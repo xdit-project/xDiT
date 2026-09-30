@@ -2,6 +2,16 @@
 
 from dataclasses import dataclass
 from importlib import import_module
+
+from .quant_adapter import (
+    LinearOwnership,
+    PreparedQuantLoad,
+    QuantAdapter,
+    TargetMappingUnavailable,
+    derive_linear_ownership,
+    descriptor_for,
+    prepare_native_load,
+)
 from importlib.metadata import PackageNotFoundError, version
 from packaging.version import InvalidVersion, Version
 from types import SimpleNamespace
@@ -340,109 +350,18 @@ def probe_fp8_backend_capabilities(
     )
 
 
-@dataclass(frozen=True)
-class TransformerFp8LoadDescriptor:
-    requested_format: str
-    selected_backend: str
-    storage_semantics: str
-    materialization_mode: str
-    fallback_reason: str | None = None
-    component_name: str = "transformer"
-
-    def log_message(self) -> str:
-        message = (
-            f"{self.component_name} quantization: "
-            f"requested={self.requested_format}, "
-            f"backend={self.selected_backend}, "
-            f"storage={self.storage_semantics}, "
-            f"materialization={self.materialization_mode}"
-        )
-        if self.fallback_reason:
-            message += f"; fallback={self.fallback_reason}"
-        return message
-
-
-@dataclass(frozen=True)
-class PreparedTransformerFp8Load:
-    descriptor: TransformerFp8LoadDescriptor
-    quantization_config: object | None = None
-
-
-class TargetMappingUnavailable(RuntimeError):
-    """The config-built model cannot safely express xDiT target prefixes."""
-
-
 def _is_linear_module(module) -> bool:
     from torch import nn
 
     return isinstance(module, nn.Linear)
 
 
-def derive_untargeted_linear_exclusions(
-    model,
-    targets,
-    *,
-    is_linear: Callable[[object], bool] = _is_linear_module,
-) -> list[str]:
-    """Map positive xDiT prefixes to Diffusers' negative Linear list."""
-
-    targets = tuple(dict.fromkeys(targets))
-    for target in targets:
-        try:
-            model.get_submodule(target)
-        except (AttributeError, KeyError) as exc:
-            raise TargetMappingUnavailable(
-                f"target mapping unavailable: model structure is missing '{target}'"
-            ) from exc
-
-    def targeted(name: str) -> bool:
-        return any(
-            name == target or name.startswith(f"{target}.") for target in targets
-        )
-
-    return [
-        name
-        for name, module in model.named_modules()
-        if name and is_linear(module) and not targeted(name)
-    ]
-
-
-class Fp8BackendAdapter:
-    """Shared conversion/config surface for ordinary, replicated, and FSDP loads."""
-
-    storage_semantics = ""
-    converts_before_device_move = False
-    supports_text_encoder_post_load = True
-
-    def __init__(
-        self,
-        *,
-        backend,
-        format_,
-        native_transformer_streaming: bool = False,
-        native_unavailable_reason: str | None = None,
-        native_text_encoder_streaming: bool = False,
-        text_encoder_unavailable_reason: str | None = None,
-    ) -> None:
-        self.backend = backend
-        self.format = format_
-        self.uses_native_transformer_streaming = native_transformer_streaming
-        self.native_unavailable_reason = native_unavailable_reason
-        self.uses_native_text_encoder_streaming = native_text_encoder_streaming
-        self.text_encoder_unavailable_reason = text_encoder_unavailable_reason
-
-    def transformer_stream_config(self, targets, *, model_factory=None):
-        return None
-
-    def convert_module(self, module, *, device, offload_to_cpu=False):
-        raise NotImplementedError
-
-    def convert_block(self, block, *, device, **kwargs):
-        return self.convert_module(block, device=device, **kwargs)
-
-
-class AiterFp8BackendAdapter(Fp8BackendAdapter):
+class AiterFp8BackendAdapter(QuantAdapter):
     storage_semantics = "block_128_scaled"
+    # A plain nn.Parameter, which is why this one needs no FSDP2 patches.
+    parameter_semantics = "packed_weight_parameter"
+    auxiliary_state_semantics = "persistent_scale_buffer"
+    serialization = "packed_state_supported_not_portable"
     converts_before_device_move = True
 
     def _stream_config_factory(self, targets):
@@ -450,8 +369,14 @@ class AiterFp8BackendAdapter(Fp8BackendAdapter):
 
         return stream_config(list(targets))
 
-    def transformer_stream_config(self, targets, *, model_factory=None):
-        return self._stream_config_factory(targets)
+    def transformer_stream_plan(
+        self, targets, *, model_factory=None, residual_match=None
+    ):
+        """Built from the targets themselves; this one needs no model structure."""
+        targets = tuple(targets)
+        return self._stream_config_factory(targets), LinearOwnership(
+            exclusions=(), streamed=targets
+        )
 
     def convert_module(
         self,
@@ -473,8 +398,9 @@ class AiterFp8BackendAdapter(Fp8BackendAdapter):
         )
 
 
-class TorchaoFp8BackendAdapter(Fp8BackendAdapter):
+class TorchaoFp8BackendAdapter(QuantAdapter):
     storage_semantics = "tensorwise_dynamic"
+    parameter_semantics = "torchao_float8_tensor_subclass"
 
     def _stream_config_factory(self, exclusions):
         from diffusers import TorchAoConfig
@@ -501,31 +427,6 @@ class TorchaoFp8BackendAdapter(Fp8BackendAdapter):
             quant_type,
             modules_to_not_convert=list(exclusions),
         )
-
-    def transformer_stream_config(self, targets, *, model_factory=None):
-        if not self.uses_native_transformer_streaming:
-            raise TargetMappingUnavailable(
-                self.native_unavailable_reason
-                or "Diffusers TorchAoConfig API is unavailable"
-            )
-        if model_factory is None:
-            raise TargetMappingUnavailable(
-                "target mapping unavailable: no model structure factory"
-            )
-        try:
-            model = model_factory()
-        except Exception as exc:
-            raise TargetMappingUnavailable(
-                f"target mapping unavailable: {type(exc).__name__}: {exc}"
-            ) from exc
-        exclusions = derive_untargeted_linear_exclusions(model, targets)
-        try:
-            return self._stream_config_factory(exclusions)
-        except Exception as exc:
-            raise TargetMappingUnavailable(
-                "Diffusers TorchAoConfig API is unavailable: "
-                f"{type(exc).__name__}: {exc}"
-            ) from exc
 
     def convert_module(
         self,
@@ -631,52 +532,6 @@ def validate_torchao_fsdp2_patches(
     )
 
 
-def _descriptor(adapter, component_name, streaming, fallback=None):
-    return TransformerFp8LoadDescriptor(
-        requested_format=adapter.format.value,
-        selected_backend=adapter.backend.value,
-        storage_semantics=adapter.storage_semantics,
-        materialization_mode="streaming" if streaming else "post_load",
-        fallback_reason=fallback,
-        component_name=component_name,
-    )
-
-
-def prepare_native_transformer_fp8_load(
-    adapter,
-    *,
-    component_name: str,
-    targets,
-    stream_quant: bool,
-    model_factory=None,
-) -> PreparedTransformerFp8Load:
-    """Build a native Diffusers config, or return an explicit fallback."""
-
-    targets = tuple(targets)
-    if not stream_quant:
-        fallback = "streaming disabled by the runner"
-    elif not targets:
-        fallback = f"{component_name} has no FP8 targets"
-    else:
-        try:
-            config = adapter.transformer_stream_config(
-                targets,
-                model_factory=model_factory,
-            )
-        except TargetMappingUnavailable as exc:
-            fallback = str(exc)
-        else:
-            return PreparedTransformerFp8Load(
-                descriptor=_descriptor(adapter, component_name, streaming=True),
-                quantization_config=config,
-            )
-    return PreparedTransformerFp8Load(
-        descriptor=_descriptor(
-            adapter, component_name, streaming=False, fallback=fallback
-        )
-    )
-
-
 def prepare_text_encoder_fp8_load(
     adapter,
     *,
@@ -686,7 +541,7 @@ def prepare_text_encoder_fp8_load(
     stream_quant: bool = True,
     supports_post_load: bool | None = None,
     framework_config_factory=None,
-) -> PreparedTransformerFp8Load:
+) -> PreparedQuantLoad:
     """Plan one TE load, keeping framework construction behind its adapter."""
 
     targets = tuple(targets)
@@ -714,7 +569,7 @@ def prepare_text_encoder_fp8_load(
                     raise TargetMappingUnavailable(
                         "target mapping unavailable: " f"{type(exc).__name__}: {exc}"
                     ) from exc
-                exclusions = tuple(derive_untargeted_linear_exclusions(model, targets))
+                exclusions = derive_linear_ownership(model, targets).exclusions
             if framework_config_factory is None:
                 from .text_encoder_adapter import (
                     TextEncoderFrameworkAdapter,
@@ -741,8 +596,8 @@ def prepare_text_encoder_fp8_load(
                 f"{type(exc).__name__}: {exc}"
             )
         else:
-            return PreparedTransformerFp8Load(
-                descriptor=_descriptor(adapter, component_name, streaming=True),
+            return PreparedQuantLoad(
+                descriptor=descriptor_for(adapter, component_name, "streaming"),
                 quantization_config=config,
             )
 
@@ -752,37 +607,8 @@ def prepare_text_encoder_fp8_load(
         raise RuntimeError(
             f"{component_name} FP8 cannot fall back before allocation: " f"{fallback}"
         )
-    return PreparedTransformerFp8Load(
-        descriptor=_descriptor(
-            adapter,
-            component_name,
-            streaming=False,
-            fallback=fallback,
+    return PreparedQuantLoad(
+        descriptor=descriptor_for(
+            adapter, component_name, "post_load", fallback
         )
     )
-
-
-def plan_blockwise_transformer_fp8_load(
-    adapter,
-    *,
-    component_name: str,
-    targets,
-    wrap_attrs,
-) -> TransformerFp8LoadDescriptor:
-    """Describe the existing FSDP/replicated per-block materializer."""
-
-    targets = tuple(targets)
-    wrap_attrs = tuple(wrap_attrs)
-    if not targets:
-        fallback = f"{component_name} has no FP8 targets"
-    elif not wrap_attrs:
-        fallback = "model has no streamed transformer blocks"
-    elif not any(
-        target == attr or target.startswith(f"{attr}.")
-        for target in targets
-        for attr in wrap_attrs
-    ):
-        fallback = "FP8 targets do not align with streamed transformer blocks"
-    else:
-        return _descriptor(adapter, component_name, streaming=True)
-    return _descriptor(adapter, component_name, streaming=False, fallback=fallback)

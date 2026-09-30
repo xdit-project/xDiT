@@ -1,0 +1,339 @@
+"""One adapter type for every quantization format, and how a load describes itself.
+
+An adapter names one concrete thing: a *format* stored by an *implementation*.
+"fp8 via aiter" is block-128 scales through ``gemm_a8w8_blockscale``; "fp8 via
+torchao" is per-tensor dynamic scaling. Same format, different implementations,
+so the pair is what identifies an adapter -- never the format alone.
+
+Everything an implementation differs by is declared here as an attribute, so a
+caller never asks which format it is holding. Which side of the device move it
+converts on, whether it can quantize on the way in from disk, what kind of
+parameter it leaves behind: all data. The only format-specific code is the
+layer each adapter finally installs.
+
+``materialization_mode`` is *derived*, not declared. It follows from what the
+implementation can do, what the run needs, and whether the declaration narrows
+to particular leaves -- see ``prepare_native_load``.
+"""
+
+from dataclasses import dataclass
+from typing import Callable
+
+
+def module_paths_overlap(left: str, right: str) -> bool:
+    """Whether two module paths are equal or one is a dotted ancestor."""
+
+    if not left or not right:
+        return True
+    return left == right or left.startswith(f"{right}.") or right.startswith(f"{left}.")
+
+
+def module_path_is_covered(path: str, owner: str) -> bool:
+    """Whether ``owner`` is the same dotted path as, or an ancestor of, ``path``."""
+
+    return not owner or path == owner or path.startswith(f"{owner}.")
+
+
+class TargetMappingUnavailable(RuntimeError):
+    """The config-built model cannot safely express xDiT target prefixes."""
+
+
+@dataclass(frozen=True)
+class LinearOwnership:
+    exclusions: tuple[str, ...]
+    streamed: tuple[str, ...]
+    residual: tuple[str, ...] = ()
+
+
+def derive_linear_ownership(
+    model,
+    targets,
+    *,
+    min_layer_size: int = 0,
+    residual_match: Callable[[str], bool] | None = None,
+    is_linear=None,
+) -> LinearOwnership:
+    """Classify linear leaves for native streaming and post-load ownership.
+
+    An empty target means the component itself, so it covers every leaf -- the
+    form ``relative_to`` produces for a whole-component target.
+    """
+
+    if is_linear is None:
+        from torch import nn
+
+        def is_linear(module):
+            return isinstance(module, nn.Linear)
+
+    targets = tuple(dict.fromkeys(targets))
+    for target in targets:
+        try:
+            model.get_submodule(target)
+        except (AttributeError, KeyError) as exc:
+            raise TargetMappingUnavailable(
+                f"target mapping unavailable: model structure is missing '{target}'"
+            ) from exc
+
+    def targeted(name):
+        return any(
+            not target or name == target or name.startswith(f"{target}.")
+            for target in targets
+        )
+
+    exclusions = []
+    streamed = []
+    residual = []
+    for name, module in model.named_modules():
+        if not name or not is_linear(module):
+            continue
+        too_small = (
+            min_layer_size > 0
+            and min(module.in_features, module.out_features) < min_layer_size
+        )
+        if not targeted(name) or too_small:
+            exclusions.append(name)
+        elif residual_match is not None and residual_match(name):
+            exclusions.append(name)
+            residual.append(name)
+        else:
+            streamed.append(name)
+    return LinearOwnership(
+        exclusions=tuple(exclusions),
+        streamed=tuple(streamed),
+        residual=tuple(residual),
+    )
+
+
+@dataclass(frozen=True)
+class QuantLoadDescriptor:
+    """What one component's quantized load will do, for logging and ownership."""
+
+    requested_format: str
+    selected_backend: str
+    storage_semantics: str
+    materialization_mode: str
+    parameter_semantics: str
+    auxiliary_state_semantics: str
+    trainability: str
+    serialization: str
+    fallback_reason: str | None = None
+    component_name: str = "transformer"
+
+    def log_message(self) -> str:
+        message = (
+            f"{self.component_name} quantization: "
+            f"requested={self.requested_format}, "
+            f"backend={self.selected_backend}, "
+            f"storage={self.storage_semantics}, "
+            f"materialization={self.materialization_mode}, "
+            f"parameters={self.parameter_semantics}, "
+            f"auxiliary={self.auxiliary_state_semantics}, "
+            f"trainability={self.trainability}, "
+            f"serialization={self.serialization}"
+        )
+        if self.fallback_reason:
+            message += f"; fallback={self.fallback_reason}"
+        return message
+
+
+@dataclass(frozen=True)
+class PreparedQuantLoad:
+    descriptor: QuantLoadDescriptor
+    quantization_config: object | None = None
+    streamed_targets: tuple[str, ...] = ()
+    residual_targets: tuple[str, ...] = ()
+
+
+class QuantAdapter:
+    """One format stored by one implementation.
+
+    Subclasses declare what they are and install their own layer; nothing above
+    them branches on which format that is.
+    """
+
+    #: How the weights are stored numerically, for the log.
+    storage_semantics = ""
+    #: What FSDP2 would find in a wrapped block. A plain parameter shards; a
+    #: tensor subclass needs patches the environment may not have.
+    parameter_semantics = "tensor_subclass_parameter"
+    auxiliary_state_semantics = "backend_managed"
+    trainability = "inference_only"
+    serialization = "torchao_version_dependent"
+    #: Leaves smaller than this in either dimension are left alone.
+    min_layer_size = 0
+    #: Whether this converter can hold selected leaves at another format while
+    #: it converts the rest of a block.
+    supports_precision_overrides = False
+    #: Whether a native streaming config can still express the run when the
+    #: hybrid schedule is on -- it cannot if streaming would take ownership of
+    #: leaves the hybrid wrapper needs to keep in two precisions.
+    streams_under_hybrid = True
+    #: AITER rewrites a module on the host; torchao swaps in subclasses that
+    #: want their final device. Decides which side of ``pipe.to`` a walk runs.
+    converts_before_device_move = False
+    supports_text_encoder_post_load = True
+
+    def __init__(
+        self,
+        *,
+        backend,
+        format_,
+        native_transformer_streaming: bool = False,
+        native_unavailable_reason: str | None = None,
+        native_text_encoder_streaming: bool = False,
+        text_encoder_unavailable_reason: str | None = None,
+    ) -> None:
+        self.backend = backend
+        self.format = format_
+        self.uses_native_transformer_streaming = native_transformer_streaming
+        self.native_unavailable_reason = native_unavailable_reason
+        self.uses_native_text_encoder_streaming = native_text_encoder_streaming
+        self.text_encoder_unavailable_reason = text_encoder_unavailable_reason
+
+    def _stream_config_factory(self, exclusions):
+        raise TargetMappingUnavailable(
+            f"{type(self).__name__} cannot build a native streaming config"
+        )
+
+    def transformer_stream_plan(
+        self,
+        targets,
+        *,
+        model_factory=None,
+        residual_match: Callable[[str], bool] | None = None,
+    ):
+        """The native config for this component, and which leaves it owns."""
+
+        if not self.uses_native_transformer_streaming:
+            raise TargetMappingUnavailable(
+                self.native_unavailable_reason
+                or "native per-weight streaming is unavailable"
+            )
+        if model_factory is None:
+            raise TargetMappingUnavailable(
+                "target mapping unavailable: no model structure factory"
+            )
+        try:
+            model = model_factory()
+        except Exception as exc:
+            raise TargetMappingUnavailable(
+                f"target mapping unavailable: {type(exc).__name__}: {exc}"
+            ) from exc
+        ownership = derive_linear_ownership(
+            model,
+            targets,
+            min_layer_size=self.min_layer_size,
+            residual_match=residual_match,
+        )
+        return self._stream_config_factory(ownership.exclusions), ownership
+
+    def transformer_stream_config(self, targets, *, model_factory=None):
+        config, _ = self.transformer_stream_plan(targets, model_factory=model_factory)
+        return config
+
+    def convert_module(self, module, *, device, filter_fn=None, offload_to_cpu=False):
+        raise NotImplementedError
+
+    def convert_block(self, block, *, device, **kwargs):
+        return self.convert_module(block, device=device, **kwargs)
+
+
+def descriptor_for(adapter, component_name, mode, fallback=None) -> QuantLoadDescriptor:
+    return QuantLoadDescriptor(
+        requested_format=adapter.format.value,
+        selected_backend=adapter.backend.value,
+        storage_semantics=adapter.storage_semantics,
+        materialization_mode=mode,
+        parameter_semantics=adapter.parameter_semantics,
+        auxiliary_state_semantics=adapter.auxiliary_state_semantics,
+        trainability=adapter.trainability,
+        serialization=adapter.serialization,
+        fallback_reason=fallback,
+        component_name=component_name,
+    )
+
+
+def prepare_native_load(
+    adapter,
+    *,
+    component_name,
+    targets,
+    stream_quant,
+    model_factory=None,
+    residual_match: Callable[[str], bool] | None = None,
+    hybrid: bool = False,
+) -> PreparedQuantLoad:
+    """Quantize on the way in from disk, or say why this load cannot.
+
+    This is where ``materialization_mode`` is decided: streaming when the run
+    asked for it, the implementation can express these targets, and the targets
+    are non-empty; post-load otherwise, with the reason recorded.
+    """
+
+    targets = tuple(targets)
+    if not stream_quant:
+        fallback = "streaming disabled by the runner"
+    elif not targets:
+        fallback = (
+            f"{component_name} has no {adapter.format.value.upper()} targets"
+        )
+    elif hybrid and not adapter.streams_under_hybrid:
+        fallback = (
+            f"native {adapter.format.value.upper()} streaming cannot preserve "
+            "hybrid ownership"
+        )
+    else:
+        try:
+            config, ownership = adapter.transformer_stream_plan(
+                targets,
+                model_factory=model_factory,
+                # Only a converter that can hold leaves back at another format
+                # has a residual to keep out of the stream.
+                residual_match=(
+                    residual_match if adapter.supports_precision_overrides else None
+                ),
+            )
+        except Exception as exc:
+            fallback = str(exc)
+        else:
+            return PreparedQuantLoad(
+                descriptor=descriptor_for(adapter, component_name, "streaming"),
+                quantization_config=config,
+                streamed_targets=(
+                    ownership.streamed if ownership.residual else targets
+                ),
+                residual_targets=ownership.residual,
+            )
+    return PreparedQuantLoad(
+        descriptor=descriptor_for(adapter, component_name, "post_load", fallback)
+    )
+
+
+def describe_blockwise_load(
+    adapter,
+    *,
+    component_name,
+    targets,
+    wrap_attrs,
+) -> QuantLoadDescriptor:
+    """How a per-block fill will quantize one component, or why it cannot."""
+
+    targets = tuple(targets)
+    wrap_attrs = tuple(wrap_attrs)
+    if not targets:
+        return descriptor_for(
+            adapter,
+            component_name,
+            "post_load",
+            f"{component_name} has no {adapter.format.value.upper()} targets",
+        )
+    if not wrap_attrs or not any(
+        module_paths_overlap(target, attr) for target in targets for attr in wrap_attrs
+    ):
+        return descriptor_for(
+            adapter,
+            component_name,
+            "post_load",
+            "quantization targets do not align with streamed transformer blocks",
+        )
+    return descriptor_for(adapter, component_name, "blockwise")

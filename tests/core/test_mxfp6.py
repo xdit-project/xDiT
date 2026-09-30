@@ -120,7 +120,7 @@ def test_wan22_mixed_mode_routes_primary_to_fp4_and_second_transformer_to_fp6(
     monkeypatch.setattr(placement, "_is_cuda", lambda: False)
     monkeypatch.setattr(
         placement,
-        "prepare_native_transformer_format_load",
+        "prepare_native_load",
         lambda *a, **k: SimpleNamespace(
             descriptor=SimpleNamespace(log_message=lambda: "")
         ),

@@ -33,6 +33,7 @@ _CARVED = GemmTargets(
     keep_high=Select(prefixes=("transformer.blocks.0.override",)),
 )
 from xfuser.model_executor.models.runner_models.loading import (
+    quant_adapter,
     fp8_backends,
     meta_load,
     text_encoder_plan,
@@ -90,6 +91,10 @@ def loader_for(runner):
 
     ledger = getattr(runner, "quantization_ledger", QuantizationLedger())
     runner.quantization_ledger = ledger
+    if not hasattr(runner, "config"):
+        runner.config = SimpleNamespace()
+    if not hasattr(runner.config, "use_hybrid_gemm_schedule"):
+        runner.config.use_hybrid_gemm_schedule = False
     if not hasattr(runner.settings, "gemm_targets"):
         runner.settings.gemm_targets = None
     plan = getattr(runner, "fp8", SimpleNamespace(targets_for=lambda name: ()))
@@ -902,8 +907,8 @@ def test_blockwise_transformer_marks_only_wrapped_target_as_streamed(
         log_message=lambda: "blockwise fp8",
     )
     monkeypatch.setattr(
-        fp8_backends,
-        "plan_blockwise_transformer_fp8_load",
+        quant_adapter,
+        "describe_blockwise_load",
         lambda *args, **kwargs: descriptor,
     )
     runner = SimpleNamespace(
@@ -937,8 +942,8 @@ def test_blockwise_fp4_marks_only_wrapped_fp8_remainder_as_streamed(
         log_message=lambda: "blockwise fp4",
     )
     monkeypatch.setattr(
-        format_backends,
-        "describe_blockwise_format_load",
+        quant_adapter,
+        "describe_blockwise_load",
         lambda *args, **kwargs: descriptor,
     )
     runner = SimpleNamespace(
@@ -1552,6 +1557,10 @@ def test_a_blockwise_filled_text_encoder_needs_no_post_load_fallback(monkeypatch
         backend=SimpleNamespace(value="torchao"),
         format=SimpleNamespace(value="fp8"),
         storage_semantics="",
+        parameter_semantics="tensor_subclass_parameter",
+        auxiliary_state_semantics="backend_managed",
+        trainability="inference_only",
+        serialization="torchao_version_dependent",
     )
     runner = SimpleNamespace(
         load_contract=SimpleNamespace(requested_format=SimpleNamespace(value="fp8")),

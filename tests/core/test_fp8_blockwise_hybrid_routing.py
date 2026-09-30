@@ -15,6 +15,7 @@ from xfuser.model_executor.models.runner_models.loading.quantization_ledger impo
     QuantizationLedger,
 )
 from xfuser.model_executor.models.runner_models.loading import fp8_backends
+from xfuser.model_executor.models.runner_models.loading import quant_adapter
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     MaterializationMode,
     QuantizationBackend,
@@ -267,8 +268,8 @@ def test_native_fp8_streaming_is_disabled_for_suffix_restricted_targets(
 ):
     observed = {}
     monkeypatch.setattr(
-        fp8_backends,
-        "prepare_native_transformer_fp8_load",
+        quant_adapter,
+        "prepare_native_load",
         lambda _adapter, **kwargs: observed.update(kwargs),
     )
     from xfuser.config.gemm import GemmQuantizationSpec
@@ -284,19 +285,18 @@ def test_native_fp8_streaming_is_disabled_for_suffix_restricted_targets(
     )
 
     transformer_load._prepare_native_load(
-        SimpleNamespace(settings=SimpleNamespace(gemm_targets=None)),
         SimpleNamespace(format=QuantizationFormat.FP8),
-        "transformer",
-        ("blocks",),
-        True,
-        lambda: object(),
+        component_name="transformer",
+        targets=("blocks",),
+        stream_quant=True,
+        model_factory=lambda: object(),
         plan=narrowed,
     )
 
     assert observed["stream_quant"] is False
 
 
-def test_native_int8_does_not_receive_fp4_precision_overrides(monkeypatch):
+def test_the_hybrid_schedule_only_blocks_streaming_where_it_must(monkeypatch):
     observed = {}
 
     def prepare(_adapter, **kwargs):
@@ -305,8 +305,8 @@ def test_native_int8_does_not_receive_fp4_precision_overrides(monkeypatch):
     from xfuser.model_executor.models.runner_models.loading import format_backends
 
     monkeypatch.setattr(
-        format_backends,
-        "prepare_native_transformer_format_load",
+        quant_adapter,
+        "prepare_native_load",
         prepare,
     )
     model = SimpleNamespace(
@@ -315,19 +315,28 @@ def test_native_int8_does_not_receive_fp4_precision_overrides(monkeypatch):
     )
 
     transformer_load._prepare_native_load(
-        model,
         SimpleNamespace(format=QuantizationFormat.INT8),
-        "transformer",
-        ("blocks",),
-        True,
-        lambda: object(),
+        component_name="transformer",
+        targets=("blocks",),
+        stream_quant=True,
+        model_factory=lambda: object(),
+        hybrid=True,
     )
 
-    # Carve-out patterns are not a native-load argument at all any more, and
-    # the hybrid schedule belongs to the FP4 family alone.
+    # Carve-out patterns are not a native-load argument at all any more. The
+    # hybrid schedule is a property of the run and is passed to every adapter;
+    # whether it prevents streaming is the adapter's own declaration, and only
+    # NVFP4 declares that it does.
+    from xfuser.model_executor.models.runner_models.loading.format_backends import (
+        TorchaoInt8BackendAdapter,
+        TorchaoNvfp4BackendAdapter,
+    )
+
     assert "precision_prefixes" not in observed
     assert "precision_suffixes" not in observed
-    assert observed["hybrid"] is False
+    assert observed["hybrid"] is True
+    assert TorchaoInt8BackendAdapter.streams_under_hybrid is True
+    assert TorchaoNvfp4BackendAdapter.streams_under_hybrid is False
 
 
 def test_precision_overrides_are_owned_by_the_high_format(monkeypatch):
@@ -951,6 +960,10 @@ def test_streamed_fp8_target_does_not_skip_disjoint_target_in_component(
         converts_before_device_move=False,
         backend=QuantizationBackend.TORCHAO,
         storage_semantics="tensorwise_dynamic",
+        parameter_semantics="tensor_subclass_parameter",
+        auxiliary_state_semantics="backend_managed",
+        trainability="inference_only",
+        serialization="torchao_version_dependent",
         convert_module=lambda module, **kwargs: fp8_calls.append((module, kwargs)),
     )
     pipe = SimpleNamespace(

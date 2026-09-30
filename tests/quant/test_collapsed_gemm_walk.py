@@ -147,7 +147,7 @@ def _loader(raw, *, text_encoder=True, fp8_before_move=True, targets=TARGETS):
 def _no_real_descriptor(monkeypatch):
     monkeypatch.setattr(
         placement,
-        "prepare_native_transformer_format_load",
+        "prepare_native_load",
         lambda *a, **k: SimpleNamespace(
             descriptor=SimpleNamespace(log_message=lambda: "")
         ),

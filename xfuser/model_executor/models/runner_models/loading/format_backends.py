@@ -3,6 +3,17 @@
 import os
 from dataclasses import dataclass
 from importlib import import_module
+from .quant_adapter import (
+    LinearOwnership,
+    PreparedQuantLoad,
+    QuantAdapter,
+    QuantLoadDescriptor,
+    TargetMappingUnavailable,
+    derive_linear_ownership,
+    descriptor_for,
+    module_path_is_covered,
+    module_paths_overlap,
+)
 from importlib.metadata import PackageNotFoundError, version
 from packaging.version import InvalidVersion, Version
 from typing import Callable
@@ -412,123 +423,15 @@ def probe_format_backend_capabilities(
 
 
 @dataclass(frozen=True)
-class FormatLoadDescriptor:
-    requested_format: str
-    selected_backend: str
-    storage_semantics: str
-    materialization_mode: str
-    parameter_semantics: str
-    auxiliary_state_semantics: str
-    trainability: str
-    serialization: str
-    fallback_reason: str | None = None
-    component_name: str = "transformer"
-
-    def log_message(self) -> str:
-        message = (
-            f"{self.component_name} quantization: "
-            f"requested={self.requested_format}, "
-            f"backend={self.selected_backend}, "
-            f"storage={self.storage_semantics}, "
-            f"materialization={self.materialization_mode}, "
-            f"parameters={self.parameter_semantics}, "
-            f"auxiliary={self.auxiliary_state_semantics}, "
-            f"trainability={self.trainability}, "
-            f"serialization={self.serialization}"
-        )
-        if self.fallback_reason:
-            message += f"; fallback={self.fallback_reason}"
-        return message
-
-
-@dataclass(frozen=True)
-class PreparedFormatLoad:
-    descriptor: FormatLoadDescriptor
-    quantization_config: object | None = None
-    streamed_targets: tuple[str, ...] = ()
-    residual_targets: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class LinearOwnership:
-    exclusions: tuple[str, ...]
-    streamed: tuple[str, ...]
-    residual: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
 class EagerBlockwisePlan:
     enabled: bool
     reason: str | None = None
 
 
-class FormatBackendAdapter:
-    storage_semantics = ""
-    parameter_semantics = "tensor_subclass_parameter"
-    auxiliary_state_semantics = "backend_managed"
-    trainability = "inference_only"
-    serialization = "torchao_version_dependent"
-    min_layer_size = 0
-    supports_precision_overrides = False
-
-    def __init__(
-        self,
-        *,
-        backend,
-        format_,
-        native_transformer_streaming: bool = False,
-        native_unavailable_reason: str | None = None,
-    ):
-        self.backend = backend
-        self.format = format_
-        self.uses_native_transformer_streaming = native_transformer_streaming
-        self.native_unavailable_reason = native_unavailable_reason
-
-    def transformer_stream_plan(
-        self,
-        targets,
-        *,
-        model_factory=None,
-        residual_match: Callable[[str], bool] | None = None,
-    ):
-        if not self.uses_native_transformer_streaming:
-            raise RuntimeError(
-                self.native_unavailable_reason
-                or "native Diffusers per-weight streaming is unavailable"
-            )
-        if model_factory is None:
-            raise RuntimeError("target mapping unavailable: no model structure factory")
-        model = model_factory()
-        ownership = derive_linear_ownership(
-            model,
-            targets,
-            min_layer_size=self.min_layer_size,
-            residual_match=residual_match,
-        )
-        return self._stream_config_factory(ownership.exclusions), ownership
-
-    def transformer_stream_config(self, targets, *, model_factory=None):
-        config, _ = self.transformer_stream_plan(targets, model_factory=model_factory)
-        return config
-
-    def convert_module(
-        self,
-        module,
-        *,
-        device,
-        fp8_layers=None,
-        fp8_suffix_layers=None,
-        hybrid=False,
-        filter_fn=None,
-        offload_to_cpu=False,
-    ):
-        raise NotImplementedError
-
-    def convert_block(self, block, *, device, **kwargs):
-        return self.convert_module(block, device=device, **kwargs)
-
-
-class TorchaoNvfp4BackendAdapter(FormatBackendAdapter):
+class TorchaoNvfp4BackendAdapter(QuantAdapter):
+    # Streaming would own every targeted leaf, leaving the hybrid
+    # wrapper nothing to build its second precision from.
+    streams_under_hybrid = False
     storage_semantics = "torchao_nvfp4_dynamic_per_tensor"
     parameter_semantics = "torchao_nvfp4_tensor_subclass"
     supports_precision_overrides = True
@@ -561,7 +464,7 @@ class TorchaoNvfp4BackendAdapter(FormatBackendAdapter):
         )
 
 
-class AiterMxfp4BackendAdapter(FormatBackendAdapter):
+class AiterMxfp4BackendAdapter(QuantAdapter):
     storage_semantics = "aiter_mxfp4_per_1x32"
     parameter_semantics = "packed_weight_parameter"
     auxiliary_state_semantics = "replicated_scale_buffer"
@@ -599,7 +502,7 @@ class AiterMxfp4BackendAdapter(FormatBackendAdapter):
         )
 
 
-class AiterMxfp6BackendAdapter(FormatBackendAdapter):
+class AiterMxfp6BackendAdapter(QuantAdapter):
     storage_semantics = "aiter_mxfp6_e2m3_per_1x32"
     parameter_semantics = "packed_weight_parameter"
     auxiliary_state_semantics = "persistent_scale_buffer"
@@ -629,7 +532,7 @@ class AiterMxfp6BackendAdapter(FormatBackendAdapter):
         )
 
 
-class TorchaoInt8BackendAdapter(FormatBackendAdapter):
+class TorchaoInt8BackendAdapter(QuantAdapter):
     storage_semantics = "torchao_w8a8_dynamic_per_row_symmetric"
     parameter_semantics = "torchao_int8_tensor_subclass"
     min_layer_size = 512
@@ -646,20 +549,6 @@ class TorchaoInt8BackendAdapter(FormatBackendAdapter):
             min_layer_size=self.min_layer_size,
             filter_fn=filter_fn,
         )
-
-
-def module_paths_overlap(left: str, right: str) -> bool:
-    """Whether two module paths are equal or one is a dotted ancestor."""
-
-    if not left or not right:
-        return True
-    return left == right or left.startswith(f"{right}.") or right.startswith(f"{left}.")
-
-
-def module_path_is_covered(path: str, owner: str) -> bool:
-    """Whether ``owner`` is the same dotted path as, or an ancestor of, ``path``."""
-
-    return not owner or path == owner or path.startswith(f"{owner}.")
 
 
 def _torchao_stream_config(kind: str, exclusions):
@@ -693,61 +582,6 @@ def _torchao_stream_config(kind: str, exclusions):
     return TorchAoConfig(config, modules_to_not_convert=list(exclusions))
 
 
-def derive_linear_ownership(
-    model,
-    targets,
-    *,
-    min_layer_size: int = 0,
-    residual_match: Callable[[str], bool] | None = None,
-    is_linear=None,
-) -> LinearOwnership:
-    """Classify linear leaves for native streaming and post-load ownership."""
-
-    if is_linear is None:
-        from torch import nn
-
-        def is_linear(module):
-            return isinstance(module, nn.Linear)
-
-    targets = tuple(dict.fromkeys(targets))
-    for target in targets:
-        try:
-            model.get_submodule(target)
-        except (AttributeError, KeyError) as exc:
-            raise RuntimeError(
-                f"target mapping unavailable: model structure is missing '{target}'"
-            ) from exc
-
-    def targeted(name):
-        return any(
-            not target or name == target or name.startswith(f"{target}.")
-            for target in targets
-        )
-
-    exclusions = []
-    streamed = []
-    residual = []
-    for name, module in model.named_modules():
-        if not name or not is_linear(module):
-            continue
-        too_small = (
-            min_layer_size > 0
-            and min(module.in_features, module.out_features) < min_layer_size
-        )
-        if not targeted(name) or too_small:
-            exclusions.append(name)
-        elif residual_match is not None and residual_match(name):
-            exclusions.append(name)
-            residual.append(name)
-        else:
-            streamed.append(name)
-    return LinearOwnership(
-        exclusions=tuple(exclusions),
-        streamed=tuple(streamed),
-        residual=tuple(residual),
-    )
-
-
 def derive_linear_exclusions(
     model,
     targets,
@@ -764,25 +598,6 @@ def derive_linear_exclusions(
         is_linear=is_linear,
     )
     return list(ownership.exclusions)
-
-
-def _precision_override_matcher(targets, prefixes, suffixes):
-    targets = tuple(targets)
-    prefixes = tuple(prefixes)
-    suffixes = tuple(suffixes)
-
-    def matches(name):
-        for target in targets:
-            if not module_path_is_covered(name, target):
-                continue
-            local_name = name if not target else name[len(target) :].lstrip(".")
-            if prefixes and local_name.startswith(prefixes):
-                return True
-            if suffixes and local_name.endswith(suffixes):
-                return True
-        return False
-
-    return matches
 
 
 def _unsupported_error(contract):
@@ -887,101 +702,6 @@ def select_mxfp6_backend(
         format_=format_enum.FP6,
         native_unavailable_reason=MXFP6_STREAMING_FALLBACK,
     )
-
-
-def _descriptor(adapter, component_name, mode, fallback=None):
-    return FormatLoadDescriptor(
-        requested_format=adapter.format.value,
-        selected_backend=adapter.backend.value,
-        storage_semantics=adapter.storage_semantics,
-        materialization_mode=mode,
-        parameter_semantics=adapter.parameter_semantics,
-        auxiliary_state_semantics=adapter.auxiliary_state_semantics,
-        trainability=adapter.trainability,
-        serialization=adapter.serialization,
-        fallback_reason=fallback,
-        component_name=component_name,
-    )
-
-
-def prepare_native_transformer_format_load(
-    adapter,
-    *,
-    component_name,
-    targets,
-    stream_quant,
-    model_factory=None,
-    precision_prefixes=(),
-    precision_suffixes=(),
-    residual_match=None,
-    hybrid=False,
-) -> PreparedFormatLoad:
-    targets = tuple(targets)
-    if not stream_quant:
-        fallback = "streaming disabled by the runner"
-    elif not targets:
-        fallback = f"{component_name} has no {adapter.format.value.upper()} targets"
-    elif isinstance(adapter, AiterMxfp4BackendAdapter):
-        fallback = adapter.native_unavailable_reason or MXFP4_STREAMING_FALLBACK
-    elif isinstance(adapter, AiterMxfp6BackendAdapter):
-        fallback = adapter.native_unavailable_reason or MXFP6_STREAMING_FALLBACK
-    elif isinstance(adapter, TorchaoNvfp4BackendAdapter) and hybrid:
-        fallback = "native NVFP4 streaming cannot preserve hybrid FP8/FP4 ownership"
-    else:
-        if not isinstance(adapter, TorchaoNvfp4BackendAdapter):
-            residual_match = None
-        elif residual_match is None and (precision_prefixes or precision_suffixes):
-            residual_match = _precision_override_matcher(
-                targets, precision_prefixes, precision_suffixes
-            )
-        try:
-            config, ownership = adapter.transformer_stream_plan(
-                targets,
-                model_factory=model_factory,
-                residual_match=residual_match,
-            )
-        except Exception as exc:
-            fallback = str(exc)
-        else:
-            return PreparedFormatLoad(
-                descriptor=_descriptor(adapter, component_name, "streaming"),
-                quantization_config=config,
-                streamed_targets=(
-                    ownership.streamed if ownership.residual else targets
-                ),
-                residual_targets=ownership.residual,
-            )
-    return PreparedFormatLoad(
-        descriptor=_descriptor(adapter, component_name, "post_load", fallback)
-    )
-
-
-def describe_blockwise_format_load(
-    adapter,
-    *,
-    component_name,
-    targets,
-    wrap_attrs,
-) -> FormatLoadDescriptor:
-    targets = tuple(targets)
-    wrap_attrs = tuple(wrap_attrs)
-    if not targets:
-        return _descriptor(
-            adapter,
-            component_name,
-            "post_load",
-            f"{component_name} has no {adapter.format.value.upper()} targets",
-        )
-    if not wrap_attrs or not any(
-        module_paths_overlap(target, attr) for target in targets for attr in wrap_attrs
-    ):
-        return _descriptor(
-            adapter,
-            component_name,
-            "post_load",
-            "quantization targets do not align with streamed transformer blocks",
-        )
-    return _descriptor(adapter, component_name, "blockwise")
 
 
 def plan_eager_blockwise_fallback(

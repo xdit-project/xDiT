@@ -84,32 +84,16 @@ def blockwise_transformer_descriptor(
     component_name,
     targets,
     wrap_attrs,
-    *,
-    local=False,
 ):
     """How one component's blockwise load will be performed, for logging and ownership.
 
-    local marks a single-rank fill, which reaches the same per-block conversion without the
-    collective; the fp8 planner describes that as streaming, so it is relabelled to match what the
-    ownership rules above key off.
+    A single-rank fill reaches the same per-block conversion without the
+    collective, and is described the same way, so the ownership rules above
+    need no special case for it.
     """
-    if adapter.format.value == "fp8":
-        from .fp8_backends import plan_blockwise_transformer_fp8_load
+    from .quant_adapter import describe_blockwise_load
 
-        descriptor = plan_blockwise_transformer_fp8_load(
-            adapter,
-            component_name=component_name,
-            targets=targets,
-            wrap_attrs=wrap_attrs,
-        )
-        return (
-            replace(descriptor, materialization_mode="blockwise")
-            if local and descriptor.materialization_mode == "streaming"
-            else descriptor
-        )
-    from .format_backends import describe_blockwise_format_load
-
-    return describe_blockwise_format_load(
+    return describe_blockwise_load(
         adapter,
         component_name=component_name,
         targets=targets,

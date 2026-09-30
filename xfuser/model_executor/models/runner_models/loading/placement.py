@@ -13,10 +13,7 @@ device, so it converts after.
 from xfuser.core.distributed import get_world_group
 from xfuser.core.utils.runner_utils import log, rgetattr
 from xfuser.envs import _is_cuda
-from .format_backends import (
-    module_path_is_covered,
-    prepare_native_transformer_format_load,
-)
+from .quant_adapter import module_path_is_covered, prepare_native_load
 
 
 def place_pipeline_components(loader) -> None:
@@ -126,7 +123,7 @@ Each walk starts where ``walk_roots`` says -- the subtrees that format owns,
                 # to be handed as precision patterns are now the filter's.
                 component_name = module_name.partition(".")[0]
                 if ledger.claim_description(component_name):
-                    descriptor = prepare_native_transformer_format_load(
+                    descriptor = prepare_native_load(
                         adapter,
                         component_name=component_name,
                         targets=loader.backends.format_targets_for(component_name),

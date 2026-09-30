@@ -1,5 +1,6 @@
 """Dependency-light contracts for text-encoder framework integration."""
 
+import importlib.machinery
 import importlib.util
 from pathlib import Path
 import sys
@@ -19,9 +20,28 @@ CONTRACTS_PATH = (
 )
 
 
+#: A synthetic package over the loading directory. These modules are meant to
+#: be importable without the rest of the app, and they share a dependency-light
+#: base, so the loader gives relative imports somewhere to resolve rather than
+#: forcing the shared code to be duplicated or imported absolutely.
+_PKG = "te_framework_pkg"
+
+
+def _package():
+    if _PKG not in sys.modules:
+        package = importlib.util.module_from_spec(
+            importlib.machinery.ModuleSpec(_PKG, None, is_package=True)
+        )
+        package.__path__ = [str(BACKENDS_PATH.parent)]
+        sys.modules[_PKG] = package
+    return sys.modules[_PKG]
+
+
 def _load_module(path, name):
-    spec = importlib.util.spec_from_file_location(name, path)
+    _package()
+    spec = importlib.util.spec_from_file_location(f"{_PKG}.{name}", path)
     module = importlib.util.module_from_spec(spec)
+    sys.modules[f"{_PKG}.{name}"] = module
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
@@ -185,8 +205,10 @@ def test_torchao_te_native_plan_derives_safe_negative_mapping(modules, monkeypat
 
     monkeypatch.setattr(
         b,
-        "derive_untargeted_linear_exclusions",
-        lambda model, targets: ["shared", "lm_head"],
+        "derive_linear_ownership",
+        lambda model, targets: SimpleNamespace(
+            exclusions=("shared", "lm_head"), streamed=(), residual=()
+        ),
     )
 
     prepared = b.prepare_text_encoder_fp8_load(
@@ -261,7 +283,7 @@ def test_missing_te_target_never_quantizes_all_linears(modules, monkeypatch):
     def unavailable(model, targets):
         raise b.TargetMappingUnavailable("target mapping unavailable: missing")
 
-    monkeypatch.setattr(b, "derive_untargeted_linear_exclusions", unavailable)
+    monkeypatch.setattr(b, "derive_linear_ownership", unavailable)
     prepared = b.prepare_text_encoder_fp8_load(
         adapter,
         component_name="text_encoder",

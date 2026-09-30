@@ -12,7 +12,7 @@ import time
 
 import torch
 
-from xfuser.core import vsa_h3_attention as vsa
+from xfuser.core.attention.backends.vsa_h3 import attention as vsa
 
 
 def _time(fn, iters, warmup=3):
@@ -31,10 +31,17 @@ def dense_call(query, key, value):
 
 
 def aiter_dense_call(query, key, value):
-    """The dense backend FastH3 actually falls back to, for a fair comparison."""
-    from xfuser.core.distributed.attention_backend import _aiter_attn_call
+    """The dense backend FastH3 actually falls back to, for a fair comparison.
 
-    return _aiter_attn_call(query, key, value, 0.0, False, None)
+    Through the spec rather than the kernel function, which is what the model
+    does: usp dispatches via Spec.run, so the constraint check is part of the
+    per-call cost this is meant to be comparable to.
+    """
+    from xfuser.core.attention import registry
+    from xfuser.core.attention.spec import AttentionBackendType, AttnCall
+
+    spec = registry.get(AttentionBackendType.AITER)
+    return spec.run(query, key, value, AttnCall())
 
 
 def main():

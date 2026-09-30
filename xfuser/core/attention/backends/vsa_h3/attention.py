@@ -133,10 +133,7 @@ def compute_h3_vsa_topk(sparsity: float, num_video_tiles: int) -> int:
     if not 0.0 <= sparsity <= 1.0:
         raise ValueError(f"VSA-H3 sparsity must be in [0, 1], got {sparsity}.")
     if num_video_tiles < 1:
-        raise ValueError(
-            "VSA-H3 requires at least one generated-video tile, got "
-            f"{num_video_tiles}."
-        )
+        raise ValueError(f"VSA-H3 requires at least one generated-video tile, got {num_video_tiles}.")
     return max(
         1,
         min(
@@ -161,11 +158,7 @@ def _video_tile_sizes(
     t_sizes = _axis_tile_sizes(video_shape[0], tile_shape[0], device)
     h_sizes = _axis_tile_sizes(video_shape[1], tile_shape[1], device)
     w_sizes = _axis_tile_sizes(video_shape[2], tile_shape[2], device)
-    return (
-        t_sizes[:, None, None]
-        * h_sizes[None, :, None]
-        * w_sizes[None, None, :]
-    ).reshape(-1)
+    return (t_sizes[:, None, None] * h_sizes[None, :, None] * w_sizes[None, None, :]).reshape(-1)
 
 
 def _video_tile_order(
@@ -204,22 +197,15 @@ def build_h3_vsa_metadata(
     segments are never merged into the same tile.
     """
     if any(segment < 0 for segment in prefix_segments):
-        raise ValueError(
-            f"VSA-H3 prefix segment lengths must be non-negative: {prefix_segments}."
-        )
+        raise ValueError(f"VSA-H3 prefix segment lengths must be non-negative: {prefix_segments}.")
     if any(size < 1 for size in video_shape):
-        raise ValueError(
-            f"VSA-H3 generated-video shape must be positive: {video_shape}."
-        )
+        raise ValueError(f"VSA-H3 generated-video shape must be positive: {video_shape}.")
     if any(size < 1 for size in tile_shape):
         raise ValueError(f"VSA-H3 tile shape must be positive: {tile_shape}.")
 
     tile_elements = math.prod(tile_shape)
     if tile_elements != FASTH3_VSA_TILE_ELEMENTS:
-        raise ValueError(
-            "FastH3 Preview v1 requires 64-token VSA tiles, got "
-            f"{tile_shape} ({tile_elements} tokens)."
-        )
+        raise ValueError(f"FastH3 Preview v1 requires 64-token VSA tiles, got {tile_shape} ({tile_elements} tokens).")
 
     segments = tuple(int(segment) for segment in prefix_segments if segment)
     prefix_sizes = []
@@ -239,9 +225,7 @@ def build_h3_vsa_metadata(
     # the padded buffer -- the token membership of each tile is untouched -- and
     # it makes the padded tile ids a contiguous suffix, so the selection path can
     # split FlexAttention's full and partial block lists with a comparison.
-    video_order = torch.argsort(
-        (video_sizes != tile_elements).to(torch.int8), stable=True
-    ).tolist()
+    video_order = torch.argsort((video_sizes != tile_elements).to(torch.int8), stable=True).tolist()
     video_sizes = video_sizes[video_order]
     num_full_video_tiles = int((video_sizes == tile_elements).sum())
     video_tokens = torch.cat([video_token_slices[index] for index in video_order])
@@ -262,10 +246,7 @@ def build_h3_vsa_metadata(
     )
     num_tiles = variable_block_sizes.numel()
     slot_in_tile = torch.arange(tile_elements, device=device)
-    non_pad_slots = (
-        torch.arange(num_tiles, device=device)[:, None] * tile_elements
-        + slot_in_tile[None, :]
-    )
+    non_pad_slots = torch.arange(num_tiles, device=device)[:, None] * tile_elements + slot_in_tile[None, :]
     valid = slot_in_tile[None, :] < variable_block_sizes[:, None]
     non_pad_slots = non_pad_slots[valid]
     packed_to_tiled = non_pad_slots[torch.argsort(tiled_to_packed)]
@@ -276,22 +257,15 @@ def build_h3_vsa_metadata(
         or packed_to_tiled.numel() != total_seq_length
         or torch.unique(packed_to_tiled).numel() != total_seq_length
     ):
-        raise ValueError(
-            "Invalid VSA-H3 tile mapping for "
-            f"prefix={prefix_segments}, video={video_shape}."
-        )
+        raise ValueError(f"Invalid VSA-H3 tile mapping for prefix={prefix_segments}, video={video_shape}.")
 
     # Gather-side mapping: padded slot -> packed row. Pad slots point at row 0
     # and are zeroed afterwards, which is cheaper than a zero-fill plus scatter
     # over the whole padded buffer.
     padded_seq_length = num_tiles * tile_elements
     tiled_slot_valid = valid.reshape(-1)
-    tiled_to_packed_gather = torch.zeros(
-        padded_seq_length, dtype=torch.long, device=device
-    )
-    tiled_to_packed_gather[packed_to_tiled] = torch.arange(
-        total_seq_length, device=device
-    )
+    tiled_to_packed_gather = torch.zeros(padded_seq_length, dtype=torch.long, device=device)
+    tiled_to_packed_gather[packed_to_tiled] = torch.arange(total_seq_length, device=device)
     pad_slot_index = (~tiled_slot_valid).nonzero(as_tuple=True)[0]
     # Output-side mapping for the Triton kernel, which writes packed rows
     # directly. Padded slots point one past the end and are masked off.
@@ -303,25 +277,17 @@ def build_h3_vsa_metadata(
         dtype=torch.int32,
         device=device,
     )
-    tiled_to_packed_row[packed_to_tiled] = torch.arange(
-        total_seq_length, dtype=torch.int32, device=device
-    )
+    tiled_to_packed_row[packed_to_tiled] = torch.arange(total_seq_length, dtype=torch.int32, device=device)
 
     num_prefix_tiles = len(prefix_sizes)
     prefix_sizes_tensor = variable_block_sizes[:num_prefix_tiles]
     prefix_is_partial = prefix_sizes_tensor != tile_elements
-    prefix_ids = torch.arange(
-        num_prefix_tiles, dtype=torch.int32, device=device
-    )
+    prefix_ids = torch.arange(num_prefix_tiles, dtype=torch.int32, device=device)
     # Sort keys that land one group ahead of the other: adding ``num_tiles`` to
     # the losing group makes a plain ascending sort produce a grouped, tile-id
     # ordered row. See build_h3_vsa_kv_blocks.
-    prefix_partial_first_keys = prefix_ids + (
-        (~prefix_is_partial).to(torch.int32) * num_tiles
-    )
-    prefix_full_first_keys = prefix_ids + (
-        prefix_is_partial.to(torch.int32) * num_tiles
-    )
+    prefix_partial_first_keys = prefix_ids + ((~prefix_is_partial).to(torch.int32) * num_tiles)
+    prefix_full_first_keys = prefix_ids + (prefix_is_partial.to(torch.int32) * num_tiles)
 
     def padding_mask_mod(batch, head, query_index, key_index):
         """Drop the padded slots of partial tiles.
@@ -337,16 +303,14 @@ def build_h3_vsa_metadata(
     logger.info(
         # Sparsity is a per-call argument to selection, not part of the cached
         # geometry, so the retained tile count does not belong in this line.
-        "VSA-H3 geometry: prefix=%s video=%s -> %d tokens, %d tiles "
-        "(%d prefix, %d video, %d padded).",
+        "VSA-H3 geometry: prefix=%s video=%s -> %d tokens, %d tiles (%d prefix, %d video, %d padded).",
         prefix_segments,
         video_shape,
         total_seq_length,
         num_tiles,
         num_prefix_tiles,
         video_sizes.numel(),
-        num_tiles - num_prefix_tiles - num_full_video_tiles
-        + int(prefix_is_partial.sum()),
+        num_tiles - num_prefix_tiles - num_full_video_tiles + int(prefix_is_partial.sum()),
     )
     return MiniMaxH3VSAMetadata(
         total_seq_length=total_seq_length,
@@ -379,10 +343,7 @@ def tile_h3_vsa_tensor(
     uses ``tile_h3_vsa_bhsd``, which is pinned against this one in the tests.
     """
     if tensor.ndim != 4 or tensor.shape[1] != metadata.total_seq_length:
-        raise ValueError(
-            "VSA-H3 expects [B, S, H, D] with S="
-            f"{metadata.total_seq_length}, got {tuple(tensor.shape)}."
-        )
+        raise ValueError(f"VSA-H3 expects [B, S, H, D] with S={metadata.total_seq_length}, got {tuple(tensor.shape)}.")
     tiled = tensor.new_zeros(
         tensor.shape[0],
         metadata.padded_seq_length,
@@ -404,10 +365,7 @@ def tile_h3_vsa_bhsd(
     scattered write plus a transposed copy to get back to BHSD.
     """
     if tensor.ndim != 4 or tensor.shape[2] != metadata.total_seq_length:
-        raise ValueError(
-            "VSA-H3 expects [B, H, S, D] with S="
-            f"{metadata.total_seq_length}, got {tuple(tensor.shape)}."
-        )
+        raise ValueError(f"VSA-H3 expects [B, H, S, D] with S={metadata.total_seq_length}, got {tuple(tensor.shape)}.")
     tiled = tensor.index_select(2, metadata.tiled_to_packed_index)
     # Pooling divides by the real token count per tile, so padded slots have to
     # hold zeros for the tile means to be correct. The attention kernel itself
@@ -466,8 +424,7 @@ def build_h3_vsa_block_mask(
     num_tiles = num_prefix_tiles + num_video_tiles
     if scores.ndim != 4 or scores.shape[-2:] != (num_tiles, num_tiles):
         raise ValueError(
-            "VSA-H3 scores must be [B, H, tiles, tiles] with tiles="
-            f"{num_tiles}, got {tuple(scores.shape)}."
+            f"VSA-H3 scores must be [B, H, tiles, tiles] with tiles={num_tiles}, got {tuple(scores.shape)}."
         )
 
     video_topk = compute_h3_vsa_topk(sparsity, num_video_tiles)
@@ -475,12 +432,7 @@ def build_h3_vsa_block_mask(
         return torch.ones_like(scores, dtype=torch.bool)
 
     mask = torch.zeros_like(scores, dtype=torch.bool)
-    video_indices = (
-        scores[..., num_prefix_tiles:]
-        .topk(video_topk, dim=-1)
-        .indices
-        + num_prefix_tiles
-    )
+    video_indices = scores[..., num_prefix_tiles:].topk(video_topk, dim=-1).indices + num_prefix_tiles
     mask.scatter_(-1, video_indices, True)
     mask[..., :num_prefix_tiles] = True
     mask[..., :num_prefix_tiles, :] = True
@@ -506,6 +458,7 @@ def _kv_block_workspace(
     Entries live for the process's lifetime. That is bounded by the number of
     distinct geometries, which for a generation run is one.
     """
+
     def allocate():
         return (
             torch.empty(
@@ -530,9 +483,7 @@ def _kv_block_workspace(
     key = (
         device.type,
         device.index,
-        torch.cuda.current_stream(device).cuda_stream
-        if device.type == "cuda"
-        else 0,
+        torch.cuda.current_stream(device).cuda_stream if device.type == "cuda" else 0,
         batch,
         heads,
         num_tiles,
@@ -565,10 +516,9 @@ def _kv_list_workspace(
 
     Same single-live-consumer contract and same lifetime; see that function.
     """
+
     def allocate():
-        return torch.empty(
-            (batch, heads, num_tiles, width), dtype=torch.int32, device=device
-        )
+        return torch.empty((batch, heads, num_tiles, width), dtype=torch.int32, device=device)
 
     if torch.compiler.is_compiling():
         return allocate()
@@ -577,9 +527,7 @@ def _kv_list_workspace(
         "list",
         device.type,
         device.index,
-        torch.cuda.current_stream(device).cuda_stream
-        if device.type == "cuda"
-        else 0,
+        torch.cuda.current_stream(device).cuda_stream if device.type == "cuda" else 0,
         batch,
         heads,
         num_tiles,
@@ -613,8 +561,7 @@ def build_h3_vsa_kv_blocks(
     batch, heads, num_tiles, head_dim = pooled_query.shape
     if num_tiles != metadata.num_tiles:
         raise ValueError(
-            "VSA-H3 pooled tensors must have one row per tile, expected "
-            f"{metadata.num_tiles}, got {num_tiles}."
+            f"VSA-H3 pooled tensors must have one row per tile, expected {metadata.num_tiles}, got {num_tiles}."
         )
 
     num_prefix = metadata.num_prefix_tiles
@@ -623,13 +570,11 @@ def build_h3_vsa_kv_blocks(
     partial_start = metadata.first_partial_video_tile
     device = pooled_query.device
 
-    kv_indices, full_kv_indices, kv_num_blocks, full_kv_num_blocks = (
-        _kv_block_workspace(batch, heads, num_tiles, width, device)
+    kv_indices, full_kv_indices, kv_num_blocks, full_kv_num_blocks = _kv_block_workspace(
+        batch, heads, num_tiles, width, device
     )
 
-    prefix_partial_first = metadata.prefix_partial_first_keys.view(
-        1, 1, 1, num_prefix
-    )
+    prefix_partial_first = metadata.prefix_partial_first_keys.view(1, 1, 1, num_prefix)
     prefix_full_first = metadata.prefix_full_first_keys.view(1, 1, 1, num_prefix)
 
     pooled_key_t = pooled_key.transpose(-2, -1)
@@ -639,11 +584,7 @@ def build_h3_vsa_kv_blocks(
         stop = min(start + chunk, num_tiles)
         scores = torch.matmul(pooled_query[:, :, start:stop], pooled_key_t)
         scores.mul_(scale)
-        video = (
-            scores[..., num_prefix:]
-            .topk(video_topk, dim=-1)
-            .indices.to(torch.int32)
-        )
+        video = scores[..., num_prefix:].topk(video_topk, dim=-1).indices.to(torch.int32)
         video += num_prefix
         is_partial = video >= partial_start
         offset = num_tiles
@@ -663,12 +604,8 @@ def build_h3_vsa_kv_blocks(
         ):
             # Offsetting the losing group past every real tile id makes one
             # ascending sort both group the row and keep it in tile order.
-            keys = torch.cat(
-                (prefix_keys.expand(prefix_shape), video_keys), dim=-1
-            ).sort(dim=-1).values
-            destination[:, :, start:stop] = torch.where(
-                keys >= offset, keys - offset, keys
-            )
+            keys = torch.cat((prefix_keys.expand(prefix_shape), video_keys), dim=-1).sort(dim=-1).values
+            destination[:, :, start:stop] = torch.where(keys >= offset, keys - offset, keys)
 
         partial_count = is_partial.sum(dim=-1, dtype=torch.int32)
         partial_count += metadata.num_prefix_partial_tiles
@@ -699,8 +636,7 @@ def build_h3_vsa_kv_list(
     batch, heads, num_tiles, head_dim = pooled_query.shape
     if num_tiles != metadata.num_tiles:
         raise ValueError(
-            "VSA-H3 pooled tensors must have one row per tile, expected "
-            f"{metadata.num_tiles}, got {num_tiles}."
+            f"VSA-H3 pooled tensors must have one row per tile, expected {metadata.num_tiles}, got {num_tiles}."
         )
 
     num_prefix = metadata.num_prefix_tiles
@@ -708,15 +644,11 @@ def build_h3_vsa_kv_list(
     width = num_prefix + video_topk
     alignment = FASTH3_VSA_KV_LIST_ALIGNMENT
     padded_width = -(-width // alignment) * alignment
-    kv_indices = _kv_list_workspace(
-        batch, heads, num_tiles, padded_width, pooled_query.device
-    )
+    kv_indices = _kv_list_workspace(batch, heads, num_tiles, padded_width, pooled_query.device)
     if padded_width > width:
         kv_indices[..., width:] = num_tiles
 
-    prefix = torch.arange(
-        num_prefix, dtype=torch.int32, device=pooled_query.device
-    ).view(1, 1, 1, num_prefix)
+    prefix = torch.arange(num_prefix, dtype=torch.int32, device=pooled_query.device).view(1, 1, 1, num_prefix)
     pooled_key_t = pooled_key.transpose(-2, -1)
     scale = head_dim**-0.5
     chunk = _selection_chunk_tiles(batch, heads, num_tiles)
@@ -724,11 +656,7 @@ def build_h3_vsa_kv_list(
         stop = min(start + chunk, num_tiles)
         scores = torch.matmul(pooled_query[:, :, start:stop], pooled_key_t)
         scores.mul_(scale)
-        video = (
-            scores[..., num_prefix:]
-            .topk(video_topk, dim=-1)
-            .indices.to(torch.int32)
-        )
+        video = scores[..., num_prefix:].topk(video_topk, dim=-1).indices.to(torch.int32)
         video += num_prefix
         # Ascending order is not needed for correctness, only for the locality
         # of the kernel's key/value loads. Only the video half is sorted: the
@@ -780,9 +708,7 @@ def flex_h3_vsa_attention(
     ``h3_vsa_attention`` replaces them with dense rows.
     """
     expected = (
-        query.ndim == 4
-        and query.shape == key.shape == value.shape
-        and query.shape[2] == metadata.padded_seq_length
+        query.ndim == 4 and query.shape == key.shape == value.shape and query.shape[2] == metadata.padded_seq_length
     )
     if not expected:
         raise ValueError(
@@ -797,8 +723,8 @@ def flex_h3_vsa_attention(
 
     # Selection stays in fp32 so the retained tile set matches the reference
     # policy in build_h3_vsa_block_mask bit for bit.
-    kv_num_blocks, kv_indices, full_kv_num_blocks, full_kv_indices = (
-        build_h3_vsa_kv_blocks(pooled_query, pooled_key, metadata, sparsity)
+    kv_num_blocks, kv_indices, full_kv_num_blocks, full_kv_indices = build_h3_vsa_kv_blocks(
+        pooled_query, pooled_key, metadata, sparsity
     )
     flex_block_mask = BlockMask.from_kv_blocks(
         kv_num_blocks,
@@ -836,7 +762,7 @@ def flex_h3_vsa_attention(
 
 def h3_vsa_triton_is_usable(device: torch.device) -> bool:
     """Whether the hand-written kernel can run on ``device``."""
-    from xfuser.core import vsa_h3_triton
+    from . import triton_kernel as vsa_h3_triton
 
     # The kernel is launched on the tensors' own device, so a CPU tensor cannot
     # use it however Triton is built.
@@ -872,7 +798,7 @@ def h3_vsa_attention(
     the ones that may fall back.
     """
     if use_triton:
-        from xfuser.core.vsa_h3_triton import (
+        from .triton_kernel import (
             triton_h3_vsa_attention,
             triton_pool_h3_vsa_tiles,
         )
@@ -880,18 +806,14 @@ def h3_vsa_attention(
         pooled_query = triton_pool_h3_vsa_tiles(query, metadata)
         pooled_key = triton_pool_h3_vsa_tiles(key, metadata)
         pooled_value = triton_pool_h3_vsa_tiles(value, metadata)
-        kv_indices = build_h3_vsa_kv_list(
-            pooled_query, pooled_key, metadata, sparsity
-        )
+        kv_indices = build_h3_vsa_kv_list(pooled_query, pooled_key, metadata, sparsity)
         # Model dtype, for the reason given in flex_h3_vsa_attention.
         compressed = F.scaled_dot_product_attention(
             pooled_query.to(query.dtype),
             pooled_key.to(query.dtype),
             pooled_value.to(query.dtype),
         )
-        return triton_h3_vsa_attention(
-            query, key, value, kv_indices, compressed, gate, metadata
-        )
+        return triton_h3_vsa_attention(query, key, value, kv_indices, compressed, gate, metadata)
 
     sparse_output, compressed = flex_h3_vsa_attention(
         tile_h3_vsa_bhsd(query, metadata),
@@ -904,12 +826,5 @@ def h3_vsa_attention(
     # Packed rows need no padding mask, so the dense prefix rows are one plain
     # attention call over the whole sequence.
     rows = metadata.num_prefix_tokens
-    packed_output[:, :, :rows] = F.scaled_dot_product_attention(
-        query[:, :, :rows], key, value
-    )
-    return packed_output + (
-        compressed.to(packed_output.dtype).index_select(
-            2, metadata.packed_token_tile
-        )
-        * gate
-    )
+    packed_output[:, :, :rows] = F.scaled_dot_product_attention(query[:, :, :rows], key, value)
+    return packed_output + (compressed.to(packed_output.dtype).index_select(2, metadata.packed_token_tile) * gate)

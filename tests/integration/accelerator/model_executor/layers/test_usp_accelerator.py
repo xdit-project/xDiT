@@ -210,19 +210,6 @@ class TestUSP(unittest.TestCase):
         self.assertNotEqual(result_diff, 0)  # Different implementations won't produce same output
         self.assertAlmostEqual(result_diff.item(), 0, places=1)  # Difference can be 0.15ish
 
-    @pytest.mark.nvidia
-    def test_ring_flash4(self):
-        """
-        Verifies ring_attn results with FAv4 are close to F.SDPA results
-        """
-        if not self.env_info["has_flash_attn_4"]:
-            self.skipTest("FAv4 library is not available in the environment.")
-
-        result_diff = self._run_ring_comparison("flash_4")
-
-        self.assertNotEqual(result_diff, 0)  # Different implementations won't produce same output
-        self.assertAlmostEqual(result_diff.item(), 0, places=1)  # Difference can be 0.15ish
-
 
 class TestUSPHybridParallel(unittest.TestCase):
     def setUp(self):

@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 import torch
 
+from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.model_executor.layers.attention_processor import (
     _joint_sp_padding_attention_kwargs,
 )
@@ -78,13 +79,15 @@ def test_joint_attention_describes_valid_kv_prefix():
 def test_trailing_kv_padding_uses_views():
     key = torch.randn(1, 2, 14, 8)
     value = torch.randn_like(key)
+    attention_kwargs = {"valid_kv_len": 13}
 
-    trimmed_key, trimmed_value = _trim_trailing_kv_padding(key, value, {"valid_kv_len": 13})
+    trimmed_key, trimmed_value, consumed = _trim_trailing_kv_padding(key, value, attention_kwargs)
 
     assert trimmed_key.shape == (1, 2, 13, 8)
     assert trimmed_value.shape == (1, 2, 13, 8)
     assert trimmed_key.untyped_storage().data_ptr() == key.untyped_storage().data_ptr()
     assert trimmed_value.untyped_storage().data_ptr() == value.untyped_storage().data_ptr()
+    assert consumed is attention_kwargs
 
 
 def test_trailing_kv_padding_defers_to_a_varlen_producer():
@@ -95,12 +98,20 @@ def test_trailing_kv_padding_defers_to_a_varlen_producer():
     """
     key = torch.randn(1, 2, 14, 8)
     value = torch.randn_like(key)
+    attention_kwargs = {
+        "valid_kv_len": 13,
+        "indices_k": torch.arange(13),
+        "cu_seqlens_k": torch.tensor([0, 13], dtype=torch.int32),
+        "max_seqlen_k": 13,
+    }
 
-    trimmed_key, trimmed_value = _trim_trailing_kv_padding(
+    trimmed_key, trimmed_value, consumed = _trim_trailing_kv_padding(
         key,
         value,
-        {"valid_kv_len": 13, "indices_k": torch.arange(13)},
+        attention_kwargs,
+        backend=AttentionBackendType.FLASH,
     )
 
     assert trimmed_key is key
     assert trimmed_value is value
+    assert consumed is attention_kwargs

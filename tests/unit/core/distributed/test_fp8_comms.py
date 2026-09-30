@@ -4,12 +4,9 @@ import pytest
 import torch
 import torch.nn as nn
 
-from xfuser.core.distributed import attention_backend as attention_backend_module
-from xfuser.core.distributed.attention_backend import (
-    AttentionBackendType,
-    FP8_HADAMARD_MATRIX,
-    rotate_qk_for_fp8_comms,
-)
+from xfuser.core.attention.numerics import hadamard
+from xfuser.core.attention.spec import AttentionBackendType
+from xfuser.core.distributed.fp8_comms import _rotate_for_backend
 from xfuser.core.distributed.attention_schedule import AttentionSchedule
 from xfuser.core.distributed.fp8_comms import (
     Fp8CommsCall,
@@ -29,6 +26,7 @@ _HB_DEVICE = "cpu"
 
 
 def _hadamard_matrix(size: int) -> torch.Tensor:
+    """Orthonormal Sylvester Hadamard, so the rotation contract needs no vendor library."""
     matrix = torch.ones(1, 1)
     while matrix.shape[0] < size:
         matrix = torch.cat(
@@ -41,14 +39,18 @@ def _hadamard_matrix(size: int) -> torch.Tensor:
 @pytest.fixture(autouse=True)
 def cpu_hadamard_matrix(monkeypatch):
     matrix = _hadamard_matrix(128).to(torch.bfloat16)
-    FP8_HADAMARD_MATRIX.clear()
-    FP8_HADAMARD_MATRIX[_HB_DEVICE] = matrix
-    monkeypatch.setattr(
-        attention_backend_module,
-        "_get_fp8_hadamard_matrix",
-        lambda head_dim, device: matrix,
-        raising=False,
-    )
+
+    def _matrix(block_r, device_key):
+        assert block_r == matrix.shape[0]
+        return matrix.to(torch.device(device_key))
+
+    monkeypatch.setattr(hadamard, "matrix", _matrix)
+
+
+def rotate_qk_for_fp8_comms(query, key, backend):
+    """What the comms layer applies: the backend's own prequant_rotate, or
+    nothing when it declares none."""
+    return _rotate_for_backend(query, key, backend)
 
 
 class _FakeBlock(nn.Module):
@@ -165,7 +167,7 @@ def _outlier_qk(head_dim: int = 128, seq: int = 64, dtype=torch.bfloat16, device
     """Q/K with a per-channel outlier, the distribution the rotation exists to fix.
 
     Seeded on CPU for determinism, then moved to ``device`` so the rotation can
-    index FP8_HADAMARD_MATRIX (which only has the host's real device as a key).
+    index the Hadamard cache (which is keyed by device).
     """
     torch.manual_seed(0)
     q = torch.randn(1, seq, 2, head_dim, dtype=dtype)
@@ -282,7 +284,7 @@ def test_hybrid_schedule_gates_fp8_comms_by_active_backend():
 
 
 def test_hadamard_matrix_is_orthonormal():
-    R = FP8_HADAMARD_MATRIX[_HB_DEVICE].float()
+    R = hadamard.matrix(128, _HB_DEVICE).float()
     torch.testing.assert_close(R @ R.T, torch.eye(R.shape[0], device=R.device), rtol=0, atol=1e-3)
 
 

@@ -8,6 +8,19 @@ import torch.nn.functional as F
 pytestmark = [pytest.mark.accelerator, pytest.mark.rocm]
 
 
+def _run(backend, query, key, value, *, dropout_p=0.0, is_causal=False, attention_kwargs=None):
+    """Call a backend through its spec, with the legacy call signature."""
+    from xfuser.core.attention import registry
+    from xfuser.core.attention.spec import AttnCall
+
+    return registry.get(backend).run(
+        query,
+        key,
+        value,
+        AttnCall(dropout_p=dropout_p, is_causal=is_causal, attention_kwargs=attention_kwargs or {}),
+    )
+
+
 def _require_gfx950_aiter():
     if not torch.cuda.is_available() or torch.version.hip is None:
         pytest.skip("AITER FP8 attention requires a ROCm GPU.")
@@ -40,7 +53,7 @@ def _require_gfx950_aiter():
 def test_ideogram4_aiter_fp8_attention_hd256(sequence_length):
     _require_gfx950_aiter()
 
-    from xfuser.core.distributed.attention_backend import _aiter_fp8_attn_call
+    from xfuser.core.attention.spec import AttentionBackendType
 
     torch.manual_seed(1234)
     device = torch.device("cuda")
@@ -51,12 +64,11 @@ def test_ideogram4_aiter_fp8_attention_hd256(sequence_length):
 
     with torch.no_grad():
         reference = F.scaled_dot_product_attention(query, key, value)
-        output, _ = _aiter_fp8_attn_call(
+        output, _ = _run(
+            AttentionBackendType.AITER_FP8,
             query,
             key,
             value,
-            dropout_p=0.0,
-            is_causal=False,
         )
 
     output_float = output.float()
@@ -80,7 +92,7 @@ def test_ideogram4_aiter_fp8_attention_hd256(sequence_length):
 def test_ideogram4_aiter_fp8_attention_hd256_compiles_fullgraph():
     _require_gfx950_aiter()
 
-    from xfuser.core.distributed.attention_backend import _aiter_fp8_attn_call
+    from xfuser.core.attention.spec import AttentionBackendType
 
     torch.manual_seed(1234)
     shape = (1, 18, 256, 256)
@@ -89,7 +101,8 @@ def test_ideogram4_aiter_fp8_attention_hd256_compiles_fullgraph():
     value = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
 
     def attention(query, key, value):
-        return _aiter_fp8_attn_call(
+        return _run(
+            AttentionBackendType.AITER_FP8,
             query,
             key,
             value,

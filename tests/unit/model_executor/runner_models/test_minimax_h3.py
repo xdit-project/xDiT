@@ -105,7 +105,7 @@ def _tiny_inputs(device, text_tokens=4, audio_tokens=12, video_tokens=48):
 
 
 def _patch_minimax_runtime_state(monkeypatch, *, track_steps=False, attention_backend=None):
-    from xfuser.core.distributed.attention_backend import AttentionBackendType
+    from xfuser.core.attention.spec import AttentionBackendType
     from xfuser.model_executor.models.runner_models import minimax_h3 as minimax_h3_runner
     from xfuser.model_executor.models.transformers import transformer_minimax_h3
 
@@ -140,7 +140,7 @@ def test_minimax_h3_wrapper_matches_diffusers_u1(monkeypatch):
     if MiniMaxH3Transformer3DModel is None:
         pytest.skip("installed diffusers does not include MiniMax-H3")
 
-    from xfuser.core.distributed.attention_backend import AttentionBackendType
+    from xfuser.core.attention.spec import AttentionBackendType
     from xfuser.model_executor.models.transformers import transformer_minimax_h3
     from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
         xFuserMiniMaxH3Transformer3DWrapper,
@@ -210,7 +210,7 @@ def test_minimax_h3_publishes_the_trailing_pad_length(monkeypatch):
     The key is published on every forward, carrying None when the sequence
     already aligns, because torch.compile guards on this dict's key set.
     """
-    from xfuser.core.distributed.attention_backend import AttentionBackendType
+    from xfuser.core.attention.spec import AttentionBackendType
     from xfuser.model_executor.models.transformers import transformer_minimax_h3
     from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
         xFuserMiniMaxH3Transformer3DWrapper,
@@ -262,10 +262,10 @@ def test_minimax_h3_runner_registration():
 
 
 def test_fasth3_defaults_match_inference_contract():
-    from xfuser.core.distributed.attention_backend import (
-        AttentionBackendType,
-        VSA_H3_BACKENDS,
-    )
+    from xfuser.core.attention import registry as attention_registry
+    from xfuser.core.attention.spec import AttentionBackendType, Sparsity
+
+    VSA_H3_BACKENDS = attention_registry.types_where(sparsity=Sparsity.H3)
     from xfuser.model_executor.models.runner_models.minimax_h3 import (
         FASTH3_V1_DATAFREE_MODEL_ID,
         xFuserFastH3Model,
@@ -278,9 +278,7 @@ def test_fasth3_defaults_match_inference_contract():
     assert xFuserFastH3Model.default_input_values.num_inference_steps == 5
     assert xFuserFastH3Model._warmup_num_inference_steps == 5
     assert xFuserFastH3Model._enable_fasth3_vsa
-    assert xFuserFastH3Model._supported_attn_backends == (
-        xFuserMiniMaxH3Model._supported_attn_backends | VSA_H3_BACKENDS
-    )
+    assert xFuserFastH3Model.supported_attn_backends == (xFuserMiniMaxH3Model.supported_attn_backends | VSA_H3_BACKENDS)
 
 
 def test_fasth3_wrapper_defines_checkpoint_compression_gates(monkeypatch):
@@ -302,7 +300,10 @@ def test_fasth3_wrapper_defines_checkpoint_compression_gates(monkeypatch):
 
 
 def test_fasth3_dense_defaults_match_inference_contract():
-    from xfuser.core.distributed.attention_backend import VSA_H3_BACKENDS
+    from xfuser.core.attention import registry as attention_registry
+    from xfuser.core.attention.spec import Sparsity
+
+    VSA_H3_BACKENDS = attention_registry.types_where(sparsity=Sparsity.H3)
     from xfuser.model_executor.models.runner_models.minimax_h3 import (
         FASTH3_V1_DENSE_DATAFREE_MODEL_ID,
         xFuserFastH3DenseModel,
@@ -317,8 +318,8 @@ def test_fasth3_dense_defaults_match_inference_contract():
     assert xFuserFastH3DenseModel.default_input_values.num_inference_steps == 5
     assert xFuserFastH3DenseModel._warmup_num_inference_steps == 5
     assert not xFuserFastH3DenseModel._enable_fasth3_vsa
-    assert xFuserFastH3DenseModel._supported_attn_backends == xFuserMiniMaxH3Model._supported_attn_backends
-    assert not (xFuserFastH3DenseModel._supported_attn_backends & VSA_H3_BACKENDS)
+    assert xFuserFastH3DenseModel.supported_attn_backends == xFuserMiniMaxH3Model.supported_attn_backends
+    assert not (xFuserFastH3DenseModel.supported_attn_backends & VSA_H3_BACKENDS)
 
 
 def test_fasth3_dense_accepts_dense_backends_and_rejects_vsa(monkeypatch):
@@ -414,7 +415,7 @@ def test_fasth3_wrapper_runs_vsa_attention(monkeypatch):
         lambda: 0,
     )
     monkeypatch.setattr(usp, "get_ulysses_parallel_world_size", lambda: 1)
-    from xfuser.core.distributed.attention_backend import AttentionBackendType
+    from xfuser.core.attention.spec import AttentionBackendType
 
     _patch_minimax_runtime_state(
         monkeypatch,
@@ -516,10 +517,13 @@ def test_minimax_h3_accepts_dense_mha_v4_backends(monkeypatch):
     length to stay padded to its KV tile.
     """
     from xfuser import xFuserArgs
-    from xfuser.core.distributed.attention_backend import (
-        AITER_MHA_V4_ONLY_BACKENDS,
-        AITER_MHA_V4_SPARGE_BACKEND_SET,
+    from xfuser.core.attention import registry as attention_registry
+    from xfuser.core.attention.backends.aiter_mha_v4.spec import (
+        DENSE_BACKENDS as AITER_MHA_V4_ONLY_BACKENDS,
     )
+    from xfuser.core.attention.spec import Sparsity
+
+    AITER_MHA_V4_SPARGE_BACKEND_SET = attention_registry.types_where(sparsity=Sparsity.SPARGE, head_balanced=True)
     from xfuser.model_executor.models.runner_models.minimax_h3 import (
         xFuserFastH3DenseModel,
         xFuserMiniMaxH3Model,
@@ -534,18 +538,19 @@ def test_minimax_h3_accepts_dense_mha_v4_backends(monkeypatch):
 
     for backend in AITER_MHA_V4_ONLY_BACKENDS:
         if backend in _UNSERVED_MHA_V4_BACKENDS:
-            # f4f4 has no manifest row of its own; mxfp4 covers it.
-            assert backend not in xFuserMiniMaxH3Model._supported_attn_backends
+            # f4f4 has no manifest row of its own; mxfp4 covers it, so this is
+            # about availability rather than the alignment bug it used to be.
+            assert backend not in xFuserMiniMaxH3Model.supported_attn_backends
             continue
-        assert backend in xFuserMiniMaxH3Model._supported_attn_backends
+        assert backend in xFuserMiniMaxH3Model.supported_attn_backends
         config = xFuserArgs(model="MiniMax-H3", task="t2va", attention_backend=backend.name)
         xFuserMiniMaxH3Model(config)
         assert config.attention_backend == backend.name
 
-    assert not (xFuserFastH3DenseModel._supported_attn_backends & AITER_MHA_V4_SPARGE_BACKEND_SET)
-    # Rejected one step earlier than an unknown backend would be: the runner
-    # declares no Sparge capability at all.
-    with pytest.raises(ValueError, match="does not support Sparge"):
+    assert not (xFuserFastH3DenseModel.supported_attn_backends & AITER_MHA_V4_SPARGE_BACKEND_SET)
+    # The model's own supported list refuses it before the generic Sparge gate
+    # is reached, so the message names what the model does support.
+    with pytest.raises(ValueError, match="does not support attention backend"):
         xFuserFastH3DenseModel(
             xFuserArgs(
                 model="FastH3-Dense",
@@ -1087,7 +1092,7 @@ def test_fasth3_loads_published_checkpoint(monkeypatch):
 def test_fasth3_dense_loads_published_checkpoint(monkeypatch):
     from diffusers import ModularPipeline
 
-    from xfuser.core.distributed.attention_backend import AttentionBackendType
+    from xfuser.core.attention.spec import AttentionBackendType
     from xfuser.model_executor.models.runner_models import minimax_h3
     from xfuser.model_executor.models.runner_models.minimax_h3 import (
         FASTH3_V1_DENSE_DATAFREE_MODEL_ID,
@@ -1427,13 +1432,17 @@ def test_fasth3_vsa_transformer_compiles_fullgraph(monkeypatch, vsa_backend):
     """Both VSA-H3 kernels must trace without graph breaks under fullgraph."""
     import torch._dynamo
 
-    from xfuser.core import vsa_h3_triton
+    from xfuser.core.attention.backends.vsa_h3 import (
+        triton_kernel as vsa_h3_triton,
+    )
 
     if vsa_backend == "TRITON_VSA_H3" and not vsa_h3_triton.is_available():
         pytest.skip("Triton is unavailable")
 
-    from xfuser.core.distributed.attention_backend import AttentionBackendType
-    from xfuser.core.vsa_h3_attention import build_h3_vsa_metadata
+    from xfuser.core.attention.spec import AttentionBackendType
+    from xfuser.core.attention.backends.vsa_h3.attention import (
+        build_h3_vsa_metadata,
+    )
     from xfuser.model_executor.models.transformers import transformer_minimax_h3
     from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
         xFuserMiniMaxH3Transformer3DWrapper,
@@ -1523,7 +1532,7 @@ def _vsa_geometry_inputs(text_tokens, audio_tokens, video_shape):
 
 
 def _vsa_geometry_transformer(monkeypatch):
-    from xfuser.core.distributed.attention_backend import AttentionBackendType
+    from xfuser.core.attention.spec import AttentionBackendType
     from xfuser.model_executor.models.transformers import transformer_minimax_h3
     from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
         xFuserMiniMaxH3Transformer3DWrapper,
@@ -1541,7 +1550,9 @@ def _vsa_geometry_transformer(monkeypatch):
 
 def test_fasth3_vsa_geometry_key_separates_transposed_video_grids(monkeypatch):
     """Two grids with the same token count must not share a cached geometry."""
-    from xfuser.core.vsa_h3_attention import build_h3_vsa_metadata
+    from xfuser.core.attention.backends.vsa_h3.attention import (
+        build_h3_vsa_metadata,
+    )
 
     wrapper = _vsa_geometry_transformer(monkeypatch)
     # Both grids split into two video tiles of the same two sizes; what differs

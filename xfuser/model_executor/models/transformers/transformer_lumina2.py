@@ -21,7 +21,7 @@ from xfuser.core.distributed import (
     get_sp_group,
     get_ulysses_parallel_world_size,
 )
-from xfuser.core.distributed.attention_backend import AttentionBackendType
+from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.model_executor.layers.attention_processor import (
     xFuserAttentionProcessorRegister,
 )

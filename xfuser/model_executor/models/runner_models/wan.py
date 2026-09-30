@@ -26,7 +26,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
 )
 from xfuser.core.distributed.runtime_state import get_runtime_state
-from xfuser.core.distributed.attention_backend import AttentionBackendType
+from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.core.utils.runner_utils import (
     log,
     resize_and_crop_image,

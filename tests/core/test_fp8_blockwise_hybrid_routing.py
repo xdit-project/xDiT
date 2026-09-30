@@ -412,13 +412,12 @@ def test_blockwise_fp4_and_int8_route_through_format_adapter(
     block = object()
     quantize(block, 2)
 
-    # The primary converter takes the hybrid schedule and nothing else; the
-    # carve-outs it used to be handed are the filter's now.
+    # The primary converter takes a filter and, when the run asks for a hybrid
+    # schedule, a companion factory. Nothing else: the carve-outs it used to be
+    # handed are the filter's, and the companion's format is the caller's.
     call_block, call_kwargs = adapter.calls[0]
     call_kwargs.pop("filter_fn")
-    assert [(call_block, call_kwargs)] == [
-        (block, {"device": "cuda:2", "hybrid": False})
-    ]
+    assert [(call_block, call_kwargs)] == [(block, {"device": "cuda:2"})]
 
 
 def test_blockwise_exact_component_target_routes_wrapped_blocks():
@@ -448,9 +447,7 @@ def test_blockwise_exact_component_target_routes_wrapped_blocks():
     call_block, call_kwargs = adapter.calls[0]
     filter_fn = call_kwargs.pop("filter_fn")
     assert filter_fn(object(), "anything")
-    assert [(call_block, call_kwargs)] == [
-        (block, {"device": "cuda:1", "hybrid": False})
-    ]
+    assert [(call_block, call_kwargs)] == [(block, {"device": "cuda:1"})]
 
 
 def _targeted_block_model(*, format_adapter, fp4=(), int8=(), fp8=()):

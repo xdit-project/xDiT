@@ -232,9 +232,11 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
             device = f"cuda:{local_rank}"
             if self.config.gemm_quantization_spec.low == "fp4":
                 log("Quantizing refiner blocks to FP4...")
+                # The refiner is quantized outside the plan-driven walk, so it
+                # gets no hybrid companion: the schedule pairs formats the plan
+                # named, and this path names none.
                 quantize_linear_layers_to_fp4(
                     refiner_transformer.blocks,
-                    use_hybrid_schedule=self.config.use_hybrid_gemm_schedule,
                     device=device,
                 )
             elif self.config.gemm_quantization_spec.low == "fp8":

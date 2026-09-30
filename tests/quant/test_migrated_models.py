@@ -169,8 +169,17 @@ def test_a_translated_pattern_holds_back_exactly_what_it_used_to(cls, entry):
     declaration is absolute, so this replays both dialects over every block of
     a generous depth and requires the same answer for every leaf.
     """
-    from xfuser.core.utils.runner_utils import _layer_uses_fp8_override
     from xfuser.model_executor.quant.targets import resolve
+
+    def held_high(local, prefixes, suffixes):
+        """The legacy matcher, stated rather than imported.
+
+        It lived in the FP4 converter, which no longer carries carve-outs at
+        all -- so the oracle spells out the rule it is checking against.
+        """
+        if prefixes and local.startswith(tuple(prefixes)):
+            return True
+        return bool(suffixes and local.endswith(tuple(suffixes)))
 
     root = (entry["fp4_gemm_module_list"] or entry["fp8_gemm_module_list"])[0]
     prefixes = tuple(entry["fp8_precision_overrides"] or ())
@@ -182,11 +191,7 @@ def test_a_translated_pattern_holds_back_exactly_what_it_used_to(cls, entry):
     for index in range(100):
         for leaf in ("attn.to_q", "ffn.net.0.proj", "ffn.net.2", "norm.linear"):
             local = f"{index}.{leaf}"
-            expected = (
-                "fp8"
-                if _layer_uses_fp8_override(local, prefixes, suffixes)
-                else "fp4"
-            )
+            expected = "fp8" if held_high(local, prefixes, suffixes) else "fp4"
             assert plan.format_for(f"{root}.{local}") == expected, (
                 f"{cls.__name__}: {root}.{local}"
             )

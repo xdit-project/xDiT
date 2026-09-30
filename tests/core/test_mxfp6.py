@@ -243,9 +243,15 @@ def test_aiter_mxfp6_probe_requires_gfx950(monkeypatch):
     assert "gfx950" in reason
 
 
-def test_fp4_hybrid_builds_an_mxfp6_high_branch(monkeypatch):
+def test_fp4_hybrid_builds_whatever_companion_it_is_given(monkeypatch):
+    """The FP4 converter no longer picks the high branch; the caller does.
+
+    It used to choose between MXFP6 and torchao FP8 from a flag of its own,
+    which is the last cross-format knowledge that lived inside a converter.
+    """
     from xfuser.core.utils import runner_utils
     from xfuser.model_executor.layers import mxfp4_linear, mxfp6_linear
+    from xfuser.model_executor.layers.hybrid_linear import xFuserHybridLinear
 
     class StubLinear(torch.nn.Module):
         def __init__(self, in_features, out_features, **kwargs):
@@ -266,12 +272,11 @@ def test_fp4_hybrid_builds_an_mxfp6_high_branch(monkeypatch):
 
     runner_utils.quantize_linear_layers_to_fp4(
         model,
-        use_hybrid_schedule=True,
-        use_fp6_for_overrides=True,
         device="cpu",
+        companion=runner_utils.packed_layer_factory(StubFP6, "cpu"),
     )
 
-    assert isinstance(model[0], mxfp4_linear.xFuserHybridMXFP4Linear)
+    assert isinstance(model[0], xFuserHybridLinear)
     assert isinstance(model[0].low_precision_linear, StubFP4)
     assert isinstance(model[0].high_precision_linear, StubFP6)
 

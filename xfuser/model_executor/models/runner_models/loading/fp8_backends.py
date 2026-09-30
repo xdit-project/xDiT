@@ -378,6 +378,12 @@ class AiterFp8BackendAdapter(QuantAdapter):
             exclusions=(), streamed=targets
         )
 
+    def layer_factory(self, *, device, companion=None):
+        from xfuser.core.utils.runner_utils import packed_layer_factory
+        from xfuser.model_executor.layers.fp8_linear import xFuserFP8BlockScaleLinear
+
+        return packed_layer_factory(xFuserFP8BlockScaleLinear, device)
+
     def convert_module(
         self,
         module,
@@ -402,8 +408,12 @@ class TorchaoFp8BackendAdapter(QuantAdapter):
     storage_semantics = "tensorwise_dynamic"
     parameter_semantics = "torchao_float8_tensor_subclass"
 
-    def _stream_config_factory(self, exclusions):
-        from diffusers import TorchAoConfig
+    def _quant_config(self):
+        """The torchao config this implementation quantizes with.
+
+        One definition, whether it is applied to a whole tree on the way in
+        from disk or to a single leaf as a hybrid companion.
+        """
         from torchao.quantization.granularity import PerTensor
         from torchao.quantization.quant_api import (
             Float8DynamicActivationFloat8WeightConfig,
@@ -412,21 +422,30 @@ class TorchaoFp8BackendAdapter(QuantAdapter):
             FP8_ACTIVATION_SCALE_FLOOR,
             _get_fp8_kernel_preference,
         )
-        from xfuser.model_executor.quant.torchao_quantizer import (
-            register_torchao_fp32_policy,
-        )
 
-        register_torchao_fp32_policy()
-        quant_type = Float8DynamicActivationFloat8WeightConfig(
+        return Float8DynamicActivationFloat8WeightConfig(
             granularity=PerTensor(),
             set_inductor_config=False,
             kernel_preference=_get_fp8_kernel_preference(),
             activation_value_lb=FP8_ACTIVATION_SCALE_FLOOR,
         )
+
+    def _stream_config_factory(self, exclusions):
+        from diffusers import TorchAoConfig
+        from xfuser.model_executor.quant.torchao_quantizer import (
+            register_torchao_fp32_policy,
+        )
+
+        register_torchao_fp32_policy()
         return TorchAoConfig(
-            quant_type,
+            self._quant_config(),
             modules_to_not_convert=list(exclusions),
         )
+
+    def layer_factory(self, *, device, companion=None):
+        from xfuser.core.utils.runner_utils import torchao_layer_factory
+
+        return torchao_layer_factory(self._quant_config(), device)
 
     def convert_module(
         self,

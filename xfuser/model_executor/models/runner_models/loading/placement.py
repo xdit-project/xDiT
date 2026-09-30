@@ -51,6 +51,22 @@ def place_pipeline_components(loader) -> None:
     )
 
 
+def _hybrid_companion(loader, plan, format_name):
+    """The per-step alternate the hybrid schedule pairs with this format.
+
+    The run names both formats and the plan says which is which, so the walk
+    composes the pair. Neither converter learns about the other.
+    """
+    if not getattr(loader.model.config, "use_hybrid_gemm_schedule", False):
+        return None
+    if plan.high is None or format_name != plan.low:
+        return None
+    companion = loader.backends.adapter_for(plan.high)
+    if companion is None:
+        return None
+    return companion.layer_factory(device=None)
+
+
 def _plan_conversion_filter(plan, module_path, format_name, already_quantized):
     """Keep the leaves under ``module_path`` the plan gives to ``format_name``.
 
@@ -118,9 +134,8 @@ Each walk starts where ``walk_roots`` says -- the subtrees that format owns,
             if before_device_move and offload_requested:
                 convert_kwargs["offload_to_cpu"] = True
             if is_primary:
-                # Only the primary-format converter builds per-block wrappers,
-                # so only it takes the hybrid schedule. The carve-outs it used
-                # to be handed as precision patterns are now the filter's.
+                # Only the primary-format converter builds per-step wrappers,
+                # so only it is given the companion to pair with.
                 component_name = module_name.partition(".")[0]
                 if ledger.claim_description(component_name):
                     descriptor = prepare_native_load(
@@ -131,7 +146,9 @@ Each walk starts where ``walk_roots`` says -- the subtrees that format owns,
                         hybrid=model.config.use_hybrid_gemm_schedule,
                     ).descriptor
                     log(descriptor.log_message())
-                convert_kwargs["hybrid"] = model.config.use_hybrid_gemm_schedule
+                companion = _hybrid_companion(loader, plan, format_name)
+                if companion is not None:
+                    convert_kwargs["companion"] = companion
 
             adapter.convert_module(
                 rgetattr(model.pipe, module_name), **convert_kwargs

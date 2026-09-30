@@ -213,19 +213,21 @@ def test_the_text_encoder_is_skipped_unless_the_run_asks():
 
 
 def test_only_the_primary_converter_takes_the_hybrid_arguments():
-    """The FP8 converter builds no per-block wrappers, so it takes none."""
+    """The FP8 converter builds no per-step wrappers, so it takes no companion."""
     loader = _loader("low=fp4,high=fp8")
     _run(loader, before_device_move=True)
     _run(loader, before_device_move=False)
 
     _, fp8_kwargs = loader.backends.blockwise_fp8.seen[0]
     _, primary_kwargs = loader.backends.format.seen[0]
-    assert "hybrid" not in fp8_kwargs
-    assert primary_kwargs["hybrid"] is False
+    assert "companion" not in fp8_kwargs
+    # This run asked for no hybrid schedule, so not even the primary gets one.
+    assert "companion" not in primary_kwargs
     # The carve-out patterns the primary converter used to be handed are the
     # filter's business now, so neither converter is given them.
+    # The carve-out patterns the primary converter used to be handed no longer
+    # exist as an argument anywhere; the filter owns that decision.
     assert "fp8_layers" not in primary_kwargs
-    assert "fp8_suffix_layers" not in primary_kwargs
 
 
 def test_nothing_is_quantized_twice():

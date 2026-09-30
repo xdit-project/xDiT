@@ -440,27 +440,16 @@ class TorchaoNvfp4BackendAdapter(QuantAdapter):
         return _torchao_stream_config("nvfp4", exclusions)
 
     def convert_module(
-        self,
-        module,
-        *,
-        device,
-        fp8_layers=None,
-        fp8_suffix_layers=None,
-        hybrid=False,
-        filter_fn=None,
+        self, module, *, device, filter_fn=None, offload_to_cpu=False, companion=None
     ):
-        if hybrid:
+        if companion is not None:
             raise RuntimeError(
-                "CUDA NVFP4 does not implement the runtime hybrid FP8/FP4 " "schedule"
+                "CUDA NVFP4 does not implement the runtime hybrid schedule"
             )
         from xfuser.core.utils.runner_utils import quantize_linear_layers_to_nvfp4
 
         return quantize_linear_layers_to_nvfp4(
-            module,
-            fp8_layers=fp8_layers,
-            fp8_suffix_layers=fp8_suffix_layers,
-            device=device,
-            filter_fn=filter_fn,
+            module, device=device, filter_fn=filter_fn
         )
 
 
@@ -471,34 +460,21 @@ class AiterMxfp4BackendAdapter(QuantAdapter):
     serialization = "packed_state_supported_not_portable"
     supports_precision_overrides = True
 
-    def __init__(self, *, use_fp6_for_overrides: bool = False, **kwargs):
-        super().__init__(**kwargs)
-        self.use_fp6_for_overrides = use_fp6_for_overrides
-        if use_fp6_for_overrides:
-            self.storage_semantics = "aiter_mxfp4_per_1x32_with_mxfp6_overrides"
-            self.auxiliary_state_semantics = "replicated_scale_buffers"
+    def layer_factory(self, *, device, companion=None):
+        from xfuser.core.utils.runner_utils import mxfp4_layer_factory
+
+        return mxfp4_layer_factory(device, companion=companion)
 
     def convert_module(
-        self,
-        module,
-        *,
-        device,
-        fp8_layers=None,
-        fp8_suffix_layers=None,
-        hybrid=False,
-        filter_fn=None,
-        offload_to_cpu=False,
+        self, module, *, device, filter_fn=None, offload_to_cpu=False, companion=None
     ):
-        from xfuser.core.utils.runner_utils import quantize_linear_layers_to_fp4
+        from xfuser.core.utils.runner_utils import replace_linears
 
-        return quantize_linear_layers_to_fp4(
+        return replace_linears(
             module,
-            fp8_layers=fp8_layers,
-            fp8_suffix_layers=fp8_suffix_layers,
-            use_hybrid_schedule=hybrid,
-            device=device,
+            self.layer_factory(device=device, companion=companion),
             filter_fn=filter_fn,
-            use_fp6_for_overrides=self.use_fp6_for_overrides,
+            offload_to_cpu=offload_to_cpu,
         )
 
 
@@ -507,6 +483,12 @@ class AiterMxfp6BackendAdapter(QuantAdapter):
     parameter_semantics = "packed_weight_parameter"
     auxiliary_state_semantics = "persistent_scale_buffer"
     serialization = "packed_state_supported_not_portable"
+
+    def layer_factory(self, *, device, companion=None):
+        from xfuser.core.utils.runner_utils import packed_layer_factory
+        from xfuser.model_executor.layers.mxfp6_linear import xFuserMXFP6Linear
+
+        return packed_layer_factory(xFuserMXFP6Linear, device)
 
     def convert_module(
         self,
@@ -643,7 +625,6 @@ def select_format_backend(
             backend=contract.selected_backend,
             format_=contract.requested_format,
             native_unavailable_reason=MXFP4_STREAMING_FALLBACK,
-            use_fp6_for_overrides=True,
         )
     if format_value == "int8":
         if backend_value != "torchao" or not capabilities.torchao_int8:

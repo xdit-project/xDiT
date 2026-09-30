@@ -4,7 +4,9 @@
 
 ## Validation
 
-Automated lint, formatting, CPU unit, and CPU integration checks run in PR CI.
+Automated lint, formatting, CPU unit, and CPU integration checks run in PR CI. They do not cover accelerator behavior.
+
+Record the hardware, environment, command, and passed/skipped/deselected counts for every suite you ran. Focused tests do not replace the applicable CPU suites or the accelerator selectors the available hardware supports.
 
 ### Accelerator tests
 
@@ -13,9 +15,9 @@ Automated lint, formatting, CPU unit, and CPU integration checks run in PR CI.
 - [ ] Multi-GPU tests passed
 - [ ] Not applicable (explain below)
 
-Hardware, command, and result:
+Hardware, environment, command, and result:
 
-<!-- Example: 2x MI300X; python -m pytest tests -m "rocm and multi_gpu"; 42 passed -->
+<!-- Example: 8x MI300X; python -m pytest tests/integration/accelerator -m "accelerator and not nvidia"; X passed, Y deselected -->
 
 ### End-to-end tests
 

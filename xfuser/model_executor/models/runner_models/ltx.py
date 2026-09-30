@@ -315,7 +315,7 @@ class xFuserLTX2VideoModel(xFuserModel):
         ring_degree=True,
         enable_tiling=True,
         enable_slicing=True,
-        use_fp8_gemms=True,
+        gemm_formats=frozenset({"fp8"}),
         supports_step_caching=True,
         fully_shard_degree=True,
         use_parallel_vae=True,
@@ -476,8 +476,7 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
         ring_degree=True,
         enable_tiling=True,
         use_parallel_vae=True,
-        use_fp8_gemms=True,
-        use_fp4_gemms=True,
+        gemm_formats=frozenset({"fp8", "fp4"}),
         profile_capture_phase=True,
     )
 

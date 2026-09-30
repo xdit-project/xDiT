@@ -201,30 +201,27 @@ def test_keep_high_on_a_transformer_module_survives_the_subtraction():
     assert list(plan.roots(plan.high)) == [TRANSFORMER[1]]
 
 
-def test_an_unsupported_format_is_refused_before_any_list_is_read():
-    """Why the shim needs no capability gate of its own.
+@pytest.mark.parametrize("unsupported", ["fp6", "int8"])
+def test_an_unsupported_format_is_refused_before_any_target_is_read(unsupported):
+    """Targets are format-agnostic, so the refusal has to happen upstream.
 
-    `use_fp6_gemms` / `use_int8_gemms` are derived from the spec at parse time
-    and checked against ModelCapabilities in `_validate_config`, so a format
-    the model cannot run never reaches the plan. That matters because targets
-    are format-agnostic now: without the upstream refusal, asking for int8
-    would happily claim the DiT that FLUX.2 declares no int8 support for.
+    Without it, asking for int8 would happily claim the DiT that FLUX.2
+    declares no int8 support for -- the declaration names modules, and says
+    nothing about which formats may be applied to them.
     """
-    from xfuser.config import xFuserArgs
+    from xfuser.config.args import xFuserArgs
 
-    assert not xFuserFlux2Model.capabilities.use_fp6_gemms
-    assert not xFuserFlux2Model.capabilities.use_int8_gemms
+    supported = xFuserFlux2Model.capabilities.supported_gemm_formats()
+    assert unsupported not in supported
 
-    for unsupported in ("fp6", "int8"):
-        config = SimpleNamespace(**{
-            key: getattr(xFuserFlux2Model.capabilities, key, None)
-            for key in type(xFuserFlux2Model.capabilities).__annotations__
-        })
-        setattr(config, f"use_{unsupported}_gemms", True)
-        key = f"use_{unsupported}_gemms"
-        assert getattr(config, key) and not getattr(
-            xFuserFlux2Model.capabilities, key
-        ), f"{key} must be the pair _validate_config rejects on"
+    model = object.__new__(xFuserFlux2Model)
+    model.settings = copy.deepcopy(xFuserFlux2Model.settings)
+    config = xFuserArgs(
+        model=model.settings.model_name, gemm_quantization=unsupported
+    )
+
+    with pytest.raises(ValueError, match="does not support GEMM format"):
+        model._validate_config(config)
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +261,7 @@ def test_a_pure_profile_places_no_high_tier(raw):
 
 
 def test_the_high_format_drives_the_adapter_choice():
-    """It was `use_fp6_gemms and use_fp4_gemms`; now any tier names its own."""
+    """It was a pair of capability booleans; now any tier names its own."""
     plan = _plan_for("low=fp4,high=fp8", text_encoder=True).gemm_plan
     assert plan.high == "fp8"
 

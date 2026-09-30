@@ -135,9 +135,7 @@ def test_runner_declaration_derives_quantization_contracts(contracts):
         "ModelCapabilities",
         (),
         {
-            "use_fp8_gemms": True,
-            "use_fp4_gemms": False,
-            "use_int8_gemms": True,
+            "gemm_formats": frozenset({"fp8", "int8"}),
         },
     )()
 
@@ -180,9 +178,7 @@ def test_runner_declaration_does_not_allow_cross_product_backend_pairs(contracts
         "ModelCapabilities",
         (),
         {
-            "use_fp8_gemms": False,
-            "use_fp4_gemms": False,
-            "use_int8_gemms": True,
+            "gemm_formats": frozenset({"int8"}),
         },
     )()
     declaration = contracts.LoadDeclaration.for_runner(model_capabilities)
@@ -206,9 +202,7 @@ def test_fp8_fp4_hybrid_is_an_explicit_valid_contract(contracts):
         "ModelCapabilities",
         (),
         {
-            "use_fp8_gemms": True,
-            "use_fp4_gemms": True,
-            "use_int8_gemms": False,
+            "gemm_formats": frozenset({"fp8", "fp4"}),
             "fully_shard_degree": False,
         },
     )()
@@ -241,9 +235,7 @@ def test_fsdp_and_replicated_meta_support_are_derived_separately(contracts):
         "ModelCapabilities",
         (),
         {
-            "use_fp8_gemms": False,
-            "use_fp4_gemms": False,
-            "use_int8_gemms": False,
+            "gemm_formats": frozenset({}),
             "fully_shard_degree": True,
         },
     )()
@@ -251,9 +243,7 @@ def test_fsdp_and_replicated_meta_support_are_derived_separately(contracts):
         "ModelCapabilities",
         (),
         {
-            "use_fp8_gemms": False,
-            "use_fp4_gemms": False,
-            "use_int8_gemms": False,
+            "gemm_formats": frozenset({}),
             "fully_shard_degree": False,
         },
     )()

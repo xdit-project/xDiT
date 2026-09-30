@@ -63,8 +63,7 @@ class xFuserCosmos3SuperModel(xFuserModel):
         use_cfg_parallel=True,
         use_parallel_vae=True,
         use_parallel_vae_encoder=True,
-        use_fp8_gemms=True,
-        use_fp4_gemms=True,
+        gemm_formats=frozenset({"fp8", "fp4"}),
         enable_slicing=True,
         enable_tiling=True,
     )

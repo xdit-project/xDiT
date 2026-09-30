@@ -46,7 +46,6 @@ class xFuserCausalWanModel(xFuserModel):
         ulysses_degree=False,   # SP incompatible with KV cache initially
         ring_degree=False,
         fully_shard_degree=True,
-        use_fp8_gemms=False,
         use_parallel_vae=True,
         use_parallel_vae_encoder=True,
         enable_tiling=True,

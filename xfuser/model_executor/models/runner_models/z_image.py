@@ -122,10 +122,9 @@ class xFuserZImageModel(xFuserModel):
         enable_tiling=True,
         enable_slicing=True,
         fully_shard_degree=True,
-        use_fp8_gemms=True,
+        gemm_formats=frozenset({"fp8", "int8"}),
         quantize_text_encoder=True,
         use_fp8_comms=True,
-        use_int8_gemms=True,
         supports_step_caching=True,
         use_parallel_vae=True,
     )
@@ -211,10 +210,9 @@ class xFuserZImageTurboModel(xFuserModel):
     capabilities = ModelCapabilities(
         enable_tiling=True,
         enable_slicing=True,
-        use_fp8_gemms=True,
+        gemm_formats=frozenset({"fp8", "int8"}),
         quantize_text_encoder=True,
         use_fp8_comms=True,
-        use_int8_gemms=True,
         fully_shard_degree=True,
         use_parallel_vae=True,
     )

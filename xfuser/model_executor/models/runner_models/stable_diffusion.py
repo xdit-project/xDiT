@@ -40,7 +40,7 @@ class xFuserStableDiffusionModel(xFuserModel):
         enable_tiling=True,
         enable_slicing=True,
         fully_shard_degree=True,
-        use_fp8_gemms=True,
+        gemm_formats=frozenset({"fp8"}),
         use_fp8_comms=True,
         supports_step_caching=True,
         quantize_text_encoder=True,

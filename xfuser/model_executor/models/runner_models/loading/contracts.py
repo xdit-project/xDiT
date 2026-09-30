@@ -160,28 +160,31 @@ class LoadDeclaration:
     ) -> "LoadDeclaration":
         """Resolve one model's static spec against final instance settings."""
 
+        # Read off the field rather than through ModelCapabilities' accessor:
+        # this takes any object that describes a model's capabilities, and a
+        # caller that declares no GEMM formats supports none.
+        supported = frozenset(getattr(model_capabilities, "gemm_formats", ()) or ())
+
         contracts = {(QuantizationFormat.NONE, QuantizationBackend.NONE)}
-        if getattr(model_capabilities, "use_fp8_gemms", False):
+        if "fp8" in supported:
             contracts.update(
                 {
                     (QuantizationFormat.FP8, QuantizationBackend.AITER),
                     (QuantizationFormat.FP8, QuantizationBackend.TORCHAO),
                 }
             )
-        if getattr(model_capabilities, "use_fp4_gemms", False):
+        if "fp4" in supported:
             contracts.update(
                 {
                     (QuantizationFormat.FP4, QuantizationBackend.AITER),
                     (QuantizationFormat.FP4, QuantizationBackend.TORCHAO),
                 }
             )
-        supports_fp4 = getattr(model_capabilities, "use_fp4_gemms", False)
-        supports_fp6 = getattr(model_capabilities, "use_fp6_gemms", False)
-        if supports_fp6:
+        if "fp6" in supported:
             contracts.add((QuantizationFormat.FP6, QuantizationBackend.AITER))
-        if supports_fp4 and supports_fp6:
+        if {"fp4", "fp6"} <= supported:
             contracts.add((QuantizationFormat.FP4_FP6, QuantizationBackend.AITER))
-        if getattr(model_capabilities, "use_int8_gemms", False):
+        if "int8" in supported:
             contracts.add((QuantizationFormat.INT8, QuantizationBackend.TORCHAO))
 
         modes = {MaterializationMode.EAGER}

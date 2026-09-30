@@ -97,7 +97,7 @@ def test_unsupported_runner_rejects_fp8_text_encoder_via_capability_validation(
 ):
     model = object.__new__(runtime.model_cls)
     model.settings = SimpleNamespace(model_name="test/model", valid_tasks=[])
-    model.capabilities = runtime.capabilities_cls(use_fp8_gemms=True)
+    model.capabilities = runtime.capabilities_cls(gemm_formats=frozenset({"fp8"}))
     config = _args(
         runtime,
         gemm_quantization="fp8",

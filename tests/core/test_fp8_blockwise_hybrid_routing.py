@@ -209,9 +209,7 @@ def _hybrid_model(
 ):
     return SimpleNamespace(
         config=SimpleNamespace(
-            use_fp4_gemms=True,
-            use_fp8_gemms=False,
-            use_int8_gemms=False,
+            gemm_formats=frozenset({"fp4"}),
             use_hybrid_gemm_schedule=False,
         ),
         settings=SimpleNamespace(
@@ -390,7 +388,6 @@ def test_blockwise_fp4_and_int8_route_through_format_adapter(
     setattr(settings, target_setting, ["transformer.blocks"])
     model = SimpleNamespace(
         config=SimpleNamespace(
-            use_fp8_gemms=False,
             use_hybrid_gemm_schedule=False,
             **config_flags,
         ),
@@ -419,9 +416,7 @@ def test_blockwise_exact_component_target_routes_wrapped_blocks():
     adapter = RecordingFormatAdapter()
     model = SimpleNamespace(
         config=SimpleNamespace(
-            use_fp4_gemms=False,
-            use_fp8_gemms=False,
-            use_int8_gemms=True,
+            gemm_formats=frozenset({"int8"}),
             use_hybrid_gemm_schedule=False,
         ),
         settings=SimpleNamespace(
@@ -691,7 +686,7 @@ def _fsdp_patch_model(
     model = SimpleNamespace(
         config=SimpleNamespace(
             fully_shard_degree=fully_shard_degree,
-            use_fp4_gemms=True,
+            gemm_formats=frozenset({"fp4"}),
             use_hybrid_gemm_schedule=hybrid,
         ),
         settings=SimpleNamespace(
@@ -971,9 +966,7 @@ def test_streamed_fp8_target_does_not_skip_disjoint_target_in_component(
             enable_model_cpu_offload=False,
             enable_sequential_cpu_offload=False,
             enable_group_cpu_offload=False,
-            use_fp4_gemms=False,
-            use_fp8_gemms=True,
-            use_int8_gemms=False,
+            gemm_formats=frozenset({"fp8"}),
             use_hybrid_attn_schedule=False,
             use_hybrid_gemm_schedule=False,
             use_vae_channels_last_format=False,

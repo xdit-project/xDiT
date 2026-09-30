@@ -43,7 +43,7 @@ class xFuserFluxModel(xFuserModel):
         ulysses_degree=True,
         ring_degree=True,
         pipefusion_parallel_degree=True,
-        use_fp8_gemms=True,
+        gemm_formats=frozenset({"fp8"}),
         quantize_text_encoder=True,
         use_parallel_vae=True,
         enable_tiling=True,
@@ -155,7 +155,7 @@ class xFuserFluxKontextModel(xFuserModel):
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
-        use_fp8_gemms=True,
+        gemm_formats=frozenset({"fp8"}),
         quantize_text_encoder=True,
         enable_tiling=True,
         enable_slicing=True,
@@ -283,9 +283,8 @@ class xFuserFlux2Model(xFuserModel):
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
-        use_fp8_gemms=True,
+        gemm_formats=frozenset({"fp8", "fp4"}),
         quantize_text_encoder=True,
-        use_fp4_gemms=True,
         fully_shard_degree=True,
         use_fp8_comms=True,
         enable_tiling=True,
@@ -433,7 +432,7 @@ class xFuserFlux2Klein9BModel(xFuserModel):
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
-        use_fp8_gemms=True,
+        gemm_formats=frozenset({"fp8"}),
         quantize_text_encoder=True,
         enable_tiling=True,
         enable_slicing=True,

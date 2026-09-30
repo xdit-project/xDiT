@@ -117,11 +117,10 @@ def test_a_migrated_model_carries_no_legacy_fields():
 def test_every_model_with_a_gemm_capability_declares_targets():
     """A capability with nothing declared would enable a format that targets
     nothing, which looks like a working run that quantizes no layer."""
-    formats = ("use_fp8_gemms", "use_fp4_gemms", "use_fp6_gemms", "use_int8_gemms")
     undeclared = [
         cls.__name__
         for cls in dict.fromkeys(MODEL_REGISTRY.values())
-        if any(getattr(cls.capabilities, f, False) for f in formats)
+        if cls.capabilities.supported_gemm_formats()
         and cls.settings.gemm_targets is None
     ]
     assert not undeclared
@@ -233,3 +232,23 @@ def test_z_image_context_refiner_follows_the_kernels_floor(
     # its neighbours are quantized whatever the parallel degree
     assert plan.format_for("transformer.layers.0.attn.to_q") == raw
     assert plan.format_for("transformer.noise_refiner.0.attn.to_q") == raw
+
+
+@pytest.mark.parametrize(
+    "cls",
+    [cls for cls in dict.fromkeys(MODEL_REGISTRY.values()) if cls.__name__ in SNAPSHOT],
+    ids=lambda cls: cls.__name__,
+)
+def test_declared_formats_match_the_recorded_capabilities(cls):
+    """`gemm_formats` replaced four booleans across every model file.
+
+    The snapshot recorded those booleans before the rewrite, so this checks the
+    mechanical part of it the only way that is not circular: against what each
+    model used to say, rather than against what it says now.
+    """
+    recorded = {
+        name.removeprefix("use_").removesuffix("_gemms")
+        for name, enabled in SNAPSHOT[cls.__name__]["capabilities"].items()
+        if enabled
+    }
+    assert cls.capabilities.supported_gemm_formats() == recorded

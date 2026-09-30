@@ -140,11 +140,11 @@ class ModelCapabilities:
     enable_tiling: bool = False
     use_vae_channels_last_format: bool = True
     # Other features
-    use_int8_gemms: bool = False
-    use_fp8_gemms: bool = False
+    #: The GEMM formats this model can run, by the names --gemm_quantization
+    #: uses. One field rather than a flag per format: a new format needs no new
+    #: capability, and a run is checked against it by name.
+    gemm_formats: frozenset = frozenset()
     quantize_text_encoder: bool = False
-    use_fp4_gemms: bool = False
-    use_fp6_gemms: bool = False
     supports_step_caching: bool = False
     use_fp8_comms: bool = False
     use_hybrid_attn_schedule: bool = False
@@ -154,6 +154,16 @@ class ModelCapabilities:
     supports_sparge_attention_backends: bool = False
     supports_distilled_weights: bool = False
     profile_capture_phase: bool = False
+
+    def supported_gemm_formats(self) -> frozenset:
+        """The formats a run may name for this model.
+
+        What "supported" means lives here, and a model that declares nothing
+        supports nothing rather than everything. `LoadDeclaration.for_runner`
+        reads the field directly because it accepts any capabilities-shaped
+        object, not only this one.
+        """
+        return frozenset(self.gemm_formats)
 
 @dataclass(frozen=True)
 class DefaultInputValues:
@@ -515,6 +525,19 @@ class xFuserModel(abc.ABC):
             else:
                 if config_value and not getattr(self.capabilities, key):
                     raise ValueError(f"Model {self.settings.model_name} does not support {key}.")
+
+        # The loop above matches capability names to config attributes, and a
+        # format is not a config attribute -- it is a name inside the profile.
+        # Without this a run could ask any model for any format.
+        requested = config.gemm_quantization_spec.formats - {"none"}
+        supported = self.capabilities.supported_gemm_formats()
+        unsupported = sorted(requested - supported)
+        if unsupported:
+            raise ValueError(
+                f"Model {self.settings.model_name} does not support GEMM "
+                f"format(s) {', '.join(unsupported)}; it supports "
+                + (", ".join(sorted(supported)) if supported else "none")
+            )
 
         if config.cache_method:
             if not self.capabilities.supports_step_caching:

@@ -531,7 +531,7 @@ def test_base_runner_selects_the_production_contract_before_loading(monkeypatch)
     monkeypatch.setattr(meta_load, "_is_cuda", lambda: False)
     model_capabilities = base_model.ModelCapabilities(
         fully_shard_degree=True,
-        use_fp8_gemms=True,
+        gemm_formats=frozenset({"fp8"}),
     )
     runner = SimpleNamespace(
         config=SimpleNamespace(
@@ -1122,7 +1122,7 @@ def test_eager_post_load_fallback_builds_meta_for_local_block_fill(monkeypatch):
             fp8_precision_override_suffixes=None,
         ),
         config=SimpleNamespace(
-            use_fp4_gemms=True,
+            gemm_formats=frozenset({"fp4"}),
             use_hybrid_gemm_schedule=False,
         ),
         _checkpoint_request=lambda name: CheckpointRequest("org/repo", subfolder=name),

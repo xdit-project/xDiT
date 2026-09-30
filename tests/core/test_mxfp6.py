@@ -50,7 +50,7 @@ def test_wan22_reuses_existing_fp4_and_quality_targets_for_mxfp6():
     # own, so the mixed mode is only reachable as low=fp4,high=fp6.
     model.config = SimpleNamespace(
         quantize_text_encoder=False,
-        use_fp6_gemms=True,
+        gemm_formats=frozenset({"fp6"}),
         gemm_quantization_spec=GemmQuantizationSpec("fp4", "fp6"),
         ulysses_degree=1,
         ring_degree=1,
@@ -185,11 +185,11 @@ def test_only_supported_wan_runners_enable_mxfp6():
         xFuserWan22TI2VModel,
     )
 
-    assert xFuserWan21I2VModel.capabilities.use_fp6_gemms
-    assert xFuserWan21T2VModel.capabilities.use_fp6_gemms
-    assert xFuserWan22DistilledI2VModel.capabilities.use_fp6_gemms
-    assert xFuserWan22TI2VModel.capabilities.use_fp6_gemms
-    assert not xFuserWan21VACEModel.capabilities.use_fp6_gemms
+    assert "fp6" in xFuserWan21I2VModel.capabilities.supported_gemm_formats()
+    assert "fp6" in xFuserWan21T2VModel.capabilities.supported_gemm_formats()
+    assert "fp6" in xFuserWan22DistilledI2VModel.capabilities.supported_gemm_formats()
+    assert "fp6" in xFuserWan22TI2VModel.capabilities.supported_gemm_formats()
+    assert "fp6" not in xFuserWan21VACEModel.capabilities.supported_gemm_formats()
 
 
 def test_wan_mxfp6_declaration_keeps_existing_load_modes():

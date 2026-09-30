@@ -43,7 +43,6 @@ def is_available() -> bool:
 
 
 if triton is not None:
-
     # Scores are masked with a large finite value rather than -inf so that an
     # all-padding N tile leaves the running max finite instead of yielding NaN.
     _MASK_SCORE = tl.constexpr(-1.0e30)
@@ -68,11 +67,7 @@ if triton is not None:
         The ratio is a property of the checkpoint's selection coherence, not of
         the device: random tensors give 0.87 and would have predicted a win.
         """
-        occupancy_hints = (
-            [{"waves_per_eu": waves} for waves in (1, 2, 4)]
-            if torch.version.hip
-            else [{}]
-        )
+        occupancy_hints = [{"waves_per_eu": waves} for waves in (1, 2, 4)] if torch.version.hip else [{}]
         return [
             triton.Config(
                 {"TILES_PER_ITER": tiles_per_iter, **hint},
@@ -114,23 +109,13 @@ if triton is not None:
         rows = tl.load(TILED_TO_PACKED + tile * TILE + tl.arange(0, TILE))
         keep = rows < packed_seq_length
         values = tl.load(
-            X
-            + batch * stride_xz
-            + head * stride_xh
-            + rows[:, None] * stride_xm
-            + tl.arange(0, HEAD_DIM)[None, :],
+            X + batch * stride_xz + head * stride_xh + rows[:, None] * stride_xm + tl.arange(0, HEAD_DIM)[None, :],
             mask=keep[:, None],
             other=0.0,
         )
-        pooled = tl.sum(values.to(tl.float32), 0) / tl.load(SIZES + tile).to(
-            tl.float32
-        )
+        pooled = tl.sum(values.to(tl.float32), 0) / tl.load(SIZES + tile).to(tl.float32)
         tl.store(
-            Out
-            + batch * stride_oz
-            + head * stride_oh
-            + tile * stride_om
-            + tl.arange(0, HEAD_DIM),
+            Out + batch * stride_oz + head * stride_oh + tile * stride_om + tl.arange(0, HEAD_DIM),
             pooled,
         )
 
@@ -216,9 +201,7 @@ if triton is not None:
             other=0.0,
         )
 
-        index_base = KV_IDX + batch64 * stride_iz + head64 * stride_ih + (
-            query_tile * stride_im
-        )
+        index_base = KV_IDX + batch64 * stride_iz + head64 * stride_ih + (query_tile * stride_im)
 
         running_max = tl.full([TILE], _MASK_SCORE, tl.float32)
         running_sum = tl.zeros([TILE], tl.float32)
@@ -259,10 +242,7 @@ if triton is not None:
                 key_rows = tl.load(TILED_TO_PACKED + key_tile * TILE + offs_t)
                 valid = key_rows < packed_seq_length
                 key = tl.load(
-                    K
-                    + qkv_base
-                    + key_rows[:, None] * stride_qm
-                    + offs_d[None, :],
+                    K + qkv_base + key_rows[:, None] * stride_qm + offs_d[None, :],
                     mask=valid[:, None],
                     other=0.0,
                 )
@@ -276,30 +256,20 @@ if triton is not None:
                 accumulator = accumulator * rescale[:, None]
 
                 value = tl.load(
-                    V
-                    + qkv_base
-                    + key_rows[:, None] * stride_qm
-                    + offs_d[None, :],
+                    V + qkv_base + key_rows[:, None] * stride_qm + offs_d[None, :],
                     mask=valid[:, None],
                     other=0.0,
                 )
-                accumulator = tl.dot(
-                    probabilities.to(value.dtype), value, accumulator
-                )
+                accumulator = tl.dot(probabilities.to(value.dtype), value, accumulator)
                 running_max = tile_max
 
         if is_dense:
             # Unnormalised partial plus its running max and sum; the launcher
             # merges a row's splits and adds the gated compression branch.
-            partial = (
-                batch_head * num_dense_tiles + query_tile
-            ) * dense_splits + split
+            partial = (batch_head * num_dense_tiles + query_tile) * dense_splits + split
             partial64 = partial.to(tl.int64)
             tl.store(
-                PARTIAL_OUT
-                + partial64 * (TILE * HEAD_DIM)
-                + offs_t[:, None] * HEAD_DIM
-                + offs_d[None, :],
+                PARTIAL_OUT + partial64 * (TILE * HEAD_DIM) + offs_t[:, None] * HEAD_DIM + offs_d[None, :],
                 accumulator,
             )
             stats = PARTIAL_STATS + partial64 * (2 * TILE) + offs_t
@@ -313,30 +283,16 @@ if triton is not None:
             # multiply or un-tile pass over the full sequence.
             packed_rows = query_rows
             compressed = tl.load(
-                COMPRESSED
-                + batch64 * stride_cz
-                + head64 * stride_ch
-                + query_tile * stride_cm
-                + offs_d
+                COMPRESSED + batch64 * stride_cz + head64 * stride_ch + query_tile * stride_cm + offs_d
             )
             gate = tl.load(
-                GATE
-                + batch64 * stride_gz
-                + head64 * stride_gh
-                + packed_rows[:, None] * stride_gm
-                + offs_d[None, :],
+                GATE + batch64 * stride_gz + head64 * stride_gh + packed_rows[:, None] * stride_gm + offs_d[None, :],
                 mask=keep[:, None],
                 other=0.0,
             )
-            accumulator += compressed[None, :].to(tl.float32) * gate.to(
-                tl.float32
-            )
+            accumulator += compressed[None, :].to(tl.float32) * gate.to(tl.float32)
             tl.store(
-                Out
-                + batch64 * stride_oz
-                + head64 * stride_oh
-                + packed_rows[:, None] * stride_om
-                + offs_d[None, :],
+                Out + batch64 * stride_oz + head64 * stride_oh + packed_rows[:, None] * stride_om + offs_d[None, :],
                 accumulator.to(Out.dtype.element_ty),
                 mask=keep[:, None],
             )
@@ -352,12 +308,9 @@ def triton_pool_h3_vsa_tiles(
     batch, heads, sequence_length, head_dim = tensor.shape
     if sequence_length != metadata.total_seq_length:
         raise ValueError(
-            "VSA-H3 pooling expects packed [B, H, S, D] with S="
-            f"{metadata.total_seq_length}, got {tuple(tensor.shape)}."
+            f"VSA-H3 pooling expects packed [B, H, S, D] with S={metadata.total_seq_length}, got {tuple(tensor.shape)}."
         )
-    pooled = tensor.new_empty(
-        (batch, heads, metadata.num_tiles, head_dim), dtype=torch.float32
-    )
+    pooled = tensor.new_empty((batch, heads, metadata.num_tiles, head_dim), dtype=torch.float32)
     _vsa_h3_pool_kernel[(metadata.num_tiles, batch * heads)](
         tensor,
         metadata.tiled_to_packed_row,
@@ -435,10 +388,7 @@ def triton_h3_vsa_attention(
     # The row index runs to sequence_length, not sequence_length - 1: padded
     # slots point one past the end, and the address is formed before the mask
     # drops the load.
-    row_span = max(
-        sequence_length * tensor.stride(2) + head_dim
-        for tensor in (query, gate)
-    )
+    row_span = max(sequence_length * tensor.stride(2) + head_dim for tensor in (query, gate))
     if row_span >= 2**31:
         raise ValueError(
             "VSA-H3 Triton attention addresses one head's rows in int32; this "
@@ -453,12 +403,8 @@ def triton_h3_vsa_attention(
     dense_chunk = kv_indices.shape[-1]
     dense_splits = -(-num_tiles // dense_chunk)
     num_partials = batch * heads * num_dense_tiles * dense_splits
-    partial_out = query.new_empty(
-        (num_partials, metadata.tile_elements, head_dim), dtype=torch.float32
-    )
-    partial_stats = query.new_empty(
-        (num_partials, 2, metadata.tile_elements), dtype=torch.float32
-    )
+    partial_out = query.new_empty((num_partials, metadata.tile_elements, head_dim), dtype=torch.float32)
+    partial_stats = query.new_empty((num_partials, 2, metadata.tile_elements), dtype=torch.float32)
 
     output = query.new_empty((batch, heads, sequence_length, head_dim))
     grid = (
@@ -503,15 +449,11 @@ def triton_h3_vsa_attention(
         HEAD_DIM=head_dim,
     )
     if num_dense_tiles:
-        _merge_dense_rows(
-            output, partial_out, partial_stats, compressed, gate, metadata
-        )
+        _merge_dense_rows(output, partial_out, partial_stats, compressed, gate, metadata)
     return output
 
 
-def _merge_dense_rows(
-    output, partial_out, partial_stats, compressed, gate, metadata
-):
+def _merge_dense_rows(output, partial_out, partial_stats, compressed, gate, metadata):
     """Merge the prefix rows' split partials and write them to ``output``.
 
     Prefix rows are packed first and tiled in order, so the prefix tiles' real
@@ -519,23 +461,13 @@ def _merge_dense_rows(
     """
     batch, heads, _, head_dim = output.shape
     tile = metadata.tile_elements
-    partial_out = partial_out.view(
-        batch, heads, metadata.num_prefix_tiles, -1, tile, head_dim
-    )
-    partial_stats = partial_stats.view(
-        batch, heads, metadata.num_prefix_tiles, -1, 2, tile
-    )
+    partial_out = partial_out.view(batch, heads, metadata.num_prefix_tiles, -1, tile, head_dim)
+    partial_stats = partial_stats.view(batch, heads, metadata.num_prefix_tiles, -1, 2, tile)
     running_max, running_sum = partial_stats.unbind(dim=-2)
     # The kernel's scores are in log2 units.
     weight = torch.exp2(running_max - running_max.amax(dim=3, keepdim=True))
-    merged = (partial_out * weight.unsqueeze(-1)).sum(dim=3) / (
-        (weight * running_sum).sum(dim=3).unsqueeze(-1)
-    )
+    merged = (partial_out * weight.unsqueeze(-1)).sum(dim=3) / ((weight * running_sum).sum(dim=3).unsqueeze(-1))
     rows = metadata.num_prefix_tokens
-    merged = merged.view(batch, heads, -1, head_dim).index_select(
-        2, metadata.packed_to_tiled_index[:rows]
-    )
-    merged += compressed.float().index_select(
-        2, metadata.packed_token_tile[:rows]
-    ) * gate[:, :, :rows].float()
+    merged = merged.view(batch, heads, -1, head_dim).index_select(2, metadata.packed_to_tiled_index[:rows])
+    merged += compressed.float().index_select(2, metadata.packed_token_tile[:rows]) * gate[:, :, :rows].float()
     output[:, :, :rows] = merged.to(output.dtype)

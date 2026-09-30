@@ -1,0 +1,18 @@
+"""Transformer Engine FP8 attention."""
+
+from xfuser.core.attention.constraints import NO_VARLEN
+from xfuser.core.attention.requirements import NEVER, PLATFORM, SYMBOL
+from xfuser.core.attention.spec import AttentionBackendType, Impl, Spec
+
+SPECS = [
+    Spec(
+        AttentionBackendType.NVTE_FP8,
+        impl=Impl("kernel:nvte_fp8"),
+        ring=NEVER,
+        low_precision=True,
+        accepts=NO_VARLEN,
+        requires=PLATFORM("cuda")
+        & SYMBOL("transformer_engine.pytorch:DotProductAttention")
+        & SYMBOL("transformer_engine.common:recipe"),
+    ),
+]

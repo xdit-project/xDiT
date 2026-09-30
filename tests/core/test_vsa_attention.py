@@ -6,7 +6,7 @@ import torch
 
 from xfuser.config.args import xFuserArgs
 from xfuser.config.config import RuntimeConfig
-from xfuser.core.distributed.attention_backend import AttentionBackendType
+from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.core.distributed.runtime_state import DiTRuntimeState
 from xfuser.core.vsa_attention import (
     _first_frame_block_count,

@@ -1,6 +1,4 @@
 from abc import ABCMeta
-import importlib
-import inspect
 import random
 from typing import List, Optional, Tuple
 
@@ -25,15 +23,8 @@ if envs._is_npu():
     from torch.npu import manual_seed as device_manual_seed
     from torch.npu import manual_seed_all as device_manual_seed_all
 
-from xfuser.core.distributed.attention_backend import (
-    AITER_LOW_PRECISION_BACKENDS,
-    AITER_MHA_V4_GFX942_SPARGE_BACKEND_SET,
-    AITER_MHA_V4_ONLY_BACKEND_SET,
-    AITER_MHA_V4_SPARGE_BACKENDS,
-    AITER_MHA_V4_SPARGE_BACKEND_SET,
-    AttentionBackendType,
-    aiter_mha_v4_is_gfx942,
-)
+from xfuser.core.attention import registry as attention_registry
+from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.core.distributed.attention_schedule import AttentionSchedule, GemmPrecisionSchedule
 from xfuser.core.distributed.fp8_comms import Fp8CommsState
 from xfuser.config.config import (
@@ -42,7 +33,7 @@ from xfuser.config.config import (
     InputConfig,
     EngineConfig,
 )
-from xfuser.logger import init_logger
+from xfuser.logger import init_logger, warn_once
 from .parallel_state import (
     destroy_distributed_environment,
     destroy_model_parallel,
@@ -66,6 +57,18 @@ def set_random_seed(seed: int):
     torch.manual_seed(seed)
     device_manual_seed(seed)
     device_manual_seed_all(seed)
+
+
+def _summarise_schedule(backends) -> str:
+    """"10x AITER_FP8, 60x AITER_MXFP6, 10x AITER_FP8" -- a per-step list is
+    unreadable at 80 steps and hides the boundaries that matter."""
+    runs = []
+    for backend in backends:
+        if runs and runs[-1][0] is backend:
+            runs[-1][1] += 1
+        else:
+            runs.append([backend, 1])
+    return ", ".join(f"{count}x {backend.name}" for backend, count in runs)
 
 
 class RuntimeState(metaclass=ABCMeta):
@@ -100,7 +103,7 @@ class RuntimeState(metaclass=ABCMeta):
         parallel_config: ParallelConfig,
     ):
         if not model_parallel_is_initialized():
-            logger.warning("Model parallel is not initialized, initializing...")
+            warn_once(logger, "Model parallel is not initialized, initializing...")
             if not torch.distributed.is_initialized():
                 init_distributed_environment()
             initialize_model_parallel(
@@ -137,17 +140,26 @@ class RuntimeState(metaclass=ABCMeta):
 
         self._check_if_backend_compatible_with_current_configuration(attention_backend)
         self.attention_backend = attention_backend
-        logger.warning("Using {} as attention backend.".format(self.attention_backend.name))
-        if attention_backend in [
-            AttentionBackendType.FLASH_3_FP8,
-            AttentionBackendType.NVTE_FP8,
-            AttentionBackendType.FLASH_4_FP4,
-            *AITER_LOW_PRECISION_BACKENDS,
-            *AITER_MHA_V4_SPARGE_BACKENDS,
-            AttentionBackendType.AITER_MLA,
-            AttentionBackendType.AITER_FLYDSL_FP8,
-        ]:
-            logger.warning("Low-precision attention backend is enabled. This may cause poor quality outputs, consider using hybrid attention if possible.")
+
+        # A per-step schedule replaces this field before the first attention
+        # call -- increment_step_counter() runs at the top of the forward -- so
+        # under a schedule this backend serves nothing and announcing it would
+        # name a backend that never runs. set_attention_schedule() reports what
+        # will actually be used. Still selected and checked: the value has to be
+        # valid either way, and the schedule may not be configured yet.
+        if self.runtime_config.use_hybrid_attn_schedule:
+            return
+
+        warn_once(logger, "Using {} as attention backend.".format(self.attention_backend.name))
+        self._warn_if_low_precision(attention_backend)
+
+    def _warn_if_low_precision(self, *backends: AttentionBackendType) -> None:
+        """Each backend declares whether it quantises, so this needs no list.
+        Broader than the list it replaces: the Sage family quantises to
+        int8/fp8 and now warns accordingly."""
+        low_precision = attention_registry.types_where(low_precision=True)
+        if any(backend in low_precision for backend in backends):
+            warn_once(logger, "Low-precision attention backend is enabled. This may cause poor quality outputs, consider using hybrid attention if possible.")
 
 
     def set_cross_attention_backend(self, cross_attention_backend: Optional[str | AttentionBackendType]):
@@ -169,7 +181,7 @@ class RuntimeState(metaclass=ABCMeta):
 
         self._check_if_backend_compatible_with_current_configuration(cross_attention_backend)
         self.cross_attention_backend = cross_attention_backend
-        logger.warning("Using {} as cross-attention backend.".format(self.cross_attention_backend.name))
+        warn_once(logger, "Using {} as cross-attention backend.".format(self.cross_attention_backend.name))
 
     def get_cross_attention_backend(self) -> AttentionBackendType:
         """
@@ -222,8 +234,12 @@ class RuntimeState(metaclass=ABCMeta):
         return backend
 
     def _check_if_backend_compatible_with_current_configuration(self, attention_backend: AttentionBackendType):
-        """
-        Check if the selected attention backend is compatible with the current configuration.
+        """Refuse a backend the current machine or configuration cannot serve.
+
+        Backend-specific knowledge lives on the spec: `requires` says what the
+        machine must provide, `ring` whether ring attention can merge its
+        output here. This method therefore stays the same size as backends are
+        added.
         """
         if (
             attention_backend == AttentionBackendType.AITER_VSA
@@ -234,211 +250,58 @@ class RuntimeState(metaclass=ABCMeta):
                 "be used with a hybrid attention schedule."
             )
 
-        if attention_backend in [AttentionBackendType.SDPA,
-                                 AttentionBackendType.SDPA_MATH,
-                                 AttentionBackendType.FLASH_4,
-                                 AttentionBackendType.FLASH_4_FP4,
-                                 AttentionBackendType.AITER_BF16,
-                                 AttentionBackendType.AITER_BF16FP8,
-                                 *AITER_LOW_PRECISION_BACKENDS,
-                                 *AITER_MHA_V4_SPARGE_BACKENDS,
-                                 AttentionBackendType.AITER_MLA,
-                                 AttentionBackendType.AITER_SAGE,
-                                 AttentionBackendType.AITER_SPARSE_SAGE,
-                                 AttentionBackendType.AITER_SPARGE,
-                                 AttentionBackendType.AITER_SAGE_V2,
-                                 AttentionBackendType.AITER_SPARSE_SAGE_V2,
-                                 AttentionBackendType.AITER_SPARGE_V2,
-                                 AttentionBackendType.AITER_VSA,
-                                 AttentionBackendType.AITER_FLYDSL,
-                                 AttentionBackendType.AITER_FLYDSL_FP8,
-                                 AttentionBackendType.FLEX_BLOCK_ATTN,
-                                 AttentionBackendType.FLEX_BLOCK_SPARGE]:
-            if self.parallel_config.ring_degree > 1:
-                # Ring parallelism merges per-rank attention outputs via LSE, so
-                # the wrapper must expose return_lse (and, for AITER_SAGE,
-                # smooth_k, shipped with the LSE-correction fix needed for
-                # correct merging). Pick (module, symbol, required params)
-                # for the selected backend and validate the wrapper's signature.
-                if attention_backend in AITER_MHA_V4_ONLY_BACKEND_SET:
-                    # The dense MHA v4 kernels export LSE; mha_v4_packed grew the lse output
-                    # buffer in the same change, whereas return_lse has always been accepted
-                    # and always raised. AITER_FP8 is excluded on purpose: it only reaches
-                    # MHA v4 for some shapes and would silently yield no LSE for the rest.
-                    if aiter_mha_v4_is_gfx942():
-                        raise RuntimeError(
-                            f"{attention_backend} cannot be used with ring parallelism on "
-                            "gfx942: AITER exports an LSE there that has never been measured "
-                            "against a reference, and a wrong one is invisible to output "
-                            "checks because O never reads it. Use ulysses parallelism, or "
-                            "gfx950 where the LSE is validated."
-                        )
-                    module_path = "aiter.ops.mha_v4"
-                    symbol = "mha_v4_packed"
-                    required = ("lse",)
-                elif attention_backend == AttentionBackendType.AITER_SAGE:
-                    module_path = "aiter.ops.triton.attention.fav3_sage"
-                    symbol = "fav3_sage_wrapper_func"
-                    required = ("return_lse", "smooth_k")
-                elif attention_backend == AttentionBackendType.AITER_SAGE_V2:
-                    module_path = "aiter.ops.triton.attention.fav3_sage_attention_mxfp4_wrapper"
-                    symbol = "fav3_sage_mxfp4_wrapper"
-                    required = ("return_lse",)
-                else:
-                    raise RuntimeError(
-                        "Selected attention backend does not support ring parallelism."
-                    )
-                try:
-                    fn = getattr(importlib.import_module(module_path), symbol)
-                except ImportError:
-                    raise RuntimeError(
-                        f"{attention_backend.value} attention is not available, "
-                        "please update AITER"
-                    ) from None
-                try:
-                    params = inspect.signature(fn).parameters
-                except (AttributeError, TypeError):
-                    params = {}
-                missing = [p for p in required if p not in params]
-                if missing:
-                    raise RuntimeError(
-                        f"{attention_backend.value} attention is missing {missing} "
-                        "required for ring parallelism, please update AITER"
-                    )
-        if attention_backend in AITER_MHA_V4_SPARGE_BACKEND_SET:
-            try:
-                from aiter.ops.mha_v4 import mha_v4
-                if inspect.signature(mha_v4).parameters.get("block_mask") is None:
-                    raise RuntimeError(
-                        f"{attention_backend.value} attention requires an AITER "
-                        "build whose mha_v4 accepts block_mask"
-                    )
-            except ImportError:
-                raise RuntimeError(
-                    f"{attention_backend.value} attention is not available, "
-                    "please update AITER"
-                ) from None
-            arch_name = (
-                torch.cuda.get_device_properties(0).gcnArchName
-                if torch.cuda.is_available()
-                else ""
+        spec = attention_registry.find(attention_backend)
+        unavailable = spec.unavailable()
+        if unavailable is not None:
+            raise RuntimeError(
+                f"{attention_backend.value} attention is unavailable: {unavailable}"
             )
-            if arch_name:
-                if "gfx942" in arch_name and attention_backend not in (
-                    AITER_MHA_V4_GFX942_SPARGE_BACKEND_SET
-                ):
-                    raise RuntimeError(
-                        f"{attention_backend.value} sparse attention is gfx950-only; "
-                        "gfx942 currently supports aiter_fp8_sparge and aiter_i8fp8_sparge"
-                    )
-                if "gfx950" not in arch_name and "gfx942" not in arch_name:
-                    raise RuntimeError(
-                        f"{attention_backend.value} attention requires gfx950 or gfx942"
-                    )
-        elif attention_backend == AttentionBackendType.AITER_FP8:
-            try:
-                from aiter import flash_attn_fp8_pertensor_func
-            except ImportError:
-                raise RuntimeError("AITER fp8 flash attention is not available, please update AITER")
-        elif attention_backend == AttentionBackendType.AITER_MXFP8:
-            try:
-                from aiter.ops.mha_v4 import mha_v4
-            except ImportError:
+
+        # A backend that hands the shapes it cannot serve to another one needs
+        # that one present too, and a missing fallback would otherwise surface
+        # mid-denoising on whichever block happened to be the wrong width.
+        link = spec._fallback
+        while link is not None:
+            unavailable = link.unavailable()
+            if unavailable is not None:
                 raise RuntimeError(
-                    f"{attention_backend.value} attention is not available, "
-                    "please update AITER"
-                ) from None
-            try:
-                from aiter.ops.mha_v4 import mha_v4_mxfp8
-            except ImportError:
-                if inspect.signature(mha_v4).parameters.get("q_scale_mode") is None:
-                    raise RuntimeError(
-                        f"{attention_backend.value} attention is not available, "
-                        "please update AITER"
-                    ) from None
-        elif attention_backend in AITER_MHA_V4_ONLY_BACKEND_SET:
-            try:
-                from aiter.ops.mha_v4 import mha_v4
-            except ImportError:
-                raise RuntimeError(
-                    f"{attention_backend.value} attention is not available, "
-                    "please update AITER"
-                ) from None
-        elif attention_backend == AttentionBackendType.NVTE_FP8:
-            if not env_info.get("has_transformer_engine"):
-                raise RuntimeError(
-                    "Transformer Engine FP8 attention requires transformer-engine"
+                    f"{attention_backend.value} attention serves other shapes "
+                    f"through {link.type.value}, which is unavailable: "
+                    f"{unavailable}"
                 )
-        elif attention_backend == AttentionBackendType.AITER_MLA:
-            try:
-                from aiter import get_ps_metadata_info_v1, get_ps_metadata_v1, mla_prefill_ps_asm_fwd, mla_reduce_v1
-            except ImportError:
-                raise RuntimeError("AITER MLA attention is not available, please update AITER") from None
-        elif attention_backend == AttentionBackendType.AITER_SAGE:
-            try:
-                import aiter.ops.triton.attention
-                from aiter.ops.triton.attention.fav3_sage import fav3_sage_wrapper_func
-            except ImportError:
-                raise RuntimeError("AITER Sage attention is not available, please update AITER") from None
-        elif attention_backend == AttentionBackendType.AITER_SPARSE_SAGE:
-            try:
-                from aiter.ops.triton.attention.utils import block_attn_mask_to_ragged_lut
-            except ImportError:
-                raise RuntimeError("AITER Sparse Sage attention is not available, please update AITER") from None
-        elif attention_backend == AttentionBackendType.AITER_SAGE_V2:
-            try:
-                from aiter.ops.triton.attention.fav3_sage_attention_mxfp4_wrapper import fav3_sage_mxfp4_wrapper
-            except ImportError:
-                raise RuntimeError("AITER Sage V2 attention is not available, please update AITER") from None
-        elif attention_backend == AttentionBackendType.FLASH_4_FP4:
-            if not env_info.get("has_flash_attn_4_fp4"):
-                raise RuntimeError(
-                    "Flash Attention V4 FP4 is not available. Requires Blackwell GPU (SM >= 10.0) "
-                    "and the hao-ai-lab/flash-attention-fp4 fork with nvidia-cutlass-dsl."
-                )
-        elif attention_backend == AttentionBackendType.SAGE:
-            if not env_info["has_sage"]:
-                raise RuntimeError("SageAttention is not available, please install SageAttention.")
-        elif attention_backend == AttentionBackendType.AITER_SPARGE:
-            msg = "AITER Sparge attention is not available, please update AITER"
-            try:
-                from aiter.ops.triton.attention.fav3_sage import fav3_sage_wrapper_func
-                if inspect.signature(fav3_sage_wrapper_func).parameters.get("block_lut") is None:
-                    raise RuntimeError(msg) from None
-            except ImportError:
-                raise RuntimeError(msg) from None
-        elif attention_backend == AttentionBackendType.AITER_SPARGE_V2:
-            msg = "AITER Sparge V2 attention is not available, please update AITER"
-            try:
-                from aiter.ops.triton.attention.fav3_sage_attention_mxfp4_wrapper import fav3_sage_mxfp4_wrapper
-                if inspect.signature(fav3_sage_mxfp4_wrapper).parameters.get("block_lut") is None:
-                    raise RuntimeError(msg) from None
-            except ImportError:
-                raise RuntimeError(msg) from None
-        elif attention_backend == AttentionBackendType.AITER_VSA:
-            try:
-                from aiter.ops.jenga_sparse_attention import vsa_sparse_attention
-            except ImportError:
-                raise RuntimeError(
-                    "AITER VSA CK attention is not available; install the "
-                    "AITER build containing jenga_sparse_attention"
-                ) from None
-        elif attention_backend == AttentionBackendType.AITER_FLYDSL:
-            try:
-                from aiter.ops.flydsl import flydsl_flash_attn_func
-            except ImportError:
-                raise RuntimeError("AITER FlyDSL attention is not available, please update AITER") from None
-        elif attention_backend == AttentionBackendType.AITER_FLYDSL_FP8:
-            # fp8 quant lands in a newer aiter than the bf16 flydsl kernel, so check it
-            # separately -- a build can ship bf16 flydsl without flydsl_fp8_quant.
-            try:
-                from aiter.ops.flydsl import flydsl_flash_attn_func, flydsl_fp8_quant
-            except ImportError:
-                raise RuntimeError("AITER FlyDSL FP8 attention is not available, please update AITER") from None
-        elif attention_backend in (AttentionBackendType.FLEX_BLOCK_ATTN,
-                                   AttentionBackendType.FLEX_BLOCK_SPARGE):
-            if not env_info["has_flex_block_attn"]:
-                raise RuntimeError("Flex Block Attention is not available, please install Flex Block Attention.")
+            link = link._fallback
+
+        if self.parallel_config.ring_degree > 1:
+            # Ring merges per-rank partials on a softmax log-sumexp. Whether a
+            # backend has one can depend on the build and the device, so the
+            # spec answers with a predicate and its reason is the message.
+            #
+            # The fallback has to answer too. On a model that mixes head
+            # widths the merge would otherwise receive a partial from the
+            # blocks the selection serves and nothing from the ones it hands
+            # on -- and a missing LSE cannot be seen in the output, because O
+            # never reads it.
+            link = spec
+            while link is not None:
+                no_ring = link.ring.unmet()
+                if no_ring is not None:
+                    through = (
+                        "" if link is spec
+                        else f" serves other shapes through {link.type.value}, which"
+                    )
+                    raise RuntimeError(
+                        f"{attention_backend.value}{through} cannot be used "
+                        f"with ring parallelism: {no_ring}"
+                    )
+                link = link._fallback
+
+        # Import the kernel module now, while we are outside any compiled
+        # region. This is the single choke point: it runs for the attention
+        # backend, the cross-attention backend, and every backend in a hybrid
+        # schedule. Resolving walks the fallback chain, so a call that lands on
+        # a fallback mid-graph finds it already imported.
+        spec.resolved()
+
 
 
 
@@ -613,7 +476,12 @@ class DiTRuntimeState(RuntimeState):
         self.attention_schedule = attention_schedule
         self.schedule_total_steps = torch.tensor(total_steps, dtype=torch.int)
         self.step_counter = torch.tensor(0, dtype=torch.int)
-        logger.warning("Per-step attention schedule enabled (total_steps=%d).", total_steps)
+        warn_once(logger,
+            "Per-step attention schedule over %d steps: %s.",
+            total_steps,
+            _summarise_schedule(attention_schedule.backends),
+        )
+        self._warn_if_low_precision(*set(attention_schedule.backends))
 
     def set_gemm_schedule(
         self,
@@ -627,7 +495,7 @@ class DiTRuntimeState(RuntimeState):
         self.gemm_schedule = gemm_schedule
         self.gemm_schedule_total_steps = torch.tensor(total_steps, dtype=torch.int)
         self.step_counter = torch.tensor(0, dtype=torch.int)
-        logger.warning("Per-step GEMM schedule enabled (total_steps=%d).", total_steps)
+        warn_once(logger, "Per-step GEMM schedule enabled (total_steps=%d).", total_steps)
 
     def set_input_parameters(
         self,
@@ -817,7 +685,7 @@ class DiTRuntimeState(RuntimeState):
             latents_height + pipeline_patches_height - 1
         ) // pipeline_patches_height
         if num_pipeline_patch != self.num_pipeline_patch:
-            logger.warning(
+            warn_once(logger,
                 f"Pipeline patches num changed from "
                 f"{self.num_pipeline_patch} to {num_pipeline_patch} due "
                 f"to input size and parallelisation requirements"
@@ -926,7 +794,7 @@ class DiTRuntimeState(RuntimeState):
             latents_height + pipeline_patches_height - 1
         ) // pipeline_patches_height
         if num_pipeline_patch != self.num_pipeline_patch:
-            logger.warning(
+            warn_once(logger,
                 f"Pipeline patches num changed from "
                 f"{self.num_pipeline_patch} to {num_pipeline_patch} due "
                 f"to input size and parallelisation requirements"
@@ -1035,7 +903,7 @@ class DiTRuntimeState(RuntimeState):
             latents_height + pipeline_patches_height - 1
         ) // pipeline_patches_height
         if num_pipeline_patch != self.num_pipeline_patch:
-            logger.warning(
+            warn_once(logger,
                 f"Pipeline patches num changed from "
                 f"{self.num_pipeline_patch} to {num_pipeline_patch} due "
                 f"to input size and parallelisation requirements"
@@ -1175,7 +1043,7 @@ def get_runtime_state():
 def initialize_runtime_state(pipeline: Optional[DiffusionPipeline] = None, engine_config: Optional[EngineConfig] = None):
     global _RUNTIME
     if _RUNTIME is not None:
-        logger.warning(
+        warn_once(logger,
             "Runtime state is already initialized, reinitializing with pipeline..."
         )
     if hasattr(pipeline, "transformer"):

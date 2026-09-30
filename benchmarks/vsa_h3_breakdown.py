@@ -11,7 +11,7 @@ import time
 
 import torch
 
-from xfuser.core import vsa_h3_attention as vsa
+from xfuser.core.attention.backends.vsa_h3 import attention as vsa
 
 
 def _time(fn, iters, warmup=5):
@@ -45,7 +45,7 @@ def main():
     ]
     query, key, value, gate = packed
 
-    from xfuser.core.vsa_h3_triton import (
+    from xfuser.core.attention.backends.vsa_h3.triton_kernel import (
         triton_h3_vsa_attention,
         triton_pool_h3_vsa_tiles,
     )

@@ -45,83 +45,51 @@ def runtime():
 def _args(runtime, **overrides):
     values = {
         "model": "test/model",
-        "use_fp8_gemms": False,
-        "use_fp4_gemms": False,
         "use_hybrid_gemm_schedule": False,
     }
     values.update(overrides)
     return runtime.args_cls(**values)
 
 
-def test_args_reject_generic_fp8_and_fp4_without_hybrid_owner(runtime):
-    config = _args(runtime, use_fp8_gemms=True, use_fp4_gemms=True)
-
-    with pytest.raises(ValueError, match="cannot both be enabled"):
-        config._validate_gemm_quantization_flags()
-
-
 @pytest.mark.parametrize(
-    "flags",
+    ("option", "replacement"),
     [
-        {"use_int8_gemms": True, "use_fp8_gemms": True},
-        {"use_int8_gemms": True, "use_fp4_gemms": True},
-        {
-            "use_int8_gemms": True,
-            "use_fp8_gemms": True,
-            "use_fp4_gemms": True,
-            "use_hybrid_gemm_schedule": True,
-        },
+        ("removed_use_fp8_gemms", "--gemm_quantization fp8"),
+        ("removed_use_fp4_gemms", "--gemm_quantization fp4"),
+        ("removed_use_int8_gemms", "--gemm_quantization int8"),
+        (
+            "removed_fp8_precision_override_prefix_patterns",
+            "--gemm_config with gemm_high_precision_prefix_patterns",
+        ),
     ],
 )
-def test_args_reject_int8_combined_with_fp8_or_fp4(runtime, flags):
-    config = _args(runtime, **flags)
+def test_a_removed_option_says_what_replaces_it(runtime, option, replacement):
+    """Still registered, so argparse accepts it and we can name the successor
+    instead of leaving the reader an "unrecognized arguments" message."""
+    value = "x" if "patterns" in option else True
 
-    with pytest.raises(ValueError, match="--use_int8_gemms cannot be combined"):
-        config._validate_gemm_quantization_flags()
+    with pytest.raises(ValueError, match="no longer supported") as refusal:
+        _args(runtime, **{option: value})
+    assert replacement in str(refusal.value)
 
 
 @pytest.mark.parametrize(
-    "use_fp8_gemms",
-    [False, True],
+    "raw", ["low=int8,high=fp8", "low=fp4,high=int8", "low=int8,high=fp4"]
 )
-def test_args_allow_explicit_hybrid_schedule_to_own_fp8_inside_fp4(
-    runtime, use_fp8_gemms
-):
-    config = _args(
-        runtime,
-        use_fp8_gemms=use_fp8_gemms,
-        use_fp4_gemms=True,
-        use_hybrid_gemm_schedule=True,
-    )
+def test_int8_cannot_be_tiered_with_another_format(runtime, raw):
+    config = _args(runtime, gemm_quantization=raw)
 
-    config._validate_gemm_quantization_flags()
+    with pytest.raises(ValueError, match="INT8 cannot be tiered"):
+        config._validate_gemm_quantization_flags()
 
 
-def test_base_model_validation_rejects_generic_fp8_and_fp4_early(runtime):
-    model = object.__new__(runtime.model_cls)
-    model.settings = SimpleNamespace(model_name="test/model", valid_tasks=[])
-    model.capabilities = runtime.capabilities_cls(
-        use_fp8_gemms=True,
-        use_fp4_gemms=True,
-        use_hybrid_gemm_schedule=True,
-    )
-    config = _args(runtime, use_fp8_gemms=True, use_fp4_gemms=True)
+@pytest.mark.parametrize("raw", ["low=fp6,high=fp8", "low=int8,high=fp6"])
+def test_mxfp6_cannot_be_tiered_with_fp8_or_int8(runtime, raw):
+    """MXFP6 already owns every declared high-precision target."""
+    config = _args(runtime, gemm_quantization=raw)
 
-    with pytest.raises(ValueError, match="cannot both be enabled"):
-        model._validate_config(config)
-
-
-def test_base_model_uses_central_int8_conflict_validation(runtime):
-    model = object.__new__(runtime.model_cls)
-    model.settings = SimpleNamespace(model_name="test/model", valid_tasks=[])
-    model.capabilities = runtime.capabilities_cls(
-        use_int8_gemms=True,
-        use_fp8_gemms=True,
-    )
-    config = _args(runtime, use_int8_gemms=True, use_fp8_gemms=True)
-
-    with pytest.raises(ValueError, match="--use_int8_gemms cannot be combined"):
-        model._validate_config(config)
+    with pytest.raises(ValueError, match="not supported"):
+        config._validate_gemm_quantization_flags()
 
 
 def test_unsupported_runner_rejects_fp8_text_encoder_via_capability_validation(
@@ -132,7 +100,7 @@ def test_unsupported_runner_rejects_fp8_text_encoder_via_capability_validation(
     model.capabilities = runtime.capabilities_cls(use_fp8_gemms=True)
     config = _args(
         runtime,
-        use_fp8_gemms=True,
+        gemm_quantization="fp8",
         quantize_text_encoder=True,
     )
 
@@ -156,7 +124,7 @@ def test_supported_runner_logs_when_text_encoder_targets_remain_bf16(
             text_encoder=Select(modules=("text_encoder.layers",)),
         ),
     )
-    config = _args(runtime, use_fp8_gemms=True)
+    config = _args(runtime, gemm_quantization="fp8")
     monkeypatch.setattr(runtime.base, "log", messages.append)
 
     model._update_model_settings(config)
@@ -170,40 +138,22 @@ def test_supported_runner_logs_when_text_encoder_targets_remain_bf16(
 
 
 @pytest.mark.parametrize(
-    ("value", "expected_flags"),
+    ("value", "formats"),
     [
-        ("fp8", (True, False, False, False)),
-        ("fp6", (False, False, True, False)),
-        ("int8", (False, False, False, True)),
-        ("low=fp4,high=fp8", (False, True, False, False)),
-        ("low=fp4,high=fp6", (False, True, True, False)),
+        ("fp8", {"fp8"}),
+        ("fp4", {"fp4"}),
+        ("fp6", {"fp6"}),
+        ("int8", {"int8"}),
+        ("low=fp4,high=fp8", {"fp4", "fp8"}),
+        ("low=fp4,high=fp6", {"fp4", "fp6"}),
     ],
 )
-def test_explicit_gemm_profiles_map_to_existing_flags(
-    runtime, value, expected_flags
-):
+def test_the_profile_is_the_representation(runtime, value, formats):
+    """There is no second, derived form of "which quant": the spec is it."""
     config = _args(runtime, gemm_quantization=value)
 
     assert str(config.gemm_quantization_spec) == value
-    assert (
-        config.use_fp8_gemms,
-        config.use_fp4_gemms,
-        config.use_fp6_gemms,
-        config.use_int8_gemms,
-    ) == expected_flags
-
-
-def test_explicit_profile_wins_over_deprecated_format_flag(runtime):
-    with pytest.warns(FutureWarning, match="ignored"):
-        config = _args(
-            runtime,
-            gemm_quantization="fp6",
-            use_fp4_gemms=True,
-        )
-
-    assert config.gemm_quantization_spec == GemmQuantizationSpec("fp6")
-    assert config.use_fp6_gemms is True
-    assert config.use_fp4_gemms is False
+    assert config.gemm_quantization_spec.formats == formats
 
 
 def test_runner_parser_accepts_explicit_gemm_profile(runtime):
@@ -216,8 +166,7 @@ def test_runner_parser_accepts_explicit_gemm_profile(runtime):
     )
     config = runtime.args_cls.from_runner_args(vars(parsed))
 
-    assert config.use_fp4_gemms is True
-    assert config.use_fp6_gemms is True
+    assert config.gemm_quantization_spec.formats == {"fp4", "fp6"}
 
 
 def test_any_profile_can_include_the_text_encoder(runtime):

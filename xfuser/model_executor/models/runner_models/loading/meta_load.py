@@ -431,10 +431,9 @@ class ModelLoader:
         )
 
         requested_format, backend = select_runtime_quantization(
-            config,
-            aiter_fp8_active=bool(
-                config.use_fp8_gemms
-                and fp8_backend_name(probe_fp8_backend_capabilities()) == AITER_FP8
+            config.gemm_quantization_spec,
+            aiter_fp8_active=(
+                fp8_backend_name(probe_fp8_backend_capabilities()) == AITER_FP8
             ),
             cuda_active=_is_cuda(),
         )

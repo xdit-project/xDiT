@@ -540,9 +540,7 @@ def test_base_runner_selects_the_production_contract_before_loading(monkeypatch)
             tensor_parallel_degree=1,
             memory_efficient_sharding=True,
             memory_efficient_replicated_load=False,
-            use_fp8_gemms=True,
-            use_fp4_gemms=False,
-            use_int8_gemms=False,
+            gemm_quantization_spec=GemmQuantizationSpec.parse("fp8"),
         ),
         settings=SimpleNamespace(
             fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}}
@@ -581,9 +579,7 @@ def test_base_runner_rejects_unsupported_meta_mode_before_loading(monkeypatch):
             tensor_parallel_degree=1,
             memory_efficient_sharding=False,
             memory_efficient_replicated_load=True,
-            use_fp8_gemms=False,
-            use_fp4_gemms=False,
-            use_int8_gemms=False,
+            gemm_quantization_spec=GemmQuantizationSpec.parse("none"),
         ),
         settings=SimpleNamespace(fsdp_strategy={}),
         load_declaration=LoadDeclaration.for_runner(
@@ -613,9 +609,7 @@ def test_base_runner_uses_effective_single_rank_mode(monkeypatch):
             tensor_parallel_degree=1,
             memory_efficient_sharding=False,
             memory_efficient_replicated_load=True,
-            use_fp8_gemms=False,
-            use_fp4_gemms=False,
-            use_int8_gemms=False,
+            gemm_quantization_spec=GemmQuantizationSpec.parse("none"),
         ),
         settings=SimpleNamespace(fsdp_strategy={}),
         load_declaration=LoadDeclaration.for_runner(
@@ -647,9 +641,7 @@ def test_wan22_spec_resolves_after_dynamic_instance_settings(monkeypatch):
         tensor_parallel_degree=1,
         memory_efficient_sharding=True,
         memory_efficient_replicated_load=False,
-        use_fp8_gemms=True,
-        use_fp4_gemms=False,
-        use_int8_gemms=False,
+        gemm_quantization_spec=GemmQuantizationSpec.parse("fp8"),
     )
     runner._customize_settings(SimpleNamespace())
     monkeypatch.setattr(
@@ -1455,9 +1447,9 @@ def test_hybrid_meta_te_uses_blockwise_fp8_backend(monkeypatch):
 
     sentinel = SimpleNamespace(backend=SimpleNamespace(value="torchao"))
     runner = SimpleNamespace(
-        load_contract=SimpleNamespace(
-            requested_format=SimpleNamespace(value="fp8_fp4")
-        ),
+        # A tiered run is an FP4 contract; its FP8 tier, encoder included, is
+        # placed by the blockwise converter.
+        load_contract=SimpleNamespace(requested_format=SimpleNamespace(value="fp4")),
         fp8_backend=None,
         blockwise_fp8_backend=sentinel,
         _replicated_broadcast_load=lambda: False,

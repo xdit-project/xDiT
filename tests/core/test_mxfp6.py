@@ -19,16 +19,14 @@ def test_runtime_selects_aiter_mxfp6_formats(fp4, hybrid, expected):
         select_runtime_quantization,
     )
 
-    config = SimpleNamespace(
-        use_fp8_gemms=False,
-        use_fp4_gemms=fp4,
-        use_fp6_gemms=True,
-        use_int8_gemms=False,
-        use_hybrid_gemm_schedule=hybrid,
+    from xfuser.config.gemm import GemmQuantizationSpec
+
+    spec = (
+        GemmQuantizationSpec("fp4", "fp6") if fp4 else GemmQuantizationSpec("fp6")
     )
 
     format_, backend = select_runtime_quantization(
-        config,
+        spec,
         aiter_fp8_active=False,
         cuda_active=False,
     )

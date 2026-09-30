@@ -9,7 +9,6 @@ class QuantizationFormat(str, Enum):
     NONE = "none"
     FP8 = "fp8"
     FP4 = "fp4"
-    FP8_FP4 = "fp8_fp4"
     FP6 = "fp6"
     FP4_FP6 = "fp4_fp6"
     INT8 = "int8"
@@ -126,8 +125,6 @@ class LoadDeclaration:
         if replicated:
             modes.add(MaterializationMode.REPLICATED_META)
         formats = frozenset(quantization_formats or {QuantizationFormat.NONE})
-        if QuantizationFormat.FP8 in formats and QuantizationFormat.FP4 in formats:
-            formats = formats | {QuantizationFormat.FP8_FP4}
         if QuantizationFormat.FP4 in formats and QuantizationFormat.FP6 in formats:
             formats = formats | {QuantizationFormat.FP4_FP6}
         backends = frozenset(quantization_backends or {QuantizationBackend.NONE})
@@ -176,21 +173,6 @@ class LoadDeclaration:
                 {
                     (QuantizationFormat.FP4, QuantizationBackend.AITER),
                     (QuantizationFormat.FP4, QuantizationBackend.TORCHAO),
-                }
-            )
-        if getattr(model_capabilities, "use_fp8_gemms", False) and getattr(
-            model_capabilities, "use_fp4_gemms", False
-        ):
-            contracts.update(
-                {
-                    (
-                        QuantizationFormat.FP8_FP4,
-                        QuantizationBackend.AITER,
-                    ),
-                    (
-                        QuantizationFormat.FP8_FP4,
-                        QuantizationBackend.TORCHAO,
-                    ),
                 }
             )
         supports_fp4 = getattr(model_capabilities, "use_fp4_gemms", False)
@@ -364,7 +346,7 @@ def assert_offload_is_compatible_with_format(
                 "its source weights on the host. Use pure FP6, or run FP4_FP6 without "
                 "CPU offload."
             )
-    if requested_format not in (QuantizationFormat.FP4, QuantizationFormat.FP8_FP4):
+    if requested_format is not QuantizationFormat.FP4:
         return
     if not getattr(config, "enable_group_cpu_offload", False):
         return
@@ -501,50 +483,37 @@ def select_load_contract(
 
 
 def select_runtime_quantization(
-    config,
+    spec,
     *,
     aiter_fp8_active: bool,
     cuda_active: bool,
 ) -> tuple[QuantizationFormat, QuantizationBackend]:
-    """Translate current flags/platform selection into the explicit contract."""
+    """Translate the requested GEMM profile into the explicit contract."""
 
-    use_fp8 = bool(getattr(config, "use_fp8_gemms", False))
-    use_fp4 = bool(getattr(config, "use_fp4_gemms", False))
-    use_int8 = bool(getattr(config, "use_int8_gemms", False))
-    use_fp6 = bool(getattr(config, "use_fp6_gemms", False))
-
-    if use_fp6 and use_fp8:
-        raise UnsupportedLoadContract(
-            "FP8 cannot be combined with an FP6 mode; FP6 owns the declared "
-            "FP8 targets"
-        )
-    if use_fp6 and use_int8:
-        raise UnsupportedLoadContract("INT8 cannot be combined with an FP6 mode")
-    if use_fp6 and cuda_active:
-        raise UnsupportedLoadContract(
-            "AITER MXFP6 requires ROCm gfx950; CUDA is not supported"
-        )
-
-    if use_int8 and (use_fp8 or use_fp4):
-        others = (
-            "FP8 + FP4"
-            if (use_fp8 and use_fp4)
-            else ("FP8" if use_fp8 else "FP4")
-        )
-        raise UnsupportedLoadContract(f"INT8 cannot be combined with {others}")
-    if use_fp6:
-        format_ = QuantizationFormat.FP4_FP6 if use_fp4 else QuantizationFormat.FP6
-        return format_, QuantizationBackend.AITER
-    if use_fp8 and use_fp4:
-        format_ = QuantizationFormat.FP8_FP4
-    elif use_fp8:
-        format_ = QuantizationFormat.FP8
-    elif use_fp4:
-        format_ = QuantizationFormat.FP4
-    elif use_int8:
-        format_ = QuantizationFormat.INT8
-    else:
+    formats = spec.formats - {"none"}
+    if not formats:
         return QuantizationFormat.NONE, QuantizationBackend.NONE
+
+    if "fp6" in formats:
+        if cuda_active:
+            raise UnsupportedLoadContract(
+                "AITER MXFP6 requires ROCm gfx950; CUDA is not supported"
+            )
+        format_ = (
+            QuantizationFormat.FP4_FP6
+            if "fp4" in formats
+            else QuantizationFormat.FP6
+        )
+        return format_, QuantizationBackend.AITER
+
+    # A tiered fp4/fp8 run is an FP4 contract: the FP8 tier is placed by the
+    # blockwise converter the FP4 backend selects, not by a contract of its own.
+    if "fp4" in formats:
+        format_ = QuantizationFormat.FP4
+    elif "fp8" in formats:
+        format_ = QuantizationFormat.FP8
+    else:
+        format_ = QuantizationFormat.INT8
 
     if format_ is QuantizationFormat.FP8:
         backend = (
@@ -552,10 +521,7 @@ def select_runtime_quantization(
             if aiter_fp8_active
             else QuantizationBackend.TORCHAO
         )
-    elif format_ in (
-        QuantizationFormat.FP4,
-        QuantizationFormat.FP8_FP4,
-    ):
+    elif format_ is QuantizationFormat.FP4:
         backend = (
             QuantizationBackend.TORCHAO if cuda_active else QuantizationBackend.AITER
         )

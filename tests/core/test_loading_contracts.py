@@ -214,34 +214,26 @@ def test_fp8_fp4_hybrid_is_an_explicit_valid_contract(contracts):
     )()
     declaration = contracts.LoadDeclaration.for_runner(model_capabilities)
 
+    # FP8 and FP4 are separate contracts: a tiered run takes the FP4 one and
+    # places its FP8 tier through the blockwise converter.
     assert (
-        contracts.QuantizationFormat.FP8_FP4,
+        contracts.QuantizationFormat.FP4,
         contracts.QuantizationBackend.AITER,
     ) in declaration.quantization_contracts
     assert (
-        contracts.QuantizationFormat.FP8_FP4,
+        contracts.QuantizationFormat.FP8,
         contracts.QuantizationBackend.TORCHAO,
     ) in declaration.quantization_contracts
 
 
-def test_int8_still_conflicts_with_hybrid_quantization(contracts):
-    config = type(
-        "Config",
-        (),
-        {
-            "use_fp8_gemms": True,
-            "use_fp4_gemms": True,
-            "use_int8_gemms": True,
-        },
-    )()
+def test_int8_cannot_be_tiered_with_another_format():
+    """`select_runtime_quantization` no longer sees impossible combinations:
+    a spec that names them is refused when the run's options are validated."""
+    from xfuser.config.args import xFuserArgs
 
-    with pytest.raises(
-        contracts.UnsupportedLoadContract,
-        match=r"INT8.*FP8.*FP4",
-    ):
-        contracts.select_runtime_quantization(
-            config, aiter_fp8_active=True, cuda_active=False
-        )
+    args = xFuserArgs(model="m", gemm_quantization="low=int8,high=fp8")
+    with pytest.raises(ValueError, match="INT8 cannot be tiered"):
+        args._validate_gemm_quantization_flags()
 
 
 def test_fsdp_and_replicated_meta_support_are_derived_separately(contracts):
@@ -417,18 +409,8 @@ def test_group_offload_with_aiter_fp4_is_refused(
     assert expected_in_reason in str(refusal.value)
 
 
-def test_the_mixed_schedule_carries_the_fp4_half_into_the_refusal(contracts):
-    """FP8_FP4 quantizes part of the model to FP4, so the same weights cannot be offloaded."""
-    config = _offload_config(enable_group_cpu_offload=True)
-
-    with pytest.raises(contracts.UnsupportedLoadContract) as refusal:
-        contracts.assert_offload_is_compatible_with_format(
-            config,
-            requested_format=contracts.QuantizationFormat.FP8_FP4,
-            selected_backend=contracts.QuantizationBackend.AITER,
-        )
-
-    assert "FP8_FP4" in str(refusal.value)
+# The mixed FP8/FP4 contract is gone: a tiered run takes the FP4 contract, so
+# the offload refusal it used to check is the FP4 case in the matrix below.
 
 
 @pytest.mark.parametrize(
@@ -487,66 +469,26 @@ def test_offload_that_was_measured_working_is_allowed(contracts, flags, shard_de
 
 
 @pytest.mark.parametrize(
-    ("flags", "aiter_fp8", "cuda", "expected"),
+    ("raw", "aiter_fp8", "cuda", "expected"),
     [
-        (
-            {},
-            False,
-            False,
-            ("NONE", "NONE"),
-        ),
-        (
-            {"use_fp8_gemms": True},
-            True,
-            False,
-            ("FP8", "AITER"),
-        ),
-        (
-            {"use_fp8_gemms": True},
-            False,
-            True,
-            ("FP8", "TORCHAO"),
-        ),
-        (
-            {"use_fp4_gemms": True},
-            False,
-            False,
-            ("FP4", "AITER"),
-        ),
-        (
-            {"use_fp4_gemms": True},
-            False,
-            True,
-            ("FP4", "TORCHAO"),
-        ),
-        (
-            {"use_fp8_gemms": True, "use_fp4_gemms": True},
-            True,
-            False,
-            ("FP8_FP4", "AITER"),
-        ),
-        (
-            {"use_int8_gemms": True},
-            False,
-            True,
-            ("INT8", "TORCHAO"),
-        ),
+        ("none", False, False, ("NONE", "NONE")),
+        ("fp8", True, False, ("FP8", "AITER")),
+        ("fp8", False, True, ("FP8", "TORCHAO")),
+        ("fp4", False, False, ("FP4", "AITER")),
+        ("fp4", False, True, ("FP4", "TORCHAO")),
+        # A tiered fp4/fp8 run is an FP4 contract; the FP8 tier is placed by
+        # the blockwise converter, not by a contract of its own.
+        ("low=fp4,high=fp8", True, False, ("FP4", "AITER")),
+        ("int8", False, True, ("INT8", "TORCHAO")),
     ],
 )
-def test_runtime_quantization_selection(contracts, flags, aiter_fp8, cuda, expected):
-    config = type(
-        "Config",
-        (),
-        {
-            "use_fp8_gemms": False,
-            "use_fp4_gemms": False,
-            "use_int8_gemms": False,
-            **flags,
-        },
-    )()
+def test_runtime_quantization_selection(contracts, raw, aiter_fp8, cuda, expected):
+    from xfuser.config.gemm import GemmQuantizationSpec
 
     requested, backend = contracts.select_runtime_quantization(
-        config, aiter_fp8_active=aiter_fp8, cuda_active=cuda
+        GemmQuantizationSpec.parse(raw),
+        aiter_fp8_active=aiter_fp8,
+        cuda_active=cuda,
     )
 
     assert (requested.name, backend.name) == expected

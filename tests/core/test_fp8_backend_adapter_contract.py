@@ -259,7 +259,7 @@ def test_unavailable_selected_backend_fails_without_format_change(modules):
 def test_hybrid_contract_projects_to_torchao_for_blockwise_fp8(modules):
     c, b = modules.contracts, modules.backends
     contract = SimpleNamespace(
-        requested_format=c.QuantizationFormat.FP8_FP4,
+        requested_format=c.QuantizationFormat.FP4,
         selected_backend=c.QuantizationBackend.TORCHAO,
     )
 

@@ -530,7 +530,7 @@ def test_nvfp4_native_streaming_rejects_hybrid_ownership(modules):
     b = modules.backends
     adapter = b.TorchaoNvfp4BackendAdapter(
         backend=modules.contracts.QuantizationBackend.TORCHAO,
-        format_=modules.contracts.QuantizationFormat.FP8_FP4,
+        format_=modules.contracts.QuantizationFormat.FP4,
         native_transformer_streaming=True,
     )
 

@@ -79,7 +79,6 @@ class QuantizationBackends:
         contract = self.loader.load_contract
         if contract is None or contract.requested_format.value not in {
             "fp4",
-            "fp8_fp4",
             "fp6",
             "fp4_fp6",
             "int8",
@@ -181,7 +180,7 @@ class QuantizationBackends:
         format_value = contract.requested_format.value
         if format_value == "fp8":
             return self.fp8
-        if format_value in {"fp4", "fp8_fp4"}:
+        if format_value == "fp4":
             return self.blockwise_fp8
         return None
 
@@ -237,7 +236,7 @@ class QuantizationBackends:
             self._high_tier_scattered() or config.use_hybrid_gemm_schedule
         )
         return bool(
-            config.use_fp4_gemms
+            plan.low == "fp4"
             and fp4_can_emit_fp8
             and any(
                 module_paths_overlap(target, fsdp_path)
@@ -307,7 +306,7 @@ class QuantizationBackends:
         if self._uses_mxfp6_contract():
             return False
         plan = self.loader.quantization_plan.gemm_plan
-        if plan is None and not self.model.config.use_fp4_gemms:
+        if plan is None:
             return False
         return bool(self.high_tier_targets())
 

@@ -595,7 +595,7 @@ def select_blockwise_fp8_backend(
     """Select FP8 independently for FP8, FP4, and FP8+FP4 contracts."""
 
     format_value = contract.requested_format.value
-    if format_value not in {"fp8", "fp4", "fp8_fp4"}:
+    if format_value not in {"fp8", "fp4"}:
         return None
     if format_value == "fp8":
         fp8_contract = contract

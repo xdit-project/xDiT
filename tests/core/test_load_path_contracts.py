@@ -70,13 +70,10 @@ def test_central_gemm_validation_owns_int8_conflicts():
         if isinstance(node, ast.FunctionDef)
         and node.name == "_validate_gemm_quantization_flags"
     )
-    attributes = {
-        node.attr for node in ast.walk(validate) if isinstance(node, ast.Attribute)
-    }
-    assert {"use_int8_gemms", "use_fp8_gemms", "use_fp4_gemms"} <= attributes
-    assert "--use_int8_gemms cannot be combined" in ast.get_source_segment(
-        args_source, validate
-    )
+    source = ast.get_source_segment(args_source, validate)
+    # The conflict is stated once, against the requested profile, in args.
+    assert "gemm_quantization_spec" in source or "spec.formats" in source
+    assert "INT8 cannot be " in source  # wrapped across two literals
 
     base_path = ROOT / "xfuser/model_executor/models/runner_models/base_model.py"
     base_source = base_path.read_text()

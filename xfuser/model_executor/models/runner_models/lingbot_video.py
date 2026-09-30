@@ -149,7 +149,7 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
         # Cache bulk_dtype on each block before quantization replaces nn.Linear
         # modules — LingBotVideoBlock.forward reads self.attn.to_q.weight.dtype
         # which breaks after FP4/FP8 quantization removes .weight.
-        if self.config.use_fp4_gemms or self.config.use_fp8_gemms:
+        if self.config.gemm_quantization_spec.low in ("fp4", "fp8"):
             for block in self.pipe.transformer.blocks:
                 if hasattr(block, "attn") and hasattr(block.attn, "to_q"):
                     w = getattr(block.attn.to_q, "weight", None)
@@ -177,7 +177,7 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
         else:
             super()._post_load_and_state_initialization(input_args)
         # After quantization, patch blocks that lost .weight.dtype
-        if self.config.use_fp4_gemms or self.config.use_fp8_gemms:
+        if self.config.gemm_quantization_spec.low in ("fp4", "fp8"):
             from xfuser.model_executor.models.transformers.transformer_lingbot_video import _patch_block_bulk_dtype
             for block in self.pipe.transformer.blocks:
                 if hasattr(block, "_cached_bulk_dtype"):
@@ -221,7 +221,7 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
             {},
         )
         # Quantize refiner linears (same path as base transformer)
-        if self.config.use_fp4_gemms or self.config.use_fp8_gemms:
+        if self.config.gemm_quantization_spec.low in ("fp4", "fp8"):
             from xfuser.model_executor.models.transformers.transformer_lingbot_video import _patch_block_bulk_dtype
             from xfuser.core.utils.runner_utils import quantize_linear_layers_to_fp4, quantize_linear_layers_to_fp8
             # Cache bulk dtype before quantization replaces nn.Linear
@@ -231,14 +231,14 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
                     if w is not None:
                         block._cached_bulk_dtype = w.dtype
             device = f"cuda:{local_rank}"
-            if self.config.use_fp4_gemms:
+            if self.config.gemm_quantization_spec.low == "fp4":
                 log("Quantizing refiner blocks to FP4...")
                 quantize_linear_layers_to_fp4(
                     refiner_transformer.blocks,
                     use_hybrid_schedule=self.config.use_hybrid_gemm_schedule,
                     device=device,
                 )
-            elif self.config.use_fp8_gemms:
+            elif self.config.gemm_quantization_spec.low == "fp8":
                 log("Quantizing refiner blocks to FP8...")
                 quantize_linear_layers_to_fp8(refiner_transformer.blocks, device=device)
             # Patch blocks that lost .weight.dtype

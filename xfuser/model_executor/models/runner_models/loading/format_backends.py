@@ -799,7 +799,7 @@ def select_format_backend(
     format_value = contract.requested_format.value
     backend_value = contract.selected_backend.value
     error = _unsupported_error(contract)
-    if format_value not in {"fp4", "fp8_fp4", "fp6", "fp4_fp6", "int8"}:
+    if format_value not in {"fp4", "fp6", "fp4_fp6", "int8"}:
         return None
     if format_value in {"fp6", "fp4_fp6"}:
         if backend_value != "aiter":

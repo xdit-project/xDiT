@@ -306,7 +306,7 @@ class xFuserModel(abc.ABC):
         te_targets = targets.text_encoder.roots() if targets is not None else ()
         spec = getattr(config, "gemm_quantization_spec", None)
         quantizing = (
-            not spec.is_pure("none") if spec is not None else config.use_fp8_gemms
+            spec is not None and not spec.is_pure("none")
         )
         if te_targets and quantizing and not config.quantize_text_encoder:
             # Said out loud because quantizing the encoder is opt-in: one left bf16 is otherwise
@@ -591,16 +591,17 @@ class xFuserModel(abc.ABC):
         if self.model_output_type == "video" and not self.fps:
             raise ValueError(f"Model {self.settings.model_name} produces video output but fps is not set.")
 
-        if config.use_int8_gemms and _is_hip():
+        gemm_formats = config.gemm_quantization_spec.formats - {"none"}
+        if "int8" in gemm_formats and _is_hip():
             raise ValueError("Int8 GEMMs on ROCm are not supported.")
-            
-        if config.use_fp6_gemms and _is_cuda():
+
+        if "fp6" in gemm_formats and _is_cuda():
             raise ValueError(
-                "--use_fp6_gemms requires the AITER MXFP6 ASM backend on ROCm gfx950; "
-                "CUDA is not supported."
+                "--gemm_quantization fp6 requires the AITER MXFP6 ASM backend "
+                "on ROCm gfx950; CUDA is not supported."
             )
         if (
-            config.use_fp6_gemms
+            "fp6" in gemm_formats
             and _is_hip()
             and not packages_info.get("has_aiter", False)
         ):
@@ -608,7 +609,7 @@ class xFuserModel(abc.ABC):
                 "MXFP6 GEMMs on ROCm gfx950 require AITER with the A6W6 " "ASM backend."
             )
 
-        if config.use_fp4_gemms:
+        if "fp4" in gemm_formats:
             if _is_hip() and not packages_info.get("has_aiter", False):
                 raise ValueError("FP4 GEMMs on ROCm require AITER.")
             if _is_cuda():

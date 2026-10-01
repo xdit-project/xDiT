@@ -74,22 +74,27 @@ def test_a_removed_option_says_what_replaces_it(runtime, option, replacement):
 
 
 @pytest.mark.parametrize(
-    "raw", ["low=int8,high=fp8", "low=fp4,high=int8", "low=int8,high=fp4"]
+    "raw",
+    [
+        "low=int8,high=fp8",
+        "low=fp4,high=int8",
+        "low=int8,high=fp4",
+        "low=fp6,high=fp8",
+        "low=int8,high=fp6",
+        "low=fp4,high=fp6",
+    ],
 )
-def test_int8_cannot_be_tiered_with_another_format(runtime, raw):
+def test_any_distinct_pair_is_accepted(runtime, raw):
+    """No list of acceptable combinations.
+
+    Each named format is one registry lookup at load time, against what the
+    probes measured. A pair nobody has run is therefore allowed and unverified
+    rather than refused here -- the structure does not forbid it, and a
+    hardcoded list is not evidence that it fails.
+    """
     config = _args(runtime, gemm_quantization=raw)
 
-    with pytest.raises(ValueError, match="INT8 cannot be tiered"):
-        config._validate_gemm_quantization_flags()
-
-
-@pytest.mark.parametrize("raw", ["low=fp6,high=fp8", "low=int8,high=fp6"])
-def test_mxfp6_cannot_be_tiered_with_fp8_or_int8(runtime, raw):
-    """MXFP6 already owns every declared high-precision target."""
-    config = _args(runtime, gemm_quantization=raw)
-
-    with pytest.raises(ValueError, match="not supported"):
-        config._validate_gemm_quantization_flags()
+    config._validate_gemm_quantization_flags()
 
 
 def test_unsupported_runner_rejects_fp8_text_encoder_via_capability_validation(

@@ -1374,25 +1374,10 @@ class xFuserArgs:
                     "YAML hybrid_gemm_schedule entries must match "
                     f"--gemm_quantization {spec}."
                 )
-        # Which pairs a tier can actually name. Any two distinct formats parse;
-        # these are the ones no backend can place together.
-        formats = spec.formats - {"none"}
-        if "fp6" in formats and formats & {"fp8", "int8"}:
-            raise ValueError(
-                f"--gemm_quantization {spec} is not supported: MXFP6 already "
-                "owns every declared high-precision target, so it cannot be "
-                "tiered with FP8 or INT8."
-            )
-        if "int8" in formats and formats - {"int8"}:
-            raise ValueError(
-                f"--gemm_quantization {spec} is not supported: INT8 cannot be "
-                "tiered with another format."
-            )
-        if self.use_hybrid_gemm_schedule and "fp4" not in formats:
-            raise ValueError(
-                "The hybrid GEMM schedule builds a per-layer FP4 wrapper, so it "
-                f"needs FP4 in the profile; --gemm_quantization {spec} has none."
-            )
+        # No list of acceptable pairs. Whether a format can be stored here is
+        # one registry lookup at load time, and whether its implementation can
+        # drive a per-step schedule is an attribute on that implementation --
+        # both answer with what was measured rather than from a list kept here.
 
     def create_config(
         self,

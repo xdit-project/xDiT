@@ -10,7 +10,6 @@ class QuantizationFormat(str, Enum):
     FP8 = "fp8"
     FP4 = "fp4"
     FP6 = "fp6"
-    FP4_FP6 = "fp4_fp6"
     INT8 = "int8"
 
 
@@ -125,8 +124,6 @@ class LoadDeclaration:
         if replicated:
             modes.add(MaterializationMode.REPLICATED_META)
         formats = frozenset(quantization_formats or {QuantizationFormat.NONE})
-        if QuantizationFormat.FP4 in formats and QuantizationFormat.FP6 in formats:
-            formats = formats | {QuantizationFormat.FP4_FP6}
         backends = frozenset(quantization_backends or {QuantizationBackend.NONE})
         contracts = {
             (format_, backend)
@@ -135,7 +132,7 @@ class LoadDeclaration:
             if (format_ is QuantizationFormat.NONE)
             == (backend is QuantizationBackend.NONE)
             and (
-                format_ not in (QuantizationFormat.FP6, QuantizationFormat.FP4_FP6)
+                format_ is not QuantizationFormat.FP6
                 or backend is QuantizationBackend.AITER
             )
         }
@@ -182,8 +179,6 @@ class LoadDeclaration:
             )
         if "fp6" in supported:
             contracts.add((QuantizationFormat.FP6, QuantizationBackend.AITER))
-        if {"fp4", "fp6"} <= supported:
-            contracts.add((QuantizationFormat.FP4_FP6, QuantizationBackend.AITER))
         if "int8" in supported:
             contracts.add((QuantizationFormat.INT8, QuantizationBackend.TORCHAO))
 
@@ -300,50 +295,6 @@ def assert_requested_materialization_is_honoured(config, *, world_size: int) -> 
             f"--memory_efficient_replicated_load conflicts with {named}: that degree already "
             "splits the weights, so there is no replicated copy to fill."
         )
-
-
-def assert_offload_is_compatible_with_format(
-    config,
-    *,
-    requested_format: QuantizationFormat,
-    selected_backend: QuantizationBackend,
-) -> None:
-    """Refuse the CPU-offload modes mixed FP4+FP6 cannot honour.
-
-    Mixed FP4+FP6 still uses the inherited MXFP4 walker for its primary
-    weights. That walker derives the packing device from each source parameter,
-    so every CPU-offload mode leaves the primary weights on an unsupported CPU
-    packing path. Pure FP6 is different: its walker packs on the requested GPU
-    and can evict each packed leaf immediately, so it remains allowed.
-
-    What a single format's storage survives is the adapter's own answer -- see
-    ``group_offload_refusal`` and ``QuantizationBackends.assert_offload_is_compatible``.
-    This is the one claim about a *compound* contract, and it goes when the
-    compound does.
-    """
-
-    if selected_backend is not QuantizationBackend.AITER:
-        return
-    if requested_format is not QuantizationFormat.FP4_FP6:
-        return
-    offload_flags = tuple(
-        flag
-        for flag in (
-            "enable_model_cpu_offload",
-            "enable_sequential_cpu_offload",
-            "enable_group_cpu_offload",
-        )
-        if getattr(config, flag, False)
-    )
-    if not offload_flags:
-        return
-    named_flags = ", ".join(f"--{flag}" for flag in offload_flags)
-    raise UnsupportedLoadContract(
-        f"{named_flags} cannot be combined with FP4_FP6 on the AITER backend: "
-        "the primary MXFP4 packing path is unsupported when CPU offload keeps "
-        "its source weights on the host. Use pure FP6, or run FP4_FP6 without "
-        "CPU offload."
-    )
 
 
 def assert_offload_is_compatible_with_sharding(config) -> None:
@@ -468,46 +419,21 @@ def select_load_contract(
 def select_runtime_quantization(
     spec,
     *,
-    aiter_fp8_active: bool,
-    cuda_active: bool,
+    impl_for,
 ) -> tuple[QuantizationFormat, QuantizationBackend]:
-    """Translate the requested GEMM profile into the explicit contract."""
+    """Name the contract: the run's low format, and what stores it here.
 
-    formats = spec.formats - {"none"}
-    if not formats:
+    The high tier gets no contract of its own. It is resolved by name through
+    the same registry wherever the plan puts it, so a pair is never a contract
+    in itself and no list of acceptable pairs has to be kept anywhere.
+    """
+
+    if spec.low in (None, "none"):
         return QuantizationFormat.NONE, QuantizationBackend.NONE
-
-    if "fp6" in formats:
-        if cuda_active:
-            raise UnsupportedLoadContract(
-                "AITER MXFP6 requires ROCm gfx950; CUDA is not supported"
-            )
-        format_ = (
-            QuantizationFormat.FP4_FP6
-            if "fp4" in formats
-            else QuantizationFormat.FP6
+    impl = impl_for(spec.low)
+    if impl is None:
+        raise UnsupportedLoadContract(
+            f"--gemm_quantization {spec} asks for {spec.low}, which nothing "
+            "here can store"
         )
-        return format_, QuantizationBackend.AITER
-
-    # A tiered fp4/fp8 run is an FP4 contract: the FP8 tier is placed by the
-    # blockwise converter the FP4 backend selects, not by a contract of its own.
-    if "fp4" in formats:
-        format_ = QuantizationFormat.FP4
-    elif "fp8" in formats:
-        format_ = QuantizationFormat.FP8
-    else:
-        format_ = QuantizationFormat.INT8
-
-    if format_ is QuantizationFormat.FP8:
-        backend = (
-            QuantizationBackend.AITER
-            if aiter_fp8_active
-            else QuantizationBackend.TORCHAO
-        )
-    elif format_ is QuantizationFormat.FP4:
-        backend = (
-            QuantizationBackend.TORCHAO if cuda_active else QuantizationBackend.AITER
-        )
-    else:
-        backend = QuantizationBackend.TORCHAO
-    return format_, backend
+    return QuantizationFormat(spec.low), QuantizationBackend(impl)

@@ -5,34 +5,26 @@ import pytest
 import torch
 
 
-@pytest.mark.parametrize(
-    ("fp4", "hybrid", "expected"),
-    [
-        (False, False, "fp6"),
-        (True, False, "fp4_fp6"),
-        (True, True, "fp4_fp6"),
-    ],
-)
-def test_runtime_selects_aiter_mxfp6_formats(fp4, hybrid, expected):
+@pytest.mark.parametrize("raw", ["fp6", "low=fp4,high=fp6"])
+def test_a_tiered_fp6_run_takes_its_low_format_contract(raw):
+    """No compound contract: the FP6 tier is resolved by name where it lands."""
     from xfuser.model_executor.models.runner_models.loading.contracts import (
         QuantizationBackend,
+        QuantizationFormat,
         select_runtime_quantization,
     )
 
     from xfuser.config.gemm import GemmQuantizationSpec
 
-    spec = (
-        GemmQuantizationSpec("fp4", "fp6") if fp4 else GemmQuantizationSpec("fp6")
-    )
-
     format_, backend = select_runtime_quantization(
-        spec,
-        aiter_fp8_active=False,
-        cuda_active=False,
+        GemmQuantizationSpec.parse(raw),
+        impl_for=lambda _format: "aiter",
     )
 
-    assert format_.value == expected
     assert backend is QuantizationBackend.AITER
+    assert format_ is (
+        QuantizationFormat.FP6 if raw == "fp6" else QuantizationFormat.FP4
+    )
 
 
 def test_wan22_reuses_existing_fp4_and_quality_targets_for_mxfp6():
@@ -212,7 +204,7 @@ def test_wan_mxfp6_declaration_keeps_existing_load_modes():
         QuantizationBackend.AITER,
     ) in declaration.quantization_contracts
     assert (
-        QuantizationFormat.FP4_FP6,
+        QuantizationFormat.FP4,
         QuantizationBackend.AITER,
     ) in declaration.quantization_contracts
     assert MaterializationMode.FSDP_META in declaration.materialization_modes

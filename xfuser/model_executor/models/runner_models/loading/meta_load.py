@@ -61,7 +61,6 @@ from .contracts import (
     LoadRoute,
     MaterializationMode,
     UnsupportedLoadContract,
-    assert_offload_is_compatible_with_format,
     assert_offload_is_compatible_with_sharding,
     assert_requested_materialization_is_honoured,
     select_effective_materialization_mode,
@@ -424,19 +423,11 @@ class ModelLoader:
         assert_requested_materialization_is_honoured(config, world_size=world_size)
         assert_offload_is_compatible_with_sharding(config)
         mode = select_effective_materialization_mode(config, world_size=world_size)
-        from .fp8_backends import AITER_FP8
-
         requested_format, backend = select_runtime_quantization(
             config.gemm_quantization_spec,
             # The same registry the converters resolve through, so the contract
-            # and the adapters cannot reach different answers about FP8.
-            aiter_fp8_active=self.backends.impl_for("fp8") == AITER_FP8,
-            cuda_active=_is_cuda(),
-        )
-        assert_offload_is_compatible_with_format(
-            config,
-            requested_format=requested_format,
-            selected_backend=backend,
+            # and the adapters cannot reach different answers about a format.
+            impl_for=self.backends.impl_for,
         )
         self.load_contract = select_load_contract(
             requested_format=requested_format,

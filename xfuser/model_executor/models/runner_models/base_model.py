@@ -614,34 +614,10 @@ class xFuserModel(abc.ABC):
         if self.model_output_type == "video" and not self.fps:
             raise ValueError(f"Model {self.settings.model_name} produces video output but fps is not set.")
 
-        gemm_formats = config.gemm_quantization_spec.formats - {"none"}
-        if "int8" in gemm_formats and _is_hip():
-            raise ValueError("Int8 GEMMs on ROCm are not supported.")
-
-        if "fp6" in gemm_formats and _is_cuda():
-            raise ValueError(
-                "--gemm_quantization fp6 requires the AITER MXFP6 ASM backend "
-                "on ROCm gfx950; CUDA is not supported."
-            )
-        if (
-            "fp6" in gemm_formats
-            and _is_hip()
-            and not packages_info.get("has_aiter", False)
-        ):
-            raise ValueError(
-                "MXFP6 GEMMs on ROCm gfx950 require AITER with the A6W6 " "ASM backend."
-            )
-
-        if "fp4" in gemm_formats:
-            if _is_hip() and not packages_info.get("has_aiter", False):
-                raise ValueError("FP4 GEMMs on ROCm require AITER.")
-            if _is_cuda():
-                major, _ = torch.cuda.get_device_capability()
-                if major < 10:
-                    raise ValueError(
-                        f"NVFP4 GEMMs require CUDA capability >= 10.0 (Blackwell). "
-                        f"Detected: {torch.cuda.get_device_capability()}"
-                    )
+        # Whether this machine can store a format is not asked here. The same
+        # probes that build the adapters answer it before allocation, naming the
+        # capability or the symbol they actually found missing, rather than from
+        # a second copy of the hardware rules kept next to the arguments.
         validate_vae_config(config, self.capabilities, self.settings)
         
         if config.distilled_transformer_path or config.distilled_transformer_2_path:

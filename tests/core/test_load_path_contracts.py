@@ -59,7 +59,14 @@ def test_args_and_base_both_validate_gemm_flag_ownership():
     assert "_validate_gemm_quantization_flags" in calls
 
 
-def test_central_gemm_validation_owns_int8_conflicts():
+def test_no_profile_gate_names_a_format_outside_the_registry():
+    """Which formats go together, and which a machine has, is asked in one place.
+
+    The argument validator keeps only the questions about the *run* -- a flag
+    that needs a tiered profile, a schedule naming formats the profile does
+    not. Whether a format can be stored here, and whether two can be named
+    together, is the registry's answer at load time.
+    """
     args_path = ROOT / "xfuser/config/args.py"
     args_source = args_path.read_text()
     args_tree = ast.parse(args_source)
@@ -71,9 +78,8 @@ def test_central_gemm_validation_owns_int8_conflicts():
         and node.name == "_validate_gemm_quantization_flags"
     )
     source = ast.get_source_segment(args_source, validate)
-    # The conflict is stated once, against the requested profile, in args.
-    assert "gemm_quantization_spec" in source or "spec.formats" in source
-    assert "INT8 cannot be " in source  # wrapped across two literals
+    for refusal in ("INT8 cannot be ", "cannot be\n                tiered"):
+        assert refusal not in source
 
     base_path = ROOT / "xfuser/model_executor/models/runner_models/base_model.py"
     base_source = base_path.read_text()
@@ -84,9 +90,11 @@ def test_central_gemm_validation_owns_int8_conflicts():
         for node in base_class.body
         if isinstance(node, ast.FunctionDef) and node.name == "_validate_config"
     )
-    assert "Cannot use int8 gemms with fp8 or fp4 gemms." not in ast.get_source_segment(
-        base_source, base_validate
-    )
+    base = ast.get_source_segment(base_source, base_validate)
+    assert "Cannot use int8 gemms with fp8 or fp4 gemms." not in base
+    # Nor a second copy of the hardware rules the probes already measure.
+    for gate in ("CUDA capability >= 10.0", "require AITER", "on ROCm are not"):
+        assert gate not in base
 
 
 def test_mxfp4_quantized_weight_is_registered_as_parameter():

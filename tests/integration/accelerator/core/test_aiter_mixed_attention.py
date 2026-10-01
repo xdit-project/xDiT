@@ -138,15 +138,10 @@ def _require_mha_v4_recipe(backend_name):
 _MXFP4_V_BACKENDS = ("AITER_F4F4", "AITER_F6F4")
 
 
-def _xfail_broken_mxfp4_v(request, backend_name, sequence_length):
+def _xfail_broken_mxfp4_v(backend_name, sequence_length):
     if backend_name in _MXFP4_V_BACKENDS and sequence_length % 128:
-        request.applymarker(
-            pytest.mark.xfail(
-                reason=(
-                    f"AITER dense MXFP4 V is numerically wrong at S={sequence_length} (S % 128 != 0); tracked upstream"
-                ),
-                strict=False,
-            )
+        pytest.xfail(
+            f"AITER dense MXFP4 V is numerically wrong at S={sequence_length} (S % 128 != 0); tracked upstream"
         )
 
 
@@ -163,10 +158,10 @@ def _xfail_broken_mxfp4_v(request, backend_name, sequence_length):
     ],
 )
 @pytest.mark.parametrize("sequence_length", [128, 257])
-def test_aiter_mixed_attention_matches_sdpa(backend_name, sequence_length, request):
+def test_aiter_mixed_attention_matches_sdpa(backend_name, sequence_length):
     _require_mha_v4_aiter(backend_name)
     _require_mha_v4_recipe(backend_name)
-    _xfail_broken_mxfp4_v(request, backend_name, sequence_length)
+    _xfail_broken_mxfp4_v(backend_name, sequence_length)
 
     torch.manual_seed(1234)
     shape = (1, 5, sequence_length, 128)
@@ -178,9 +173,7 @@ def test_aiter_mixed_attention_matches_sdpa(backend_name, sequence_length, reque
         reference = F.scaled_dot_product_attention(query, key, value)
         output, lse = _run(backend_name, query, key, value, dropout_p=0.0, is_causal=False)
 
-    output_float = output.float()
-    reference_float = reference.float()
-    cosine_similarity = F.cosine_similarity(output_float.flatten(), reference_float.flatten(), dim=0).item()
+    cosine_similarity = F.cosine_similarity(output.float().flatten(), reference.float().flatten(), dim=0).item()
 
     assert output.shape == reference.shape
     assert torch.isfinite(output).all()
@@ -284,8 +277,11 @@ def test_aiter_mixed_attention_unequal_sequence_lengths(backend_name):
     _require_mha_v4_aiter(backend_name)
     _require_mha_v4_recipe(backend_name)
 
+    # The MXFP4-V rows require a full V tile. Keep Q and K unequal while
+    # respecting that kernel constraint; the other rows exercise a ragged K.
+    key_length = 256 if backend_name in _MXFP4_V_BACKENDS else 257
     query = torch.randn((2, 5, 128, 128), device="cuda", dtype=torch.bfloat16)
-    key = torch.randn((2, 5, 257, 128), device="cuda", dtype=torch.bfloat16)
+    key = torch.randn((2, 5, key_length, 128), device="cuda", dtype=torch.bfloat16)
     value = torch.randn_like(key)
     output, _ = _run(backend_name, query, key, value, dropout_p=0.0, is_causal=False)
 

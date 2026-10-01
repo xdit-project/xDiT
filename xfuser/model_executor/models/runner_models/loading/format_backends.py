@@ -280,7 +280,7 @@ def probe_format_backend_capabilities(
     aiter_probe: Callable[[], bool] | None = None,
     mxfp4_probe: Callable[[], _ProbeResult] | None = None,
     mxfp6_probe: Callable[[], _ProbeResult] | None = None,
-    require_mxfp6: bool = False,
+    wanted=None,
     nvfp4_probe: Callable[[], _ProbeResult] | None = None,
     int8_probe: Callable[[], _ProbeResult] | None = None,
     diffusers_probe: Callable[[str], _ProbeResult] | None = None,
@@ -291,7 +291,17 @@ def probe_format_backend_capabilities(
     Each record is gated to the hardware its kernels run on, so a caller
     choosing between two implementations of one format takes the first
     available one rather than repeating the hardware test.
+
+    ``wanted`` narrows the probing to the formats a run actually named; None
+    probes everything. Some probes are not free -- MXFP6's imports AITER
+    kernels -- and a run that will never place a format has no reason to pay
+    for it. Stated as "the formats this run wants" rather than a flag named
+    after the one expensive probe, so a future expensive one needs no new
+    argument.
     """
+
+    def is_wanted(format_name):
+        return wanted is None or format_name in wanted
 
     if cuda_probe is None or hip_probe is None:
         from xfuser.envs import _is_cuda, _is_hip
@@ -323,7 +333,7 @@ def probe_format_backend_capabilities(
                     None if available else "AITER MXFP4 APIs are unavailable",
                 )
 
-    probe_mxfp6 = require_mxfp6 or mxfp6_probe is not None
+    probe_mxfp6 = is_wanted("fp6") or mxfp6_probe is not None
     if probe_mxfp6 and mxfp6_probe is None:
         if aiter_probe is None:
             mxfp6_probe = _probe_aiter_mxfp6_apis
@@ -341,12 +351,19 @@ def probe_format_backend_capabilities(
     diffusers_probe = diffusers_probe or _probe_diffusers_config
     fsdp_probe = fsdp_probe or _probe_fsdp_support
 
-    if blackwell:
+    if blackwell and is_wanted("fp4"):
         nvfp4, nvfp4_reason = _result(nvfp4_probe())
+    elif not is_wanted("fp4"):
+        nvfp4, nvfp4_reason = False, "fp4 was not requested"
     else:
         nvfp4 = False
         nvfp4_reason = "NVFP4 requires CUDA capability >= 10.0"
-    if hip:
+    if not is_wanted("fp4"):
+        mxfp4, mxfp4_reason = False, "fp4 was not requested"
+        mxfp6, mxfp6_reason = (
+            _result(mxfp6_probe()) if hip and probe_mxfp6 else (False, "AITER MXFP6 was not requested")
+        )
+    elif hip:
         mxfp4, mxfp4_reason = _result(mxfp4_probe())
         if probe_mxfp6:
             mxfp6, mxfp6_reason = _result(mxfp6_probe())
@@ -358,7 +375,9 @@ def probe_format_backend_capabilities(
         mxfp4_reason = "AITER MXFP4 requires ROCm"
         mxfp6 = False
         mxfp6_reason = "AITER MXFP6 requires ROCm"
-    if cuda:
+    if not is_wanted("int8"):
+        int8, int8_reason = False, "int8 was not requested"
+    elif cuda:
         int8, int8_reason = _result(int8_probe())
     else:
         int8 = False

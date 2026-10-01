@@ -69,17 +69,17 @@ class QuantizationBackends:
     def capabilities(self):
         """Every (format, implementation) this machine offers, probed once.
 
-        MXFP6 is probed only when the run names it: its probe imports AITER
-        kernels, which is not free on a machine that will never use them.
+        Narrowed to the formats the run named: some probes import kernels,
+        which is not free on a machine that will never place them. Read off the
+        spec rather than the resolved plan, so a run whose model declares no
+        targets still gets a truthful answer about what it asked for.
         """
 
         from .fp8_backends import probe_fp8_backend_capabilities
         from .format_backends import probe_format_backend_capabilities
 
         return probe_fp8_backend_capabilities().merged(
-            probe_format_backend_capabilities(
-                require_mxfp6="fp6" in self._formats_in_play()
-            )
+            probe_format_backend_capabilities(wanted=self._formats_requested())
         )
 
     def impl_for(self, format_name: str) -> str | None:
@@ -177,6 +177,13 @@ class QuantizationBackends:
                 "Offload at a format that survives the host round trip, or run "
                 "without offload."
             )
+
+    def _formats_requested(self) -> frozenset:
+        """Every format this run named, before the plan resolves any targets."""
+        spec = getattr(self.model.config, "gemm_quantization_spec", None)
+        if spec is None:
+            return frozenset()
+        return frozenset(spec.formats) - {"none"}
 
     def _formats_in_play(self) -> tuple:
         """The formats this run will place, low and high."""

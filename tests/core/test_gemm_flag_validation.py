@@ -255,3 +255,40 @@ def test_fp6_profile_supports_simple_hybrid_schedule(runtime):
     )
 
     config._validate_gemm_quantization_flags()
+
+
+def test_the_parser_knows_exactly_the_formats_the_registry_does():
+    """The one list the parser keeps cannot drift from the registry.
+
+    Argument parsing must not import the registry -- that pulls in torch -- so
+    `_KNOWN_FORMATS` is a second copy of the format names, kept only to catch a
+    typo at the command line. This is what stops the two from diverging: add a
+    format to one and this fails until the other has it too.
+    """
+    from xfuser.config.gemm import _KNOWN_FORMATS
+    from xfuser.model_executor.models.runner_models.loading.backend_selection import (
+        _IMPL_PREFERENCE,
+    )
+
+    assert _KNOWN_FORMATS - {"none"} == set(_IMPL_PREFERENCE)
+
+
+def test_every_known_format_has_a_registered_adapter():
+    """And every name the registry offers is a pair something implements."""
+    from xfuser.model_executor.models.runner_models.loading import (  # noqa: F401
+        format_backends,
+        fp8_backends,
+    )
+    from xfuser.model_executor.models.runner_models.loading.backend_selection import (
+        _IMPL_PREFERENCE,
+    )
+    from xfuser.model_executor.models.runner_models.loading.quant_adapter import (
+        REGISTRY,
+    )
+
+    declared = {
+        (format_name, impl)
+        for format_name, impls in _IMPL_PREFERENCE.items()
+        for impl in impls
+    }
+    assert declared == set(REGISTRY)

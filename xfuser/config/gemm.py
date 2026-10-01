@@ -7,10 +7,14 @@ from typing import Any, Mapping
 import yaml
 
 
-_PURE_FORMATS = frozenset({"none", "fp8", "fp4", "fp6", "int8"})
-#: The formats a tier can name. Which of the two is the better one is the
-#: user's business: any distinct pair is allowed.
-_TIER_FORMATS = _PURE_FORMATS - {"none"}
+#: The format names this build knows, for catching a typo at the command line
+#: rather than minutes later. It is not a capability list and not a list of
+#: pairs: whether a machine can store a format is one registry lookup at load
+#: time, and any two distinct names may be tiered. Kept here because argument
+#: parsing must not import the registry, which pulls in torch -- so
+#: ``test_the_parser_knows_exactly_the_formats_the_registry_does`` pins the two
+#: together instead.
+_KNOWN_FORMATS = frozenset({"none", "fp8", "fp4", "fp6", "int8"})
 #: Formats whose GEMM kernel refuses a small M. TorchAO's INT8 path lowers to
 #: ``torch._int_mm`` under ``torch.compile``, which needs M >= 16; the FP8 and
 #: MX kernels have no such floor. A module a model declares ``short_sequence``
@@ -42,21 +46,22 @@ class GemmQuantizationSpec:
         object.__setattr__(self, "low", low)
         object.__setattr__(self, "high", high)
 
-        if high is None:
-            if low not in _PURE_FORMATS:
-                raise ValueError(
-                    f"unknown GEMM quantization format {low!r}; expected one of "
-                    f"{', '.join(sorted(_PURE_FORMATS))}"
-                )
-            return
-
-        if low == high:
-            raise ValueError("GEMM low and high quantization formats must differ")
-        unknown = [name for name in (low, high) if name not in _TIER_FORMATS]
+        unknown = [
+            name for name in (low, high) if name is not None and name not in _KNOWN_FORMATS
+        ]
         if unknown:
             raise ValueError(
-                f"unknown GEMM quantization format(s) {unknown}; a tier accepts "
-                f"{', '.join(sorted(_TIER_FORMATS))}"
+                f"unknown GEMM quantization format(s) {unknown}; expected one of "
+                f"{', '.join(sorted(_KNOWN_FORMATS))}"
+            )
+        if high is None:
+            return
+        if low == high:
+            raise ValueError("GEMM low and high quantization formats must differ")
+        if "none" in (low, high):
+            raise ValueError(
+                "a GEMM tier names a format to quantize to; use "
+                "--gemm_quantization none to quantize nothing"
             )
 
     @classmethod

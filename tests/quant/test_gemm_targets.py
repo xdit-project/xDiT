@@ -250,7 +250,11 @@ def test_any_sensible_pair_tiers(low, high):
 @pytest.mark.parametrize(
     "raw, message",
     [
-        ("low=none,high=fp8", "unknown GEMM quantization format"),
+        # `none` is a known format, just not one a tier can name, and the
+        # refusal says that rather than calling it a typo.
+        ("low=none,high=fp8", "a GEMM tier names a format to quantize to"),
+        ("low=fp8,high=none", "a GEMM tier names a format to quantize to"),
+        ("low=fp9,high=fp8", "unknown GEMM quantization format"),
         ("low=fp4,high=fp4", "must differ"),
     ],
 )

@@ -156,7 +156,7 @@ def _record_native_quantization(ledger, adapter, component_name, prepared, targe
 
     log(prepared.descriptor.log_message())
     is_fp8 = adapter.format.value == "fp8"
-    ledger.describe(component_name, fp8=is_fp8)
+    ledger.describe(component_name, format_name=adapter.format.value)
     if prepared.quantization_config is None:
         return
     # A load that held a residual back narrows the streamed set; one that did

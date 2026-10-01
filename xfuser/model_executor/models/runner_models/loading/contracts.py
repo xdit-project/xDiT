@@ -420,6 +420,7 @@ def select_runtime_quantization(
     spec,
     *,
     impl_for,
+    why_not=None,
 ) -> tuple[QuantizationFormat, QuantizationBackend]:
     """Name the contract: the run's low format, and what stores it here.
 
@@ -432,8 +433,12 @@ def select_runtime_quantization(
         return QuantizationFormat.NONE, QuantizationBackend.NONE
     impl = impl_for(spec.low)
     if impl is None:
+        # The same measured reasons the adapter refusal carries: "unavailable"
+        # on its own sends the reader to the source to find out which probe
+        # failed and why.
+        detail = f": {why_not(spec.low)}" if why_not is not None else ""
         raise UnsupportedLoadContract(
             f"--gemm_quantization {spec} asks for {spec.low}, which nothing "
-            "here can store"
+            f"here can store{detail}"
         )
     return QuantizationFormat(spec.low), QuantizationBackend(impl)

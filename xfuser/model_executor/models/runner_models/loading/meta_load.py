@@ -428,6 +428,7 @@ class ModelLoader:
             # The same registry the converters resolve through, so the contract
             # and the adapters cannot reach different answers about a format.
             impl_for=self.backends.impl_for,
+            why_not=self.backends.why_not,
         )
         self.load_contract = select_load_contract(
             requested_format=requested_format,

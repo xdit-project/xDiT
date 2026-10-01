@@ -123,7 +123,7 @@ class QuantizationBackends:
         if impl is None:
             raise UnsupportedLoadContract(
                 f"this run asked for {format_name}, which nothing here can "
-                "store: " + self._why_not(format_name)
+                "store: " + self.why_not(format_name)
             )
         capability = self.capabilities.of(format_name, impl)
         plan = self.loader.quantization_plan.gemm_plan
@@ -146,7 +146,7 @@ class QuantizationBackends:
         )
         return adapter
 
-    def _why_not(self, format_name: str) -> str:
+    def why_not(self, format_name: str) -> str:
         """What each implementation of a format said when it was probed."""
         tried = _IMPL_PREFERENCE.get(format_name)
         if not tried:

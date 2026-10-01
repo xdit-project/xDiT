@@ -131,13 +131,11 @@ Each walk starts where ``walk_roots`` says -- the subtrees that format owns,
             }
             if before_device_move and offload_requested:
                 convert_kwargs["offload_to_cpu"] = True
-            # Claimed under the same key the skip above reads, so a component
-            # whose descriptor the load path already logged is not logged twice
-            # and each format in play still gets a line of its own.
+            # Claimed per (component, format), so a component whose descriptor
+            # the load path already logged is not logged twice and each format
+            # in play still gets a line of its own.
             component_name = module_name.partition(".")[0]
-            if ledger.claim_description(
-                component_name, fp8=format_name == "fp8"
-            ):
+            if ledger.claim_description(component_name, format_name=format_name):
                 descriptor = prepare_native_load(
                     adapter,
                     component_name=component_name,

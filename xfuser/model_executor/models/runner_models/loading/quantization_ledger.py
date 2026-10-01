@@ -32,29 +32,28 @@ class QuantizationLedger:
     FP4/INT8 walks ask separately and a component can be described to one and not the other.
     """
 
-    descriptor_components: set = field(default_factory=set)
-    fp8_descriptor_components: set = field(default_factory=set)
+    #: (component, format) pairs already announced. Keyed by format, not by
+    #: "is it FP8": a run placing two non-FP8 formats -- fp4 with an fp6 tier --
+    #: shared one slot under the boolean, so whichever walk ran second was
+    #: silently never logged and its tier was invisible in the run's output.
+    described: set = field(default_factory=set)
     streaming_targets: set = field(default_factory=set)
     fp8_streaming_targets: set = field(default_factory=set)
 
-    def describe(self, component_name, *, fp8):
-        """Record that this component's quantization plan has been logged."""
+    def describe(self, component_name, *, format_name):
+        """Record that this component's plan for one format has been logged."""
 
-        self.descriptor_components.add(component_name)
-        if fp8:
-            self.fp8_descriptor_components.add(component_name)
+        self.described.add((component_name, format_name))
 
-    def claim_description(self, component_name, *, fp8=False):
-        """True when nothing has described this component yet, so the caller should.
+    def claim_description(self, component_name, *, format_name):
+        """True when this component's `format_name` plan has not been announced yet.
 
-        A post-load walk uses this to announce the fallback it is about to perform, exactly once.
+        A post-load walk uses this to announce the fallback it is about to
+        perform, exactly once per component and format.
         """
-        described = (
-            self.fp8_descriptor_components if fp8 else self.descriptor_components
-        )
-        if component_name in described:
+        if (component_name, format_name) in self.described:
             return False
-        described.add(component_name)
+        self.described.add((component_name, format_name))
         return True
 
     def record_streamed(self, component_name, targets, *, fp8):

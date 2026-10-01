@@ -58,7 +58,7 @@ def record_blockwise_ownership(
     """
     log(descriptor.log_message())
     is_fp8 = adapter.format.value == "fp8"
-    ledger.describe(component_name, fp8=is_fp8)
+    ledger.describe(component_name, format_name=adapter.format.value)
     if descriptor.materialization_mode not in {"streaming", "blockwise"}:
         return
     owned_targets = blockwise_owned_targets(targets, wrap_attrs)

@@ -130,7 +130,7 @@ def plan_text_encoders(loader, existing_quantization_config=None):
             # A declared encoder is part of the plan the format-agnostic walks
             # iterate, so it is recorded under the format this route actually
             # placed and they leave it where this route put it.
-            ledger.describe(component_name, fp8=True)
+            ledger.describe(component_name, format_name=TEXT_ENCODER_FORMAT)
             if prepared.descriptor.materialization_mode == "streaming":
                 ledger.record_streamed(component_name, targets, fp8=True)
             if prepared.quantization_config is not None:

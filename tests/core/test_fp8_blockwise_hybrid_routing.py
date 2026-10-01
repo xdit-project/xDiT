@@ -1130,7 +1130,7 @@ def test_streamed_fp8_target_does_not_skip_disjoint_target_in_component(
         pipe=pipe,
         quantization_ledger=QuantizationLedger(
             fp8_streaming_targets={"transformer.blocks"},
-            fp8_descriptor_components={"transformer"},
+            described={("transformer", "fp8")},
         ),
         _replicated_broadcast_load=lambda: False,
     )

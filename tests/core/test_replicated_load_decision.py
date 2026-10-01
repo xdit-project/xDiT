@@ -177,6 +177,7 @@ def preflight_loader(runner):
     # answer is whatever the test set on the runner.
     loader.backends = SimpleNamespace(
         impl_for=lambda _fmt: getattr(runner, "fp8_impl", "torchao"),
+        why_not=lambda _fmt: "stub registry",
         adapter_for=lambda _fmt: None,
         preflight=lambda: None,
         assert_offload_is_compatible=lambda: None,
@@ -650,6 +651,7 @@ def test_wan22_spec_resolves_after_dynamic_instance_settings(monkeypatch):
     loader = ModelLoader(runner)
     loader.backends = SimpleNamespace(
         impl_for=lambda _fmt: getattr(runner, "fp8_impl", "torchao"),
+        why_not=lambda _fmt: "stub registry",
         adapter_for=lambda _fmt: None,
         preflight=lambda: None,
         assert_offload_is_compatible=lambda: None,
@@ -674,6 +676,7 @@ def test_wan22_spec_resolves_after_dynamic_instance_settings(monkeypatch):
     loader = ModelLoader(runner)
     loader.backends = SimpleNamespace(
         impl_for=lambda _fmt: getattr(runner, "fp8_impl", "torchao"),
+        why_not=lambda _fmt: "stub registry",
         adapter_for=lambda _fmt: None,
         preflight=lambda: None,
         assert_offload_is_compatible=lambda: None,
@@ -1614,7 +1617,7 @@ def test_a_blockwise_filled_text_encoder_needs_no_post_load_fallback(monkeypatch
 
     assert (kwargs, config) == ({"text_encoder": "meta"}, None)
     # Recorded as already quantized, so the post-load walk leaves the filled blocks alone.
-    assert "text_encoder" in runner.quantization_ledger.fp8_descriptor_components
+    assert ("text_encoder", "fp8") in runner.quantization_ledger.described
     assert runner.quantization_ledger.fp8_streaming_targets
 
 

@@ -532,7 +532,5 @@ def prepare_text_encoder_fp8_load(
             f"{component_name} FP8 cannot fall back before allocation: " f"{fallback}"
         )
     return PreparedQuantLoad(
-        descriptor=descriptor_for(
-            adapter, component_name, "post_load", fallback
-        )
+        descriptor=descriptor_for(adapter, component_name, "post_load", fallback)
     )

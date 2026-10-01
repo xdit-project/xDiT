@@ -142,6 +142,7 @@ def test_the_snapshot_still_describes_unmigrated_models():
 # what the oracle above cannot see: which block a pattern picks out
 # ---------------------------------------------------------------------------
 
+
 def _translated():
     """Migrated models that held blocks back by block-relative prefix.
 
@@ -192,18 +193,18 @@ def test_a_translated_pattern_holds_back_exactly_what_it_used_to(cls, entry):
         for leaf in ("attn.to_q", "ffn.net.0.proj", "ffn.net.2", "norm.linear"):
             local = f"{index}.{leaf}"
             expected = "fp8" if held_high(local, prefixes, suffixes) else "fp4"
-            assert plan.format_for(f"{root}.{local}") == expected, (
-                f"{cls.__name__}: {root}.{local}"
-            )
+            assert (
+                plan.format_for(f"{root}.{local}") == expected
+            ), f"{cls.__name__}: {root}.{local}"
 
 
 @pytest.mark.parametrize(
     ("raw", "sp_world_size", "quantized"),
     [
-        ("int8", 1, True),   # one rank sees the whole caption
+        ("int8", 1, True),  # one rank sees the whole caption
         ("int8", 8, False),  # chunked below torch._int_mm's minimum M
         ("int8", 4, False),
-        ("fp8", 8, True),    # no floor, so the chunking does not matter
+        ("fp8", 8, True),  # no floor, so the chunking does not matter
     ],
 )
 def test_z_image_context_refiner_follows_the_kernels_floor(
@@ -263,6 +264,7 @@ def test_declared_formats_match_the_recorded_capabilities(cls):
 # the deliberate change: `only` narrows every format, `include_suffixes` did not
 # ---------------------------------------------------------------------------
 
+
 def _only_models():
     """Migrated models that quantize a subset of the leaves in their blocks."""
     for cls, entry in CHECKABLE:
@@ -304,14 +306,12 @@ def test_only_narrows_every_format_the_same_way(cls, entry):
     )
 
     for profile in _profiles(entry):
-        plan = resolve(
-            cls.settings.gemm_targets, GemmQuantizationSpec.parse(profile)
-        )
+        plan = resolve(cls.settings.gemm_targets, GemmQuantizationSpec.parse(profile))
         for leaf in select.only:
             path = f"{root}.0.{leaf}"
-            assert plan.format_for(path) is not None, (
-                f"{profile}: {path} is declared but quantized by nothing"
-            )
+            assert (
+                plan.format_for(path) is not None
+            ), f"{profile}: {path} is declared but quantized by nothing"
         for leaf in excluded:
             path = f"{root}.0.{leaf}"
             assert plan.format_for(path) is None, (

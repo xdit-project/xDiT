@@ -89,9 +89,7 @@ def test_a_pair_with_no_registered_class_is_refused(modules):
     a = modules.adapter
 
     with pytest.raises(modules.contracts.UnsupportedLoadContract, match="no aiter"):
-        a.build_adapter(
-            "int8", "aiter", capability=a.FormatCapability(available=True)
-        )
+        a.build_adapter("int8", "aiter", capability=a.FormatCapability(available=True))
 
 
 def test_hardware_and_package_probes_are_injectable(modules):

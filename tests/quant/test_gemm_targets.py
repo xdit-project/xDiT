@@ -26,6 +26,7 @@ TARGETS = GemmTargets(
 # matching
 # ---------------------------------------------------------------------------
 
+
 def test_a_module_matches_itself_and_its_descendants():
     select = Select(modules=(BLOCKS,))
     assert select.matches(BLOCKS)
@@ -47,7 +48,7 @@ def test_suffixes_match_whole_segments():
 
 
 def test_prefixes_do_not_need_a_trailing_dot_to_be_exact():
-    """"3." vs "30." is the trap absolute segment matching removes."""
+    """ "3." vs "30." is the trap absolute segment matching removes."""
     select = Select(prefixes=(f"{BLOCKS}.3",))
     assert select.matches(f"{BLOCKS}.3.attn.to_qkv")
     assert not select.matches(f"{BLOCKS}.30.attn.to_qkv")
@@ -73,6 +74,7 @@ def test_keep_high_may_name_any_targeted_component():
 # ---------------------------------------------------------------------------
 # resolving
 # ---------------------------------------------------------------------------
+
 
 def test_one_format_quantizes_every_target():
     """`--gemm_quantization fp8`: the high/low split has nothing to say."""
@@ -111,7 +113,9 @@ def test_the_text_encoder_is_quantized_only_when_asked():
     assert resolve(TARGETS, GemmQuantizationSpec.parse("fp8")).format_for(path) is None
 
     plan = resolve(
-        TARGETS, GemmQuantizationSpec.parse("fp8"), enable=("transformer", "text_encoder")
+        TARGETS,
+        GemmQuantizationSpec.parse("fp8"),
+        enable=("transformer", "text_encoder"),
     )
     assert plan.format_for(path) == "fp8"
 
@@ -180,7 +184,9 @@ def test_roots_narrow_to_one_component_for_loaders_that_split_them():
         GemmQuantizationSpec.parse("fp8"),
         enable=("transformer", "text_encoder"),
     )
-    assert plan.roots("fp8", component="text_encoder") == ("text_encoder.encoder.block",)
+    assert plan.roots("fp8", component="text_encoder") == (
+        "text_encoder.encoder.block",
+    )
     assert BLOCKS in plan.roots("fp8", component="transformer")
     assert plan.roots("fp8", component="vae") == ()
 
@@ -440,4 +446,6 @@ def test_the_log_names_a_suffix_carve_out():
     assert len(header) == 1
     assert "transformer.blocks.0" in header[0]
     assert "net.0.proj" in header[0] and "net.2" in header[0]
-    assert "GEMM quantization: transformer.blocks -> FP4; selected layers -> FP8" in lines
+    assert (
+        "GEMM quantization: transformer.blocks -> FP4; selected layers -> FP8" in lines
+    )

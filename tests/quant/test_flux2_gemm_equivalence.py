@@ -29,8 +29,14 @@ TEXT_ENCODER = "text_encoder.model.language_model.layers"
 #: What FLUX.2-dev declared before it was migrated, recorded here so the
 #: comparison outlives the fields themselves. Every test below that says
 #: "the legacy path" means these values through the unchanged legacy code.
-LEGACY_FP8_GEMM = ["transformer.transformer_blocks", "transformer.single_transformer_blocks"]
-LEGACY_FP4_GEMM = ["transformer.transformer_blocks", "transformer.single_transformer_blocks"]
+LEGACY_FP8_GEMM = [
+    "transformer.transformer_blocks",
+    "transformer.single_transformer_blocks",
+]
+LEGACY_FP4_GEMM = [
+    "transformer.transformer_blocks",
+    "transformer.single_transformer_blocks",
+]
 LEGACY_TEXT_ENCODER = ["text_encoder.model.language_model.layers"]
 assert LEGACY_FP8_GEMM == LEGACY_FP4_GEMM  # the split was never by format
 
@@ -80,11 +86,7 @@ def _legacy(spec: GemmQuantizationSpec, *, text_encoder: bool) -> dict:
 def _resolved(spec: GemmQuantizationSpec, *, text_encoder: bool) -> dict:
     enable = ("transformer", "text_encoder") if text_encoder else ("transformer",)
     plan = resolve(xFuserFlux2Model.settings.gemm_targets, spec, enable=enable)
-    return {
-        fmt: sorted(plan.roots(fmt))
-        for fmt in spec.formats
-        if fmt != "none"
-    }
+    return {fmt: sorted(plan.roots(fmt)) for fmt in spec.formats if fmt != "none"}
 
 
 # FLUX.2-dev's capabilities allow fp8, fp4 and the fp4/fp8 tier; the text
@@ -117,7 +119,9 @@ def test_none_quantizes_nothing():
 @pytest.mark.parametrize("raw", ["fp8", "fp4", "low=fp4,high=fp8"])
 def test_every_transformer_block_is_quantized(raw):
     """Leaf paths, not just the declared roots: this is what the loaders walk."""
-    plan = resolve(xFuserFlux2Model.settings.gemm_targets, GemmQuantizationSpec.parse(raw))
+    plan = resolve(
+        xFuserFlux2Model.settings.gemm_targets, GemmQuantizationSpec.parse(raw)
+    )
     spec = GemmQuantizationSpec.parse(raw)
     for root in TRANSFORMER:
         assert plan.format_for(f"{root}.0.attn.to_qkv") == spec.low
@@ -132,7 +136,9 @@ def test_the_text_encoder_stays_fp8_in_every_profile_that_allows_it():
 
     targets = xFuserFlux2Model.settings.gemm_targets
     pure = resolve(targets, GemmQuantizationSpec.parse("fp8"), enable=enable)
-    tiered = resolve(targets, GemmQuantizationSpec.parse("low=fp4,high=fp8"), enable=enable)
+    tiered = resolve(
+        targets, GemmQuantizationSpec.parse("low=fp4,high=fp8"), enable=enable
+    )
 
     assert pure.format_for(leaf) == "fp8"
     assert tiered.format_for(leaf) == "fp8"
@@ -216,9 +222,7 @@ def test_an_unsupported_format_is_refused_before_any_target_is_read(unsupported)
 
     model = object.__new__(xFuserFlux2Model)
     model.settings = copy.deepcopy(xFuserFlux2Model.settings)
-    config = xFuserArgs(
-        model=model.settings.model_name, gemm_quantization=unsupported
-    )
+    config = xFuserArgs(model=model.settings.model_name, gemm_quantization=unsupported)
 
     with pytest.raises(ValueError, match="does not support GEMM format"):
         model._validate_config(config)
@@ -240,9 +244,7 @@ def test_the_high_tier_survives_the_rewrite(raw, text_encoder):
     spec = GemmQuantizationSpec.parse(raw)
     gemm_plan = _plan_for(raw, text_encoder=text_encoder).gemm_plan
     rewritten = list(gemm_plan.roots(gemm_plan.high)) if gemm_plan.high else []
-    expected = (
-        _legacy(spec, text_encoder=text_encoder)[spec.high] if spec.high else []
-    )
+    expected = _legacy(spec, text_encoder=text_encoder)[spec.high] if spec.high else []
     assert sorted(rewritten) == expected
 
 
@@ -270,9 +272,11 @@ def test_the_high_format_drives_the_adapter_choice():
 # phase 4, step 1: the log says what the plan decided
 # ---------------------------------------------------------------------------
 
+
 def _logged(plan_obj, monkeypatch):
     lines = []
     from xfuser.model_executor.models.runner_models.loading import quantization_plan
+
     monkeypatch.setattr(quantization_plan, "log", lines.append)
     plan_obj.log_gemm_plan()
     return lines
@@ -280,11 +284,7 @@ def _logged(plan_obj, monkeypatch):
 
 def _mapping(lines, *, component="transformer"):
     """The target -> format decisions for one component, sans tier header."""
-    return sorted(
-        l
-        for l in lines
-        if l.startswith(f"GEMM quantization: {component}")
-    )
+    return sorted(l for l in lines if l.startswith(f"GEMM quantization: {component}"))
 
 
 def test_the_log_now_mentions_the_text_encoder(monkeypatch):
@@ -302,9 +302,7 @@ def test_the_log_now_mentions_the_text_encoder(monkeypatch):
 
 
 def test_the_tier_log_names_the_high_modules(monkeypatch):
-    lines = _logged(
-        _plan_for("low=fp4,high=fp8", text_encoder=True), monkeypatch
-    )
+    lines = _logged(_plan_for("low=fp4,high=fp8", text_encoder=True), monkeypatch)
     header = [l for l in lines if l.startswith("GEMM high-precision tier:")]
     assert len(header) == 1
     assert "format=fp8" in header[0] and TEXT_ENCODER in header[0]
@@ -319,6 +317,7 @@ def test_an_unquantized_run_logs_nothing(monkeypatch):
 # ---------------------------------------------------------------------------
 # phase 4, step 2: the text-encoder readers
 # ---------------------------------------------------------------------------
+
 
 def test_declared_components_reads_the_declaration_not_the_run():
     """It lists encoders to plan for, which the run's format cannot change."""
@@ -346,6 +345,7 @@ def test_declared_components_is_empty_without_text_encoder_targets():
 # ---------------------------------------------------------------------------
 # the advanced GEMM config overrides keep_high
 # ---------------------------------------------------------------------------
+
 
 def _configured(raw, **yaml):
     """A plan with an advanced GEMM config file applied."""

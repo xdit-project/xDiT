@@ -52,10 +52,7 @@ def make_plan(
 def _targeted(plan):
     """The components this run quantizes, and what it quantizes in each."""
     gemm_plan = plan.gemm_plan
-    return {
-        name: sorted(select.roots())
-        for name, select in gemm_plan.targeted.items()
-    }
+    return {name: sorted(select.roots()) for name, select in gemm_plan.targeted.items()}
 
 
 def test_text_encoder_targets_excluded_by_default(monkeypatch):

@@ -36,16 +36,12 @@ BLOCK_COUNT = 4
 
 def _leaves_under(root):
     return tuple(
-        f"{root}.{index}.{leaf}"
-        for index in range(BLOCK_COUNT)
-        for leaf in LEAVES
+        f"{root}.{index}.{leaf}" for index in range(BLOCK_COUNT) for leaf in LEAVES
     )
 
 
 ALL_LEAVES = tuple(
-    leaf
-    for root in BLOCKS + (TEXT_ENCODER,)
-    for leaf in _leaves_under(root)
+    leaf for root in BLOCKS + (TEXT_ENCODER,) for leaf in _leaves_under(root)
 )
 
 
@@ -131,8 +127,11 @@ def _loader(raw, *, text_encoder=True, fp8_before_move=True, targets=TARGETS):
     backends.adapter_for = lambda fmt: (
         backends.fp6
         if fmt == "fp6"
-        else (backends.fp8 or backends.blockwise_fp8) if fmt == "fp8"
-        else backends.format
+        else (
+            (backends.fp8 or backends.blockwise_fp8)
+            if fmt == "fp8"
+            else backends.format
+        )
     )
     return SimpleNamespace(
         model=model,
@@ -393,6 +392,7 @@ def test_an_unquantized_run_gets_no_callable():
 # ---------------------------------------------------------------------------
 # phase 4, step 3: the FSDP predicates ask the plan
 # ---------------------------------------------------------------------------
+
 
 def _backends_for(raw, *, text_encoder=True, targets=TARGETS):
     from xfuser.model_executor.models.runner_models.loading.backend_selection import (

@@ -66,9 +66,7 @@ class FormatCapability:
 class Capabilities:
     """Every ``(format, implementation)`` pair this machine was probed for."""
 
-    records: Mapping[Tuple[str, str], FormatCapability] = field(
-        default_factory=dict
-    )
+    records: Mapping[Tuple[str, str], FormatCapability] = field(default_factory=dict)
 
     def of(self, format_name: str, impl: str) -> FormatCapability:
         """This machine's record for one pair, absent meaning "never probed"."""
@@ -466,9 +464,7 @@ def prepare_native_load(
     if not stream_quant:
         fallback = "streaming disabled by the runner"
     elif not targets:
-        fallback = (
-            f"{component_name} has no {adapter.format.value.upper()} targets"
-        )
+        fallback = f"{component_name} has no {adapter.format.value.upper()} targets"
     elif hybrid and not adapter.streams_under_hybrid:
         fallback = (
             f"native {adapter.format.value.upper()} streaming cannot preserve "

@@ -71,7 +71,6 @@ class Select:
         return tuple(dict.fromkeys(self.modules + self.prefixes))
 
 
-
 #: The components a model can target. Adding one -- "vae", say -- means adding
 #: it here and as a field below; nothing after that is component-aware.
 COMPONENTS = ("transformer", "text_encoder")
@@ -112,7 +111,8 @@ class GemmTargets:
             root for select in self.components.values() for root in select.roots()
         ]
         stray = [
-            root for root in self.keep_high.roots()
+            root
+            for root in self.keep_high.roots()
             if not any(_is_under(root, t) for t in targeted)
         ]
         if stray:
@@ -128,9 +128,7 @@ class GemmTargets:
                 "prefixes; a suffix or a leaf list would have to be carved "
                 "inside a target, which is not what it means."
             )
-        outside = [
-            root for root in self.short_sequence.roots() if root not in targeted
-        ]
+        outside = [root for root in self.short_sequence.roots() if root not in targeted]
         if outside:
             raise ValueError(
                 f"short_sequence selects modules that are not declared "
@@ -164,9 +162,7 @@ class GemmPlan:
         found = [leaf for select in self.targeted.values() for leaf in select.only]
         return tuple(dict.fromkeys(found))
 
-    def declared_roots(
-        self, *, component: Optional[str] = None
-    ) -> Tuple[str, ...]:
+    def declared_roots(self, *, component: Optional[str] = None) -> Tuple[str, ...]:
         """Every subtree this run quantizes, whatever format each leaf takes.
 
         The starting points for a walk. `roots` answers a different question --
@@ -182,9 +178,7 @@ class GemmPlan:
             selects = [self.targeted[component]] if component in self.targeted else []
         return tuple(dict.fromkeys(r for select in selects for r in select.roots()))
 
-    def relative_to(
-        self, component_name: str, roots: Iterable[str]
-    ) -> Tuple[str, ...]:
+    def relative_to(self, component_name: str, roots: Iterable[str]) -> Tuple[str, ...]:
         """`roots` rewritten as paths under `component_name`, others dropped.
 
         A converter is handed one component and walks paths relative to it,
@@ -343,9 +337,7 @@ def resolve(
     high = spec.high if low is not None else None
 
     targeted = {
-        name: select
-        for name, select in targets.components.items()
-        if name in enable
+        name: select for name, select in targets.components.items() if name in enable
     }
     if sp_world_size > 1 and targets.short_sequence:
         # Sequence parallelism can chunk these modules below the M their

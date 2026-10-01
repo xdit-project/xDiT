@@ -47,7 +47,9 @@ class GemmQuantizationSpec:
         object.__setattr__(self, "high", high)
 
         unknown = [
-            name for name in (low, high) if name is not None and name not in _KNOWN_FORMATS
+            name
+            for name in (low, high)
+            if name is not None and name not in _KNOWN_FORMATS
         ]
         if unknown:
             raise ValueError(

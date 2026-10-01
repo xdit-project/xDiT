@@ -15,8 +15,10 @@ the run and no longer.
 """
 
 import functools
+from types import SimpleNamespace
 
-from .format_backends import module_paths_overlap
+from xfuser.envs import _is_cuda
+from .quant_adapter import module_paths_overlap
 
 
 class QuantizationBackends:
@@ -30,15 +32,16 @@ class QuantizationBackends:
     def __init__(self, loader) -> None:
         self.loader = loader
         self.model = loader.model
+        self._adapters = {}
 
     def preflight(self) -> None:
-        """Resolve and validate only the adapters required by this run."""
-        _ = self.fp8
-        _ = self.format
-        if self._uses_mxfp6_contract():
-            _ = self.fp6
-        if self.uses_blockwise_fp8():
-            _ = self.blockwise_fp8
+        """Resolve and validate every adapter this run will need.
+
+        Before allocation, so "this cannot be sharded here" is a startup error
+        rather than a failure at the first all-gather.
+        """
+        for format_name in self._formats_in_play():
+            _ = self.adapter_for(format_name)
 
     def _format_value(self) -> str | None:
         contract = getattr(getattr(self, "loader", None), "load_contract", None)
@@ -48,141 +51,109 @@ class QuantizationBackends:
         return self._format_value() in {"fp6", "fp4_fp6"}
 
     @functools.cached_property
-    def fp8(self):
-        """The selected FP8 implementation, validated before allocation."""
-        contract = self.loader.load_contract
-        if contract is None or contract.requested_format.value != "fp8":
-            return None
-        from .fp8_backends import (
-            probe_fp8_backend_capabilities,
-            select_fp8_backend,
-        )
-
-        return select_fp8_backend(
-            contract,
-            capabilities=probe_fp8_backend_capabilities(),
-        )
-
-    @functools.cached_property
     def format_capabilities(self):
-        """Probe format capabilities once, and only include MXFP6 when requested."""
+        """Probe format capabilities once, and only include MXFP6 when asked."""
 
         from .format_backends import probe_format_backend_capabilities
 
         return probe_format_backend_capabilities(
-            require_mxfp6=self._uses_mxfp6_contract()
+            require_mxfp6="fp6" in self._formats_in_play()
         )
 
     @functools.cached_property
-    def format(self):
-        """Primary FP4/FP6/INT8 implementation, validated before allocation."""
-        contract = self.loader.load_contract
-        if contract is None or contract.requested_format.value not in {
-            "fp4",
-            "fp6",
-            "fp4_fp6",
-            "int8",
-        }:
-            return None
+    def fp8_capabilities(self):
+        from .fp8_backends import probe_fp8_backend_capabilities
+
+        return probe_fp8_backend_capabilities()
+
+    def _impl_for(self, format_name: str) -> str | None:
+        """Which implementation stores this format on this machine.
+
+        The one place format and implementation meet. A new format adds a row;
+        nothing else in the loading layer changes.
+        """
+        from .fp8_backends import fp8_backend_name
+
+        if format_name == "fp8":
+            return fp8_backend_name(self.fp8_capabilities)
+        return {
+            "fp4": "torchao" if _is_cuda() else "aiter",
+            "fp6": "aiter",
+            "int8": "torchao",
+        }.get(format_name)
+
+    def _select(self, format_name: str):
+        """Resolve one format to its adapter, refusing an FSDP placement it cannot take.
+
+        The run names a format; this says which implementation stores it here
+        and whether the shape that implementation stores can be sharded where
+        this run will put it. Both answers are the same for a format whether it
+        arrived as the run's low tier or its high one.
+        """
+
+        from .contracts import QuantizationBackend, QuantizationFormat
+        from .fp8_backends import select_fp8_backend, validate_torchao_fsdp2_patches
         from .format_backends import (
             select_format_backend,
             validate_format_fsdp_placement,
         )
 
-        capabilities = self.format_capabilities
+        impl = self._impl_for(format_name)
+        if impl is None:
+            return None
+        contract = SimpleNamespace(
+            requested_format=QuantizationFormat(format_name),
+            selected_backend=QuantizationBackend(impl),
+        )
+        if format_name == "fp8":
+            adapter = select_fp8_backend(contract, capabilities=self.fp8_capabilities)
+            validate_torchao_fsdp2_patches(
+                contract,
+                capabilities=self.fp8_capabilities,
+                required=self.places_torchao_tensor_subclass_under_fsdp2(adapter),
+            )
+            return adapter
+
+        plan = self.loader.quantization_plan.gemm_plan
+        is_low = plan is not None and format_name == plan.low
         adapter = select_format_backend(
             contract,
-            capabilities=capabilities,
-            hybrid=self.model.config.use_hybrid_gemm_schedule,
-        )
-        validate_format_fsdp_placement(
-            contract,
-            adapter,
-            capabilities=capabilities,
-            required=self.places_format_backend_under_fsdp2(),
-        )
-        return adapter
-
-    @functools.cached_property
-    def fp6(self):
-        """MXFP6 owner for pure mode or the mixed mode's FP8 remainder."""
-
-        contract = self.loader.load_contract
-        if contract is None:
-            return None
-        format_value = contract.requested_format.value
-        if format_value == "fp6":
-            return self.format
-        if format_value != "fp4_fp6":
-            return None
-        from .format_backends import (
-            select_mxfp6_backend,
-            validate_format_fsdp_placement,
-        )
-
-        adapter = select_mxfp6_backend(
-            contract,
             capabilities=self.format_capabilities,
+            # Only the format a step actually runs in bf16-vs-quantized pairs
+            # can refuse the hybrid schedule; the companion never drives it.
+            hybrid=is_low and self.model.config.use_hybrid_gemm_schedule,
         )
         validate_format_fsdp_placement(
             contract,
             adapter,
             capabilities=self.format_capabilities,
-            required=self.places_mxfp6_backend_under_fsdp2(),
+            required=(
+                self.places_format_backend_under_fsdp2()
+                if is_low
+                else self.places_mxfp6_backend_under_fsdp2()
+            ),
         )
         return adapter
+
+    def _formats_in_play(self) -> tuple:
+        """The formats this run will place, low and high."""
+        plan = self.loader.quantization_plan.gemm_plan
+        if plan is None:
+            return ()
+        return tuple(dict.fromkeys(n for n in (plan.low, plan.high) if n))
 
     def adapter_for(self, format_name: str):
-        """The converter that owns one format.
+        """The implementation that stores one format on this machine.
 
-        A run can name any format at either tier, so callers ask for the one
-        they resolved rather than picking between named attributes. `fp8` is
-        the pure-FP8 implementation when the contract requested exactly FP8,
-        and the blockwise converter when FP8 is one tier of a hybrid load.
+        A lookup, not a slot. The run names formats and the plan says which
+        module takes which; this turns a format into the one thing that can
+        store it here. Nothing above it asks which format it got back.
         """
-        if format_name == "fp6":
-            return self.fp6
-        if format_name == "fp8":
-            return self.fp8 or self.blockwise_fp8
-        return self.format
-
-    @functools.cached_property
-    def blockwise_fp8(self):
-        """FP8 converter for pure FP8 and FP8-only portions of hybrid loads."""
-        contract = self.loader.load_contract
-        if contract is None:
+        if format_name in (None, "none"):
             return None
-        from .fp8_backends import (
-            probe_fp8_backend_capabilities,
-            select_blockwise_fp8_backend,
-            validate_torchao_fsdp2_patches,
-        )
-
-        capabilities = probe_fp8_backend_capabilities()
-        adapter = select_blockwise_fp8_backend(contract, capabilities=capabilities)
-        validate_torchao_fsdp2_patches(
-            contract,
-            capabilities=capabilities,
-            required=self.places_torchao_tensor_subclass_under_fsdp2(adapter),
-        )
-        return adapter
-
-    def fp8_adapter_for_contract(self):
-        """The backend that owns FP8 storage for the active contract.
-
-        FP8 storage has two owners depending on the format requested: a pure fp8 run quantizes
-        through the fp8 adapter, while an fp4 run quantizes its fp8-only remainder through the
-        blockwise one.
-        """
-        contract = self.loader.load_contract
-        if contract is None:
-            return None
-        format_value = contract.requested_format.value
-        if format_value == "fp8":
-            return self.fp8
-        if format_value == "fp4":
-            return self.blockwise_fp8
-        return None
+        if format_name not in self._adapters:
+            self._adapters[format_name] = self._select(format_name)
+        return self._adapters[format_name]
 
     def _fsdp_target_paths(self) -> set:
         """Every pipe-level module path FSDP will wrap, empty when nothing is sharded."""
@@ -358,20 +329,15 @@ class QuantizationBackends:
     def transformer_adapter(self, component_name: str):
         """The adapter and component-relative targets owning one transformer.
 
-        Format targets win over fp8 ones: a component listed for fp4 or int8 is quantized by the
-        format backend, and its fp8 entries describe the remainder that backend leaves behind.
+        The low format wins where it claims the component, and the high one
+        answers for a component the low format never reaches -- which is the
+        only sense in which this still knows there are two.
         """
-        format_targets = self.format_targets_for(component_name)
-        if format_targets:
-            return self.format, format_targets
         plan = self.loader.quantization_plan.gemm_plan
-        fp8_targets = (
-            plan.relative_to(component_name, plan.roots("fp8"))
-            if plan is not None
-            else ()
-        )
-        if not fp8_targets:
+        if plan is None:
             return None, ()
-        if self._format_value() == "fp4_fp6":
-            return self.fp6, fp8_targets
-        return self.fp8_adapter_for_contract(), fp8_targets
+        for format_name in self._formats_in_play():
+            targets = plan.relative_to(component_name, plan.roots(format_name))
+            if targets:
+                return self.adapter_for(format_name), targets
+        return None, ()

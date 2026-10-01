@@ -405,6 +405,7 @@ class AiterFp8BackendAdapter(QuantAdapter):
 
 
 class TorchaoFp8BackendAdapter(QuantAdapter):
+    default_unavailable_reason = "Diffusers TorchAoConfig API is unavailable"
     storage_semantics = "tensorwise_dynamic"
     parameter_semantics = "torchao_float8_tensor_subclass"
 

@@ -1331,10 +1331,10 @@ def _attach_backends(runner):
 
     loader = loader_for(runner)
     backends = QuantizationBackends(loader)
-    backends.__dict__.update(
-        fp8=getattr(runner, "fp8_backend", None),
-        blockwise_fp8=getattr(runner, "blockwise_fp8_backend", None),
-        format=getattr(runner, "format_backend", None),
+    # Seed the resolution cache rather than probe: these fixtures are about
+    # what the loader does with an adapter, not which one the machine offers.
+    backends._adapters["fp8"] = getattr(runner, "fp8_backend", None) or getattr(
+        runner, "blockwise_fp8_backend", None
     )
     loader.backends = backends
     runner.backends = backends
@@ -1448,12 +1448,12 @@ def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
     }
 
 
-def test_hybrid_meta_te_uses_blockwise_fp8_backend(monkeypatch):
+def test_hybrid_meta_te_uses_the_fp8_adapter(monkeypatch):
 
     sentinel = SimpleNamespace(backend=SimpleNamespace(value="torchao"))
     runner = SimpleNamespace(
-        # A tiered run is an FP4 contract; its FP8 tier, encoder included, is
-        # placed by the blockwise converter.
+        # A tiered run names FP8 for its high tier, and the encoder is placed
+        # by whatever stores FP8 here -- the same adapter a pure FP8 run uses.
         load_contract=SimpleNamespace(requested_format=SimpleNamespace(value="fp4")),
         fp8_backend=None,
         blockwise_fp8_backend=sentinel,

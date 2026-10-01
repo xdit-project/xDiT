@@ -118,8 +118,6 @@ Each walk starts where ``walk_roots`` says -- the subtrees that format owns,
         if converts_first != before_device_move:
             continue
 
-        is_primary = adapter is loader.backends.format
-
         for module_name in roots:
             already = ledger.already_quantized(fp8=format_name == "fp8")
             if any(module_path_is_covered(module_name, owner) for owner in already):
@@ -133,22 +131,26 @@ Each walk starts where ``walk_roots`` says -- the subtrees that format owns,
             }
             if before_device_move and offload_requested:
                 convert_kwargs["offload_to_cpu"] = True
-            if is_primary:
-                # Only the primary-format converter builds per-step wrappers,
-                # so only it is given the companion to pair with.
-                component_name = module_name.partition(".")[0]
-                if ledger.claim_description(component_name):
-                    descriptor = prepare_native_load(
-                        adapter,
-                        component_name=component_name,
-                        targets=loader.backends.format_targets_for(component_name),
-                        stream_quant=not _is_cuda(),
-                        hybrid=model.config.use_hybrid_gemm_schedule,
-                    ).descriptor
-                    log(descriptor.log_message())
-                companion = _hybrid_companion(loader, plan, format_name)
-                if companion is not None:
-                    convert_kwargs["companion"] = companion
+            # Claimed under the same key the skip above reads, so a component
+            # whose descriptor the load path already logged is not logged twice
+            # and each format in play still gets a line of its own.
+            component_name = module_name.partition(".")[0]
+            if ledger.claim_description(
+                component_name, fp8=format_name == "fp8"
+            ):
+                descriptor = prepare_native_load(
+                    adapter,
+                    component_name=component_name,
+                    targets=plan.relative_to(
+                        component_name, plan.roots(format_name)
+                    ),
+                    stream_quant=not _is_cuda(),
+                    hybrid=model.config.use_hybrid_gemm_schedule,
+                ).descriptor
+                log(descriptor.log_message())
+            companion = _hybrid_companion(loader, plan, format_name)
+            if companion is not None:
+                convert_kwargs["companion"] = companion
 
             adapter.convert_module(
                 rgetattr(model.pipe, module_name), **convert_kwargs

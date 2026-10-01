@@ -248,10 +248,9 @@ def build_block_quantize_fn(
         for format_name in present:
             adapter = adapters[format_name]
             convert_kwargs = {}
-            if adapter is loader.backends.format:
-                companion = _hybrid_companion(loader, plan, format_name)
-                if companion is not None:
-                    convert_kwargs.update(companion=companion)
+            companion = _hybrid_companion(loader, plan, format_name)
+            if companion is not None:
+                convert_kwargs.update(companion=companion)
             adapter.convert_block(
                 block,
                 device=device,

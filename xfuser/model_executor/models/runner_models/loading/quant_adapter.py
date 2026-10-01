@@ -172,6 +172,10 @@ class QuantAdapter:
     #: want their final device. Decides which side of ``pipe.to`` a walk runs.
     converts_before_device_move = False
     supports_text_encoder_post_load = True
+    #: What to say when this implementation cannot stream per weight and the
+    #: probe recorded no reason of its own. Each implementation names the API
+    #: it would have streamed through, so the log says which one was missing.
+    default_unavailable_reason = "native per-weight streaming is unavailable"
 
     def __init__(
         self,
@@ -206,8 +210,7 @@ class QuantAdapter:
 
         if not self.uses_native_transformer_streaming:
             raise TargetMappingUnavailable(
-                self.native_unavailable_reason
-                or "native per-weight streaming is unavailable"
+                self.native_unavailable_reason or self.default_unavailable_reason
             )
         if model_factory is None:
             raise TargetMappingUnavailable(
@@ -225,7 +228,15 @@ class QuantAdapter:
             min_layer_size=self.min_layer_size,
             residual_match=residual_match,
         )
-        return self._stream_config_factory(ownership.exclusions), ownership
+        try:
+            config = self._stream_config_factory(ownership.exclusions)
+        except TargetMappingUnavailable:
+            raise
+        except Exception as exc:
+            raise TargetMappingUnavailable(
+                f"{self.default_unavailable_reason}: {type(exc).__name__}: {exc}"
+            ) from exc
+        return config, ownership
 
     def transformer_stream_config(self, targets, *, model_factory=None):
         config, _ = self.transformer_stream_plan(targets, model_factory=model_factory)

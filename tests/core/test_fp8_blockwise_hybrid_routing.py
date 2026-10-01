@@ -35,13 +35,17 @@ def backends(model):
 
     loader = runtime(model)
     selected = QuantizationBackends(loader)
-    for runtime_name, fixture_name in (
-        ("fp8", "fp8_backend"),
-        ("format", "format_backend"),
-        ("blockwise_fp8", "blockwise_fp8_backend"),
-    ):
-        if hasattr(model, fixture_name):
-            selected.__dict__[runtime_name] = getattr(model, fixture_name)
+    # Seed the resolution cache by format rather than probe: these fixtures say
+    # what the selector does with an adapter, not which one the machine offers.
+    fp8 = getattr(model, "fp8_backend", None) or getattr(
+        model, "blockwise_fp8_backend", None
+    )
+    if fp8 is not None:
+        selected._adapters["fp8"] = fp8
+    low = getattr(model, "format_backend", None)
+    plan = loader.quantization_plan.gemm_plan
+    if low is not None and plan is not None and plan.low:
+        selected._adapters[plan.low] = low
     return selected
 
 
@@ -651,28 +655,42 @@ def test_eager_fp4_with_fp8_only_target_preflights_component_backend():
 
 
 @pytest.mark.parametrize(
-    ("uses_blockwise", "expected"),
+    ("profile", "expected"),
     [
-        (False, ["fp8", "format"]),
-        (True, ["fp8", "format", "blockwise_fp8"]),
+        ("fp8", ["fp8"]),
+        ("fp4", ["fp4"]),
+        ("low=fp4,high=fp8", ["fp4", "fp8"]),
+        ("low=int8,high=fp8", ["int8", "fp8"]),
     ],
 )
-def test_quantization_backends_preflight_resolves_required_adapters(
-    monkeypatch, uses_blockwise, expected
+def test_preflight_resolves_every_format_the_run_names(
+    monkeypatch, profile, expected
 ):
+    """Startup resolves the formats in play, whatever pair they are.
+
+    Resolving them here is what makes "this cannot be sharded" a startup
+    error; a pair the run never named is never probed.
+    """
     from xfuser.model_executor.models.runner_models.loading.backend_selection import (
         QuantizationBackends,
     )
+    from xfuser.config.gemm import GemmQuantizationSpec
+    from xfuser.model_executor.quant.targets import GemmTargets, Select, resolve
 
     observed = []
-    for name in ("fp8", "format", "blockwise_fp8"):
-        monkeypatch.setattr(
-            QuantizationBackends,
-            name,
-            property(lambda _self, name=name: observed.append(name)),
-        )
     selected = object.__new__(QuantizationBackends)
-    selected.uses_blockwise_fp8 = lambda: uses_blockwise
+    selected._adapters = {}
+    selected._select = lambda name: observed.append(name)
+    plan = resolve(
+        GemmTargets(
+            transformer=Select(modules=("transformer.blocks",)),
+            keep_high=Select(suffixes=("ff.net.2",)),
+        ),
+        GemmQuantizationSpec.parse(profile),
+    )
+    selected.loader = SimpleNamespace(
+        quantization_plan=SimpleNamespace(gemm_plan=plan)
+    )
 
     selected.preflight()
 
@@ -853,7 +871,7 @@ def test_backend_preflight_uses_component_target_requirement(monkeypatch):
 
     monkeypatch.setattr(
         fp8_backends,
-        "select_blockwise_fp8_backend",
+        "select_fp8_backend",
         select_backend,
     )
     monkeypatch.setattr(
@@ -870,7 +888,7 @@ def test_backend_preflight_uses_component_target_requirement(monkeypatch):
         materialization_mode=MaterializationMode.FSDP_META,
     )
 
-    selected = backends(model).blockwise_fp8
+    selected = backends(model).adapter_for("fp8")
 
     assert selected is adapter
     assert observed == [True]
@@ -894,7 +912,7 @@ def test_component_outside_fsdp_strategy_does_not_block_startup(monkeypatch):
         selected_backend=QuantizationBackend.TORCHAO,
     )
 
-    adapter = backends(model).blockwise_fp8
+    adapter = backends(model).adapter_for("fp8")
 
     assert adapter.backend is QuantizationBackend.TORCHAO
 
@@ -946,7 +964,7 @@ def test_fp4_override_under_fsdp_requires_patches_with_aiter_fp8_backend(
     )
 
     with pytest.raises(ValueError, match=r"FSDP.*fsdp_post_all_gather"):
-        backends(model).blockwise_fp8
+        backends(model).adapter_for("fp8")
 def test_streamed_fp8_target_does_not_skip_disjoint_target_in_component(
     monkeypatch,
 ):

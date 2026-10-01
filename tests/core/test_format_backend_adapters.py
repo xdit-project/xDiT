@@ -1,5 +1,6 @@
 """Dependency-light contracts for FP4 and INT8 materialization backends."""
 
+import importlib.machinery
 import importlib.util
 from pathlib import Path
 import sys
@@ -14,11 +15,33 @@ BACKENDS_PATH = (
 CONTRACTS_PATH = (
     ROOT / "xfuser/model_executor/models/runner_models/loading/contracts.py"
 )
+ADAPTER_PATH = (
+    ROOT / "xfuser/model_executor/models/runner_models/loading/quant_adapter.py"
+)
+
+
+#: A synthetic package over the loading directory. These modules are meant to
+#: be importable without the rest of the app, and they share a dependency-light
+#: base, so the loader gives relative imports somewhere to resolve rather than
+#: forcing the shared code to be duplicated or imported absolutely.
+_PKG = "format_adapter_pkg"
+
+
+def _package():
+    if _PKG not in sys.modules:
+        package = importlib.util.module_from_spec(
+            importlib.machinery.ModuleSpec(_PKG, None, is_package=True)
+        )
+        package.__path__ = [str(BACKENDS_PATH.parent)]
+        sys.modules[_PKG] = package
+    return sys.modules[_PKG]
 
 
 def _load_module(path, name):
-    spec = importlib.util.spec_from_file_location(name, path)
+    _package()
+    spec = importlib.util.spec_from_file_location(f"{_PKG}.{name}", path)
     module = importlib.util.module_from_spec(spec)
+    sys.modules[f"{_PKG}.{name}"] = module
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
@@ -27,8 +50,9 @@ def _load_module(path, name):
 @pytest.fixture(scope="module")
 def modules():
     contracts = _load_module(CONTRACTS_PATH, "format_adapter_contracts")
+    adapter = _load_module(ADAPTER_PATH, "quant_adapter")
     backends = _load_module(BACKENDS_PATH, "format_adapter_backends")
-    return SimpleNamespace(contracts=contracts, backends=backends)
+    return SimpleNamespace(contracts=contracts, backends=backends, adapter=adapter)
 
 
 def _contract(modules, format_name, backend_name, mode_name="EAGER"):
@@ -133,7 +157,13 @@ def test_cuda_nvfp4_hybrid_is_rejected_before_backend_use(modules):
         )
 
 
-def test_nvfp4_adapter_never_silently_ignores_hybrid(modules):
+def test_nvfp4_adapter_never_silently_ignores_a_companion(modules):
+    """The walk composes the hybrid pair, so refusing it has to happen here too.
+
+    Selection already refuses the schedule, but a companion handed to this
+    converter would otherwise be dropped and the run would quietly lose its
+    second precision.
+    """
     b = modules.backends
     adapter = b.TorchaoNvfp4BackendAdapter(
         backend=modules.contracts.QuantizationBackend.TORCHAO,
@@ -141,7 +171,7 @@ def test_nvfp4_adapter_never_silently_ignores_hybrid(modules):
     )
 
     with pytest.raises(RuntimeError, match=r"NVFP4.*hybrid"):
-        adapter.convert_module(object(), device="cuda:0", hybrid=True)
+        adapter.convert_module(object(), device="cuda:0", companion=object())
 
 
 def test_rocm_aiter_mxfp4_hybrid_remains_supported(modules):
@@ -394,7 +424,7 @@ def test_component_root_target_aligns_with_blockwise_wrapped_paths(modules):
         format_=modules.contracts.QuantizationFormat.INT8,
     )
 
-    descriptor = b.describe_blockwise_format_load(
+    descriptor = modules.adapter.describe_blockwise_load(
         adapter,
         component_name="transformer",
         targets=("",),
@@ -500,13 +530,14 @@ def test_nvfp4_native_streaming_excludes_only_precision_overrides(modules, monke
         lambda exclusions: captured.append(list(exclusions)) or sentinel,
     )
 
-    prepared = b.prepare_native_transformer_format_load(
+    prepared = modules.adapter.prepare_native_load(
         adapter,
         component_name="transformer",
         targets=("blocks",),
         stream_quant=True,
-        precision_prefixes=("0.attn",),
-        precision_suffixes=(".out_proj",),
+        residual_match=lambda name: (
+            name.startswith("blocks.0.attn") or name.endswith(".out_proj")
+        ),
         hybrid=False,
         model_factory=FakeModel,
     )
@@ -534,13 +565,11 @@ def test_nvfp4_native_streaming_rejects_hybrid_ownership(modules):
         native_transformer_streaming=True,
     )
 
-    prepared = b.prepare_native_transformer_format_load(
+    prepared = modules.adapter.prepare_native_load(
         adapter,
         component_name="transformer",
         targets=("blocks",),
         stream_quant=True,
-        precision_prefixes=(),
-        precision_suffixes=(),
         hybrid=True,
         model_factory=lambda: pytest.fail("must not inspect structure"),
     )
@@ -557,7 +586,7 @@ def test_mxfp4_never_claims_per_weight_streaming(modules):
         native_unavailable_reason=b.MXFP4_STREAMING_FALLBACK,
     )
 
-    prepared = b.prepare_native_transformer_format_load(
+    prepared = modules.adapter.prepare_native_load(
         adapter,
         component_name="transformer",
         targets=("blocks",),
@@ -577,7 +606,7 @@ def test_descriptor_declares_storage_sharding_and_trainability(modules):
         format_=modules.contracts.QuantizationFormat.FP4,
     )
 
-    descriptor = b.describe_blockwise_format_load(
+    descriptor = modules.adapter.describe_blockwise_load(
         adapter,
         component_name="transformer",
         targets=("blocks",),

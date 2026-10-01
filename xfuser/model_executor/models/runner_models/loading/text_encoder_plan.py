@@ -44,7 +44,8 @@ def plan_text_encoders(loader, existing_quantization_config=None):
     ledger = loader.quantization_ledger
     replicated_meta = loader.replicated_broadcast_load()
     fsdp_meta = False if replicated_meta else loader.fsdp_meta_load()
-    adapter = loader.backends.fp8_adapter_for_contract()
+    # Named outright, because this route only knows FP8 (see below).
+    adapter = loader.backends.adapter_for("fp8")
 
     component_configs = {}
     if adapter is not None:

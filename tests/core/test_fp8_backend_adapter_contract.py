@@ -1,5 +1,6 @@
 """Dependency-light contracts for generalized transformer FP8 load backends."""
 
+import importlib.machinery
 import importlib.util
 from pathlib import Path
 import sys
@@ -14,11 +15,33 @@ BACKENDS_PATH = (
 CONTRACTS_PATH = (
     ROOT / "xfuser/model_executor/models/runner_models/loading/contracts.py"
 )
+ADAPTER_PATH = (
+    ROOT / "xfuser/model_executor/models/runner_models/loading/quant_adapter.py"
+)
+
+
+#: A synthetic package over the loading directory. These modules are meant to
+#: be importable without the rest of the app, and they share a dependency-light
+#: base, so the loader gives relative imports somewhere to resolve rather than
+#: forcing the shared code to be duplicated or imported absolutely.
+_PKG = "fp8_adapter_pkg"
+
+
+def _package():
+    if _PKG not in sys.modules:
+        package = importlib.util.module_from_spec(
+            importlib.machinery.ModuleSpec(_PKG, None, is_package=True)
+        )
+        package.__path__ = [str(BACKENDS_PATH.parent)]
+        sys.modules[_PKG] = package
+    return sys.modules[_PKG]
 
 
 def _load_module(path, name):
-    spec = importlib.util.spec_from_file_location(name, path)
+    _package()
+    spec = importlib.util.spec_from_file_location(f"{_PKG}.{name}", path)
     module = importlib.util.module_from_spec(spec)
+    sys.modules[f"{_PKG}.{name}"] = module
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
@@ -27,8 +50,9 @@ def _load_module(path, name):
 @pytest.fixture(scope="module")
 def modules():
     contracts = _load_module(CONTRACTS_PATH, "fp8_adapter_contracts")
+    adapter = _load_module(ADAPTER_PATH, "quant_adapter")
     backends = _load_module(BACKENDS_PATH, "fp8_adapter_backends")
-    return SimpleNamespace(contracts=contracts, backends=backends)
+    return SimpleNamespace(contracts=contracts, backends=backends, adapter=adapter)
 
 
 def _contract(modules, backend):
@@ -436,13 +460,14 @@ def test_derive_exclusions_preserves_only_declared_target_prefixes(modules):
                 return object()
             raise AttributeError(name)
 
-    exclusions = b.derive_untargeted_linear_exclusions(
+    ownership = modules.adapter.derive_linear_ownership(
         FakeModel(),
         ("blocks",),
         is_linear=lambda module: module == "linear",
     )
 
-    assert exclusions == ["blocks_extra.proj", "input_proj"]
+    assert ownership.exclusions == ("blocks_extra.proj", "input_proj")
+    assert ownership.streamed == ("blocks.0.proj",)
 
 
 def test_missing_target_makes_native_mapping_unavailable(modules):
@@ -456,7 +481,7 @@ def test_missing_target_makes_native_mapping_unavailable(modules):
             raise AttributeError(name)
 
     with pytest.raises(b.TargetMappingUnavailable, match="missing"):
-        b.derive_untargeted_linear_exclusions(
+        modules.adapter.derive_linear_ownership(
             FakeModel(),
             ("missing",),
             is_linear=lambda module: module == "linear",
@@ -495,12 +520,14 @@ def test_torchao_native_config_uses_structure_derived_exclusions(modules, monkey
         lambda exclusions: captured.append(exclusions) or sentinel,
     )
     monkeypatch.setattr(
-        b,
-        "derive_untargeted_linear_exclusions",
-        lambda model, targets: ["input_proj"],
+        modules.adapter,
+        "derive_linear_ownership",
+        lambda model, targets, **kwargs: modules.adapter.LinearOwnership(
+            exclusions=("input_proj",), streamed=("blocks.0.proj",)
+        ),
     )
 
-    prepared = b.prepare_native_transformer_fp8_load(
+    prepared = modules.adapter.prepare_native_load(
         adapter,
         component_name="transformer",
         targets=("blocks",),
@@ -509,7 +536,7 @@ def test_torchao_native_config_uses_structure_derived_exclusions(modules, monkey
     )
 
     assert prepared.quantization_config is sentinel
-    assert captured == [["input_proj"]]
+    assert captured == [("input_proj",)]
     assert prepared.descriptor.materialization_mode == "streaming"
     assert prepared.descriptor.storage_semantics == "tensorwise_dynamic"
     assert prepared.descriptor.fallback_reason is None
@@ -522,7 +549,7 @@ def test_torchao_without_native_diffusers_api_is_explicit_fallback(modules):
         capabilities=b.Fp8BackendCapabilities(torchao_fp8=True),
     )
 
-    prepared = b.prepare_native_transformer_fp8_load(
+    prepared = modules.adapter.prepare_native_load(
         adapter,
         component_name="transformer",
         targets=("blocks",),
@@ -544,7 +571,7 @@ def test_untargeted_transformer_does_not_claim_streaming(modules):
         capabilities=b.Fp8BackendCapabilities(torchao_fp8=True),
     )
 
-    prepared = b.prepare_native_transformer_fp8_load(
+    prepared = modules.adapter.prepare_native_load(
         adapter,
         component_name="transformer_2",
         targets=(),
@@ -556,21 +583,23 @@ def test_untargeted_transformer_does_not_claim_streaming(modules):
     assert "no FP8 targets" in prepared.descriptor.fallback_reason
 
 
-def test_blockwise_paths_keep_streaming_through_backend_adapter(modules):
+def test_blockwise_paths_quantize_on_the_way_in(modules):
     c, b = modules.contracts, modules.backends
     adapter = b.select_fp8_backend(
         _contract(modules, c.QuantizationBackend.TORCHAO),
         capabilities=b.Fp8BackendCapabilities(torchao_fp8=True),
     )
 
-    descriptor = b.plan_blockwise_transformer_fp8_load(
+    descriptor = modules.adapter.describe_blockwise_load(
         adapter,
         component_name="transformer",
         targets=("blocks",),
         wrap_attrs=("blocks",),
     )
 
-    assert descriptor.materialization_mode == "streaming"
+    # Per block on the way in from disk, which the descriptor names as its own
+    # mode rather than borrowing the per-weight one.
+    assert descriptor.materialization_mode == "blockwise"
     assert descriptor.fallback_reason is None
 
 

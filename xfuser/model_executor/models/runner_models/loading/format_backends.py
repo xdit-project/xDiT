@@ -429,6 +429,7 @@ class EagerBlockwisePlan:
 
 
 class TorchaoNvfp4BackendAdapter(QuantAdapter):
+    default_unavailable_reason = "Diffusers TorchAoConfig API is unavailable"
     # Streaming would own every targeted leaf, leaving the hybrid
     # wrapper nothing to build its second precision from.
     streams_under_hybrid = False
@@ -515,6 +516,7 @@ class AiterMxfp6BackendAdapter(QuantAdapter):
 
 
 class TorchaoInt8BackendAdapter(QuantAdapter):
+    default_unavailable_reason = "Diffusers TorchAoConfig API is unavailable"
     storage_semantics = "torchao_w8a8_dynamic_per_row_symmetric"
     parameter_semantics = "torchao_int8_tensor_subclass"
     min_layer_size = 512

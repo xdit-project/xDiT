@@ -1015,21 +1015,15 @@ def test_an_implementation_with_no_offload_measurement_is_left_alone():
 
 
 @pytest.mark.parametrize(
-    ("profile", "refused"),
-    [
-        ("low=fp4,high=fp8", False),
-        ("low=fp8,high=fp4", True),
-        ("low=int8,high=fp8", True),
-    ],
+    "profile",
+    ["low=fp4,high=fp8", "low=fp8,high=fp4", "low=int8,high=fp8", "low=fp6,high=fp8"],
 )
-def test_a_hybrid_pair_neither_half_can_build_is_refused_at_startup(
-    profile, refused
-):
-    """Not an AttributeError at the first converted leaf.
+def test_any_pair_of_implementations_can_drive_a_per_step_schedule(profile):
+    """Whichever way round the formats are named, both halves can be built.
 
-    Only the MXFP4 factory composes an xFuserHybridLinear, so it is the only
-    implementation that can be the low side. A CUDA run naming any other low
-    format with --use_hybrid_gemm_schedule is told so before allocation.
+    `low=fp8,high=fp4` used to reach an AttributeError at the first converted
+    leaf, then an explicit refusal, and now simply works: the composition is
+    the base class's, so being the low side needs only a single-leaf seam.
     """
     from xfuser.config.gemm import GemmQuantizationSpec
     from xfuser.model_executor.quant.targets import resolve
@@ -1039,6 +1033,7 @@ def test_a_hybrid_pair_neither_half_can_build_is_refused_at_startup(
         model,
         {
             ("fp4", "aiter"): FormatCapability(available=True),
+            ("fp6", "aiter"): FormatCapability(available=True),
             ("fp8", "aiter"): FormatCapability(available=True),
             ("int8", "torchao"): FormatCapability(available=True),
         },
@@ -1050,11 +1045,7 @@ def test_a_hybrid_pair_neither_half_can_build_is_refused_at_startup(
         )
     )
 
-    if not refused:
-        selected.preflight()
-        return
-    with pytest.raises(ValueError, match="low/high GEMM schedule"):
-        selected.preflight()
+    selected.preflight()
 
 
 def test_an_aiter_carve_out_under_fsdp_needs_no_torchao_patches():

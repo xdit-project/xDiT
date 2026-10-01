@@ -131,48 +131,6 @@ def test_nvfp4_requires_blackwell_before_adapter_selection(modules):
         )
 
 
-def test_an_implementation_that_cannot_pair_refuses_the_schedule(modules):
-    b = modules.backends
-    capabilities = b.probe_format_backend_capabilities(
-        cuda_probe=lambda: True,
-        hip_probe=lambda: False,
-        cuda_capability_probe=lambda: (10, 0),
-        mxfp4_probe=lambda: pytest.fail("must not probe AITER on CUDA"),
-        nvfp4_probe=lambda: (True, None),
-        int8_probe=lambda: (True, None),
-        diffusers_probe=lambda config_kind: (True, None),
-        fsdp_probe=lambda config_kind: (True, None),
-    )
-
-    with pytest.raises(
-        modules.contracts.UnsupportedLoadContract,
-        match=r"torchao fp4 does not implement the runtime low/high",
-    ):
-        modules.adapter.build_adapter(
-            "fp4",
-            "torchao",
-            capability=capabilities.of("fp4", "torchao"),
-            hybrid=True,
-        )
-
-
-def test_nvfp4_adapter_never_silently_ignores_a_companion(modules):
-    """The walk composes the hybrid pair, so refusing it has to happen here too.
-
-    Selection already refuses the schedule, but a companion handed to this
-    converter would otherwise be dropped and the run would quietly lose its
-    second precision.
-    """
-    b = modules.backends
-    adapter = b.TorchaoNvfp4BackendAdapter(
-        backend=modules.contracts.QuantizationBackend.TORCHAO,
-        format_=modules.contracts.QuantizationFormat.FP4,
-    )
-
-    with pytest.raises(RuntimeError, match=r"NVFP4.*hybrid"):
-        adapter.convert_module(object(), device="cuda:0", companion=object())
-
-
 def test_rocm_aiter_mxfp4_hybrid_remains_supported(modules):
     b = modules.backends
     capabilities = b.probe_format_backend_capabilities(
@@ -661,44 +619,65 @@ def test_fsdp_placement_is_skipped_when_nothing_shards_it(modules):
 
 
 @pytest.mark.parametrize(
-    ("format_name", "impl", "drives", "installs_a_layer"),
+    ("format_name", "impl"),
     [
-        ("fp4", "aiter", True, True),
-        ("fp6", "aiter", False, True),
-        ("fp4", "torchao", False, False),
-        ("int8", "torchao", False, False),
+        ("fp4", "aiter"),
+        ("fp6", "aiter"),
+        ("fp4", "torchao"),
+        ("int8", "torchao"),
     ],
 )
-def test_driving_a_per_step_pair_and_being_half_of_one_are_different(
-    modules, format_name, impl, drives, installs_a_layer
+def test_every_implementation_can_be_either_half_of_a_per_step_pair(
+    modules, format_name, impl
 ):
-    """Composing the pair is the low side's job; the companion only supplies a layer.
+    """Composing is the base class's job, so no format is excluded by age.
 
-    Only the factory that builds an ``xFuserHybridLinear`` can drive the
-    schedule, so that is declared rather than inferred from being able to
-    install a layer -- MXFP6 can do the second and not the first.
+    The pairing used to live inside the MXFP4 factory, which made MXFP4 the
+    only possible low side -- not because another kernel could not hold two
+    precisions at a leaf, but because no other factory was ever handed the
+    companion.
     """
     a = modules.adapter
     capability = a.FormatCapability(available=True)
-    adapter = a.build_adapter(format_name, impl, capability=capability)
 
-    assert adapter.supports_hybrid_schedule is drives
-    if installs_a_layer:
-        assert type(adapter).layer_factory is not a.QuantAdapter.layer_factory
-        return
+    adapter = a.build_adapter(format_name, impl, capability=capability)
+    assert adapter.builds_one_layer()
+
+    # Accepted as the low side rather than refused.
+    a.build_adapter(format_name, impl, capability=capability, hybrid=True)
+
+
+def test_an_implementation_with_no_single_leaf_seam_is_still_refused(modules):
+    """The refusal remains for a future adapter that can only convert a tree."""
+    a = modules.adapter
+
+    class TreeOnly(a.QuantAdapter):
+        pass
+
+    assert not TreeOnly.builds_one_layer()
     with pytest.raises(
         modules.contracts.UnsupportedLoadContract,
         match="cannot install one layer at a time",
     ):
-        adapter.layer_factory(device=None)
+        TreeOnly(backend=None, format_=None)._single_layer_factory(device=None)
 
 
-def test_every_implementation_that_drives_the_schedule_can_build_a_layer(modules):
-    """A declaration that cannot be honoured is caught here, not at a leaf."""
-    a = modules.adapter
-    for (format_name, impl), cls in a.REGISTRY.items():
-        if cls.supports_hybrid_schedule:
-            assert cls.layer_factory is not a.QuantAdapter.layer_factory, (
-                f"{impl} {format_name} says it drives a per-step pair but has "
-                "no layer factory to compose one with"
-            )
+def test_a_companion_reaches_the_converter_rather_than_being_dropped(modules):
+    """A dropped companion would silently lose the run's second precision."""
+    a, b = modules.adapter, modules.backends
+    adapter = b.TorchaoNvfp4BackendAdapter(
+        backend=modules.contracts.QuantizationBackend.TORCHAO,
+        format_=modules.contracts.QuantizationFormat.FP4,
+    )
+    seen = []
+    adapter._single_layer_factory = lambda *, device: (
+        lambda spec: seen.append("low")
+    )
+
+    paired = adapter.layer_factory(
+        device=None, companion=lambda spec: seen.append("high")
+    )
+    paired(object())
+
+    # Low first, as it was when only MXFP4 composed.
+    assert seen == ["low", "high"]

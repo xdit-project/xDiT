@@ -366,7 +366,7 @@ class AiterFp8BackendAdapter(QuantAdapter):
             exclusions=(), streamed=targets
         )
 
-    def layer_factory(self, *, device, companion=None):
+    def _single_layer_factory(self, *, device):
         from xfuser.core.utils.runner_utils import packed_layer_factory
         from xfuser.model_executor.layers.fp8_linear import xFuserFP8BlockScaleLinear
 
@@ -379,16 +379,15 @@ class AiterFp8BackendAdapter(QuantAdapter):
         device,
         offload_to_cpu=False,
         filter_fn=None,
+        companion=None,
     ):
-        from xfuser.core.utils.runner_utils import (
-            quantize_linear_layers_to_fp8_blockscale,
-        )
+        from xfuser.core.utils.runner_utils import replace_linears
 
-        return quantize_linear_layers_to_fp8_blockscale(
+        return replace_linears(
             module,
-            device=device,
-            offload_to_cpu=offload_to_cpu,
+            self.layer_factory(device=device, companion=companion),
             filter_fn=filter_fn,
+            offload_to_cpu=offload_to_cpu,
         )
 
 
@@ -432,7 +431,7 @@ class TorchaoFp8BackendAdapter(QuantAdapter):
             modules_to_not_convert=list(exclusions),
         )
 
-    def layer_factory(self, *, device, companion=None):
+    def _single_layer_factory(self, *, device):
         from xfuser.core.utils.runner_utils import torchao_layer_factory
 
         return torchao_layer_factory(self._quant_config(), device)

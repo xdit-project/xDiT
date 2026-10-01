@@ -656,17 +656,36 @@ def quantize_linear_layers_to_fp8_blockscale(
     )
 
 
-def mxfp4_layer_factory(device, companion=None):
-    """Build one MXFP4 layer, optionally paired with a per-step alternate.
+def paired_layer_factory(low_factory, companion=None):
+    """Pair any two layer factories into one per-step wrapper.
 
-    ``companion`` is another factory -- whatever the run's high format builds.
-    This converter no longer knows or chooses what that is: the caller holds
-    the plan, so the caller composes. That is what removed the FP8 and MXFP6
-    branches this function used to carry.
+    The schedule holds both precisions at every leaf and picks one per step,
+    so composing them needs nothing from either format -- only that each can
+    build one layer. Kept here rather than inside a format's own factory,
+    which is what limited the low side to MXFP4: FP6 and FP8 block-scale could
+    always build a layer, they were simply never handed the companion.
+
+    The low layer is built first, as it was when only MXFP4 composed.
     """
 
-    from xfuser.model_executor.layers.mxfp4_linear import xFuserMXFP4Linear
+    if companion is None:
+        return low_factory
+
     from xfuser.model_executor.layers.hybrid_linear import xFuserHybridLinear
+
+    def make_layer(spec: LinearSpec):
+        low = low_factory(spec)
+        return xFuserHybridLinear(
+            high_precision_linear=companion(spec), low_precision_linear=low
+        )
+
+    return make_layer
+
+
+def mxfp4_layer_factory(device, companion=None):
+    """Build one MXFP4 layer, optionally paired with a per-step alternate."""
+
+    from xfuser.model_executor.layers.mxfp4_linear import xFuserMXFP4Linear
 
     def make_layer(spec: LinearSpec):
         low = xFuserMXFP4Linear(
@@ -678,13 +697,9 @@ def mxfp4_layer_factory(device, companion=None):
         )
         with torch.no_grad():
             low.load_and_quantize_weights(spec.weight, spec.bias)
-        if companion is None:
-            return low
-        return xFuserHybridLinear(
-            high_precision_linear=companion(spec), low_precision_linear=low
-        )
+        return low
 
-    return make_layer
+    return paired_layer_factory(make_layer, companion)
 
 
 def quantize_linear_layers_to_fp4(

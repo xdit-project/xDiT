@@ -125,11 +125,11 @@ def build_adapter(format_name: str, impl: str, *, capability, hybrid: bool = Fal
         raise UnsupportedLoadContract(
             f"{impl} {format_name} is unavailable on this machine: {reason}"
         )
-    if hybrid and not cls.supports_hybrid_schedule:
+    if hybrid and not cls.builds_one_layer():
         raise UnsupportedLoadContract(
-            f"{impl} {format_name} does not implement the runtime low/high "
-            "GEMM schedule; drop --use_hybrid_gemm_schedule or name a format "
-            "that does"
+            f"{impl} {format_name} cannot install one layer at a time, so it "
+            "cannot drive a low/high GEMM schedule; drop "
+            "--use_hybrid_gemm_schedule or name a format that can"
         )
     return cls(
         backend=QuantizationBackend(impl),
@@ -303,12 +303,6 @@ class QuantAdapter:
     #: first. None means they do, or that nothing has measured otherwise --
     #: refusing on a guess would assert a claim no one has tested.
     group_offload_refusal = None
-    #: Whether this implementation can be the *low* side of a per-step pair --
-    #: the one whose layer factory composes the two into an
-    #: ``xFuserHybridLinear``. False by default: installing one layer is not
-    #: the same as knowing how to pair it with another, and only the factory
-    #: that builds the wrapper can drive the schedule.
-    supports_hybrid_schedule = False
     #: Filled in by ``stores`` at registration.
     format_name = ""
     impl = ""
@@ -382,21 +376,39 @@ class QuantAdapter:
         config, _ = self.transformer_stream_plan(targets, model_factory=model_factory)
         return config
 
-    def layer_factory(self, *, device, companion=None):
+    def _single_layer_factory(self, *, device):
         """Build one layer at a time, which a per-step pair is made of.
 
-        Not every implementation can: one that converts a whole module through
-        a framework config has no single-leaf seam, and is neither half of a
-        pair. Overridden where there is one.
+        Overridden by every implementation with a single-leaf seam. One that
+        has none is neither half of a pair, and says so.
         """
 
         from .contracts import UnsupportedLoadContract
 
         raise UnsupportedLoadContract(
-            f"{self.impl} {self.format_name} converts a whole module through a "
-            "framework config and cannot install one layer at a time, so it "
-            "cannot be either half of a low/high GEMM schedule"
+            f"{self.impl} {self.format_name} cannot install one layer at a "
+            "time, so it cannot be either half of a low/high GEMM schedule"
         )
+
+    def layer_factory(self, *, device, companion=None):
+        """One layer, or a per-step pair when the run supplies a companion.
+
+        The pairing is done here rather than in any format's own factory, so
+        no implementation has to know it can be half of a pair, and none is
+        excluded by having been written before the schedule existed.
+        """
+
+        from xfuser.core.utils.runner_utils import paired_layer_factory
+
+        return paired_layer_factory(
+            self._single_layer_factory(device=device), companion
+        )
+
+    @classmethod
+    def builds_one_layer(cls) -> bool:
+        """Whether this implementation has a single-leaf seam at all."""
+
+        return cls._single_layer_factory is not QuantAdapter._single_layer_factory
 
     def convert_module(self, module, *, device, filter_fn=None, offload_to_cpu=False):
         raise NotImplementedError

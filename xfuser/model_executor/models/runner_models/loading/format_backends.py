@@ -410,12 +410,22 @@ class TorchaoNvfp4BackendAdapter(QuantAdapter):
     def _stream_config_factory(self, exclusions):
         return _torchao_stream_config("nvfp4", exclusions)
 
+    def _single_layer_factory(self, *, device):
+        from xfuser.core.utils.runner_utils import torchao_layer_factory
+
+        return torchao_layer_factory(_torchao_quant_config("nvfp4"), device)
+
     def convert_module(
         self, module, *, device, filter_fn=None, offload_to_cpu=False, companion=None
     ):
         if companion is not None:
-            raise RuntimeError(
-                "CUDA NVFP4 does not implement the runtime hybrid schedule"
+            from xfuser.core.utils.runner_utils import replace_linears
+
+            return replace_linears(
+                module,
+                self.layer_factory(device=device, companion=companion),
+                filter_fn=filter_fn,
+                offload_to_cpu=offload_to_cpu,
             )
         from xfuser.core.utils.runner_utils import quantize_linear_layers_to_nvfp4
 
@@ -426,9 +436,6 @@ class TorchaoNvfp4BackendAdapter(QuantAdapter):
 
 @stores("fp4", "aiter")
 class AiterMxfp4BackendAdapter(QuantAdapter):
-    # The only factory that composes two layers into an xFuserHybridLinear, so
-    # the only implementation that can be the low side of a per-step pair.
-    supports_hybrid_schedule = True
     # Group offloading moves a module's parameters between host and device
     # around each call, and these weights survive neither leg. Both failures
     # land below Python -- one inside the hook, one as AITER's own abort with
@@ -446,10 +453,10 @@ class AiterMxfp4BackendAdapter(QuantAdapter):
     serialization = "packed_state_supported_not_portable"
     supports_precision_overrides = True
 
-    def layer_factory(self, *, device, companion=None):
+    def _single_layer_factory(self, *, device):
         from xfuser.core.utils.runner_utils import mxfp4_layer_factory
 
-        return mxfp4_layer_factory(device, companion=companion)
+        return mxfp4_layer_factory(device)
 
     def convert_module(
         self, module, *, device, filter_fn=None, offload_to_cpu=False, companion=None
@@ -471,7 +478,7 @@ class AiterMxfp6BackendAdapter(QuantAdapter):
     auxiliary_state_semantics = "persistent_scale_buffer"
     serialization = "packed_state_supported_not_portable"
 
-    def layer_factory(self, *, device, companion=None):
+    def _single_layer_factory(self, *, device):
         from xfuser.core.utils.runner_utils import packed_layer_factory
         from xfuser.model_executor.layers.mxfp6_linear import xFuserMXFP6Linear
 
@@ -487,17 +494,13 @@ class AiterMxfp6BackendAdapter(QuantAdapter):
         companion=None,
         **kwargs,
     ):
-        if companion is not None:
-            raise RuntimeError(
-                "AITER MXFP6 does not implement the runtime low/high GEMM schedule"
-            )
-        from xfuser.core.utils.runner_utils import quantize_linear_layers_to_fp6
+        from xfuser.core.utils.runner_utils import replace_linears
 
-        return quantize_linear_layers_to_fp6(
+        return replace_linears(
             module,
-            device=device,
-            offload_to_cpu=offload_to_cpu,
+            self.layer_factory(device=device, companion=companion),
             filter_fn=filter_fn,
+            offload_to_cpu=offload_to_cpu,
         )
 
 
@@ -511,7 +514,22 @@ class TorchaoInt8BackendAdapter(QuantAdapter):
     def _stream_config_factory(self, exclusions):
         return _torchao_stream_config("int8", exclusions)
 
-    def convert_module(self, module, *, device, filter_fn=None, **kwargs):
+    def _single_layer_factory(self, *, device):
+        from xfuser.core.utils.runner_utils import torchao_layer_factory
+
+        return torchao_layer_factory(_torchao_quant_config("int8"), device)
+
+    def convert_module(
+        self, module, *, device, filter_fn=None, companion=None, **kwargs
+    ):
+        if companion is not None:
+            from xfuser.core.utils.runner_utils import replace_linears
+
+            return replace_linears(
+                module,
+                self.layer_factory(device=device, companion=companion),
+                filter_fn=filter_fn,
+            )
         from xfuser.core.utils.runner_utils import quantize_linear_layers_to_int8
 
         return quantize_linear_layers_to_int8(
@@ -523,7 +541,23 @@ class TorchaoInt8BackendAdapter(QuantAdapter):
 
 
 def _torchao_stream_config(kind: str, exclusions):
+    """The Diffusers wrapper around the quant config, for a module-wide load."""
+
     from diffusers import TorchAoConfig
+
+    return TorchAoConfig(
+        _torchao_quant_config(kind), modules_to_not_convert=list(exclusions)
+    )
+
+
+def _torchao_quant_config(kind: str):
+    """The torchao config itself, which `quantize_` takes for one leaf or a tree.
+
+    Split out so a single leaf can be built with exactly the settings a
+    module-wide load would have used -- that is what gives NVFP4 and INT8 a
+    per-leaf seam, and with it a place in a per-step pair.
+    """
+
     from xfuser.model_executor.quant.torchao_quantizer import (
         register_torchao_fp32_policy,
     )
@@ -550,7 +584,7 @@ def _torchao_stream_config(kind: str, exclusions):
             act_mapping_type=MappingType.SYMMETRIC,
             set_inductor_config=False,
         )
-    return TorchAoConfig(config, modules_to_not_convert=list(exclusions))
+    return config
 
 
 def derive_linear_exclusions(

@@ -257,3 +257,64 @@ def test_declared_formats_match_the_recorded_capabilities(cls):
         if enabled
     }
     assert cls.capabilities.supported_gemm_formats() == recorded
+
+
+# ---------------------------------------------------------------------------
+# the deliberate change: `only` narrows every format, `include_suffixes` did not
+# ---------------------------------------------------------------------------
+
+def _only_models():
+    """Migrated models that quantize a subset of the leaves in their blocks."""
+    for cls, entry in CHECKABLE:
+        select = cls.settings.gemm_targets.transformer
+        if select.only:
+            yield cls, entry
+
+
+ONLY_MODELS = list(_only_models())
+ONLY_IDS = [cls.__name__ for cls, _ in ONLY_MODELS]
+
+
+@pytest.mark.skipif(not ONLY_MODELS, reason="no model declares `only`")
+@pytest.mark.parametrize("cls, entry", ONLY_MODELS, ids=ONLY_IDS)
+def test_only_narrows_every_format_the_same_way(cls, entry):
+    """A behaviour change, made on purpose, and the only thing pinning it.
+
+    These models declared `fp8_gemm_include_suffixes` to quantize two leaves
+    per block, plus `fp8_precision_override_suffixes` naming three leaves to
+    hold at FP8 during FP4. But the three were already outside the two: the
+    override could only ever fire because the legacy FP4 walk did not apply
+    the include-suffixes at all, so FP4 took the whole block while FP8 took
+    two leaves of it.
+
+    `only` applies to every format equally, so FP4 now narrows exactly as FP8
+    always did. That is a real change in what an FP4 run quantizes for these
+    models -- the previous behaviour was the walk ignoring a declared
+    narrowing -- and it is why their override suffixes translated to nothing.
+    """
+    from xfuser.model_executor.quant.targets import resolve
+
+    select = cls.settings.gemm_targets.transformer
+    root = select.roots()[0]
+    excluded = tuple(entry["fp8_precision_override_suffixes"])
+    assert excluded, "this model had no override suffixes to account for"
+    assert not set(excluded) & set(select.only), (
+        "the override suffixes overlap `only`, so they were not dead after "
+        "all and this translation needs re-examining"
+    )
+
+    for profile in _profiles(entry):
+        plan = resolve(
+            cls.settings.gemm_targets, GemmQuantizationSpec.parse(profile)
+        )
+        for leaf in select.only:
+            path = f"{root}.0.{leaf}"
+            assert plan.format_for(path) is not None, (
+                f"{profile}: {path} is declared but quantized by nothing"
+            )
+        for leaf in excluded:
+            path = f"{root}.0.{leaf}"
+            assert plan.format_for(path) is None, (
+                f"{profile}: {path} is outside `only` yet {profile} quantizes "
+                "it -- the narrowing is not being applied to every format"
+            )

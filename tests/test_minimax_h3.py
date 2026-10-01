@@ -604,29 +604,30 @@ def test_fasth3_rejects_unsupported_compile_modes(unsupported, backend):
         xFuserFastH3Model(config)
 
 
-def test_minimax_h3_fp8_quantization_policy():
+def test_minimax_h3_quantization_policy():
+    """The two leaves per block this model quantizes, for every format.
+
+    It used to say this twice -- `fp8_gemm_include_suffixes` to pick the
+    leaves, `fp8_precision_override_suffixes` to name three it had already
+    excluded -- and the second only ever did anything because the FP4 walk
+    ignored the first. One `only` now narrows every format alike; see
+    tests/quant/test_migrated_models.py::test_only_narrows_every_format_the_same_way.
+    """
     from xfuser.model_executor.models.runner_models.minimax_h3 import (
         xFuserMiniMaxH3Model,
         xFuserMiniMaxH3Ref2VAModel,
     )
 
     expected = ("attn.to_qkv", "ff.net.0.proj")
-    assert xFuserMiniMaxH3Model.settings.fp8_gemm_include_suffixes == expected
-    assert xFuserMiniMaxH3Ref2VAModel.settings.fp8_gemm_include_suffixes == expected
-
-
-def test_minimax_h3_fp4_quantization_policy():
-    from xfuser.model_executor.models.runner_models.minimax_h3 import (
-        xFuserMiniMaxH3Model,
-        xFuserMiniMaxH3Ref2VAModel,
-    )
-
-    expected = ("attn.to_out.0", "ff.net.2", "adaln_proj.linear")
-    assert xFuserMiniMaxH3Model.settings.fp8_precision_override_suffixes == expected
-    assert (
-        xFuserMiniMaxH3Ref2VAModel.settings.fp8_precision_override_suffixes
-        == expected
-    )
+    for cls, root in (
+        (xFuserMiniMaxH3Model, "transformer.transformer_blocks"),
+        (xFuserMiniMaxH3Ref2VAModel, "transformer_ref.transformer_blocks"),
+    ):
+        select = cls.settings.gemm_targets.transformer
+        assert select.only == expected
+        assert select.roots() == (root,)
+        # Nothing is held at a better precision: a tier has nothing to carve.
+        assert not cls.settings.gemm_targets.keep_high
 
 
 def test_minimax_h3_text_encoder_tp_plan():

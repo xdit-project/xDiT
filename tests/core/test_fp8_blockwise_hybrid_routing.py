@@ -583,8 +583,6 @@ def test_exact_component_target_maps_to_transformer_root():
         fp8=SimpleNamespace(targets_for=lambda component: ()),
     )
 
-    assert backends(model).format_targets_for("transformer") == ("",)
-    assert backends(model).format_targets_for("transformer_2") == ("blocks",)
     assert backends(model).transformer_adapter("transformer") == (
         adapter,
         ("",),
@@ -619,14 +617,15 @@ def test_format_fsdp_preflight_uses_boundary_safe_path_containment(
             int8_gemm_module_list=[target],
         ),
     )
+    model.config.use_hybrid_gemm_schedule = False
 
-    assert backends(model).places_format_backend_under_fsdp2() is expected
+    assert backends(model).places_under_fsdp2("int8") is expected
 
 
-def test_pure_fp4_wan_targets_require_backend_preflight():
+def test_an_fp8_remainder_puts_a_second_format_in_play():
     model = _hybrid_model(adapter=RecordingAdapter())
 
-    assert backends(model).requires_blockwise_fp8()
+    assert backends(model)._formats_in_play() == ("fp4", "fp8")
 
 
 # `test_narrow_fp4_target_preserves_broad_fp8_remainder` lived here. It
@@ -641,7 +640,7 @@ def test_narrow_fp4_target_under_broad_fp8_requires_backend_preflight():
     model.settings.fp4_gemm_module_list = ["transformer.blocks.0.attn"]
     model.fp8 = SimpleNamespace(module_list=lambda: ["transformer.blocks"])
 
-    assert backends(model).requires_blockwise_fp8()
+    assert backends(model)._formats_in_play() == ("fp4", "fp8")
 
 
 def test_eager_fp4_with_fp8_only_target_preflights_component_backend():
@@ -651,7 +650,7 @@ def test_eager_fp4_with_fp8_only_target_preflights_component_backend():
         materialization_mode=MaterializationMode.EAGER,
     )
 
-    assert backends(model).uses_blockwise_fp8()
+    assert backends(model)._formats_in_play() == ("fp4", "fp8")
 
 
 @pytest.mark.parametrize(
@@ -724,22 +723,20 @@ def _fsdp_patch_model(
     return model
 
 
-def test_fp8_only_target_outside_fsdp_strategy_needs_no_torchao_patches():
+def test_fp8_only_target_outside_fsdp_strategy_is_not_placed_there():
     model = _fsdp_patch_model(
         strategy={"transformer": {"wrap_attrs": ["blocks"]}},
     )
-    adapter = SimpleNamespace(backend=QuantizationBackend.TORCHAO)
 
-    assert not backends(model).places_torchao_tensor_subclass_under_fsdp2(adapter)
+    assert not backends(model).places_under_fsdp2("fp8")
 
 
-def test_fsdp_sharded_fp8_only_torchao_target_needs_patches():
+def test_fsdp_sharded_fp8_only_target_is_placed_there():
     model = _fsdp_patch_model(
         strategy={"transformer_2": {"wrap_attrs": ["blocks"]}},
     )
-    adapter = SimpleNamespace(backend=QuantizationBackend.TORCHAO)
 
-    assert backends(model).places_torchao_tensor_subclass_under_fsdp2(adapter)
+    assert backends(model).places_under_fsdp2("fp8")
 
 
 @pytest.mark.parametrize(
@@ -761,21 +758,8 @@ def test_fp8_fsdp_preflight_uses_boundary_safe_path_containment(
         fp4_targets=(),
         fp8_targets=(target,),
     )
-    adapter = SimpleNamespace(backend=QuantizationBackend.TORCHAO)
 
-    assert (
-        backends(model).places_torchao_tensor_subclass_under_fsdp2(adapter)
-        is expected
-    )
-
-
-def test_fsdp_sharded_fp8_only_aiter_target_needs_no_torchao_patches():
-    model = _fsdp_patch_model(
-        strategy={"transformer_2": {"wrap_attrs": ["blocks"]}},
-    )
-    adapter = SimpleNamespace(backend=QuantizationBackend.AITER)
-
-    assert not backends(model).places_torchao_tensor_subclass_under_fsdp2(adapter)
+    assert backends(model).places_under_fsdp2("fp8") is expected
 
 
 @pytest.mark.parametrize(
@@ -786,30 +770,35 @@ def test_fsdp_sharded_fp8_only_aiter_target_needs_no_torchao_patches():
         ((), (), True),
     ],
 )
-def test_fsdp_sharded_fp4_torchao_fp8_paths_need_patches(
+def test_a_carve_out_puts_the_high_format_inside_the_wrapped_block(
     prefixes,
     suffixes,
     hybrid,
 ):
+    """A tier with no subtree of its own still lands under FSDP.
+
+    A block prefix, a leaf suffix and the hybrid schedule each put the high
+    format inside blocks the low format owns, where a predicate reading only
+    whole-subtree roots would answer "no high format here".
+    """
     model = _fsdp_patch_model(
         strategy={"transformer": {"wrap_attrs": ["blocks"]}},
         prefixes=prefixes,
         suffixes=suffixes,
         hybrid=hybrid,
     )
-    adapter = SimpleNamespace(backend=QuantizationBackend.AITER)
 
-    assert backends(model).places_torchao_tensor_subclass_under_fsdp2(adapter)
+    assert backends(model).places_under_fsdp2("fp8")
 
 
-def test_fp4_torchao_fp8_paths_outside_fsdp_strategy_need_no_patches():
+def test_a_carve_out_outside_the_fsdp_strategy_is_not_placed_there():
     model = _fsdp_patch_model(
         strategy={"transformer_2": {"wrap_attrs": ["blocks"]}},
+        fp8_targets=("transformer.blocks",),
         prefixes=("0.",),
     )
-    adapter = SimpleNamespace(backend=QuantizationBackend.AITER)
 
-    assert not backends(model).places_torchao_tensor_subclass_under_fsdp2(adapter)
+    assert not backends(model).places_under_fsdp2("fp8")
 
 
 def test_fsdp_fp4_override_triggers_startup_backend_preflight():
@@ -823,10 +812,10 @@ def test_fsdp_fp4_override_triggers_startup_backend_preflight():
         materialization_mode=MaterializationMode.FSDP_META,
     )
 
-    assert backends(model).uses_blockwise_fp8()
+    assert backends(model)._formats_in_play() == ("fp4", "fp8")
 
 
-def test_eager_fsdp_fp8_triggers_startup_backend_preflight():
+def test_a_pure_fp8_run_under_fsdp_resolves_its_one_format():
     model = _fsdp_patch_model(
         strategy={"transformer": {"wrap_attrs": ["blocks"]}},
         fp4_targets=(),
@@ -838,10 +827,13 @@ def test_eager_fsdp_fp8_triggers_startup_backend_preflight():
         materialization_mode=MaterializationMode.EAGER,
     )
 
-    assert backends(model).uses_blockwise_fp8()
+    # A pure run names one format, and that one is still resolved before
+    # allocation because its parameters land inside a wrapped block.
+    assert backends(model)._formats_in_play() == ("fp8",)
+    assert backends(model).places_under_fsdp2("fp8")
 
 
-def test_fp4_override_outside_strategy_skips_startup_backend_preflight():
+def test_a_carve_out_outside_every_wrapped_block_needs_no_sharding():
     model = _fsdp_patch_model(
         strategy={"transformer_2": {"wrap_attrs": ["blocks"]}},
         fp8_targets=("transformer.blocks",),
@@ -853,8 +845,10 @@ def test_fp4_override_outside_strategy_skips_startup_backend_preflight():
     )
 
     # A prefix carve-out is placed by the FP8 converter now rather than by the
-    # FP4 owner, so the backend is required wherever the carve-out is.
-    assert backends(model).uses_blockwise_fp8()
+    # FP4 owner, so FP8 is in play -- but its parameters land outside every
+    # wrapped block, so nothing has to be shardable.
+    assert backends(model)._formats_in_play() == ("fp4", "fp8")
+    assert not backends(model).places_under_fsdp2("fp8")
 
 
 def test_backend_preflight_uses_component_target_requirement(monkeypatch):

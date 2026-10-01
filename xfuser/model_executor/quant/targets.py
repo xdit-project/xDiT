@@ -198,16 +198,22 @@ class GemmPlan:
             if root == component_name or root.startswith(prefix)
         )
 
-    def walk_roots(self, format_name: str) -> Tuple[str, ...]:
+    def walk_roots(self, format_name: str, *, paired: bool = False) -> Tuple[str, ...]:
         """Where a converter for `format_name` should start walking.
 
         `roots` names the subtrees this format owns whole, which is enough
         except for a carve-out with no subtree of its own: a leaf suffix occurs
         inside targets the other format owns, so reaching it means walking
         those too and letting `format_for` reject the rest.
+
+        `paired` says the run builds both formats at every leaf rather than
+        splitting the leaves between them -- the hybrid schedule -- so each
+        format reaches wherever any target does. The caller knows that about
+        the run; the plan only knows what it means for where a walk starts.
         """
         found = list(self.roots(format_name))
-        if format_name == self.high and self.keep_high.suffixes:
+        widen = paired or (format_name == self.high and self.keep_high.suffixes)
+        if widen:
             found += [r for r in self.declared_roots() if r not in found]
         return tuple(found)
 

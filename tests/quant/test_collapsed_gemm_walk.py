@@ -407,26 +407,25 @@ def _backends_for(raw, *, text_encoder=True, targets=TARGETS):
 
 
 def test_the_high_tier_is_what_the_primary_format_leaves():
-    backends = _backends_for("low=fp4,high=fp8")
-    assert backends.high_tier_targets() == {TEXT_ENCODER}
-    assert backends.primary_targets() == set(BLOCKS)
+    plan = _backends_for("low=fp4,high=fp8").loader.quantization_plan.gemm_plan
+    assert set(plan.roots("fp8")) == {TEXT_ENCODER}
+    assert set(plan.roots("fp4")) == set(BLOCKS)
 
 
 @pytest.mark.parametrize("raw", ["fp8", "fp4"])
-def test_a_pure_profile_leaves_no_high_tier(raw):
-    """Nothing is held back, so no second converter is required."""
-    backends = _backends_for(raw)
-    assert backends.high_tier_targets() == set()
-    assert backends.requires_blockwise_fp8() is False
+def test_a_pure_profile_puts_one_format_in_play(raw):
+    """Nothing is held back, so only one converter is ever resolved."""
+    assert _backends_for(raw)._formats_in_play() == (raw,)
 
 
-def test_a_tier_requires_the_second_converter():
-    assert _backends_for("low=fp4,high=fp8").requires_blockwise_fp8() is True
+def test_a_tier_puts_both_formats_in_play():
+    assert _backends_for("low=fp4,high=fp8")._formats_in_play() == ("fp4", "fp8")
 
 
 def test_no_high_tier_without_the_component_enabled():
     """FLUX.2 holds only its text encoder high; leave it out and nothing is."""
-    assert _backends_for("low=fp4,high=fp8", text_encoder=False).high_tier_targets() == set()
+    backends = _backends_for("low=fp4,high=fp8", text_encoder=False)
+    assert set(backends.loader.quantization_plan.gemm_plan.roots("fp8")) == set()
 
 
 def test_a_narrowed_declaration_filters_inside_the_subtree():

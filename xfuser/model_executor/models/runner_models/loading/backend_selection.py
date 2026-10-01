@@ -1,13 +1,16 @@
-"""Which quantization implementation a run uses, and whether FSDP placement permits it.
+"""Which implementation stores each format this run names, and whether FSDP permits it.
 
 Selection is a question about the run, not about being a diffusion model, so it lives here rather
 than on the runner base. ``ModelLoader`` owns the one cached selection for the run.
 
-Two questions, and they are not independent. Which adapter owns a format is decided by the load
-contract; whether that adapter is *allowed* is decided by where FSDP will put its tensors, because
-some storage forms cannot be sharded. A TorchAO Float8Tensor inside an FSDP2 block needs patches the
-environment may not have, so the placement predicates below run before allocation and fail there
-rather than at the first all-gather.
+A format is a lookup: the run names one, ``_impl_for`` says which implementation has it on this
+machine, and ``adapter_for`` returns that one converter. Nothing above asks which format it got
+back, and a format arriving as the run's low tier resolves exactly as it would as the high one.
+
+Whether that implementation is *allowed* is a second question, and not independent: some storage
+forms cannot be sharded. A TorchAO Float8Tensor inside an FSDP2 block needs patches the environment
+may not have, so ``places_under_fsdp2`` runs before allocation and fails there rather than at the
+first all-gather.
 
 Adapters are cached: selecting one probes the environment, and every consumer must get the same
 answer. The cache lives on the instance, which is itself cached on the model, so it lasts as long as
@@ -42,13 +45,6 @@ class QuantizationBackends:
         """
         for format_name in self._formats_in_play():
             _ = self.adapter_for(format_name)
-
-    def _format_value(self) -> str | None:
-        contract = getattr(getattr(self, "loader", None), "load_contract", None)
-        return None if contract is None else contract.requested_format.value
-
-    def _uses_mxfp6_contract(self) -> bool:
-        return self._format_value() in {"fp6", "fp4_fp6"}
 
     @functools.cached_property
     def format_capabilities(self):
@@ -105,33 +101,31 @@ class QuantizationBackends:
             requested_format=QuantizationFormat(format_name),
             selected_backend=QuantizationBackend(impl),
         )
+        places = self.places_under_fsdp2(format_name)
         if format_name == "fp8":
             adapter = select_fp8_backend(contract, capabilities=self.fp8_capabilities)
             validate_torchao_fsdp2_patches(
-                contract,
-                capabilities=self.fp8_capabilities,
-                required=self.places_torchao_tensor_subclass_under_fsdp2(adapter),
+                contract, capabilities=self.fp8_capabilities, required=places
             )
             return adapter
 
         plan = self.loader.quantization_plan.gemm_plan
-        is_low = plan is not None and format_name == plan.low
         adapter = select_format_backend(
             contract,
             capabilities=self.format_capabilities,
             # Only the format a step actually runs in bf16-vs-quantized pairs
             # can refuse the hybrid schedule; the companion never drives it.
-            hybrid=is_low and self.model.config.use_hybrid_gemm_schedule,
+            hybrid=(
+                plan is not None
+                and format_name == plan.low
+                and bool(self.model.config.use_hybrid_gemm_schedule)
+            ),
         )
         validate_format_fsdp_placement(
             contract,
             adapter,
             capabilities=self.format_capabilities,
-            required=(
-                self.places_format_backend_under_fsdp2()
-                if is_low
-                else self.places_mxfp6_backend_under_fsdp2()
-            ),
+            required=places,
         )
         return adapter
 
@@ -167,164 +161,30 @@ class QuantizationBackends:
             for wrap_attr in strategy.get("wrap_attrs", ())
         }
 
-    def places_torchao_tensor_subclass_under_fsdp2(
-        self,
-        fp8_adapter,
-        *,
-        assume_torchao_fp8: bool = False,
-    ) -> bool:
-        """Whether configured FSDP2 blocks will contain TorchAO Float8Tensor.
+    def places_under_fsdp2(self, format_name: str) -> bool:
+        """Whether an FSDP2-wrapped block will hold this format's parameters.
 
-        assume_torchao_fp8 answers the question before an adapter has been selected, which is how
-        the selection itself avoids depending on its own result.
+        One question for every format. `walk_roots` already covers a carve-out
+        named below a target rather than at it, and `paired` covers the hybrid
+        schedule, which puts both formats at every leaf. Whether landing there
+        is a *problem* is the adapter's answer, not this one's -- a plain packed
+        parameter shards, a tensor subclass may not.
         """
         fsdp_target_paths = self._fsdp_target_paths()
         if not fsdp_target_paths:
             return False
-        if self._uses_mxfp6_contract():
-            return False
-
-        config = self.model.config
-        # Everything the run gives to FP8, which is the whole target set in a
-        # pure FP8 run and only the held-back modules in a tiered one. Asking
-        # `high_tier_targets` instead would answer "none" for a pure run, which
-        # has no tier but does put Float8Tensor inside every wrapped block.
-        plan = self.loader.quantization_plan.gemm_plan
-        fp8_targets = set(plan.roots("fp8"))
-        is_torchao = assume_torchao_fp8 or (
-            fp8_adapter is not None and fp8_adapter.backend.value == "torchao"
-        )
-        if is_torchao and any(
-            module_paths_overlap(target, fsdp_path)
-            for target in fp8_targets
-            for fsdp_path in fsdp_target_paths
-        ):
-            return True
-
-        # An fp4 run still emits fp8 tensors wherever a carve-out or the hybrid schedule
-        # holds a layer back from fp4, so fp4 targets count too once either is in play.
-        fp4_can_emit_fp8 = bool(
-            self._high_tier_scattered() or config.use_hybrid_gemm_schedule
-        )
-        return bool(
-            plan.low == "fp4"
-            and fp4_can_emit_fp8
-            and any(
-                module_paths_overlap(target, fsdp_path)
-                for target in self.primary_targets()
-                for fsdp_path in fsdp_target_paths
-            )
-        )
-
-    def places_format_backend_under_fsdp2(self) -> bool:
-        fsdp_target_paths = self._fsdp_target_paths()
-        if not fsdp_target_paths:
-            return False
-        targets = set(self._format_entries())
-        return any(
-            module_paths_overlap(target, fsdp_path)
-            for target in targets
-            for fsdp_path in fsdp_target_paths
-        )
-
-    def places_mxfp6_backend_under_fsdp2(self) -> bool:
-        """Whether pure/mixed MXFP6 creates packed parameters inside FSDP2."""
-
-        fsdp_target_paths = self._fsdp_target_paths()
-        if not fsdp_target_paths or not self._uses_mxfp6_contract():
-            return False
-        if self._format_value() == "fp6":
-            fp6_targets = set(self._format_entries())
-        else:
-            fp6_targets = self.high_tier_targets()
-            if self._high_tier_scattered():
-                # A carve-out scatters the better format inside the low-tier
-                # blocks too, so those components count as well.
-                fp6_targets.update(self.primary_targets())
-        return any(
-            module_paths_overlap(target, fsdp_path)
-            for target in fp6_targets
-            for fsdp_path in fsdp_target_paths
-        )
-
-    def _high_tier_scattered(self) -> bool:
-        """Whether the better format lands inside the primary format's targets.
-
-        A whole-module high-tier target is visible in `high_tier_targets`; one
-        carved out below a target root -- a block prefix, a leaf suffix -- is
-        not, and a predicate reading only that set would answer "no high tier
-        here" about a block that holds one.
-        """
-        return self.loader.quantization_plan.gemm_plan.splits_a_target
-
-    def primary_targets(self) -> set:
-        """The targets the run's primary format owns."""
-        plan = self.loader.quantization_plan.gemm_plan
-        return set(plan.roots(plan.low)) if plan.low else set()
-
-    def high_tier_targets(self) -> set:
-        """The targets held at the better format, which the primary one skips.
-
-        Three FSDP predicates need this, and each used to rebuild it by
-        subtracting the fp4 list from the fp8 one. The plan resolves it once,
-        so they can just ask.
-        """
-        plan = self.loader.quantization_plan.gemm_plan
-        return set(plan.roots(plan.high)) if plan.high else set()
-
-    def requires_blockwise_fp8(self) -> bool:
-        """Whether FP4 mode declares whole components owned only by FP8."""
-        if self._uses_mxfp6_contract():
-            return False
         plan = self.loader.quantization_plan.gemm_plan
         if plan is None:
             return False
-        return bool(self.high_tier_targets())
-
-    def uses_blockwise_fp8(self) -> bool:
-        contract = self.loader.load_contract
-        if contract is None or self._uses_mxfp6_contract():
-            return False
-        if self.requires_blockwise_fp8():
-            return True
-        if self.places_torchao_tensor_subclass_under_fsdp2(None):
-            return True
-        if contract.requested_format.value == "fp8" and (
-            self.places_torchao_tensor_subclass_under_fsdp2(
-                None, assume_torchao_fp8=True
-            )
-        ):
-            return True
-        return (
-            contract.materialization_mode.value != "eager"
-            and contract.requested_format.value == "fp8"
+        roots = plan.walk_roots(
+            format_name,
+            paired=bool(self.model.config.use_hybrid_gemm_schedule),
         )
-
-    def _format_entries(self):
-        """The transformer targets this run's primary format owns.
-
-        The text encoder is excluded: it is loaded and quantized by its own
-        route, which the format backends never touch.
-        """
-        format_value = self.loader.load_contract.requested_format.value
-        if format_value not in {"fp4", "fp4_fp6", "fp6", "int8"}:
-            return ()
-        plan = self.loader.quantization_plan.gemm_plan
-        if plan is None or plan.low is None:
-            return ()
-        return plan.roots(plan.low, component="transformer")
-
-    def format_entries(self):
-        """Public stable view used by eager placement."""
-
-        return tuple(self._format_entries())
-
-    def format_targets_for(self, component_name: str) -> tuple:
-        """Primary-format targets under one component, with its prefix stripped."""
-        plan = self.loader.quantization_plan.gemm_plan
-        if plan is None:
-            return ()
-        return plan.relative_to(component_name, self._format_entries())
+        return any(
+            module_paths_overlap(root, fsdp_path)
+            for root in roots
+            for fsdp_path in fsdp_target_paths
+        )
 
     def transformer_adapter(self, component_name: str):
         """The adapter and component-relative targets owning one transformer.

@@ -2,7 +2,7 @@
 
 One rank cannot show that parameters were split. These tests cover the behavior
 that is visible on one device: dtype conversion, a missing wrap attribute, and
-preserving the parameter count. Each check runs in its own interpreter.
+preserving the parameter count.
 """
 
 import gc
@@ -84,34 +84,40 @@ def _check_parameter_count():
 
 
 def _guard(init_method, check, result_queue):
+    torch.cuda.set_device(0)
     try:
         dist.init_process_group(
-            backend="gloo",
+            backend="nccl",
             init_method=init_method,
             rank=0,
             world_size=1,
         )
-        try:
-            check()
-        finally:
-            gc.collect()
-            if dist.is_initialized():
-                dist.destroy_process_group()
+        check()
     except Exception:
         result_queue.put(traceback.format_exc())
         raise
+    finally:
+        gc.collect()
+        try:
+            torch.cuda.synchronize()
+        finally:
+            if dist.is_initialized():
+                dist.destroy_process_group()
+            torch.cuda.empty_cache()
     result_queue.put(None)
 
 
 def _run_isolated(check, tmp_path):
     if not torch.cuda.is_available():
         pytest.skip("requires an accelerator device")
+    if not dist.is_nccl_available():
+        pytest.skip("NCCL/RCCL is unavailable")
 
     context = torch.multiprocessing.get_context("spawn")
     result_queue = context.Queue()
     process = context.Process(
         target=_guard,
-        args=(f"file://{tmp_path / 'gloo-init'}", check, result_queue),
+        args=(f"file://{tmp_path / 'nccl-init'}", check, result_queue),
     )
     process.start()
     process.join(60)

@@ -367,6 +367,7 @@ def test_h3_vsa_attention_backends_agree_with_the_dense_reference(use_triton):
     torch.testing.assert_close(actual.float(), expected.float(), rtol=2e-2, atol=2e-2)
 
 
+@pytest.mark.accelerator
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
 @pytest.mark.parametrize("use_triton", [False, True])
 @pytest.mark.parametrize(

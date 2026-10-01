@@ -59,7 +59,7 @@ def test_wan22_reuses_existing_fp4_and_quality_targets_for_mxfp6():
     )
 
 
-def test_wan22_logs_explicit_fp4_fp6_mapping(monkeypatch):
+def test_wan22_logs_an_explicit_fp4_and_fp6_mapping(monkeypatch):
     from xfuser.config.gemm import GemmQuantizationSpec
     from xfuser.model_executor.models.runner_models.loading import quantization_plan
     from xfuser.model_executor.quant.targets import GemmTargets, Select
@@ -148,7 +148,6 @@ def test_wan22_mixed_mode_routes_primary_to_fp4_and_second_transformer_to_fp6(
         ),
         fp8=None,
         blockwise_fp8=None,
-        format_targets_for=lambda name: (),
     )
     backends.adapter_for = lambda format_name: (
         backends.fp6 if format_name == "fp6" else backends.format

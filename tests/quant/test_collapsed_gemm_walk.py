@@ -127,7 +127,6 @@ def _loader(raw, *, text_encoder=True, fp8_before_move=True, targets=TARGETS):
         fp8=None,
         fp6=_Recorder("fp6"),
         blockwise_fp8=blockwise,
-        format_targets_for=lambda name: (),
     )
     backends.adapter_for = lambda fmt: (
         backends.fp6

@@ -155,7 +155,6 @@ def runtime(model):
         format=getattr(model, "format_backend", None),
         fp6=getattr(model, "fp6_backend", None),
         blockwise_fp8=getattr(model, "blockwise_fp8_backend", None),
-        format_targets_for=lambda name: plan.targets_for(name, "fp4"),
     )
     backends.adapter_for = lambda format_name: (
         backends.fp6

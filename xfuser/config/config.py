@@ -73,6 +73,13 @@ class RuntimeConfig:
     spargeattn_simthreshold: float = 0.3
     spargeattn_cdfthreshold: float = 0.92
     use_spargeattn_head_balance: bool = False
+    # Sol-Attn. kv_splits "auto" is 4 on SM90 CuTe for sequences of at least
+    # 65536 tokens, and 1 otherwise. sink_start None keeps a sink on the suffix.
+    sol_attn_tau: float = 0.2
+    sol_attn_thresh_type: str = "exact"
+    sol_attn_kv_splits: str = "auto"
+    sol_attn_sink_tokens: int = 0
+    sol_attn_sink_start: Optional[int] = None
     vsa_block_size: int = 128
     vsa_top_k: int = 1
     vsa_top_k_ratio: float = 0.0

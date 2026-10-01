@@ -30,6 +30,7 @@ class AttentionBackendType(Enum):
     FLASH_4 = "Flash Attention V4"
     FLASH_4_FP4 = "Flash Attention V4 FP4"
     SAGE = "Sage Attention"
+    SOL_ATTN = "Sol Attention"
     FLEX_BLOCK_ATTN = "Flex Block Attention"
     AITER = "AITER"
     AITER_BF16 = "AITER BF16 MHA v4"

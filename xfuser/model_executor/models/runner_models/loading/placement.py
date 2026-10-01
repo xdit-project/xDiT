@@ -107,7 +107,7 @@ Each walk starts where ``walk_roots`` says -- the subtrees that format owns,
 
     model = loader.model
     ledger = loader.quantization_ledger
-    formats = tuple(dict.fromkeys(name for name in (plan.low, plan.high) if name))
+    formats = plan.formats_in_play
 
     for format_name in formats:
         roots = plan.walk_roots(format_name)

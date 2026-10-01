@@ -188,9 +188,7 @@ class QuantizationBackends:
     def _formats_in_play(self) -> tuple:
         """The formats this run will place, low and high."""
         plan = self.loader.quantization_plan.gemm_plan
-        if plan is None:
-            return ()
-        return tuple(dict.fromkeys(n for n in (plan.low, plan.high) if n))
+        return () if plan is None else plan.formats_in_play
 
     def adapter_for(self, format_name: str):
         """The implementation that stores one format on this machine.

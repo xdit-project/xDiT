@@ -196,7 +196,7 @@ def build_block_quantize_fn(
     model = loader.model
     device = f"cuda:{local_rank}"
 
-    formats = tuple(dict.fromkeys(name for name in (plan.low, plan.high) if name))
+    formats = plan.formats_in_play
     by_format = {name: plan.walk_roots(name) for name in formats}
 
     paths = [f"{component_name}.{attr}" for attr in wrap_attrs]

@@ -198,6 +198,17 @@ class GemmPlan:
             if root == component_name or root.startswith(prefix)
         )
 
+    @property
+    def formats_in_play(self) -> Tuple[str, ...]:
+        """The formats this run places, low first.
+
+        The one answer to "which converters does this run need". Each consumer
+        rebuilt it from `low` and `high`, which was the last place a tier was
+        visible below the resolver -- and three identical expressions to edit
+        if a run ever names more than two.
+        """
+        return tuple(dict.fromkeys(n for n in (self.low, self.high) if n))
+
     def walk_roots(self, format_name: str, *, paired: bool = False) -> Tuple[str, ...]:
         """Where a converter for `format_name` should start walking.
 

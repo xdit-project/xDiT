@@ -34,6 +34,10 @@ def _declared_components(model):
 
 
 #: The one format a text encoder is ever stored at, whatever the run names.
+#: A statement, not a knob: ``_swap_meta_te_to_fp8`` builds one specific layer
+#: class without consulting this, so changing it here alone would move the
+#: adapter, the ledger and the log while leaving the meta layout FP8. See
+#: ``test_the_meta_text_encoder_layout_matches_the_declared_format``.
 #:
 #: Everything below the resolver is format-agnostic except this route. A
 #: declared encoder is in the plan like any other target and `format_for` gives

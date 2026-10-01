@@ -305,3 +305,33 @@ def test_disk_fill_preserves_nonpersistent_buffers_and_reports_source_errors():
         and node.func.id == "_collective_quantize_call"
     )
     assert quantize_line < _call_line(_is_block_shard)
+
+
+def test_the_meta_text_encoder_layout_matches_the_declared_format():
+    """`TEXT_ENCODER_FORMAT` is a statement about this route, not a setting.
+
+    Seven places read it -- the adapter lookup, the ledger, the log line that
+    tells a non-FP8 run its encoder is FP8 anyway. `_swap_meta_te_to_fp8` is
+    not one of them: it builds one specific layer class. Changing the constant
+    alone would leave the meta layout behind while everything else moved, so
+    this fails until the swap moves with it.
+    """
+    from xfuser.model_executor.models.runner_models.loading.text_encoder_plan import (
+        TEXT_ENCODER_FORMAT,
+    )
+
+    path = ROOT / "xfuser/model_executor/models/runner_models/loading/meta_load.py"
+    source = path.read_text()
+    swap = next(
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef) and node.name == "_swap_meta_te_to_fp8"
+    )
+    body = ast.get_source_segment(source, swap)
+
+    layer_for = {"fp8": "xFuserFP8BlockScaleLinear"}
+    assert TEXT_ENCODER_FORMAT in layer_for, (
+        f"the meta swap builds {sorted(layer_for)}; TEXT_ENCODER_FORMAT is "
+        f"{TEXT_ENCODER_FORMAT}, so the two have diverged"
+    )
+    assert layer_for[TEXT_ENCODER_FORMAT] in body

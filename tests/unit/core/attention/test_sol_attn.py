@@ -1,5 +1,7 @@
 """Sol-Attn backend: contract checks, and a kernel smoke test when it can run."""
 
+from types import SimpleNamespace
+
 import torch
 import torch.nn.functional as F
 
@@ -67,30 +69,36 @@ def test_ineligible_call_falls_back_to_sdpa():
     assert torch.allclose(out, ref)
 
 
-def test_call_kwargs_override_the_defaults():
+def test_runtime_config_is_forwarded_to_kernel(monkeypatch):
     import pytest
 
     pytest.importorskip("sol_attn")
-    from xfuser.core.attention.backends.sol_attn.kernel import _configured
+    from xfuser.core.attention.backends.sol_attn import kernel
 
-    call = AttnCall(
-        attention_kwargs={
-            "sol_attn_tau": 2.5,
-            "sol_attn_thresh_type": "exact",
-            "sol_attn_kv_splits": "4",
-            "sol_attn_sink_tokens": 32,
-            "sol_attn_sink_start": 0,
-        }
+    runtime_config = SimpleNamespace(
+        sol_attn_tau=2.5,
+        sol_attn_thresh_type="diag",
+        sol_attn_kv_splits="4",
+        sol_attn_sink_tokens=32,
+        sol_attn_sink_start=0,
     )
-    cfg = _configured(call)
-    assert cfg["sol_attn_tau"] == 2.5
-    assert cfg["sol_attn_thresh_type"] == "exact"
-    assert cfg["sol_attn_kv_splits"] == "4"
-    assert cfg["sol_attn_sink_tokens"] == 32
-    assert cfg["sol_attn_sink_start"] == 0
+    runtime_state = SimpleNamespace(runtime_config=runtime_config)
+    monkeypatch.setattr(kernel, "get_runtime_state", lambda: runtime_state)
+    received = {}
+
+    def fake_op(query, key, value, tau, thresh_type, kv_splits, sink_tokens, sink_start):
+        received["config"] = (tau, thresh_type, kv_splits, sink_tokens, sink_start)
+        return query
+
+    monkeypatch.setattr(kernel, "_sol_attn_op", fake_op)
+    q, k, v = _qkv()
+    out, lse = kernel.sol_attention(q, k, v, AttnCall())
+    assert received["config"] == (2.5, 0, 4, 32, 0)
+    assert out.shape == q.shape
+    assert lse is None
 
 
-def test_kernel_returns_the_query_shape():
+def test_kernel_returns_the_query_shape(monkeypatch):
     spec = _spec()
     reason = spec.unavailable()
     if reason is not None:
@@ -98,6 +106,17 @@ def test_kernel_returns_the_query_shape():
 
         pytest.skip(reason)
 
+    from xfuser.core.attention.backends.sol_attn import kernel
+
+    runtime_config = SimpleNamespace(
+        sol_attn_tau=1.0,
+        sol_attn_thresh_type="diag",
+        sol_attn_kv_splits="1",
+        sol_attn_sink_tokens=0,
+        sol_attn_sink_start=None,
+    )
+    runtime_state = SimpleNamespace(runtime_config=runtime_config)
+    monkeypatch.setattr(kernel, "get_runtime_state", lambda: runtime_state)
     torch.manual_seed(0)
     q, k, v = _qkv(heads=4, length=128)
     q = torch.randn_like(q)
@@ -108,15 +127,7 @@ def test_kernel_returns_the_query_shape():
         q,
         k,
         v,
-        AttnCall(
-            attention_kwargs={
-                "sol_attn_tau": 1.0,
-                "sol_attn_thresh_type": "diag",
-                "sol_attn_kv_splits": 1,
-                "sol_attn_sink_tokens": 0,
-                "sol_attn_sink_start": None,
-            }
-        ),
+        AttnCall(),
     )
     assert out.shape == q.shape
     assert out.dtype == torch.bfloat16

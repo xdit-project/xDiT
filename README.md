@@ -289,6 +289,7 @@ Several different attention backends are supported:
 | [AITER Sparge](https://github.com/rocm/aiter) | aiter_sparge |
 | [AITER Sparge V2](https://github.com/rocm/aiter) | aiter_sparge_v2 |
 | [Flex Block Sparge](https://github.com/xdit-project/xDiT) | flex_block_sparge |
+| [Sol-Attn](https://github.com/NVlabs/Sana/tree/sol-engine/techniques/sparse_backends) | sol_attn |
 | [AITER MLA](https://github.com/rocm/aiter) | aiter_mla |
 | [AITER FlyDSL](https://github.com/rocm/aiter) | aiter_flydsl |
 | [AITER FlyDSL FP8](https://github.com/rocm/aiter) | aiter_flydsl_fp8 |
@@ -296,6 +297,12 @@ Several different attention backends are supported:
 xDiT comes with `flash_attn` as an optional install requirement, as it currently supports the largest variety of different GPU architectures.
 However, newer implementations generally offer better performance. If available for you, we highly recommend using `cuDNN`, `FAv3`, `FAv3 FP8` (on _hopper_ GPUs) or `FAv4`, `Transformer engine FP8` (on _blackwell_ GPUs).
 On recent AMD GPUs (MI300X or newer) it is generally recommended to use `AITER` in all cases to get the best possible performance. Note that when using `AITER FP8` as the attention backend with `torch.compile`, it is important to use a version of `AITER` from Jan 16, 2026 or later. Older versions may trigger a bug related to the fake tensors, resulting in a runtime error.
+
+Sol-Attn is an optional package and must be installed separately:
+
+```bash
+pip install "git+https://github.com/NVlabs/Sana.git@sol-engine#subdirectory=techniques/sparse_backends"
+```
 
 The dedicated `aiter_bf16`, `aiter_bf16fp8`, `aiter_mxfp8`, `aiter_f8f6`, `aiter_mxfp6`, `aiter_f6f4`, `aiter_mxfp4`, and `aiter_f4f4` ASM backends require gfx950 and head dimension 128. `aiter_bf16` selects the BF16 Q/K/V MHA v4 kernel, `aiter_bf16fp8` selects BF16 Q/K with per-tensor FP8 V, while `aiter` continues to use MHA v3. `aiter_mxfp8` requires an AITER build with either the generic MHA v4 scale-mode API or the legacy `aiter.ops.mha_v4.mha_v4_mxfp8` entrypoint. F4F4/F6F4 pad only the packed FP4 V storage for partial final 128-token tiles; the logical attention sequence length is unchanged.
 

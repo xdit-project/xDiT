@@ -1,18 +1,14 @@
-import os
-import torch
-import torch.distributed as dist
-from packaging import version
 from dataclasses import dataclass, fields
+from typing import List, Optional, Union
 
-from torch import distributed as dist
+import torch
+from packaging import version
 
 from xfuser.compat import declared_floor, version_at_least
+from xfuser.envs import CUDA_VERSION, PACKAGES_CHECKER, TORCH_VERSION
 from xfuser.logger import init_logger
-from xfuser.envs import CUDA_VERSION, TORCH_VERSION, PACKAGES_CHECKER
 
 logger = init_logger(__name__)
-
-from typing import Union, Optional, List
 
 env_info = PACKAGES_CHECKER.get_packages_info()
 HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
@@ -26,10 +22,7 @@ def check_packages():
 
     floor = declared_floor("diffusers")
     if floor is not None and not version_at_least(diffusers.__version__, floor):
-        raise RuntimeError(
-            f"This project requires diffusers >= {floor}, "
-            f"but {diffusers.__version__} is installed."
-        )
+        raise RuntimeError(f"This project requires diffusers >= {floor}, but {diffusers.__version__} is installed.")
 
 
 def check_env():
@@ -129,12 +122,11 @@ class DataParallelConfig:
         else:
             self.cfg_degree = 1
         assert self.dp_degree * self.cfg_degree <= self.dit_parallel_size, (
-            "dp_degree * cfg_degree must be less than or equal to "
-            "dit_parallel_size because of classifier free guidance"
+            "dp_degree * cfg_degree must be less than or equal to dit_parallel_size because of classifier free guidance"
         )
-        assert (
-            self.dit_parallel_size % (self.dp_degree * self.cfg_degree) == 0
-        ), "dit_parallel_size must be divisible by dp_degree * cfg_degree"
+        assert self.dit_parallel_size % (self.dp_degree * self.cfg_degree) == 0, (
+            "dit_parallel_size must be divisible by dp_degree * cfg_degree"
+        )
 
 
 @dataclass
@@ -147,20 +139,14 @@ class SequenceParallelConfig:
     def __post_init__(self):
         if self.ulysses_degree is None:
             self.ulysses_degree = 1
-            logger.info(
-                f"Ulysses degree not set, " f"using default value {self.ulysses_degree}"
-            )
+            logger.info(f"Ulysses degree not set, using default value {self.ulysses_degree}")
         if self.ring_degree is None:
             self.ring_degree = 1
-            logger.info(
-                f"Ring degree not set, " f"using default value {self.ring_degree}"
-            )
+            logger.info(f"Ring degree not set, using default value {self.ring_degree}")
         self.sp_degree = self.ulysses_degree * self.ring_degree
         if self.sp_degree == 1 and self.shard_dit:
             self.shard_dit = False
-            logger.info(
-                f"Sequence parallelism not set, model sharding disabled"
-            )
+            logger.info("Sequence parallelism not set, model sharding disabled")
 
         if not HAS_LONG_CTX_ATTN and self.sp_degree > 1:
             raise ImportError(
@@ -178,9 +164,7 @@ class TensorParallelConfig:
 
     def __post_init__(self):
         assert self.tp_degree >= 1, "tp_degree must be greater than or equal to 1"
-        assert (
-            self.tp_degree <= self.dit_parallel_size
-        ), "tp_degree must be less than or equal to dit_parallel_size"
+        assert self.tp_degree <= self.dit_parallel_size, "tp_degree must be less than or equal to dit_parallel_size"
 
 
 @dataclass
@@ -191,12 +175,12 @@ class FullyShardConfig:
 
     def __post_init__(self):
         assert self.fs_degree >= 1, "fully_shard_degree must be greater than or equal to 1"
-        assert (
-            self.fs_degree <= self.dit_parallel_size
-        ), "fully_shard_degree must be less than or equal to dit_parallel_size"
-        assert (
-            self.tp_degree == 1 or self.fs_degree == 1
-        ), "Tensor parellelism and fully sharding cannot be used together"
+        assert self.fs_degree <= self.dit_parallel_size, (
+            "fully_shard_degree must be less than or equal to dit_parallel_size"
+        )
+        assert self.tp_degree == 1 or self.fs_degree == 1, (
+            "Tensor parellelism and fully sharding cannot be used together"
+        )
 
 
 @dataclass
@@ -212,32 +196,22 @@ class PipeFusionParallelConfig:
     dit_parallel_size: int = 1
 
     def __post_init__(self):
-        assert (
-            self.pp_degree is not None and self.pp_degree >= 1
-        ), "pipefusion_degree must be set and greater than 1 to use pipefusion"
-        assert (
-            self.pp_degree <= self.dit_parallel_size
-        ), "pipefusion_degree must be less than or equal to dit_parallel_size"
+        assert self.pp_degree is not None and self.pp_degree >= 1, (
+            "pipefusion_degree must be set and greater than 1 to use pipefusion"
+        )
+        assert self.pp_degree <= self.dit_parallel_size, (
+            "pipefusion_degree must be less than or equal to dit_parallel_size"
+        )
         if self.num_pipeline_patch is None:
             self.num_pipeline_patch = self.pp_degree
-            logger.info(
-                f"Pipeline patch number not set, "
-                f"using default value {self.pp_degree}"
-            )
+            logger.info(f"Pipeline patch number not set, using default value {self.pp_degree}")
         if self.attn_layer_num_for_pp is not None:
-            logger.info(
-                f"attn_layer_num_for_pp set, splitting attention layers"
-                f"to {self.attn_layer_num_for_pp}"
-            )
+            logger.info(f"attn_layer_num_for_pp set, splitting attention layersto {self.attn_layer_num_for_pp}")
             assert len(self.attn_layer_num_for_pp) == self.pp_degree, (
-                "attn_layer_num_for_pp must have the same "
-                "length as pp_degree if not None"
+                "attn_layer_num_for_pp must have the same length as pp_degree if not None"
             )
         if self.pp_degree == 1 and self.num_pipeline_patch > 1:
-            logger.warning(
-                f"Pipefusion degree is 1, pipeline will not be used,"
-                f"num_pipeline_patch will be ignored"
-            )
+            logger.warning("Pipefusion degree is 1, pipeline will not be used,num_pipeline_patch will be ignored")
             self.num_pipeline_patch = 1
 
 
@@ -249,9 +223,9 @@ class ParallelConfig:
     tp_config: TensorParallelConfig
     fs_config: FullyShardConfig
     vae_config: VaeParallelConfig
-    world_size: int = 1 # FIXME: remove this
+    world_size: int = 1  # FIXME: remove this
     dit_parallel_size: int = 1
-    vae_parallel_size: int = 1 # 0 means the vae is in the same process with diffusion
+    vae_parallel_size: int = 1  # 0 means the vae is in the same process with diffusion
     shard_t5_encoder: bool = False
 
     def __post_init__(self):
@@ -269,21 +243,14 @@ class ParallelConfig:
         )
         dit_parallel_size = self.dit_parallel_size
         assert parallel_world_size == dit_parallel_size, (
-            f"parallel_world_size {parallel_world_size} "
-            f"must be equal to dit_parallel_size {self.dit_parallel_size}"
+            f"parallel_world_size {parallel_world_size} must be equal to dit_parallel_size {self.dit_parallel_size}"
         )
-        assert (
-            dit_parallel_size % (self.dp_config.dp_degree * self.dp_config.cfg_degree) == 0
-        ), "dit_parallel_size must be divisible by dp_degree * cfg_degree"
-        assert (
-            dit_parallel_size % self.pp_config.pp_degree == 0
-        ), "dit_parallel_size must be divisible by pp_degree"
-        assert (
-            dit_parallel_size % self.sp_config.sp_degree == 0
-        ), "dit_parallel_size must be divisible by sp_degree"
-        assert (
-            dit_parallel_size % self.tp_config.tp_degree == 0
-        ), "dit_parallel_size must be divisible by tp_degree"
+        assert dit_parallel_size % (self.dp_config.dp_degree * self.dp_config.cfg_degree) == 0, (
+            "dit_parallel_size must be divisible by dp_degree * cfg_degree"
+        )
+        assert dit_parallel_size % self.pp_config.pp_degree == 0, "dit_parallel_size must be divisible by pp_degree"
+        assert dit_parallel_size % self.sp_config.sp_degree == 0, "dit_parallel_size must be divisible by sp_degree"
+        assert dit_parallel_size % self.tp_config.tp_degree == 0, "dit_parallel_size must be divisible by tp_degree"
 
         self.dp_degree = self.dp_config.dp_degree
         self.cfg_degree = self.dp_config.cfg_degree
@@ -305,7 +272,9 @@ class EngineConfig:
 
     def __post_init__(self):
         if self.fast_attn_config.use_fast_attn:
-            assert self.parallel_config.dp_degree == self.parallel_config.dit_parallel_size, f"dit_parallel_size must be equal to dp_degree when using DiTFastAttn"
+            assert self.parallel_config.dp_degree == self.parallel_config.dit_parallel_size, (
+                "dit_parallel_size must be equal to dp_degree when using DiTFastAttn"
+            )
 
     def to_dict(self):
         """Return the configs as a dictionary, for use in **kwargs."""

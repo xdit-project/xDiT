@@ -27,6 +27,13 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
     QuantizationFormat,
 )
 
+def _streamed_ledger(component, targets, format_name):
+    ledger = QuantizationLedger()
+    ledger.describe(component, format_name=format_name)
+    ledger.record_streamed(component, targets, format_name=format_name)
+    return ledger
+
+
 def backends(model):
     """The quantization backend selector under test, bound to a fake model."""
     from xfuser.model_executor.models.runner_models.loading.backend_selection import (
@@ -1119,10 +1126,11 @@ def test_streamed_fp8_target_does_not_skip_disjoint_target_in_component(
         ),
         fp8_backend=adapter,
         pipe=pipe,
-        quantization_ledger=QuantizationLedger(
-            fp8_streaming_targets={"transformer.blocks"},
-            described={("transformer", "fp8")},
-        ),
+        # Built through the real recorder rather than by setting fields: the
+        # hand-built version populated only the FP8 subset, a state the walk
+        # cannot reach, and the skip then depended on a union that always
+        # equalled the full set in production.
+        quantization_ledger=_streamed_ledger("transformer", ("blocks",), "fp8"),
         _replicated_broadcast_load=lambda: False,
     )
     monkeypatch.setattr(

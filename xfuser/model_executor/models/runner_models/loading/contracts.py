@@ -13,6 +13,19 @@ class QuantizationFormat(str, Enum):
     INT8 = "int8"
 
 
+#: Which implementations can store each format, best first. The one table that
+#: names a format: a new one is a row here plus a registered adapter class, and
+#: nothing between them changes. Kept in this dependency-light module so both
+#: the registry and the per-model contract list read the same rows rather than
+#: each keeping their own copy.
+IMPL_PREFERENCE = {
+    "fp8": ("aiter", "torchao"),
+    "fp4": ("torchao", "aiter"),
+    "fp6": ("aiter",),
+    "int8": ("torchao",),
+}
+
+
 class QuantizationBackend(str, Enum):
     NONE = "none"
     AITER = "aiter"
@@ -162,25 +175,16 @@ class LoadDeclaration:
         # caller that declares no GEMM formats supports none.
         supported = frozenset(getattr(model_capabilities, "gemm_formats", ()) or ())
 
+        # Generated from the one table rather than restated per format: the
+        # hand-written version was the same rows a second time, and a format
+        # added to one and not the other would have been accepted by the
+        # registry and then refused by the contract, or the reverse.
         contracts = {(QuantizationFormat.NONE, QuantizationBackend.NONE)}
-        if "fp8" in supported:
-            contracts.update(
-                {
-                    (QuantizationFormat.FP8, QuantizationBackend.AITER),
-                    (QuantizationFormat.FP8, QuantizationBackend.TORCHAO),
-                }
-            )
-        if "fp4" in supported:
-            contracts.update(
-                {
-                    (QuantizationFormat.FP4, QuantizationBackend.AITER),
-                    (QuantizationFormat.FP4, QuantizationBackend.TORCHAO),
-                }
-            )
-        if "fp6" in supported:
-            contracts.add((QuantizationFormat.FP6, QuantizationBackend.AITER))
-        if "int8" in supported:
-            contracts.add((QuantizationFormat.INT8, QuantizationBackend.TORCHAO))
+        contracts.update(
+            (QuantizationFormat(format_name), QuantizationBackend(impl))
+            for format_name in supported
+            for impl in IMPL_PREFERENCE.get(format_name, ())
+        )
 
         modes = {MaterializationMode.EAGER}
         seam = None

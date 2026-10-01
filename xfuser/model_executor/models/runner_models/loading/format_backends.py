@@ -436,6 +436,8 @@ class TorchaoNvfp4BackendAdapter(QuantAdapter):
 
 @stores("fp4", "aiter")
 class AiterMxfp4BackendAdapter(QuantAdapter):
+    meta_layout_matches_storage = True
+    streams_by_exclusion = False
     # Group offloading moves a module's parameters between host and device
     # around each call, and these weights survive neither leg. Both failures
     # land below Python -- one inside the hook, one as AITER's own abort with
@@ -473,6 +475,8 @@ class AiterMxfp4BackendAdapter(QuantAdapter):
 
 @stores("fp6", "aiter")
 class AiterMxfp6BackendAdapter(QuantAdapter):
+    meta_layout_matches_storage = True
+    streams_by_exclusion = False
     storage_semantics = "aiter_mxfp6_e2m3_per_1x32"
     parameter_semantics = "packed_weight_parameter"
     auxiliary_state_semantics = "persistent_scale_buffer"

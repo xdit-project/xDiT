@@ -879,7 +879,7 @@ def test_build_transformer_routes_torchao_fp8_to_native_diffusers_config(
 
     assert result == "streamed"
     assert calls[0]["quantization_config"] is sentinel
-    assert runner.quantization_ledger.fp8_streaming_targets == {"transformer.blocks"}
+    assert runner.quantization_ledger.streamed_at("fp8") == {"transformer.blocks"}
 
 
 def test_blockwise_transformer_marks_only_wrapped_target_as_streamed(
@@ -913,7 +913,7 @@ def test_blockwise_transformer_marks_only_wrapped_target_as_streamed(
     result = transformer_load.load_transformer(loader_for(runner), SimpleNamespace())
 
     assert result == "meta"
-    assert runner.quantization_ledger.fp8_streaming_targets == {"transformer.blocks"}
+    assert runner.quantization_ledger.streamed_at("fp8") == {"transformer.blocks"}
     assert runner.quantization_ledger.streaming_targets == {"transformer.blocks"}
 
 
@@ -959,7 +959,7 @@ def test_blockwise_fp4_marks_only_wrapped_fp8_remainder_as_streamed(
     result = transformer_load.load_transformer(loader_for(runner), SimpleNamespace())
 
     assert result == "meta"
-    assert runner.quantization_ledger.fp8_streaming_targets == {"transformer.blocks"}
+    assert runner.quantization_ledger.streamed_at("fp8") == {"transformer.blocks"}
     assert runner.quantization_ledger.streaming_targets == {"transformer.blocks"}
 
 
@@ -1411,7 +1411,7 @@ def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
         "text_encoder descriptor",
         "text_encoder_2 descriptor",
     ]
-    assert runner.quantization_ledger.fp8_streaming_targets == {
+    assert runner.quantization_ledger.streamed_at("fp8") == {
         "text_encoder.encoder.block",
         "text_encoder_2.model.layers",
     }
@@ -1433,7 +1433,7 @@ def test_a_non_fp8_run_says_the_encoder_is_still_stored_at_fp8(monkeypatch):
     )
     runner = SimpleNamespace(
         load_contract=SimpleNamespace(requested_format=SimpleNamespace(value="fp4")),
-        fp8_backend=SimpleNamespace(backend=SimpleNamespace(value="aiter")),
+        fp8_backend=_fp8_adapter("aiter"),
         _replicated_broadcast_load=lambda: False,
         _memory_efficient_fsdp_load=lambda: False,
         settings=SimpleNamespace(gemm_targets=targets),
@@ -1471,7 +1471,7 @@ def test_a_non_fp8_run_says_the_encoder_is_still_stored_at_fp8(monkeypatch):
 
 def test_hybrid_meta_te_uses_the_fp8_adapter(monkeypatch):
 
-    sentinel = SimpleNamespace(backend=SimpleNamespace(value="torchao"))
+    sentinel = _fp8_adapter("torchao")
     runner = SimpleNamespace(
         # A tiered run names FP8 for its high tier, and the encoder is placed
         # by whatever stores FP8 here -- the same adapter a pure FP8 run uses.
@@ -1526,7 +1526,7 @@ def test_meta_te_placement_disables_torchao_native_pipeline_streaming(
         load_contract=SimpleNamespace(requested_format=SimpleNamespace(value="fp8")),
         _replicated_broadcast_load=lambda: False,
         _memory_efficient_fsdp_load=lambda: True,
-        fp8_backend=SimpleNamespace(backend=SimpleNamespace(value="torchao")),
+        fp8_backend=_fp8_adapter("torchao"),
         fp8=SimpleNamespace(targets_for=lambda name: ["encoder.block"]),
         settings=SimpleNamespace(
             gemm_targets=GemmTargets(
@@ -1562,7 +1562,7 @@ def test_meta_te_placement_disables_torchao_native_pipeline_streaming(
 
     assert (kwargs, config) == ({"text_encoder": "meta"}, None)
     assert observed == [(False, False)]
-    assert runner.quantization_ledger.fp8_streaming_targets == set()
+    assert runner.quantization_ledger.streamed_at("fp8") == set()
 
 
 def test_a_blockwise_filled_text_encoder_needs_no_post_load_fallback(monkeypatch):
@@ -1618,7 +1618,7 @@ def test_a_blockwise_filled_text_encoder_needs_no_post_load_fallback(monkeypatch
     assert (kwargs, config) == ({"text_encoder": "meta"}, None)
     # Recorded as already quantized, so the post-load walk leaves the filled blocks alone.
     assert ("text_encoder", "fp8") in runner.quantization_ledger.described
-    assert runner.quantization_ledger.fp8_streaming_targets
+    assert runner.quantization_ledger.streamed_at("fp8")
 
 
 def test_meta_fsdp_rejects_text_encoder_post_load_fallback(monkeypatch):
@@ -1627,7 +1627,7 @@ def test_meta_fsdp_rejects_text_encoder_post_load_fallback(monkeypatch):
         load_contract=SimpleNamespace(requested_format=SimpleNamespace(value="fp8")),
         _replicated_broadcast_load=lambda: False,
         _memory_efficient_fsdp_load=lambda: True,
-        fp8_backend=SimpleNamespace(backend=SimpleNamespace(value="aiter")),
+        fp8_backend=_fp8_adapter("aiter"),
         fp8=SimpleNamespace(targets_for=lambda name: ["encoder.block"]),
         settings=SimpleNamespace(
             gemm_targets=GemmTargets(

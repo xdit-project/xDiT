@@ -119,7 +119,7 @@ Each walk starts where ``walk_roots`` says -- the subtrees that format owns,
             continue
 
         for module_name in roots:
-            already = ledger.already_quantized(fp8=format_name == "fp8")
+            already = ledger.already_quantized()
             if any(module_path_is_covered(module_name, owner) for owner in already):
                 continue
 

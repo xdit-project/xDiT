@@ -19,17 +19,8 @@ the run and no longer.
 
 import functools
 
+from .contracts import IMPL_PREFERENCE as _IMPL_PREFERENCE
 from .quant_adapter import module_paths_overlap
-
-#: Which implementations can store each format, best first. The only table in
-#: the loading layer that names a format: adding one is adding a row here and a
-#: registered adapter class, and nothing between them has to change.
-_IMPL_PREFERENCE = {
-    "fp8": ("aiter", "torchao"),
-    "fp4": ("torchao", "aiter"),
-    "fp6": ("aiter",),
-    "int8": ("torchao",),
-}
 
 
 class QuantizationBackends:

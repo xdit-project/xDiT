@@ -297,6 +297,19 @@ class QuantAdapter:
     #: AITER rewrites a module on the host; torchao swaps in subclasses that
     #: want their final device. Decides which side of ``pipe.to`` a walk runs.
     converts_before_device_move = False
+    #: Whether the checkpoint can be loaded straight to host memory because this
+    #: converter packs there anyway. Only meaningful under CPU offload, where it
+    #: saves a device round trip.
+    loads_to_host_under_offload = False
+    #: Whether a meta-built component already has the layout this stores, so a
+    #: broadcast or per-block fill can quantize on the way in. A packed weight
+    #: plus a scale buffer does; a tensor subclass has to be converted after,
+    #: which the memory-efficient FSDP path refuses.
+    meta_layout_matches_storage = False
+    #: Whether a native streaming config is expressed by *excluding* the leaves
+    #: it must not touch, which needs the model's structure to enumerate. A
+    #: converter that takes the targets positively needs no structure at all.
+    streams_by_exclusion = True
     supports_text_encoder_post_load = True
     #: Why this implementation's weights do not survive the host round trip a
     #: group-offload hook performs, keyed by whether the hook pins each tensor

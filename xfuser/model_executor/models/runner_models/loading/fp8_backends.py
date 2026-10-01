@@ -351,6 +351,9 @@ class AiterFp8BackendAdapter(QuantAdapter):
     auxiliary_state_semantics = "persistent_scale_buffer"
     serialization = "packed_state_supported_not_portable"
     converts_before_device_move = True
+    loads_to_host_under_offload = True
+    meta_layout_matches_storage = True
+    streams_by_exclusion = False
 
     def _stream_config_factory(self, targets):
         from xfuser.model_executor.quant.aiter_load import stream_config
@@ -478,7 +481,7 @@ def prepare_text_encoder_fp8_load(
     else:
         try:
             exclusions = ()
-            if adapter.backend.value == "torchao":
+            if adapter.streams_by_exclusion:
                 if model_factory is None:
                     raise TargetMappingUnavailable(
                         "target mapping unavailable: no text-encoder "

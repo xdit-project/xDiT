@@ -101,11 +101,13 @@ def plan_text_encoders(loader, existing_quantization_config=None):
                     ),
                 )
                 continue
-            # Existing meta layouts only mirror AITER's plain fp8+scale representation.
-            # Replicated TorchAO falls back after broadcast; memory-efficient FSDP rejects
-            # that layout-changing fallback.
-            stream_quant = not (replicated_meta or fsdp_meta) or (
-                adapter.backend.value == "aiter"
+            # A meta component only carries the layout a converter that packs
+            # in place would produce. Anything that swaps in a tensor subclass
+            # has to convert after the broadcast, which the memory-efficient
+            # FSDP path refuses -- so it does not claim quantize-on-load.
+            stream_quant = (
+                not (replicated_meta or fsdp_meta)
+                or adapter.meta_layout_matches_storage
             )
             prepared = prepare_text_encoder_fp8_load(
                 adapter,
@@ -132,7 +134,9 @@ def plan_text_encoders(loader, existing_quantization_config=None):
             # placed and they leave it where this route put it.
             ledger.describe(component_name, format_name=TEXT_ENCODER_FORMAT)
             if prepared.descriptor.materialization_mode == "streaming":
-                ledger.record_streamed(component_name, targets, fp8=True)
+                ledger.record_streamed(
+                    component_name, targets, format_name=TEXT_ENCODER_FORMAT
+                )
             if prepared.quantization_config is not None:
                 component_configs[component_name] = prepared.quantization_config
 

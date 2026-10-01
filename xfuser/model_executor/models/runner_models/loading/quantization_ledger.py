@@ -38,7 +38,11 @@ class QuantizationLedger:
     #: silently never logged and its tier was invisible in the run's output.
     described: set = field(default_factory=set)
     streaming_targets: set = field(default_factory=set)
-    fp8_streaming_targets: set = field(default_factory=set)
+    #: Streamed paths per format, for the one consumer that needs to know which
+    #: format a path holds rather than merely that it holds one. Keyed by
+    #: format for the same reason `described` is: two non-FP8 formats in one
+    #: run shared a slot under a boolean.
+    streamed_by_format: dict = field(default_factory=dict)
 
     def describe(self, component_name, *, format_name):
         """Record that this component's plan for one format has been logged."""
@@ -56,7 +60,7 @@ class QuantizationLedger:
         self.described.add((component_name, format_name))
         return True
 
-    def record_streamed(self, component_name, targets, *, fp8):
+    def record_streamed(self, component_name, targets, *, format_name):
         """Record the module paths that will hold quantized weights once this route finishes.
 
         Recorded for every format, not only the one that did the quantizing. A
@@ -68,14 +72,20 @@ class QuantizationLedger:
 
         paths = component_target_paths(component_name, targets)
         self.streaming_targets.update(paths)
-        if fp8:
-            self.fp8_streaming_targets.update(paths)
+        self.streamed_by_format.setdefault(format_name, set()).update(paths)
 
-    def already_quantized(self, *, fp8=False):
-        """The paths a walk should skip, as one set."""
+    def already_quantized(self):
+        """The paths a walk should skip, whatever format it is placing.
 
-        return (
-            self.streaming_targets | self.fp8_streaming_targets
-            if fp8
-            else set(self.streaming_targets)
-        )
+        One set, with no format in the question. It used to take an ``fp8``
+        flag choosing between ``streaming_targets`` and its union with the FP8
+        subset -- but every FP8 path was recorded in both, so the union was
+        always the first set and the flag never changed an answer.
+        """
+
+        return set(self.streaming_targets)
+
+    def streamed_at(self, format_name):
+        """The paths already holding one particular format."""
+
+        return set(self.streamed_by_format.get(format_name, ()))

@@ -62,11 +62,7 @@ def native_quantization_device_map(model, adapter):
             "enable_group_cpu_offload",
         )
     )
-    if (
-        adapter.format.value == "fp8"
-        and adapter.backend.value == "aiter"
-        and cpu_offload
-    ):
+    if cpu_offload and adapter.loads_to_host_under_offload:
         return {"": "cpu"}
     return {"": get_world_group().local_rank}
 
@@ -136,33 +132,35 @@ def _prepare_native_load(
     )
 
 
-def _fp4_remainder(loader, component_name):
-    """Tell an FP4 block fill which higher-precision remainder it also owns."""
+def _blockwise_remainder(loader, component_name):
+    """What else this component's blockwise fill converts, per format.
+
+    The fill walks each block once and places whatever that block holds, so
+    anything the run gives the other format is converted in the same pass and
+    has to be recorded too. Neither format is named here: the plan says which
+    is which, and a run with no second format simply yields nothing.
+    """
 
     plan = loader.quantization_plan.gemm_plan
-    if plan is None or plan.low != "fp4":
+    if plan is None or plan.high is None:
         return {}
-    remainder_key = "mxfp6_targets" if plan.high == "fp6" else "fp8_targets"
-    remainder = (
-        plan.relative_to(component_name, plan.roots(plan.high))
-        if plan is not None and plan.high is not None
-        else ()
-    )
-    return {"fp4_gemms": True, remainder_key: remainder}
+    targets = plan.relative_to(component_name, plan.roots(plan.high))
+    return {"remainder": ((plan.high, targets),)} if targets else {}
 
 
 def _record_native_quantization(ledger, adapter, component_name, prepared, targets):
     """Note what the native config will have quantized, so the post-load walk skips it."""
 
     log(prepared.descriptor.log_message())
-    is_fp8 = adapter.format.value == "fp8"
     ledger.describe(component_name, format_name=adapter.format.value)
     if prepared.quantization_config is None:
         return
     # A load that held a residual back narrows the streamed set; one that did
     # not owns everything it was given.
     streamed = prepared.streamed_targets or targets
-    ledger.record_streamed(component_name, streamed, fp8=is_fp8)
+    ledger.record_streamed(
+        component_name, streamed, format_name=adapter.format.value
+    )
 
 
 def load_transformer(
@@ -208,7 +206,7 @@ def load_transformer(
                 blockwise_transformer_descriptor(
                     adapter, component_name, targets, wrap_attrs
                 ),
-                **_fp4_remainder(loader, component_name),
+                **_blockwise_remainder(loader, component_name),
             )
         return loader.build_meta_transformer(
             wrapper_cls, request, init_kwargs, **build_kwargs
@@ -238,7 +236,7 @@ def load_transformer(
                 blockwise_transformer_descriptor(
                     adapter, component_name, targets, wrap_attrs
                 ),
-                **_fp4_remainder(loader, component_name),
+                **_blockwise_remainder(loader, component_name),
             )
             component = loader.build_meta_transformer(
                 wrapper_cls, request, init_kwargs, **build_kwargs

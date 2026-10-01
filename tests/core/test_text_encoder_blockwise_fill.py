@@ -76,7 +76,7 @@ def make_loader(
             meta_text_encoders=tuple(meta_text_encoders)
         ),
         quantization_ledger=QuantizationLedger(
-            fp8_streaming_targets={"text_encoder.model.layers"}
+            streamed_by_format={"fp8": {"text_encoder.model.layers"}}
         ),
     )
     loader = object.__new__(meta_load.ModelLoader)

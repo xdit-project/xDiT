@@ -18,6 +18,9 @@ CONTRACTS_PATH = (
 ADAPTER_PATH = (
     ROOT / "xfuser/model_executor/models/runner_models/loading/quant_adapter.py"
 )
+FP8_PATH = (
+    ROOT / "xfuser/model_executor/models/runner_models/loading/fp8_backends.py"
+)
 
 
 #: A synthetic package over the loading directory. These modules are meant to
@@ -51,7 +54,12 @@ def modules():
     contracts = _load_module(CONTRACTS_PATH, "contracts")
     adapter = _load_module(ADAPTER_PATH, "quant_adapter")
     backends = _load_module(BACKENDS_PATH, "format_adapter_backends")
-    return SimpleNamespace(contracts=contracts, backends=backends, adapter=adapter)
+    # Both halves of the registry, so a test can ask about any declared pair
+    # rather than only the ones this module happens to define.
+    fp8 = _load_module(FP8_PATH, "format_adapter_fp8")
+    return SimpleNamespace(
+        contracts=contracts, backends=backends, adapter=adapter, fp8=fp8
+    )
 
 
 def _contract(modules, format_name, backend_name, mode_name="EAGER"):
@@ -681,3 +689,40 @@ def test_a_companion_reaches_the_converter_rather_than_being_dropped(modules):
 
     # Low first, as it was when only MXFP4 composed.
     assert seen == ["low", "high"]
+
+
+@pytest.mark.parametrize(
+    ("format_name", "impl", "attribute", "expected"),
+    [
+        # Packed weight plus a scale buffer: the layout a meta component
+        # already has, and the one a host-side pack can build under offload.
+        ("fp8", "aiter", "meta_layout_matches_storage", True),
+        ("fp4", "aiter", "meta_layout_matches_storage", True),
+        ("fp6", "aiter", "meta_layout_matches_storage", True),
+        ("fp8", "torchao", "meta_layout_matches_storage", False),
+        ("fp4", "torchao", "meta_layout_matches_storage", False),
+        ("fp8", "aiter", "loads_to_host_under_offload", True),
+        ("fp4", "aiter", "loads_to_host_under_offload", False),
+        ("fp8", "torchao", "loads_to_host_under_offload", False),
+        # A config that lists what NOT to convert needs the model's structure;
+        # one that takes the targets positively does not.
+        ("fp8", "torchao", "streams_by_exclusion", True),
+        ("int8", "torchao", "streams_by_exclusion", True),
+        ("fp8", "aiter", "streams_by_exclusion", False),
+        ("fp4", "aiter", "streams_by_exclusion", False),
+    ],
+)
+def test_the_loader_reads_these_as_attributes_not_as_a_backend_name(
+    modules, format_name, impl, attribute, expected
+):
+    """Each replaced an `adapter.backend.value == "..."` branch in the loader.
+
+    Pinned per pair, because the loader now trusts the declaration: a wrong one
+    is silently wrong at load time rather than caught by the branch it replaced.
+    """
+    a = modules.adapter
+    adapter = a.build_adapter(
+        format_name, impl, capability=a.FormatCapability(available=True)
+    )
+
+    assert getattr(adapter, attribute) is expected

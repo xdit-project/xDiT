@@ -46,37 +46,37 @@ def record_blockwise_ownership(
     wrap_attrs,
     descriptor,
     *,
-    fp4_gemms=False,
-    fp8_targets=(),
-    mxfp6_targets=(),
+    remainder=(),
 ):
     """Log the plan and record what it will have quantized by the time the fill finishes.
 
-    ``fp8_targets`` are the component's FP8 targets, needed only for the FP4 case below, so a
-    caller that is not running FP4 gemms need not look them up. ``mxfp6_targets`` describes the
-    corresponding MXFP6 remainder in mixed mode.
+    ``remainder`` is what the same fill converts besides its own targets, as
+    ``(format_name, targets)`` pairs: a blockwise fill walks each block once and
+    places every format that block holds, so the ledger has to learn about all
+    of them. Which formats those are is the plan's business -- this used to ask
+    whether the run was FP4 and then pick between an ``fp8_targets`` and an
+    ``mxfp6_targets`` argument, which stopped being true the moment any format
+    could be the low one.
     """
     log(descriptor.log_message())
-    is_fp8 = adapter.format.value == "fp8"
     ledger.describe(component_name, format_name=adapter.format.value)
     if descriptor.materialization_mode not in {"streaming", "blockwise"}:
         return
-    owned_targets = blockwise_owned_targets(targets, wrap_attrs)
-    ledger.record_streamed(component_name, owned_targets, fp8=is_fp8)
-    # An fp4 blockwise fill also converts the fp8 remainder its adapter leaves behind, so those
-    # targets are owned too even though they are not the ones the descriptor names.
-    if descriptor.materialization_mode == "blockwise" and fp4_gemms:
+    ledger.record_streamed(
+        component_name,
+        blockwise_owned_targets(targets, wrap_attrs),
+        format_name=adapter.format.value,
+    )
+    if descriptor.materialization_mode != "blockwise":
+        return
+    for format_name, remainder_targets in remainder:
+        if not remainder_targets:
+            continue
         ledger.record_streamed(
             component_name,
-            blockwise_owned_targets(tuple(fp8_targets), wrap_attrs),
-            fp8=True,
+            blockwise_owned_targets(tuple(remainder_targets), wrap_attrs),
+            format_name=format_name,
         )
-        if mxfp6_targets:
-            ledger.record_streamed(
-                component_name,
-                blockwise_owned_targets(tuple(mxfp6_targets), wrap_attrs),
-                fp8=False,
-            )
 
 
 def blockwise_transformer_descriptor(

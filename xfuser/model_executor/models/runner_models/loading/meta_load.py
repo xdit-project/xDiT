@@ -747,8 +747,10 @@ class ModelLoader:
         return component
 
     def _meta_te_fp8_targets(self, component_name: str) -> tuple:
-        """This component's fp8-streamed target paths, component-relative."""
-        streamed_targets = self.quantization_ledger.fp8_streaming_targets
+        """This component's streamed target paths for the encoder's format."""
+        from .text_encoder_plan import TEXT_ENCODER_FORMAT
+
+        streamed_targets = self.quantization_ledger.streamed_at(TEXT_ENCODER_FORMAT)
         prefix = f"{component_name}."
         return tuple(
             "" if target == component_name else target[len(prefix) :]

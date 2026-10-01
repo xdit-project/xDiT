@@ -30,9 +30,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # used in distributed environment to determine the master address
     "MASTER_ADDR": lambda: os.getenv("MASTER_ADDR", ""),
     # used in distributed environment to manually set the communication port
-    "MASTER_PORT": lambda: (
-        int(os.getenv("MASTER_PORT", "0")) if "MASTER_PORT" in os.environ else None
-    ),
+    "MASTER_PORT": lambda: (int(os.getenv("MASTER_PORT", "0")) if "MASTER_PORT" in os.environ else None),
     # path to cudatoolkit home directory, under which should be bin, include,
     # and lib directories.
     "CUDA_HOME": lambda: os.environ.get("CUDA_HOME", None),
@@ -44,9 +42,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # this is used for configuring the default logging level
     "XDIT_LOGGING_LEVEL": lambda: os.getenv("XDIT_LOGGING_LEVEL", "INFO"),
     # this is used to set the static scale for AITER FP8 attention when descale vectors are used
-    "AITER_FP8_STATIC_SCALE_WITH_DESCALE": lambda: os.environ.get(
-                "XFUSER_AITER_FP8_STATIC_SCALE_WITH_DESCALE", None
-            ),
+    "AITER_FP8_STATIC_SCALE_WITH_DESCALE": lambda: os.environ.get("XFUSER_AITER_FP8_STATIC_SCALE_WITH_DESCALE", None),
     "AITER_SAGE_V2_BLOCK_R": lambda: os.environ.get("XFUSER_AITER_SAGE_V2_BLOCK_R", "128"),
     "XDIT_FBCACHE_THRESH": lambda: os.environ.get("XDIT_FBCACHE_THRESH", None),
     # opt-in breakdown of where a memory-efficient fill spends its time. Off by default because an
@@ -135,9 +131,7 @@ def get_device_version():
     elif _is_npu():
         return None
     else:
-        raise NotImplementedError(
-            "No Accelerators(AMD/NV/MTT GPU, AMD MI instinct accelerators) available"
-        )
+        return None
 
 
 def get_torch_distributed_backend() -> str:
@@ -150,9 +144,8 @@ def get_torch_distributed_backend() -> str:
     elif _is_npu():
         return "hccl"
     else:
-        raise NotImplementedError(
-            "No Accelerators(AMD/NV/MTT GPU, AMD MI instinct accelerators) available"
-        )
+        raise NotImplementedError("No Accelerators(AMD/NV/MTT GPU, AMD MI instinct accelerators) available")
+
 
 def get_platform() -> str:
     if _is_cuda():
@@ -173,9 +166,7 @@ variables: Dict[str, Callable[[], Any]] = {
     # ================== Other Vars ==================
     # used in version checking
     "CUDA_VERSION": lambda: version.parse(get_device_version() or "0.0"),
-    "TORCH_VERSION": lambda: version.parse(
-        version.parse(torch.__version__).base_version
-    ),
+    "TORCH_VERSION": lambda: version.parse(version.parse(torch.__version__).base_version),
 }
 
 
@@ -185,12 +176,8 @@ def _setup_musa(environment_variables, variables):
         return
     try:
         if musa.is_available():
-            environment_variables["MUSA_HOME"] = lambda: os.environ.get(
-                "MUSA_HOME", None
-            )
-            environment_variables["MUSA_VISIBLE_DEVICES"] = lambda: os.environ.get(
-                "MUSA_VISIBLE_DEVICES", None
-            )
+            environment_variables["MUSA_HOME"] = lambda: os.environ.get("MUSA_HOME", None)
+            environment_variables["MUSA_VISIBLE_DEVICES"] = lambda: os.environ.get("MUSA_VISIBLE_DEVICES", None)
             musa_ver = getattr(getattr(torch, "version", None), "musa", None)
             if musa_ver:
                 variables["MUSA_VERSION"] = lambda: version.parse(musa_ver)
@@ -238,16 +225,14 @@ class PackagesEnvChecker:
             return False
         try:
             import aiter
+
             return True
         except:
             if _is_hip():
                 logger.warning(
-                    f'Using AMD GPUs, but library "aiter" is not installed, '
-                    'defaulting to other attention mechanisms'
+                    'Using AMD GPUs, but library "aiter" is not installed, defaulting to other attention mechanisms'
                 )
             return False
-
-
 
     def check_flash_attn(self):
         if not torch.cuda.is_available():
@@ -259,9 +244,7 @@ class PackagesEnvChecker:
             return False
 
         if _is_musa():
-            logger.info(
-                "Flash Attention library is not supported on MUSA for the moment."
-            )
+            logger.info("Flash Attention library is not supported on MUSA for the moment.")
             return False
         try:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -282,6 +265,7 @@ class PackagesEnvChecker:
     def _check_flash_attn_3(self):
         try:
             from flash_attn_interface import flash_attn_func as flash3_attn_func
+
             return True
         except:
             return False
@@ -289,6 +273,7 @@ class PackagesEnvChecker:
     def _check_flash_attn_4(self):
         try:
             from flash_attn.cute import interface as flash_cute
+
             return True
         except:
             return False
@@ -301,6 +286,7 @@ class PackagesEnvChecker:
             if major < 10:
                 return False
             from flash_attn.cute.flash_fwd_sm100_fp4 import FlashAttentionForwardSm100  # noqa: F401
+
             # TVM-FFI must be enabled for CUTE tensors (FP4 quantized Q/K)
             # to be passed through the cutlass-dsl compiled kernel.
             os.environ.setdefault("CUTE_DSL_ENABLE_TVM_FFI", "1")
@@ -326,6 +312,7 @@ class PackagesEnvChecker:
 
     def check_transformer_engine(self):
         import sys
+
         if not torch.cuda.is_available() or _is_hip():
             return False
         self._install_flash_attn_3_shim_for_transformer_engine()
@@ -333,7 +320,8 @@ class PackagesEnvChecker:
             return False
         try:
             from transformer_engine.pytorch import DotProductAttention, fp8_autocast  # noqa: F401
-            from transformer_engine.common import recipe # noqa: F401
+            from transformer_engine.common import recipe  # noqa: F401
+
             return True
         except ImportError:
             return False
@@ -341,6 +329,7 @@ class PackagesEnvChecker:
     def _check_sage(self):
         try:
             from sageattention import sageattn
+
             return True
         except:
             return False
@@ -348,10 +337,10 @@ class PackagesEnvChecker:
     def _check_flex_block_attn(self):
         try:
             from flex_block_attn import flex_block_attn_func
+
             return True
         except:
             return False
-
 
     def check_long_ctx_attn(self):
         if not (torch.cuda.is_available() or _is_npu()):
@@ -367,16 +356,11 @@ class PackagesEnvChecker:
 
             return True
         except ImportError:
-            logger.warning(
-                f'Ring Flash Attention library "yunchang" not found, '
-                f"using pytorch attention implementation"
-            )
+            logger.warning('Ring Flash Attention library "yunchang" not found, using pytorch attention implementation')
             return False
 
     def check_diffusers_version(self):
-        if version.parse(
-            version.parse(diffusers.__version__).base_version
-        ) < version.parse("0.30.0"):
+        if version.parse(version.parse(diffusers.__version__).base_version) < version.parse("0.30.0"):
             raise RuntimeError(
                 f"Diffusers version: {version.parse(version.parse(diffusers.__version__).base_version)} is not supported,"
                 f"please upgrade to version > 0.30.0"
@@ -388,6 +372,7 @@ class PackagesEnvChecker:
             return False
         try:
             import torch_npu
+
             return hasattr(torch_npu, "npu_fused_infer_attention_score")
         except ImportError:
             return False
@@ -426,16 +411,19 @@ def _setup_rocm_libraries():
     if PACKAGES_CHECKER.packages_info.get("has_aiter", False):
         try:
             from aiter.ops.groupnorm import GroupNorm
+
             torch.nn.GroupNorm = GroupNorm
             logger.info("Using AITER GroupNorm as torch.nn.GroupNorm")
         except ImportError:
             logger.warning(
-                f'Using AITER but AITER GroupNorm is not available, please update AITER. '
-                'Defaulting to torch GroupNorm implementation'
+                "Using AITER but AITER GroupNorm is not available, please update AITER. "
+                "Defaulting to torch GroupNorm implementation"
             )
+
 
 if _is_hip():
     _setup_rocm_libraries()
+
 
 def __getattr__(name):
     # lazy evaluation of environment variables

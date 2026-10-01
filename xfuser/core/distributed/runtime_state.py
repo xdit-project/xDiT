@@ -10,7 +10,7 @@ from diffusers import DiffusionPipeline
 import torch.distributed
 
 try:
-    import torch_musa
+    import torch_musa  # noqa: F401
     from torch_musa.core.random import manual_seed as device_manual_seed
     from torch_musa.core.random import manual_seed_all as device_manual_seed_all
 except ModuleNotFoundError:
@@ -60,7 +60,7 @@ def set_random_seed(seed: int):
 
 
 def _summarise_schedule(backends) -> str:
-    """"10x AITER_FP8, 60x AITER_MXFP6, 10x AITER_FP8" -- a per-step list is
+    """ "10x AITER_FP8, 60x AITER_MXFP6, 10x AITER_FP8" -- a per-step list is
     unreadable at 80 steps and hides the boundaries that matter."""
     runs = []
     for backend in backends:
@@ -132,7 +132,7 @@ class RuntimeState(metaclass=ABCMeta):
         if isinstance(attention_backend, str):
             try:
                 attention_backend = AttentionBackendType[attention_backend.upper()]
-            except:
+            except KeyError:
                 pass
 
         if not isinstance(attention_backend, AttentionBackendType):
@@ -159,8 +159,10 @@ class RuntimeState(metaclass=ABCMeta):
         int8/fp8 and now warns accordingly."""
         low_precision = attention_registry.types_where(low_precision=True)
         if any(backend in low_precision for backend in backends):
-            warn_once(logger, "Low-precision attention backend is enabled. This may cause poor quality outputs, consider using hybrid attention if possible.")
-
+            warn_once(
+                logger,
+                "Low-precision attention backend is enabled. This may cause poor quality outputs, consider using hybrid attention if possible.",
+            )
 
     def set_cross_attention_backend(self, cross_attention_backend: Optional[str | AttentionBackendType]):
         """
@@ -173,7 +175,7 @@ class RuntimeState(metaclass=ABCMeta):
         if isinstance(cross_attention_backend, str):
             try:
                 cross_attention_backend = AttentionBackendType[cross_attention_backend.upper()]
-            except:
+            except KeyError:
                 pass
 
         if not isinstance(cross_attention_backend, AttentionBackendType):
@@ -192,7 +194,9 @@ class RuntimeState(metaclass=ABCMeta):
             return self.cross_attention_backend
         return self.attention_backend
 
-    def _select_cross_attention_backend(self, engine_config: Optional[EngineConfig] = None) -> Optional[AttentionBackendType]:
+    def _select_cross_attention_backend(
+        self, engine_config: Optional[EngineConfig] = None
+    ) -> Optional[AttentionBackendType]:
         """
         Select the cross-attention backend from config. Returns None if not explicitly set
         (meaning the main attention_backend will be used).
@@ -241,21 +245,15 @@ class RuntimeState(metaclass=ABCMeta):
         output here. This method therefore stays the same size as backends are
         added.
         """
-        if (
-            attention_backend == AttentionBackendType.AITER_VSA
-            and self.runtime_config.use_hybrid_attn_schedule
-        ):
+        if attention_backend == AttentionBackendType.AITER_VSA and self.runtime_config.use_hybrid_attn_schedule:
             raise RuntimeError(
-                "AITER_VSA manages its own denoising-step schedule and cannot "
-                "be used with a hybrid attention schedule."
+                "AITER_VSA manages its own denoising-step schedule and cannot be used with a hybrid attention schedule."
             )
 
         spec = attention_registry.find(attention_backend)
         unavailable = spec.unavailable()
         if unavailable is not None:
-            raise RuntimeError(
-                f"{attention_backend.value} attention is unavailable: {unavailable}"
-            )
+            raise RuntimeError(f"{attention_backend.value} attention is unavailable: {unavailable}")
 
         # A backend that hands the shapes it cannot serve to another one needs
         # that one present too, and a missing fallback would otherwise surface
@@ -285,13 +283,9 @@ class RuntimeState(metaclass=ABCMeta):
             while link is not None:
                 no_ring = link.ring.unmet()
                 if no_ring is not None:
-                    through = (
-                        "" if link is spec
-                        else f" serves other shapes through {link.type.value}, which"
-                    )
+                    through = "" if link is spec else f" serves other shapes through {link.type.value}, which"
                     raise RuntimeError(
-                        f"{attention_backend.value}{through} cannot be used "
-                        f"with ring parallelism: {no_ring}"
+                        f"{attention_backend.value}{through} cannot be used with ring parallelism: {no_ring}"
                     )
                 link = link._fallback
 
@@ -303,17 +297,14 @@ class RuntimeState(metaclass=ABCMeta):
         spec.resolved()
 
 
-
-
 class UnetRuntimeState(RuntimeState):
-
     def __init__(self, pipeline: DiffusionPipeline, config: EngineConfig):
         super().__init__(config)
         self.sanity_check()
 
     def sanity_check(self):
         if self.parallel_config.world_size > 1:
-            if not(self.parallel_config.cfg_degree == 2 and self.parallel_config.world_size == 2):
+            if not (self.parallel_config.cfg_degree == 2 and self.parallel_config.world_size == 2):
                 raise RuntimeError("UnetRuntimeState only supports 2 GPUs with CFG Parallel")
 
 
@@ -347,9 +338,7 @@ class DiTRuntimeState(RuntimeState):
         super().__init__(config)
         self.patch_mode = False
         self.pipeline_patch_idx = 0
-        self._check_model_and_parallel_config(
-            pipeline=pipeline, parallel_config=config.parallel_config
-        )
+        self._check_model_and_parallel_config(pipeline=pipeline, parallel_config=config.parallel_config)
         try:
             self._check_pipeline_class_name(pipeline, config)
         except Exception:
@@ -380,8 +369,7 @@ class DiTRuntimeState(RuntimeState):
                 vae_scale_factor=pipeline.vae_scale_factor,
                 backbone_patch_size=pipeline.transformer.config.all_patch_size,
                 backbone_in_channel=pipeline.transformer.config.in_channels,
-                backbone_inner_dim=pipeline.transformer.config.n_heads
-                * pipeline.transformer.config.axes_dims[-1]
+                backbone_inner_dim=pipeline.transformer.config.n_heads * pipeline.transformer.config.axes_dims[-1],
             )
         elif pipeline.__class__.__name__.startswith(("Lumina2", "xFuserLumina2")):
             self._set_model_parameters(
@@ -424,9 +412,7 @@ class DiTRuntimeState(RuntimeState):
         if num_steps is None:
             num_steps = int(self.input_config.num_inference_steps)
         if self._vsa_last_timestep is None or timestep != self._vsa_last_timestep:
-            self._vsa_denoising_step = (
-                self._vsa_denoising_step + 1
-            ) % max(num_steps, 1)
+            self._vsa_denoising_step = (self._vsa_denoising_step + 1) % max(num_steps, 1)
             self._vsa_last_timestep = timestep
         return self._vsa_denoising_step, num_steps
 
@@ -476,7 +462,8 @@ class DiTRuntimeState(RuntimeState):
         self.attention_schedule = attention_schedule
         self.schedule_total_steps = torch.tensor(total_steps, dtype=torch.int)
         self.step_counter = torch.tensor(0, dtype=torch.int)
-        warn_once(logger,
+        warn_once(
+            logger,
             "Per-step attention schedule over %d steps: %s.",
             total_steps,
             _summarise_schedule(attention_schedule.backends),
@@ -507,9 +494,7 @@ class DiTRuntimeState(RuntimeState):
         max_condition_sequence_length: Optional[int] = None,
         split_text_embed_in_sp: bool = True,
     ):
-        self.input_config.num_inference_steps = (
-            num_inference_steps or self.input_config.num_inference_steps
-        )
+        self.input_config.num_inference_steps = num_inference_steps or self.input_config.num_inference_steps
         self.max_condition_sequence_length = max_condition_sequence_length
         self.split_text_embed_in_sp = split_text_embed_in_sp
         self.text_embed_sp_pad = 0
@@ -538,9 +523,7 @@ class DiTRuntimeState(RuntimeState):
         seed: Optional[int] = None,
         split_text_embed_in_sp: bool = True,
     ):
-        self.input_config.num_inference_steps = (
-            num_inference_steps or self.input_config.num_inference_steps
-        )
+        self.input_config.num_inference_steps = num_inference_steps or self.input_config.num_inference_steps
         if self.runtime_config.warmup_steps > self.input_config.num_inference_steps:
             self.runtime_config.warmup_steps = self.input_config.num_inference_steps
         self.split_text_embed_in_sp = split_text_embed_in_sp
@@ -666,36 +649,26 @@ class DiTRuntimeState(RuntimeState):
         latents_width = self.input_config.width // vae_scale_factor
 
         if latents_height % num_sp_patches != 0:
-            raise ValueError(
-                "The height of the input is not divisible by the number of sequence parallel devices"
-            )
+            raise ValueError("The height of the input is not divisible by the number of sequence parallel devices")
 
         self.num_pipeline_patch = self.parallel_config.pp_config.num_pipeline_patch
         # Pipeline patches
-        pipeline_patches_height = (
-            latents_height + self.num_pipeline_patch - 1
-        ) // self.num_pipeline_patch
+        pipeline_patches_height = (latents_height + self.num_pipeline_patch - 1) // self.num_pipeline_patch
         # make sure pipeline_patches_height is a multiple of (num_sp_patches * patch_size)
         pipeline_patches_height = (
-            (pipeline_patches_height + (num_sp_patches * patch_size) - 1)
-            // (patch_size * num_sp_patches)
+            (pipeline_patches_height + (num_sp_patches * patch_size) - 1) // (patch_size * num_sp_patches)
         ) * (patch_size * num_sp_patches)
         # get the number of pipeline that matches patch height requirements
-        num_pipeline_patch = (
-            latents_height + pipeline_patches_height - 1
-        ) // pipeline_patches_height
+        num_pipeline_patch = (latents_height + pipeline_patches_height - 1) // pipeline_patches_height
         if num_pipeline_patch != self.num_pipeline_patch:
-            warn_once(logger,
+            warn_once(
+                logger,
                 f"Pipeline patches num changed from "
                 f"{self.num_pipeline_patch} to {num_pipeline_patch} due "
-                f"to input size and parallelisation requirements"
+                f"to input size and parallelisation requirements",
             )
-        pipeline_patches_height_list = [
-            pipeline_patches_height for _ in range(num_pipeline_patch - 1)
-        ]
-        the_last_pp_patch_height = latents_height - pipeline_patches_height * (
-            num_pipeline_patch - 1
-        )
+        pipeline_patches_height_list = [pipeline_patches_height for _ in range(num_pipeline_patch - 1)]
+        the_last_pp_patch_height = latents_height - pipeline_patches_height * (num_pipeline_patch - 1)
         if the_last_pp_patch_height % (patch_size * num_sp_patches) != 0:
             raise ValueError(
                 f"The height of the last pipeline patch is {the_last_pp_patch_height}, "
@@ -713,32 +686,21 @@ class DiTRuntimeState(RuntimeState):
             for pp_patch_height in pipeline_patches_height_list
         ]
         flatten_patches_start_idx = [0] + [
-            sum(flatten_patches_height[:i])
-            for i in range(1, len(flatten_patches_height) + 1)
+            sum(flatten_patches_height[:i]) for i in range(1, len(flatten_patches_height) + 1)
         ]
         pp_sp_patches_height = [
-            flatten_patches_height[
-                pp_patch_idx * num_sp_patches : (pp_patch_idx + 1) * num_sp_patches
-            ]
+            flatten_patches_height[pp_patch_idx * num_sp_patches : (pp_patch_idx + 1) * num_sp_patches]
             for pp_patch_idx in range(num_pipeline_patch)
         ]
         pp_sp_patches_start_idx = [
-            flatten_patches_start_idx[
-                pp_patch_idx * num_sp_patches : (pp_patch_idx + 1) * num_sp_patches + 1
-            ]
+            flatten_patches_start_idx[pp_patch_idx * num_sp_patches : (pp_patch_idx + 1) * num_sp_patches + 1]
             for pp_patch_idx in range(num_pipeline_patch)
         ]
 
-        pp_patches_height = [
-            sp_patches_height[sp_patch_idx]
-            for sp_patches_height in pp_sp_patches_height
-        ]
-        pp_patches_start_idx_local = [0] + [
-            sum(pp_patches_height[:i]) for i in range(1, len(pp_patches_height) + 1)
-        ]
+        pp_patches_height = [sp_patches_height[sp_patch_idx] for sp_patches_height in pp_sp_patches_height]
+        pp_patches_start_idx_local = [0] + [sum(pp_patches_height[:i]) for i in range(1, len(pp_patches_height) + 1)]
         pp_patches_start_end_idx_global = [
-            sp_patches_start_idx[sp_patch_idx : sp_patch_idx + 2]
-            for sp_patches_start_idx in pp_sp_patches_start_idx
+            sp_patches_start_idx[sp_patch_idx : sp_patch_idx + 2] for sp_patches_start_idx in pp_sp_patches_start_idx
         ]
         pp_patches_token_start_end_idx_global = [
             [
@@ -747,20 +709,14 @@ class DiTRuntimeState(RuntimeState):
             ]
             for start_idx, end_idx in pp_patches_start_end_idx_global
         ]
-        pp_patches_token_num = [
-            end - start for start, end in pp_patches_token_start_end_idx_global
-        ]
-        pp_patches_token_start_idx_local = [
-            sum(pp_patches_token_num[:i]) for i in range(len(pp_patches_token_num) + 1)
-        ]
+        pp_patches_token_num = [end - start for start, end in pp_patches_token_start_end_idx_global]
+        pp_patches_token_start_idx_local = [sum(pp_patches_token_num[:i]) for i in range(len(pp_patches_token_num) + 1)]
         self.num_pipeline_patch = num_pipeline_patch
         self.pp_patches_height = pp_patches_height
         self.pp_patches_start_idx_local = pp_patches_start_idx_local
         self.pp_patches_start_end_idx_global = pp_patches_start_end_idx_global
         self.pp_patches_token_start_idx_local = pp_patches_token_start_idx_local
-        self.pp_patches_token_start_end_idx_global = (
-            pp_patches_token_start_end_idx_global
-        )
+        self.pp_patches_token_start_end_idx_global = pp_patches_token_start_end_idx_global
         self.pp_patches_token_num = pp_patches_token_num
 
     def _calc_cogvideox_patches_metadata(self):
@@ -770,41 +726,28 @@ class DiTRuntimeState(RuntimeState):
         vae_scale_factor_spatial = self.vae_scale_factor_spatial
         latents_height = self.input_config.height // vae_scale_factor_spatial
         latents_width = self.input_config.width // vae_scale_factor_spatial
-        latents_frames = (
-            self.input_config.num_frames - 1
-        ) // self.vae_scale_factor_temporal + 1
 
         if latents_height % num_sp_patches != 0:
-            raise ValueError(
-                "The height of the input is not divisible by the number of sequence parallel devices"
-            )
+            raise ValueError("The height of the input is not divisible by the number of sequence parallel devices")
 
         self.num_pipeline_patch = self.parallel_config.pp_config.num_pipeline_patch
         # Pipeline patches
-        pipeline_patches_height = (
-            latents_height + self.num_pipeline_patch - 1
-        ) // self.num_pipeline_patch
+        pipeline_patches_height = (latents_height + self.num_pipeline_patch - 1) // self.num_pipeline_patch
         # make sure pipeline_patches_height is a multiple of (num_sp_patches * patch_size)
         pipeline_patches_height = (
-            (pipeline_patches_height + (num_sp_patches * patch_size) - 1)
-            // (patch_size * num_sp_patches)
+            (pipeline_patches_height + (num_sp_patches * patch_size) - 1) // (patch_size * num_sp_patches)
         ) * (patch_size * num_sp_patches)
         # get the number of pipeline that matches patch height requirements
-        num_pipeline_patch = (
-            latents_height + pipeline_patches_height - 1
-        ) // pipeline_patches_height
+        num_pipeline_patch = (latents_height + pipeline_patches_height - 1) // pipeline_patches_height
         if num_pipeline_patch != self.num_pipeline_patch:
-            warn_once(logger,
+            warn_once(
+                logger,
                 f"Pipeline patches num changed from "
                 f"{self.num_pipeline_patch} to {num_pipeline_patch} due "
-                f"to input size and parallelisation requirements"
+                f"to input size and parallelisation requirements",
             )
-        pipeline_patches_height_list = [
-            pipeline_patches_height for _ in range(num_pipeline_patch - 1)
-        ]
-        the_last_pp_patch_height = latents_height - pipeline_patches_height * (
-            num_pipeline_patch - 1
-        )
+        pipeline_patches_height_list = [pipeline_patches_height for _ in range(num_pipeline_patch - 1)]
+        the_last_pp_patch_height = latents_height - pipeline_patches_height * (num_pipeline_patch - 1)
         if the_last_pp_patch_height % (patch_size * num_sp_patches) != 0:
             raise ValueError(
                 f"The height of the last pipeline patch is {the_last_pp_patch_height}, "
@@ -822,32 +765,21 @@ class DiTRuntimeState(RuntimeState):
             for pp_patch_height in pipeline_patches_height_list
         ]
         flatten_patches_start_idx = [0] + [
-            sum(flatten_patches_height[:i])
-            for i in range(1, len(flatten_patches_height) + 1)
+            sum(flatten_patches_height[:i]) for i in range(1, len(flatten_patches_height) + 1)
         ]
         pp_sp_patches_height = [
-            flatten_patches_height[
-                pp_patch_idx * num_sp_patches : (pp_patch_idx + 1) * num_sp_patches
-            ]
+            flatten_patches_height[pp_patch_idx * num_sp_patches : (pp_patch_idx + 1) * num_sp_patches]
             for pp_patch_idx in range(num_pipeline_patch)
         ]
         pp_sp_patches_start_idx = [
-            flatten_patches_start_idx[
-                pp_patch_idx * num_sp_patches : (pp_patch_idx + 1) * num_sp_patches + 1
-            ]
+            flatten_patches_start_idx[pp_patch_idx * num_sp_patches : (pp_patch_idx + 1) * num_sp_patches + 1]
             for pp_patch_idx in range(num_pipeline_patch)
         ]
 
-        pp_patches_height = [
-            sp_patches_height[sp_patch_idx]
-            for sp_patches_height in pp_sp_patches_height
-        ]
-        pp_patches_start_idx_local = [0] + [
-            sum(pp_patches_height[:i]) for i in range(1, len(pp_patches_height) + 1)
-        ]
+        pp_patches_height = [sp_patches_height[sp_patch_idx] for sp_patches_height in pp_sp_patches_height]
+        pp_patches_start_idx_local = [0] + [sum(pp_patches_height[:i]) for i in range(1, len(pp_patches_height) + 1)]
         pp_patches_start_end_idx_global = [
-            sp_patches_start_idx[sp_patch_idx : sp_patch_idx + 2]
-            for sp_patches_start_idx in pp_sp_patches_start_idx
+            sp_patches_start_idx[sp_patch_idx : sp_patch_idx + 2] for sp_patches_start_idx in pp_sp_patches_start_idx
         ]
         pp_patches_token_start_end_idx_global = [
             [
@@ -856,20 +788,14 @@ class DiTRuntimeState(RuntimeState):
             ]
             for start_idx, end_idx in pp_patches_start_end_idx_global
         ]
-        pp_patches_token_num = [
-            end - start for start, end in pp_patches_token_start_end_idx_global
-        ]
-        pp_patches_token_start_idx_local = [
-            sum(pp_patches_token_num[:i]) for i in range(len(pp_patches_token_num) + 1)
-        ]
+        pp_patches_token_num = [end - start for start, end in pp_patches_token_start_end_idx_global]
+        pp_patches_token_start_idx_local = [sum(pp_patches_token_num[:i]) for i in range(len(pp_patches_token_num) + 1)]
         self.num_pipeline_patch = num_pipeline_patch
         self.pp_patches_height = pp_patches_height
         self.pp_patches_start_idx_local = pp_patches_start_idx_local
         self.pp_patches_start_end_idx_global = pp_patches_start_end_idx_global
         self.pp_patches_token_start_idx_local = pp_patches_token_start_idx_local
-        self.pp_patches_token_start_end_idx_global = (
-            pp_patches_token_start_end_idx_global
-        )
+        self.pp_patches_token_start_end_idx_global = pp_patches_token_start_end_idx_global
         self.pp_patches_token_num = pp_patches_token_num
 
     def _calc_consisid_patches_metadata(self):
@@ -879,41 +805,28 @@ class DiTRuntimeState(RuntimeState):
         vae_scale_factor_spatial = self.vae_scale_factor_spatial
         latents_height = self.input_config.height // vae_scale_factor_spatial
         latents_width = self.input_config.width // vae_scale_factor_spatial
-        latents_frames = (
-            self.input_config.num_frames - 1
-        ) // self.vae_scale_factor_temporal + 1
 
         if latents_height % num_sp_patches != 0:
-            raise ValueError(
-                "The height of the input is not divisible by the number of sequence parallel devices"
-            )
+            raise ValueError("The height of the input is not divisible by the number of sequence parallel devices")
 
         self.num_pipeline_patch = self.parallel_config.pp_config.num_pipeline_patch
         # Pipeline patches
-        pipeline_patches_height = (
-            latents_height + self.num_pipeline_patch - 1
-        ) // self.num_pipeline_patch
+        pipeline_patches_height = (latents_height + self.num_pipeline_patch - 1) // self.num_pipeline_patch
         # make sure pipeline_patches_height is a multiple of (num_sp_patches * patch_size)
         pipeline_patches_height = (
-            (pipeline_patches_height + (num_sp_patches * patch_size) - 1)
-            // (patch_size * num_sp_patches)
+            (pipeline_patches_height + (num_sp_patches * patch_size) - 1) // (patch_size * num_sp_patches)
         ) * (patch_size * num_sp_patches)
         # get the number of pipeline that matches patch height requirements
-        num_pipeline_patch = (
-            latents_height + pipeline_patches_height - 1
-        ) // pipeline_patches_height
+        num_pipeline_patch = (latents_height + pipeline_patches_height - 1) // pipeline_patches_height
         if num_pipeline_patch != self.num_pipeline_patch:
-            warn_once(logger,
+            warn_once(
+                logger,
                 f"Pipeline patches num changed from "
                 f"{self.num_pipeline_patch} to {num_pipeline_patch} due "
-                f"to input size and parallelisation requirements"
+                f"to input size and parallelisation requirements",
             )
-        pipeline_patches_height_list = [
-            pipeline_patches_height for _ in range(num_pipeline_patch - 1)
-        ]
-        the_last_pp_patch_height = latents_height - pipeline_patches_height * (
-            num_pipeline_patch - 1
-        )
+        pipeline_patches_height_list = [pipeline_patches_height for _ in range(num_pipeline_patch - 1)]
+        the_last_pp_patch_height = latents_height - pipeline_patches_height * (num_pipeline_patch - 1)
         if the_last_pp_patch_height % (patch_size * num_sp_patches) != 0:
             raise ValueError(
                 f"The height of the last pipeline patch is {the_last_pp_patch_height}, "
@@ -931,32 +844,21 @@ class DiTRuntimeState(RuntimeState):
             for pp_patch_height in pipeline_patches_height_list
         ]
         flatten_patches_start_idx = [0] + [
-            sum(flatten_patches_height[:i])
-            for i in range(1, len(flatten_patches_height) + 1)
+            sum(flatten_patches_height[:i]) for i in range(1, len(flatten_patches_height) + 1)
         ]
         pp_sp_patches_height = [
-            flatten_patches_height[
-                pp_patch_idx * num_sp_patches : (pp_patch_idx + 1) * num_sp_patches
-            ]
+            flatten_patches_height[pp_patch_idx * num_sp_patches : (pp_patch_idx + 1) * num_sp_patches]
             for pp_patch_idx in range(num_pipeline_patch)
         ]
         pp_sp_patches_start_idx = [
-            flatten_patches_start_idx[
-                pp_patch_idx * num_sp_patches : (pp_patch_idx + 1) * num_sp_patches + 1
-            ]
+            flatten_patches_start_idx[pp_patch_idx * num_sp_patches : (pp_patch_idx + 1) * num_sp_patches + 1]
             for pp_patch_idx in range(num_pipeline_patch)
         ]
 
-        pp_patches_height = [
-            sp_patches_height[sp_patch_idx]
-            for sp_patches_height in pp_sp_patches_height
-        ]
-        pp_patches_start_idx_local = [0] + [
-            sum(pp_patches_height[:i]) for i in range(1, len(pp_patches_height) + 1)
-        ]
+        pp_patches_height = [sp_patches_height[sp_patch_idx] for sp_patches_height in pp_sp_patches_height]
+        pp_patches_start_idx_local = [0] + [sum(pp_patches_height[:i]) for i in range(1, len(pp_patches_height) + 1)]
         pp_patches_start_end_idx_global = [
-            sp_patches_start_idx[sp_patch_idx : sp_patch_idx + 2]
-            for sp_patches_start_idx in pp_sp_patches_start_idx
+            sp_patches_start_idx[sp_patch_idx : sp_patch_idx + 2] for sp_patches_start_idx in pp_sp_patches_start_idx
         ]
         pp_patches_token_start_end_idx_global = [
             [
@@ -965,20 +867,14 @@ class DiTRuntimeState(RuntimeState):
             ]
             for start_idx, end_idx in pp_patches_start_end_idx_global
         ]
-        pp_patches_token_num = [
-            end - start for start, end in pp_patches_token_start_end_idx_global
-        ]
-        pp_patches_token_start_idx_local = [
-            sum(pp_patches_token_num[:i]) for i in range(len(pp_patches_token_num) + 1)
-        ]
+        pp_patches_token_num = [end - start for start, end in pp_patches_token_start_end_idx_global]
+        pp_patches_token_start_idx_local = [sum(pp_patches_token_num[:i]) for i in range(len(pp_patches_token_num) + 1)]
         self.num_pipeline_patch = num_pipeline_patch
         self.pp_patches_height = pp_patches_height
         self.pp_patches_start_idx_local = pp_patches_start_idx_local
         self.pp_patches_start_end_idx_global = pp_patches_start_end_idx_global
         self.pp_patches_token_start_idx_local = pp_patches_token_start_idx_local
-        self.pp_patches_token_start_end_idx_global = (
-            pp_patches_token_start_end_idx_global
-        )
+        self.pp_patches_token_start_end_idx_global = pp_patches_token_start_end_idx_global
         self.pp_patches_token_num = pp_patches_token_num
 
     def _reset_recv_buffer(self):
@@ -989,13 +885,8 @@ class DiTRuntimeState(RuntimeState):
         batch_size = self.input_config.batch_size
         batch_size = batch_size * (2 // self.parallel_config.cfg_degree)
         hidden_dim = self.backbone_inner_dim
-        num_patches_tokens = [
-            end - start for start, end in self.pp_patches_token_start_end_idx_global
-        ]
-        patches_shape = [
-            [num_blocks_per_stage, batch_size, tokens, hidden_dim]
-            for tokens in num_patches_tokens
-        ]
+        num_patches_tokens = [end - start for start, end in self.pp_patches_token_start_end_idx_global]
+        patches_shape = [[num_blocks_per_stage, batch_size, tokens, hidden_dim] for tokens in num_patches_tokens]
         feature_map_shape = [
             num_blocks_per_stage,
             batch_size,
@@ -1009,18 +900,17 @@ class DiTRuntimeState(RuntimeState):
         )
 
 
-
 class ExternalRuntimeState(RuntimeState):
     """
     Runtime state for running xDiT components outside xDiT.
     This can be used to test individual components in tests without
     having to setup a full distributed environment.
     """
-    def __init__(self):
-        # Creating config with default params
-        config, _ = xFuserArgs().create_config()
-        super().__init__(config)
 
+    def __init__(self, config: Optional[EngineConfig] = None):
+        if config is None:
+            config, _ = xFuserArgs().create_config()
+        super().__init__(config)
 
     def _check_distributed_env(self, parallel_config):
         pass
@@ -1040,16 +930,15 @@ def get_runtime_state():
     return _RUNTIME
 
 
-def initialize_runtime_state(pipeline: Optional[DiffusionPipeline] = None, engine_config: Optional[EngineConfig] = None):
+def initialize_runtime_state(
+    pipeline: Optional[DiffusionPipeline] = None, engine_config: Optional[EngineConfig] = None
+):
     global _RUNTIME
     if _RUNTIME is not None:
-        warn_once(logger,
-            "Runtime state is already initialized, reinitializing with pipeline..."
-        )
+        warn_once(logger, "Runtime state is already initialized, reinitializing with pipeline...")
     if hasattr(pipeline, "transformer"):
         _RUNTIME = DiTRuntimeState(pipeline=pipeline, config=engine_config)
     elif hasattr(pipeline, "unet"):
         _RUNTIME = UnetRuntimeState(pipeline=pipeline, config=engine_config)
     elif not pipeline:
-        _RUNTIME = ExternalRuntimeState()
-
+        _RUNTIME = ExternalRuntimeState(engine_config)

@@ -53,6 +53,26 @@ class QuantizationBackends:
         """
         for format_name in self._formats_in_play():
             _ = self.adapter_for(format_name)
+        self.assert_hybrid_schedule_is_implementable()
+
+    def assert_hybrid_schedule_is_implementable(self) -> None:
+        """Refuse a per-step pair neither half of which can be built.
+
+        The schedule holds both formats at every leaf and picks one per step,
+        so the low side has to compose the pair and the high side has to be
+        installable one layer at a time. Checked here rather than at the first
+        converted leaf, where it would be an AttributeError mid-load.
+        """
+
+        if not getattr(self.model.config, "use_hybrid_gemm_schedule", False):
+            return
+        plan = self.loader.quantization_plan.gemm_plan
+        if plan is None or plan.high is None:
+            return
+        companion = self.adapter_for(plan.high)
+        if companion is not None:
+            # Raises for an implementation with no single-leaf seam, naming it.
+            companion.layer_factory(device=None)
 
     @functools.cached_property
     def capabilities(self):

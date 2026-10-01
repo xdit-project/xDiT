@@ -6,6 +6,7 @@ import pytest
 
 from xfuser.model_executor.models.runner_models import base_model
 from xfuser.model_executor.models.runner_models.base_model import xFuserModel
+from xfuser.model_executor.quant.targets import GemmTargets, Select
 from xfuser.model_executor.models.runner_models.loading.quant_adapter import (
     Capabilities,
     FormatCapability,
@@ -688,6 +689,9 @@ def test_preflight_resolves_every_format_the_run_names(
     selected.loader = SimpleNamespace(
         quantization_plan=SimpleNamespace(gemm_plan=plan)
     )
+    selected.model = SimpleNamespace(
+        config=SimpleNamespace(use_hybrid_gemm_schedule=False)
+    )
 
     selected.preflight()
 
@@ -1008,6 +1012,49 @@ def test_an_implementation_with_no_offload_measurement_is_left_alone():
     )
 
     selected.assert_offload_is_compatible()
+
+
+@pytest.mark.parametrize(
+    ("profile", "refused"),
+    [
+        ("low=fp4,high=fp8", False),
+        ("low=fp8,high=fp4", True),
+        ("low=int8,high=fp8", True),
+    ],
+)
+def test_a_hybrid_pair_neither_half_can_build_is_refused_at_startup(
+    profile, refused
+):
+    """Not an AttributeError at the first converted leaf.
+
+    Only the MXFP4 factory composes an xFuserHybridLinear, so it is the only
+    implementation that can be the low side. A CUDA run naming any other low
+    format with --use_hybrid_gemm_schedule is told so before allocation.
+    """
+    from xfuser.config.gemm import GemmQuantizationSpec
+    from xfuser.model_executor.quant.targets import resolve
+
+    model = _fsdp_patch_model(strategy={}, fully_shard_degree=1, hybrid=True)
+    selected = _measured(
+        model,
+        {
+            ("fp4", "aiter"): FormatCapability(available=True),
+            ("fp8", "aiter"): FormatCapability(available=True),
+            ("int8", "torchao"): FormatCapability(available=True),
+        },
+    )
+    selected.loader.quantization_plan = SimpleNamespace(
+        gemm_plan=resolve(
+            GemmTargets(transformer=Select(modules=("transformer.blocks",))),
+            GemmQuantizationSpec.parse(profile),
+        )
+    )
+
+    if not refused:
+        selected.preflight()
+        return
+    with pytest.raises(ValueError, match="low/high GEMM schedule"):
+        selected.preflight()
 
 
 def test_an_aiter_carve_out_under_fsdp_needs_no_torchao_patches():

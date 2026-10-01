@@ -403,8 +403,6 @@ class TorchaoNvfp4BackendAdapter(QuantAdapter):
     # Streaming would own every targeted leaf, leaving the hybrid
     # wrapper nothing to build its second precision from.
     streams_under_hybrid = False
-    # And there is no NVFP4 per-step kernel pair to wrap even without it.
-    supports_hybrid_schedule = False
     storage_semantics = "torchao_nvfp4_dynamic_per_tensor"
     parameter_semantics = "torchao_nvfp4_tensor_subclass"
     supports_precision_overrides = True
@@ -428,6 +426,9 @@ class TorchaoNvfp4BackendAdapter(QuantAdapter):
 
 @stores("fp4", "aiter")
 class AiterMxfp4BackendAdapter(QuantAdapter):
+    # The only factory that composes two layers into an xFuserHybridLinear, so
+    # the only implementation that can be the low side of a per-step pair.
+    supports_hybrid_schedule = True
     # Group offloading moves a module's parameters between host and device
     # around each call, and these weights survive neither leg. Both failures
     # land below Python -- one inside the hook, one as AITER's own abort with
@@ -465,7 +466,6 @@ class AiterMxfp4BackendAdapter(QuantAdapter):
 
 @stores("fp6", "aiter")
 class AiterMxfp6BackendAdapter(QuantAdapter):
-    supports_hybrid_schedule = False
     storage_semantics = "aiter_mxfp6_e2m3_per_1x32"
     parameter_semantics = "packed_weight_parameter"
     auxiliary_state_semantics = "persistent_scale_buffer"

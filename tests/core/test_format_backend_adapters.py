@@ -658,3 +658,47 @@ def test_fsdp_placement_is_skipped_when_nothing_shards_it(modules):
     adapter = a.build_adapter("fp4", "aiter", capability=capability)
 
     a.validate_fsdp_placement(adapter, capability=capability, required=False)
+
+
+@pytest.mark.parametrize(
+    ("format_name", "impl", "drives", "installs_a_layer"),
+    [
+        ("fp4", "aiter", True, True),
+        ("fp6", "aiter", False, True),
+        ("fp4", "torchao", False, False),
+        ("int8", "torchao", False, False),
+    ],
+)
+def test_driving_a_per_step_pair_and_being_half_of_one_are_different(
+    modules, format_name, impl, drives, installs_a_layer
+):
+    """Composing the pair is the low side's job; the companion only supplies a layer.
+
+    Only the factory that builds an ``xFuserHybridLinear`` can drive the
+    schedule, so that is declared rather than inferred from being able to
+    install a layer -- MXFP6 can do the second and not the first.
+    """
+    a = modules.adapter
+    capability = a.FormatCapability(available=True)
+    adapter = a.build_adapter(format_name, impl, capability=capability)
+
+    assert adapter.supports_hybrid_schedule is drives
+    if installs_a_layer:
+        assert type(adapter).layer_factory is not a.QuantAdapter.layer_factory
+        return
+    with pytest.raises(
+        modules.contracts.UnsupportedLoadContract,
+        match="cannot install one layer at a time",
+    ):
+        adapter.layer_factory(device=None)
+
+
+def test_every_implementation_that_drives_the_schedule_can_build_a_layer(modules):
+    """A declaration that cannot be honoured is caught here, not at a leaf."""
+    a = modules.adapter
+    for (format_name, impl), cls in a.REGISTRY.items():
+        if cls.supports_hybrid_schedule:
+            assert cls.layer_factory is not a.QuantAdapter.layer_factory, (
+                f"{impl} {format_name} says it drives a per-step pair but has "
+                "no layer factory to compose one with"
+            )

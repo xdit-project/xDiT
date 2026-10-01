@@ -303,10 +303,12 @@ class QuantAdapter:
     #: first. None means they do, or that nothing has measured otherwise --
     #: refusing on a guess would assert a claim no one has tested.
     group_offload_refusal = None
-    #: Whether this can be the format a step runs in bf16-vs-quantized pairs.
-    #: False where streaming or the kernel would take the leaves the per-step
-    #: wrapper needs to keep in two precisions.
-    supports_hybrid_schedule = True
+    #: Whether this implementation can be the *low* side of a per-step pair --
+    #: the one whose layer factory composes the two into an
+    #: ``xFuserHybridLinear``. False by default: installing one layer is not
+    #: the same as knowing how to pair it with another, and only the factory
+    #: that builds the wrapper can drive the schedule.
+    supports_hybrid_schedule = False
     #: Filled in by ``stores`` at registration.
     format_name = ""
     impl = ""
@@ -379,6 +381,22 @@ class QuantAdapter:
     def transformer_stream_config(self, targets, *, model_factory=None):
         config, _ = self.transformer_stream_plan(targets, model_factory=model_factory)
         return config
+
+    def layer_factory(self, *, device, companion=None):
+        """Build one layer at a time, which a per-step pair is made of.
+
+        Not every implementation can: one that converts a whole module through
+        a framework config has no single-leaf seam, and is neither half of a
+        pair. Overridden where there is one.
+        """
+
+        from .contracts import UnsupportedLoadContract
+
+        raise UnsupportedLoadContract(
+            f"{self.impl} {self.format_name} converts a whole module through a "
+            "framework config and cannot install one layer at a time, so it "
+            "cannot be either half of a low/high GEMM schedule"
+        )
 
     def convert_module(self, module, *, device, filter_fn=None, offload_to_cpu=False):
         raise NotImplementedError

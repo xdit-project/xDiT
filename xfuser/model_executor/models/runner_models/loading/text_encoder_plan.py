@@ -33,28 +33,41 @@ def _declared_components(model):
     )
 
 
+#: The one format a text encoder is ever stored at, whatever the run names.
+#:
+#: Everything below the resolver is format-agnostic except this route. A
+#: declared encoder is in the plan like any other target and `format_for` gives
+#: it the run's format, but the meta and broadcast load paths this route goes
+#: through have only ever carried FP8, so that is what it places. Generalising
+#: it would run encoder formats nothing has measured, so it is stated here and
+#: said out loud at load time rather than looking format-agnostic and quietly
+#: substituting. See `plan_text_encoders`.
+TEXT_ENCODER_FORMAT = "fp8"
+
+
 def plan_text_encoders(loader, existing_quantization_config=None):
     """Plan every declared text encoder, returning pipeline kwargs and a quantization config.
 
-    The framework-level config is assembled last and only if some encoder needs one, because
-    constructing it registers the Transformers quantizer process-globally and the meta paths
-    have no use for that.
+    Every encoder is stored at ``TEXT_ENCODER_FORMAT`` regardless of what the
+    run asked the transformer for, and says so in its log line when the two
+    differ. The framework-level config is assembled last and only if some
+    encoder needs one, because constructing it registers the Transformers
+    quantizer process-globally and the meta paths have no use for that.
     """
     model = loader.model
     ledger = loader.quantization_ledger
     replicated_meta = loader.replicated_broadcast_load()
     fsdp_meta = False if replicated_meta else loader.fsdp_meta_load()
-    # Named outright, because this route only knows FP8 (see below).
-    adapter = loader.backends.adapter_for("fp8")
+    adapter = loader.backends.adapter_for(TEXT_ENCODER_FORMAT)
 
     component_configs = {}
     if adapter is not None:
         from .fp8_backends import prepare_text_encoder_fp8_load
 
         for component_name in _declared_components(model):
-            # The declared encoder targets, not "this run's FP8 targets":
-            # this route is the only one that quantizes an encoder and it only
-            # knows FP8, so a run whose format is FP4 still gets FP8 here.
+            # The declared encoder targets, not the targets of whatever format
+            # the run named: this route places one format and the plan's answer
+            # for these paths may be a different one.
             plan = loader.quantization_plan.gemm_plan
             targets = (
                 plan.relative_to(
@@ -104,11 +117,19 @@ def plan_text_encoders(loader, existing_quantization_config=None):
                     loader.build_meta_component(name, fp8=False)
                 ),
             )
-            log(prepared.descriptor.log_message())
-            # This route is the only one that quantizes a text encoder, and it
-            # only knows FP8. A declared encoder is part of the plan the
-            # format-agnostic walks iterate, so it is recorded for every format
-            # and they leave it where this route put it.
+            message = prepared.descriptor.log_message()
+            asked = plan.format_for(f"{component_name}.{targets[0]}".rstrip("."))
+            if asked not in (None, TEXT_ENCODER_FORMAT):
+                # Said out loud rather than substituted quietly: the run named
+                # one format and this component is getting another.
+                message += (
+                    f" (text encoders are stored at {TEXT_ENCODER_FORMAT}; "
+                    f"--gemm_quantization asked for {asked} here)"
+                )
+            log(message)
+            # A declared encoder is part of the plan the format-agnostic walks
+            # iterate, so it is recorded under the format this route actually
+            # placed and they leave it where this route put it.
             ledger.describe(component_name, fp8=True)
             if prepared.descriptor.materialization_mode == "streaming":
                 ledger.record_streamed(component_name, targets, fp8=True)

@@ -1414,6 +1414,58 @@ def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
     }
 
 
+def test_a_non_fp8_run_says_the_encoder_is_still_stored_at_fp8(monkeypatch):
+    """The limitation is stated, not silently applied.
+
+    Everything below the resolver is format-agnostic except this route: the
+    meta and broadcast load paths an encoder goes through have only ever
+    carried FP8. A run that asked for something else gets FP8 here and is told.
+    """
+    from xfuser.model_executor.quant.targets import resolve
+    from xfuser.config.gemm import GemmQuantizationSpec
+
+    logs = []
+    targets = GemmTargets(
+        text_encoder=Select(modules=("text_encoder.encoder.block",))
+    )
+    runner = SimpleNamespace(
+        load_contract=SimpleNamespace(requested_format=SimpleNamespace(value="fp4")),
+        fp8_backend=SimpleNamespace(backend=SimpleNamespace(value="aiter")),
+        _replicated_broadcast_load=lambda: False,
+        _memory_efficient_fsdp_load=lambda: False,
+        settings=SimpleNamespace(gemm_targets=targets),
+        _loader=SimpleNamespace(
+            build_meta_component=lambda name, fp8=False: object()
+        ),
+    )
+    monkeypatch.setattr(
+        "xfuser.model_executor.models.runner_models.loading.fp8_backends."
+        "prepare_text_encoder_fp8_load",
+        lambda adapter, **kwargs: SimpleNamespace(
+            descriptor=SimpleNamespace(
+                materialization_mode="post_load",
+                log_message=lambda: "text_encoder quantization: requested=fp8",
+            ),
+            quantization_config=None,
+        ),
+    )
+    monkeypatch.setattr(text_encoder_plan, "log", logs.append)
+
+    _attach_backends(runner)
+    loader = loader_for(runner)
+    loader.quantization_plan = SimpleNamespace(
+        gemm_plan=resolve(
+            targets,
+            GemmQuantizationSpec.parse("fp4"),
+            enable=("transformer", "text_encoder"),
+        )
+    )
+    text_encoder_plan.plan_text_encoders(loader)
+
+    assert any("stored at fp8" in message for message in logs)
+    assert any("asked for fp4" in message for message in logs)
+
+
 def test_hybrid_meta_te_uses_the_fp8_adapter(monkeypatch):
 
     sentinel = SimpleNamespace(backend=SimpleNamespace(value="torchao"))

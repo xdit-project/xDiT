@@ -18,6 +18,9 @@ BACKENDS_PATH = (
 CONTRACTS_PATH = (
     ROOT / "xfuser/model_executor/models/runner_models/loading/contracts.py"
 )
+QUANT_ADAPTER_PATH = (
+    ROOT / "xfuser/model_executor/models/runner_models/loading/quant_adapter.py"
+)
 
 
 #: A synthetic package over the loading directory. These modules are meant to
@@ -50,25 +53,20 @@ def _load_module(path, name):
 @pytest.fixture(scope="module")
 def modules():
     return SimpleNamespace(
+        quant=_load_module(QUANT_ADAPTER_PATH, "quant_adapter"),
         adapter=_load_module(ADAPTER_PATH, "te_framework_adapter"),
         backends=_load_module(BACKENDS_PATH, "te_framework_backends"),
         contracts=_load_module(CONTRACTS_PATH, "te_framework_contracts"),
     )
 
 
-def _backend(modules, name, **capabilities):
-    c, b = modules.contracts, modules.backends
-    contract = SimpleNamespace(
-        requested_format=c.QuantizationFormat.FP8,
-        selected_backend=getattr(c.QuantizationBackend, name),
-    )
-    defaults = {
-        "aiter_block_scale": name == "AITER",
-        "torchao_fp8": name == "TORCHAO",
-    }
-    defaults.update(capabilities)
-    return b.select_fp8_backend(
-        contract, capabilities=b.Fp8BackendCapabilities(**defaults)
+def _backend(modules, name, **measured):
+    """The FP8 adapter one implementation gives, from a measured record."""
+    q = modules.quant
+    return q.build_adapter(
+        "fp8",
+        name.lower(),
+        capability=q.FormatCapability(available=True, **measured),
     )
 
 
@@ -197,8 +195,8 @@ def test_torchao_te_native_plan_derives_safe_negative_mapping(modules, monkeypat
     adapter = _backend(
         modules,
         "TORCHAO",
-        torchao_diffusers_streaming=True,
-        torchao_text_encoder_streaming=True,
+        streams=True,
+        te_streams=True,
     )
     sentinel = object()
     captured = []
@@ -237,8 +235,8 @@ def test_transformers_4_aiter_falls_back_to_post_load(modules):
     adapter = _backend(
         modules,
         "AITER",
-        aiter_transformers_streaming=False,
-        aiter_transformers_reason=("transformers>=5.0 streaming loader is unavailable"),
+        te_streams=False,
+        te_streams_reason="transformers>=5.0 streaming loader is unavailable",
     )
 
     prepared = b.prepare_text_encoder_fp8_load(
@@ -259,8 +257,8 @@ def test_transformers_4_raises_before_allocation_without_post_load(modules):
     adapter = _backend(
         modules,
         "AITER",
-        aiter_transformers_streaming=False,
-        aiter_transformers_reason="transformers>=5.0 is required",
+        te_streams=False,
+        te_streams_reason="transformers>=5.0 is required",
     )
     with pytest.raises(RuntimeError, match="before allocation"):
         b.prepare_text_encoder_fp8_load(
@@ -277,7 +275,7 @@ def test_missing_te_target_never_quantizes_all_linears(modules, monkeypatch):
     adapter = _backend(
         modules,
         "TORCHAO",
-        torchao_text_encoder_streaming=True,
+        te_streams=True,
     )
 
     def unavailable(model, targets):

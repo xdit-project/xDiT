@@ -18,10 +18,18 @@ the run and no longer.
 """
 
 import functools
-from types import SimpleNamespace
 
-from xfuser.envs import _is_cuda
 from .quant_adapter import module_paths_overlap
+
+#: Which implementations can store each format, best first. The only table in
+#: the loading layer that names a format: adding one is adding a row here and a
+#: registered adapter class, and nothing between them has to change.
+_IMPL_PREFERENCE = {
+    "fp8": ("aiter", "torchao"),
+    "fp4": ("torchao", "aiter"),
+    "fp6": ("aiter",),
+    "int8": ("torchao",),
+}
 
 
 class QuantizationBackends:
@@ -47,87 +55,117 @@ class QuantizationBackends:
             _ = self.adapter_for(format_name)
 
     @functools.cached_property
-    def format_capabilities(self):
-        """Probe format capabilities once, and only include MXFP6 when asked."""
+    def capabilities(self):
+        """Every (format, implementation) this machine offers, probed once.
 
+        MXFP6 is probed only when the run names it: its probe imports AITER
+        kernels, which is not free on a machine that will never use them.
+        """
+
+        from .fp8_backends import probe_fp8_backend_capabilities
         from .format_backends import probe_format_backend_capabilities
 
-        return probe_format_backend_capabilities(
-            require_mxfp6="fp6" in self._formats_in_play()
+        return probe_fp8_backend_capabilities().merged(
+            probe_format_backend_capabilities(
+                require_mxfp6="fp6" in self._formats_in_play()
+            )
         )
 
-    @functools.cached_property
-    def fp8_capabilities(self):
-        from .fp8_backends import probe_fp8_backend_capabilities
-
-        return probe_fp8_backend_capabilities()
-
-    def _impl_for(self, format_name: str) -> str | None:
+    def impl_for(self, format_name: str) -> str | None:
         """Which implementation stores this format on this machine.
 
-        The one place format and implementation meet. A new format adds a row;
-        nothing else in the loading layer changes.
+        First available wins. Each probe is already gated to the hardware its
+        kernels run on -- AITER FP8 block-scale to RDNA4, NVFP4 to Blackwell,
+        MXFP4 to ROCm -- so the order below is a preference between two that
+        could both work, not a hardware test repeated here.
         """
-        from .fp8_backends import fp8_backend_name
-
-        if format_name == "fp8":
-            return fp8_backend_name(self.fp8_capabilities)
-        return {
-            "fp4": "torchao" if _is_cuda() else "aiter",
-            "fp6": "aiter",
-            "int8": "torchao",
-        }.get(format_name)
+        for impl in _IMPL_PREFERENCE.get(format_name, ()):
+            if self.capabilities.of(format_name, impl).available:
+                return impl
+        return None
 
     def _select(self, format_name: str):
-        """Resolve one format to its adapter, refusing an FSDP placement it cannot take.
+        """Resolve one format to its adapter, refusing what cannot be placed.
 
         The run names a format; this says which implementation stores it here
-        and whether the shape that implementation stores can be sharded where
-        this run will put it. Both answers are the same for a format whether it
+        and whether what that implementation stores can be sharded where this
+        run will put it. Both answers are the same for a format whether it
         arrived as the run's low tier or its high one.
         """
 
-        from .contracts import QuantizationBackend, QuantizationFormat
-        from .fp8_backends import select_fp8_backend, validate_torchao_fsdp2_patches
-        from .format_backends import (
-            select_format_backend,
-            validate_format_fsdp_placement,
-        )
+        # Imported for their registrations: each adapter class registers the
+        # one pair it stores as it is defined.
+        from . import format_backends, fp8_backends  # noqa: F401
+        from .contracts import UnsupportedLoadContract
+        from .quant_adapter import build_adapter, validate_fsdp_placement
 
-        impl = self._impl_for(format_name)
+        impl = self.impl_for(format_name)
         if impl is None:
-            return None
-        contract = SimpleNamespace(
-            requested_format=QuantizationFormat(format_name),
-            selected_backend=QuantizationBackend(impl),
-        )
-        places = self.places_under_fsdp2(format_name)
-        if format_name == "fp8":
-            adapter = select_fp8_backend(contract, capabilities=self.fp8_capabilities)
-            validate_torchao_fsdp2_patches(
-                contract, capabilities=self.fp8_capabilities, required=places
+            raise UnsupportedLoadContract(
+                f"this run asked for {format_name}, which nothing here can "
+                "store: " + self._why_not(format_name)
             )
-            return adapter
-
+        capability = self.capabilities.of(format_name, impl)
         plan = self.loader.quantization_plan.gemm_plan
-        adapter = select_format_backend(
-            contract,
-            capabilities=self.format_capabilities,
+        adapter = build_adapter(
+            format_name,
+            impl,
+            capability=capability,
             # Only the format a step actually runs in bf16-vs-quantized pairs
-            # can refuse the hybrid schedule; the companion never drives it.
+            # can refuse the schedule; the companion never drives it.
             hybrid=(
                 plan is not None
                 and format_name == plan.low
                 and bool(self.model.config.use_hybrid_gemm_schedule)
             ),
         )
-        validate_format_fsdp_placement(
-            contract,
+        validate_fsdp_placement(
             adapter,
-            capabilities=self.format_capabilities,
-            required=places,
+            capability=capability,
+            required=self.places_under_fsdp2(format_name),
         )
         return adapter
+
+    def _why_not(self, format_name: str) -> str:
+        """What each implementation of a format said when it was probed."""
+        tried = _IMPL_PREFERENCE.get(format_name)
+        if not tried:
+            return f"{format_name} is not a GEMM format this build knows"
+        return "; ".join(
+            f"{impl}: {self.capabilities.of(format_name, impl).reason or 'unavailable'}"
+            for impl in tried
+        )
+
+    def assert_offload_is_compatible(self) -> None:
+        """Refuse an offload mode an implementation in play cannot survive.
+
+        Each converter says whether its stored weights survive the host round
+        trip the hook performs, and carries the measured reason. An
+        implementation that says nothing is left alone: refusing it would
+        assert a claim nobody has tested.
+        """
+
+        from .contracts import UnsupportedLoadContract
+
+        config = self.model.config
+        if not getattr(config, "enable_group_cpu_offload", False):
+            return
+        leg = (
+            "pinned"
+            if getattr(config, "group_offload_low_cpu_mem", False)
+            else "unpinned"
+        )
+        for format_name in self._formats_in_play():
+            adapter = self.adapter_for(format_name)
+            refusal = getattr(adapter, "group_offload_refusal", None)
+            if not refusal:
+                continue
+            raise UnsupportedLoadContract(
+                f"--enable_group_cpu_offload cannot be combined with "
+                f"{format_name} on the {adapter.impl} backend: {refusal[leg]}. "
+                "Offload at a format that survives the host round trip, or run "
+                "without offload."
+            )
 
     def _formats_in_play(self) -> tuple:
         """The formats this run will place, low and high."""

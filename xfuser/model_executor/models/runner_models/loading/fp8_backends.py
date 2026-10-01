@@ -4,9 +4,12 @@ from dataclasses import dataclass
 from importlib import import_module
 
 from .quant_adapter import (
+    Capabilities,
+    FormatCapability,
     LinearOwnership,
     PreparedQuantLoad,
     QuantAdapter,
+    stores,
     TargetMappingUnavailable,
     derive_linear_ownership,
     descriptor_for,
@@ -21,44 +24,10 @@ _MIN_TORCHAO_VERSION = Version("0.15.0")
 _ProbeResult = bool | tuple[bool, str | None]
 
 
-@dataclass(frozen=True)
-class Fp8BackendCapabilities:
-    """Runtime support discovered before transformer allocation."""
-
-    aiter_block_scale: bool = False
-    aiter_transformers_streaming: bool = False
-    torchao_fp8: bool = False
-    torchao_diffusers_streaming: bool = False
-    torchao_text_encoder_streaming: bool = False
-    torchao_fsdp_patches: bool = False
-    aiter_transformers_reason: str | None = None
-    torchao_fp8_reason: str | None = None
-    torchao_diffusers_reason: str | None = None
-    torchao_text_encoder_reason: str | None = None
-    torchao_fsdp_reason: str | None = None
-
-
 #: The two FP8 implementations, spelled as QuantizationBackend values so a
 #: caller maps the answer onto its own enum without a second table.
 AITER_FP8 = "aiter"
 TORCHAO_FP8 = "torchao"
-
-
-def fp8_backend_name(capabilities: Fp8BackendCapabilities) -> str:
-    """Which FP8 implementation this machine stores FP8 with.
-
-    The only place that decides. AITER's ``gemm_a8w8_blockscale`` is a Triton
-    kernel confirmed to reach FP8 WMMA on gfx1200+ (RDNA4), so it is taken
-    there; every other target -- CUDA, MI300, gfx950 -- stores FP8 as torchao
-    per-tensor dynamic scaling. ``aiter_block_scale`` carries that gate.
-
-    Every FP8 consumer asks here, so a pure FP8 run, the high tier of a tiered
-    run, a text encoder and a block carved out of a low-format target all get
-    the same implementation rather than each reaching for its own predicate.
-    Widening the gate to another architecture is an edit to this function.
-    """
-
-    return AITER_FP8 if capabilities.aiter_block_scale else TORCHAO_FP8
 
 
 def _probe_torchao_fp8_conversion_api() -> tuple[bool, str | None]:
@@ -292,8 +261,14 @@ def probe_fp8_backend_capabilities(
     torchao_text_encoder_probe: Callable[[], _ProbeResult] | None = None,
     aiter_transformers_probe: Callable[[], _ProbeResult] | None = None,
     torchao_fsdp_probe: Callable[[], _ProbeResult] | None = None,
-) -> Fp8BackendCapabilities:
-    """Keep hardware/package probing outside adapters and injectable in tests."""
+) -> Capabilities:
+    """Keep hardware/package probing outside adapters and injectable in tests.
+
+    AITER's ``gemm_a8w8_blockscale`` is a Triton kernel confirmed to reach FP8
+    WMMA on gfx1200+ (RDNA4), and ``aiter_probe`` is gated to exactly that; on
+    every other target -- CUDA, MI300, gfx950 -- it reports unavailable and the
+    preference order falls through to torchao per-tensor dynamic scaling.
+    """
 
     if aiter_probe is None:
         from xfuser.core.utils.runner_utils import _use_aiter_fp8_rdna4
@@ -311,6 +286,7 @@ def probe_fp8_backend_capabilities(
         aiter_transformers_probe = _probe_aiter_transformers_streaming
     if torchao_fsdp_probe is None:
         torchao_fsdp_probe = _probe_torchao_fsdp_patches
+
     aiter_available = bool(aiter_probe())
     if aiter_available:
         aiter_te_available, aiter_te_reason = _probe_result(aiter_transformers_probe())
@@ -335,18 +311,29 @@ def probe_fp8_backend_capabilities(
         native_available, native_reason = False, torchao_reason
         te_available, te_reason = False, torchao_reason
         fsdp_available, fsdp_reason = False, torchao_reason
-    return Fp8BackendCapabilities(
-        aiter_block_scale=aiter_available,
-        aiter_transformers_streaming=aiter_te_available,
-        torchao_fp8=torchao_available,
-        torchao_diffusers_streaming=native_available,
-        torchao_text_encoder_streaming=te_available,
-        torchao_fsdp_patches=fsdp_available,
-        aiter_transformers_reason=aiter_te_reason,
-        torchao_fp8_reason=torchao_reason,
-        torchao_diffusers_reason=native_reason,
-        torchao_text_encoder_reason=te_reason,
-        torchao_fsdp_reason=fsdp_reason,
+    return Capabilities(
+        {
+            ("fp8", AITER_FP8): FormatCapability(
+                available=aiter_available,
+                reason=None if aiter_available else "AITER FP8 requires RDNA4",
+                streams=aiter_available,
+                te_streams=aiter_te_available,
+                te_streams_reason=aiter_te_reason,
+                # Block-128 scales live in a plain nn.Parameter and a buffer,
+                # which is why this one needs no Float8Tensor FSDP patches.
+                fsdp_safe=True,
+            ),
+            ("fp8", TORCHAO_FP8): FormatCapability(
+                available=torchao_available,
+                reason=torchao_reason,
+                streams=native_available,
+                streams_reason=native_reason,
+                te_streams=te_available,
+                te_streams_reason=te_reason,
+                fsdp_safe=fsdp_available,
+                fsdp_reason=fsdp_reason,
+            ),
+        }
     )
 
 
@@ -356,6 +343,7 @@ def _is_linear_module(module) -> bool:
     return isinstance(module, nn.Linear)
 
 
+@stores("fp8", AITER_FP8)
 class AiterFp8BackendAdapter(QuantAdapter):
     storage_semantics = "block_128_scaled"
     # A plain nn.Parameter, which is why this one needs no FSDP2 patches.
@@ -404,6 +392,7 @@ class AiterFp8BackendAdapter(QuantAdapter):
         )
 
 
+@stores("fp8", TORCHAO_FP8)
 class TorchaoFp8BackendAdapter(QuantAdapter):
     default_unavailable_reason = "Diffusers TorchAoConfig API is unavailable"
     storage_semantics = "tensorwise_dynamic"
@@ -463,93 +452,6 @@ class TorchaoFp8BackendAdapter(QuantAdapter):
         from xfuser.core.utils.runner_utils import quantize_linear_layers_to_fp8
 
         return quantize_linear_layers_to_fp8(module, device=device, filter_fn=filter_fn)
-
-
-def _unsupported_error(contract):
-    module = import_module(contract.requested_format.__class__.__module__)
-    return getattr(module, "UnsupportedLoadContract", ValueError)
-
-
-def select_fp8_backend(contract, *, capabilities: Fp8BackendCapabilities):
-    """Select exactly the backend the contract names, or fail explicitly."""
-
-    format_value = contract.requested_format.value
-    backend_value = contract.selected_backend.value
-    if format_value != "fp8":
-        return None
-
-    error = _unsupported_error(contract)
-    if backend_value == "aiter":
-        if not capabilities.aiter_block_scale:
-            raise error("AITER backend for FP8 is unavailable")
-        return AiterFp8BackendAdapter(
-            backend=contract.selected_backend,
-            format_=contract.requested_format,
-            native_transformer_streaming=True,
-            native_text_encoder_streaming=(capabilities.aiter_transformers_streaming),
-            text_encoder_unavailable_reason=(capabilities.aiter_transformers_reason),
-        )
-    if backend_value == "torchao":
-        if not capabilities.torchao_fp8:
-            reason = (
-                f": {capabilities.torchao_fp8_reason}"
-                if capabilities.torchao_fp8_reason
-                else ""
-            )
-            raise error(f"TORCHAO backend for FP8 is unavailable{reason}")
-        return TorchaoFp8BackendAdapter(
-            backend=contract.selected_backend,
-            format_=contract.requested_format,
-            native_transformer_streaming=(capabilities.torchao_diffusers_streaming),
-            native_unavailable_reason=(capabilities.torchao_diffusers_reason),
-            native_text_encoder_streaming=(capabilities.torchao_text_encoder_streaming),
-            text_encoder_unavailable_reason=(capabilities.torchao_text_encoder_reason),
-        )
-    raise error(f"{contract.selected_backend.name} backend cannot store requested FP8")
-
-
-def select_blockwise_fp8_backend(
-    contract,
-    *,
-    capabilities: Fp8BackendCapabilities,
-):
-    """Select FP8 independently for FP8, FP4, and FP8+FP4 contracts."""
-
-    format_value = contract.requested_format.value
-    if format_value not in {"fp8", "fp4"}:
-        return None
-    if format_value == "fp8":
-        fp8_contract = contract
-    else:
-        backend_enum = contract.selected_backend.__class__
-        fp8_backend = backend_enum(fp8_backend_name(capabilities))
-        fp8_contract = SimpleNamespace(
-            requested_format=contract.requested_format.__class__.FP8,
-            selected_backend=fp8_backend,
-        )
-    adapter = select_fp8_backend(fp8_contract, capabilities=capabilities)
-    return adapter
-
-
-def validate_torchao_fsdp2_patches(
-    contract,
-    *,
-    capabilities: Fp8BackendCapabilities,
-    required: bool,
-) -> None:
-    """Reject an FSDP2 placement that will contain TorchAO tensor subclasses."""
-
-    if not required or capabilities.torchao_fsdp_patches:
-        return
-    reason = (
-        f": {capabilities.torchao_fsdp_reason}"
-        if capabilities.torchao_fsdp_reason
-        else ""
-    )
-    raise _unsupported_error(contract)(
-        "TorchAO tensor subclasses under FSDP2 require "
-        f"Float8Tensor FSDP patches{reason}"
-    )
 
 
 def prepare_text_encoder_fp8_load(

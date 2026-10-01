@@ -308,61 +308,41 @@ def assert_offload_is_compatible_with_format(
     requested_format: QuantizationFormat,
     selected_backend: QuantizationBackend,
 ) -> None:
-    """Refuse CPU-offload contracts that AITER FP4 cannot honor safely.
+    """Refuse the CPU-offload modes mixed FP4+FP6 cannot honour.
 
-    Mixed FP4+FP6 still uses the inherited MXFP4 walker for its primary weights.
-    That walker derives the packing device from each source parameter, so every
-    CPU-offload mode leaves the primary weights on an unsupported CPU packing
-    path. Pure FP6 is different: its walker packs on the requested GPU and can
-    evict each packed leaf immediately, so it remains allowed.
+    Mixed FP4+FP6 still uses the inherited MXFP4 walker for its primary
+    weights. That walker derives the packing device from each source parameter,
+    so every CPU-offload mode leaves the primary weights on an unsupported CPU
+    packing path. Pure FP6 is different: its walker packs on the requested GPU
+    and can evict each packed leaf immediately, so it remains allowed.
 
-    Group offloading moves a module's parameters between host and device around each
-    call. AITER FP4 weights survive neither leg. With --group_offload_low_cpu_mem the
-    hook pins each tensor first, and torch has no pin_memory for Float4_e2m1fn_x2, so
-    the offload raises from inside the hook. Without it, AITER's quant module binds a
-    device from the parameter it is handed, and a parameter on the host resolves to an
-    invalid ordinal, which reaches AITER's own abort and kills the rank with SIGABRT
-    and no Python traceback.
-
-    Scoped to the AITER backend because that is where both failures were measured;
-    CUDA FP4 packs through TorchAO tensor subclasses, whose offload behaviour is
-    untested here and would be a different claim.
+    What a single format's storage survives is the adapter's own answer -- see
+    ``group_offload_refusal`` and ``QuantizationBackends.assert_offload_is_compatible``.
+    This is the one claim about a *compound* contract, and it goes when the
+    compound does.
     """
 
     if selected_backend is not QuantizationBackend.AITER:
         return
-    if requested_format is QuantizationFormat.FP4_FP6:
-        offload_flags = tuple(
-            flag
-            for flag in (
-                "enable_model_cpu_offload",
-                "enable_sequential_cpu_offload",
-                "enable_group_cpu_offload",
-            )
-            if getattr(config, flag, False)
+    if requested_format is not QuantizationFormat.FP4_FP6:
+        return
+    offload_flags = tuple(
+        flag
+        for flag in (
+            "enable_model_cpu_offload",
+            "enable_sequential_cpu_offload",
+            "enable_group_cpu_offload",
         )
-        if offload_flags:
-            named_flags = ", ".join(f"--{flag}" for flag in offload_flags)
-            raise UnsupportedLoadContract(
-                f"{named_flags} cannot be combined with FP4_FP6 on the AITER backend: "
-                "the primary MXFP4 packing path is unsupported when CPU offload keeps "
-                "its source weights on the host. Use pure FP6, or run FP4_FP6 without "
-                "CPU offload."
-            )
-    if requested_format is not QuantizationFormat.FP4:
-        return
-    if not getattr(config, "enable_group_cpu_offload", False):
-        return
-    detail = (
-        "torch cannot pin a Float4_e2m1fn_x2 tensor"
-        if getattr(config, "group_offload_low_cpu_mem", False)
-        else "AITER binds a device from the parameter it is given, and a host "
-        "parameter resolves to an invalid ordinal"
+        if getattr(config, flag, False)
     )
+    if not offload_flags:
+        return
+    named_flags = ", ".join(f"--{flag}" for flag in offload_flags)
     raise UnsupportedLoadContract(
-        f"--enable_group_cpu_offload cannot be combined with {requested_format.name} "
-        f"on the AITER backend: {detail}. Offload the model at FP8 or bf16, or run "
-        f"{requested_format.name} without offload."
+        f"{named_flags} cannot be combined with FP4_FP6 on the AITER backend: "
+        "the primary MXFP4 packing path is unsupported when CPU offload keeps "
+        "its source weights on the host. Use pure FP6, or run FP4_FP6 without "
+        "CPU offload."
     )
 
 

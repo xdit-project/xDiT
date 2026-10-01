@@ -6,6 +6,10 @@ import pytest
 
 from xfuser.model_executor.models.runner_models import base_model
 from xfuser.model_executor.models.runner_models.base_model import xFuserModel
+from xfuser.model_executor.models.runner_models.loading.quant_adapter import (
+    Capabilities,
+    FormatCapability,
+)
 from xfuser.model_executor.models.runner_models.loading import (
     placement,
     shard,
@@ -21,11 +25,6 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
     QuantizationBackend,
     QuantizationFormat,
 )
-from xfuser.model_executor.models.runner_models.loading.fp8_backends import (
-    Fp8BackendCapabilities,
-    select_blockwise_fp8_backend,
-)
-
 
 def backends(model):
     """The quantization backend selector under test, bound to a fake model."""
@@ -851,64 +850,50 @@ def test_a_carve_out_outside_every_wrapped_block_needs_no_sharding():
     assert not backends(model).places_under_fsdp2("fp8")
 
 
-def test_backend_preflight_uses_component_target_requirement(monkeypatch):
-    observed = []
-    adapter = SimpleNamespace(backend=QuantizationBackend.TORCHAO)
-    monkeypatch.setattr(
-        fp8_backends,
-        "probe_fp8_backend_capabilities",
-        lambda: Fp8BackendCapabilities(),
-    )
+def _measured(model, records):
+    """Seed what this machine offers, so a routing test probes nothing."""
+    selected = backends(model)
+    selected.__dict__["capabilities"] = Capabilities(records)
+    return selected
 
-    def select_backend(contract, *, capabilities):
-        return adapter
 
-    monkeypatch.setattr(
-        fp8_backends,
-        "select_fp8_backend",
-        select_backend,
-    )
-    monkeypatch.setattr(
-        fp8_backends,
-        "validate_torchao_fsdp2_patches",
-        lambda contract, *, capabilities, required: observed.append(required),
-    )
+def test_an_unshardable_parameter_inside_a_wrapped_block_is_refused(monkeypatch):
+    """Resolution fails at startup, not at the first all-gather."""
     model = _fsdp_patch_model(
         strategy={"transformer_2": {"wrap_attrs": ["blocks"]}},
     )
-    model.load_contract = SimpleNamespace(
-        requested_format=QuantizationFormat.FP4,
-        selected_backend=QuantizationBackend.TORCHAO,
-        materialization_mode=MaterializationMode.FSDP_META,
+    selected = _measured(
+        model,
+        {
+            ("fp8", "torchao"): FormatCapability(
+                available=True,
+                fsdp_safe=False,
+                fsdp_reason="patches unavailable",
+            )
+        },
     )
 
-    selected = backends(model).adapter_for("fp8")
-
-    assert selected is adapter
-    assert observed == [True]
+    with pytest.raises(ValueError, match="FSDP2.*patches unavailable"):
+        selected.adapter_for("fp8")
 
 
-def test_component_outside_fsdp_strategy_does_not_block_startup(monkeypatch):
-    monkeypatch.setattr(
-        fp8_backends,
-        "probe_fp8_backend_capabilities",
-        lambda: Fp8BackendCapabilities(
-            torchao_fp8=True,
-            torchao_fsdp_patches=False,
-            torchao_fsdp_reason="patches unavailable",
-        ),
-    )
+def test_component_outside_fsdp_strategy_does_not_block_startup():
+    """The same unshardable storage, placed where nothing wraps it."""
     model = _fsdp_patch_model(
         strategy={"transformer": {"wrap_attrs": ["blocks"]}},
     )
-    model.load_contract = SimpleNamespace(
-        requested_format=QuantizationFormat.FP4,
-        selected_backend=QuantizationBackend.TORCHAO,
+    selected = _measured(
+        model,
+        {
+            ("fp8", "torchao"): FormatCapability(
+                available=True,
+                fsdp_safe=False,
+                fsdp_reason="patches unavailable",
+            )
+        },
     )
 
-    adapter = backends(model).adapter_for("fp8")
-
-    assert adapter.backend is QuantizationBackend.TORCHAO
+    assert selected.adapter_for("fp8").backend is QuantizationBackend.TORCHAO
 
 
 def test_fsdp_boundary_has_no_global_fp8_patch_assertion(monkeypatch):
@@ -935,30 +920,122 @@ def test_fsdp_boundary_has_no_global_fp8_patch_assertion(monkeypatch):
     shard.shard_pipeline_components(runtime(model))
 
 
-def test_fp4_override_under_fsdp_requires_patches_with_aiter_fp8_backend(
-    monkeypatch,
+@pytest.mark.parametrize(
+    ("platform", "aiter_fp8", "torchao_fp8", "expected"),
+    [
+        ("cuda", False, True, "torchao"),
+        ("rdna4_rocm", True, True, "aiter"),
+        ("other_rocm", False, True, "torchao"),
+        ("neither", False, False, None),
+    ],
+)
+def test_the_first_available_implementation_wins(
+    platform, aiter_fp8, torchao_fp8, expected
 ):
-    monkeypatch.setattr(
-        fp8_backends,
-        "probe_fp8_backend_capabilities",
-        lambda: Fp8BackendCapabilities(
-            aiter_block_scale=True,
-            torchao_fp8=True,
-            torchao_fsdp_patches=False,
-            torchao_fsdp_reason="missing fsdp_post_all_gather",
-        ),
+    """The preference order picks; each probe gates itself to its hardware.
+
+    AITER block-scale probes available only on RDNA4, so naming it first is
+    not a hardware test repeated here -- everywhere else it falls through.
+    """
+    model = _fsdp_patch_model(strategy={})
+    selected = _measured(
+        model,
+        {
+            ("fp8", "aiter"): FormatCapability(
+                available=aiter_fp8, reason="not RDNA4"
+            ),
+            ("fp8", "torchao"): FormatCapability(
+                available=torchao_fp8, reason="torchao is not installed"
+            ),
+        },
     )
+
+    assert selected.impl_for("fp8") == expected, platform
+
+
+def test_a_format_nothing_can_store_says_what_each_implementation_measured():
+    model = _fsdp_patch_model(strategy={})
+    selected = _measured(
+        model,
+        {
+            ("fp8", "aiter"): FormatCapability(reason="not RDNA4"),
+            ("fp8", "torchao"): FormatCapability(reason="torchao is not installed"),
+        },
+    )
+
+    with pytest.raises(ValueError, match="not RDNA4.*torchao is not installed"):
+        selected.adapter_for("fp8")
+
+
+@pytest.mark.parametrize(
+    ("low_cpu_mem", "expected_in_reason"),
+    [
+        (False, "invalid ordinal"),
+        (True, "pin"),
+    ],
+)
+def test_group_offload_is_refused_by_the_implementation_that_cannot_survive_it(
+    low_cpu_mem, expected_in_reason
+):
+    """Both legs fail below Python, one by abort, so neither can be caught there."""
+    model = _fsdp_patch_model(strategy={}, fully_shard_degree=1)
+    model.config.enable_group_cpu_offload = True
+    model.config.group_offload_low_cpu_mem = low_cpu_mem
+    selected = _measured(
+        model,
+        {
+            ("fp4", "aiter"): FormatCapability(available=True),
+            ("fp8", "aiter"): FormatCapability(available=True, fsdp_safe=True),
+        },
+    )
+
+    with pytest.raises(ValueError) as refusal:
+        selected.assert_offload_is_compatible()
+
+    assert expected_in_reason in str(refusal.value)
+
+
+def test_an_implementation_with_no_offload_measurement_is_left_alone():
+    """Refusing TorchAO NVFP4 offload would assert a claim nothing here tested."""
+    model = _fsdp_patch_model(strategy={}, fully_shard_degree=1)
+    model.config.enable_group_cpu_offload = True
+    model.config.group_offload_low_cpu_mem = False
+    selected = _measured(
+        model,
+        {
+            ("fp4", "torchao"): FormatCapability(available=True),
+            ("fp8", "torchao"): FormatCapability(available=True, fsdp_safe=True),
+        },
+    )
+
+    selected.assert_offload_is_compatible()
+
+
+def test_an_aiter_carve_out_under_fsdp_needs_no_torchao_patches():
+    """A shardable parameter kind is not refused for another one's missing patches.
+
+    The carve-out does land inside the wrapped block. It is stored as a plain
+    packed parameter, which shards, so the TorchAO Float8Tensor patches this
+    run will never use are not its problem.
+    """
     model = _fsdp_patch_model(
         strategy={"transformer": {"wrap_attrs": ["blocks"]}},
         prefixes=("0.",),
     )
-    model.load_contract = SimpleNamespace(
-        requested_format=QuantizationFormat.FP4,
-        selected_backend=QuantizationBackend.AITER,
+    selected = _measured(
+        model,
+        {
+            ("fp8", "aiter"): FormatCapability(available=True, fsdp_safe=True),
+            ("fp8", "torchao"): FormatCapability(
+                available=True,
+                fsdp_safe=False,
+                fsdp_reason="missing fsdp_post_all_gather",
+            ),
+        },
     )
 
-    with pytest.raises(ValueError, match=r"FSDP.*fsdp_post_all_gather"):
-        backends(model).adapter_for("fp8")
+    assert selected.places_under_fsdp2("fp8")
+    assert selected.adapter_for("fp8").backend is QuantizationBackend.AITER
 def test_streamed_fp8_target_does_not_skip_disjoint_target_in_component(
     monkeypatch,
 ):

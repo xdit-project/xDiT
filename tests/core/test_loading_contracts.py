@@ -374,47 +374,44 @@ def _offload_config(**flags):
     return type("Config", (), {**defaults, **flags})()
 
 
+# Which offload a single format's storage survives moved onto the adapter:
+# `group_offload_refusal` carries the measured reason, and the loop that reads
+# it lives in test_fp8_blockwise_hybrid_routing.py, where an adapter exists.
+# What is left here is the one claim about a *compound* contract.
+
+
 @pytest.mark.parametrize(
-    ("low_cpu_mem", "expected_in_reason"),
+    "flag",
     [
-        (False, "invalid ordinal"),
-        (True, "pin"),
+        "enable_model_cpu_offload",
+        "enable_sequential_cpu_offload",
+        "enable_group_cpu_offload",
     ],
 )
-def test_group_offload_with_aiter_fp4_is_refused(
-    contracts, low_cpu_mem, expected_in_reason
-):
-    """Both legs of the offload fail below Python, one by abort, so neither can be caught."""
-    config = _offload_config(
-        enable_group_cpu_offload=True, group_offload_low_cpu_mem=low_cpu_mem
-    )
+def test_every_offload_mode_is_refused_for_mixed_fp4_fp6(contracts, flag):
+    config = _offload_config(**{flag: True})
 
-    with pytest.raises(contracts.UnsupportedLoadContract) as refusal:
+    with pytest.raises(contracts.UnsupportedLoadContract, match="MXFP4 packing"):
         contracts.assert_offload_is_compatible_with_format(
             config,
-            requested_format=contracts.QuantizationFormat.FP4,
+            requested_format=contracts.QuantizationFormat.FP4_FP6,
             selected_backend=contracts.QuantizationBackend.AITER,
         )
-
-    assert expected_in_reason in str(refusal.value)
-
-
-# The mixed FP8/FP4 contract is gone: a tiered run takes the FP4 contract, so
-# the offload refusal it used to check is the FP4 case in the matrix below.
 
 
 @pytest.mark.parametrize(
     ("format_name", "backend_name", "offload"),
     [
-        ("FP4", "AITER", False),
+        ("FP4", "AITER", True),
         ("FP8", "AITER", True),
         ("FP4", "TORCHAO", True),
+        ("FP4_FP6", "TORCHAO", True),
     ],
 )
-def test_an_offload_this_has_no_measurement_for_is_left_alone(
+def test_a_single_format_contract_is_left_to_its_adapter(
     contracts, format_name, backend_name, offload
 ):
-    """Refusing CUDA FP4 offload would assert a claim nothing here has tested."""
+    """Only the compound claim lives here; the rest is the adapter's answer."""
     config = _offload_config(enable_group_cpu_offload=offload)
 
     contracts.assert_offload_is_compatible_with_format(

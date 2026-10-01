@@ -16,8 +16,8 @@ implementation can do, what the run needs, and whether the declaration narrows
 to particular leaves -- see ``prepare_native_load``.
 """
 
-from dataclasses import dataclass
-from typing import Callable
+from dataclasses import dataclass, field
+from typing import Callable, Mapping, Tuple, Type
 
 
 def module_paths_overlap(left: str, right: str) -> bool:
@@ -32,6 +32,132 @@ def module_path_is_covered(path: str, owner: str) -> bool:
     """Whether ``owner`` is the same dotted path as, or an ancestor of, ``path``."""
 
     return not owner or path == owner or path.startswith(f"{owner}.")
+
+
+@dataclass(frozen=True)
+class FormatCapability:
+    """What one implementation of one format can do on this machine.
+
+    One record per ``(format, implementation)``. Every question the loading
+    layer asks about a format -- can this machine store it, can it be quantized
+    on the way in from disk, can FSDP2 shard what it leaves behind -- is a field
+    here, so adding an implementation is adding a record rather than four more
+    flat fields named after it.
+
+    Each ``reason`` is what the probe measured, kept so a refusal can say what
+    was actually missing rather than "unavailable".
+    """
+
+    available: bool = False
+    reason: str | None = None
+    #: Per-weight quantization through the framework's own checkpoint loader.
+    streams: bool = False
+    streams_reason: str | None = None
+    #: The same for a text encoder, which comes in through a different loader.
+    te_streams: bool = False
+    te_streams_reason: str | None = None
+    #: Whether what this leaves in a module survives being sharded by FSDP2.
+    #: A plain packed parameter does; a tensor subclass needs patches.
+    fsdp_safe: bool = False
+    fsdp_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class Capabilities:
+    """Every ``(format, implementation)`` pair this machine was probed for."""
+
+    records: Mapping[Tuple[str, str], FormatCapability] = field(
+        default_factory=dict
+    )
+
+    def of(self, format_name: str, impl: str) -> FormatCapability:
+        """This machine's record for one pair, absent meaning "never probed"."""
+
+        return self.records.get(
+            (format_name, impl),
+            FormatCapability(
+                reason=f"no {impl} implementation of {format_name} was probed"
+            ),
+        )
+
+    def merged(self, other: "Capabilities") -> "Capabilities":
+        return Capabilities({**self.records, **other.records})
+
+
+#: Every adapter class, keyed by the pair it stores. Populated by ``stores``
+#: at import, so adding an implementation is adding a decorated class.
+REGISTRY: dict[Tuple[str, str], Type] = {}
+
+
+def stores(format_name: str, impl: str):
+    """Register the one class that stores `format_name` through `impl`."""
+
+    def register(cls):
+        cls.format_name = format_name
+        cls.impl = impl
+        REGISTRY[(format_name, impl)] = cls
+        return cls
+
+    return register
+
+
+def build_adapter(format_name: str, impl: str, *, capability, hybrid: bool = False):
+    """The adapter for one pair, built from what this machine measured.
+
+    Uniform: no class gets its flags from anywhere but its own record, and the
+    only thing that can refuse a pair is the record being unavailable or the
+    implementation declaring it cannot drive a per-step schedule.
+    """
+
+    from .contracts import (
+        QuantizationBackend,
+        QuantizationFormat,
+        UnsupportedLoadContract,
+    )
+
+    cls = REGISTRY.get((format_name, impl))
+    if cls is None:
+        raise UnsupportedLoadContract(
+            f"no {impl} implementation of {format_name} exists"
+        )
+    if not capability.available:
+        reason = capability.reason or "backend unavailable"
+        raise UnsupportedLoadContract(
+            f"{impl} {format_name} is unavailable on this machine: {reason}"
+        )
+    if hybrid and not cls.supports_hybrid_schedule:
+        raise UnsupportedLoadContract(
+            f"{impl} {format_name} does not implement the runtime low/high "
+            "GEMM schedule; drop --use_hybrid_gemm_schedule or name a format "
+            "that does"
+        )
+    return cls(
+        backend=QuantizationBackend(impl),
+        format_=QuantizationFormat(format_name),
+        native_transformer_streaming=capability.streams,
+        native_unavailable_reason=capability.streams_reason,
+        native_text_encoder_streaming=capability.te_streams,
+        text_encoder_unavailable_reason=capability.te_streams_reason,
+    )
+
+
+def validate_fsdp_placement(adapter, *, capability, required: bool) -> None:
+    """Refuse a placement whose stored parameter kind FSDP2 cannot shard.
+
+    One rule for every implementation: the adapter says what it leaves in a
+    wrapped block, the record says whether that survives sharding here. No
+    ladder, because there is nothing to dispatch on.
+    """
+
+    from .contracts import UnsupportedLoadContract
+
+    if not required or adapter is None or capability.fsdp_safe:
+        return
+    suffix = f": {capability.fsdp_reason}" if capability.fsdp_reason else ""
+    raise UnsupportedLoadContract(
+        f"{adapter.parameter_semantics} stored by {adapter.impl} "
+        f"{adapter.format_name} cannot be placed under FSDP2{suffix}"
+    )
 
 
 class TargetMappingUnavailable(RuntimeError):
@@ -172,6 +298,18 @@ class QuantAdapter:
     #: want their final device. Decides which side of ``pipe.to`` a walk runs.
     converts_before_device_move = False
     supports_text_encoder_post_load = True
+    #: Why this implementation's weights do not survive the host round trip a
+    #: group-offload hook performs, keyed by whether the hook pins each tensor
+    #: first. None means they do, or that nothing has measured otherwise --
+    #: refusing on a guess would assert a claim no one has tested.
+    group_offload_refusal = None
+    #: Whether this can be the format a step runs in bf16-vs-quantized pairs.
+    #: False where streaming or the kernel would take the leaves the per-step
+    #: wrapper needs to keep in two precisions.
+    supports_hybrid_schedule = True
+    #: Filled in by ``stores`` at registration.
+    format_name = ""
+    impl = ""
     #: What to say when this implementation cannot stream per weight and the
     #: probe recorded no reason of its own. Each implementation names the API
     #: it would have streamed through, so the log says which one was missing.

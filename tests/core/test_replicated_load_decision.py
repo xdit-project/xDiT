@@ -172,11 +172,14 @@ def preflight_loader(runner):
     loader.load_declaration = runner.load_declaration
     loader.load_contract = None
     loader.quantization_plan = QuantizationPlan(runner)
+    # A stub registry: these tests are about the contract preflight builds,
+    # not about which implementation this machine happens to offer, so the
+    # answer is whatever the test set on the runner.
     loader.backends = SimpleNamespace(
-        fp8=None,
-        format=None,
-        uses_blockwise_fp8=lambda: False,
+        impl_for=lambda _fmt: getattr(runner, "fp8_impl", "torchao"),
+        adapter_for=lambda _fmt: None,
         preflight=lambda: None,
+        assert_offload_is_compatible=lambda: None,
     )
     return loader
 
@@ -530,15 +533,13 @@ def test_runner_fsdp_meta_support_matches_capabilities_and_strategy():
 def test_base_runner_selects_the_production_contract_before_loading(monkeypatch):
     from xfuser.model_executor.models.runner_models import base_model
 
-    monkeypatch.setattr(
-        fp8_backends, "fp8_backend_name", lambda _caps: fp8_backends.AITER_FP8
-    )
     monkeypatch.setattr(meta_load, "_is_cuda", lambda: False)
     model_capabilities = base_model.ModelCapabilities(
         fully_shard_degree=True,
         gemm_formats=frozenset({"fp8"}),
     )
     runner = SimpleNamespace(
+        fp8_impl="aiter",
         config=SimpleNamespace(
             fully_shard_degree=2,
             pipefusion_parallel_degree=1,
@@ -573,9 +574,6 @@ def test_base_runner_selects_the_production_contract_before_loading(monkeypatch)
 def test_base_runner_rejects_unsupported_meta_mode_before_loading(monkeypatch):
     from xfuser.model_executor.models.runner_models import base_model
 
-    monkeypatch.setattr(
-        fp8_backends, "fp8_backend_name", lambda _caps: fp8_backends.TORCHAO_FP8
-    )
     monkeypatch.setattr(meta_load, "_is_cuda", lambda: True)
     runner = SimpleNamespace(
         config=SimpleNamespace(
@@ -603,9 +601,6 @@ def test_base_runner_rejects_unsupported_meta_mode_before_loading(monkeypatch):
 def test_base_runner_uses_effective_single_rank_mode(monkeypatch):
     from xfuser.model_executor.models.runner_models import base_model
 
-    monkeypatch.setattr(
-        fp8_backends, "fp8_backend_name", lambda _caps: fp8_backends.TORCHAO_FP8
-    )
     monkeypatch.setattr(meta_load, "_is_cuda", lambda: True)
     runner = SimpleNamespace(
         config=SimpleNamespace(
@@ -649,17 +644,15 @@ def test_wan22_spec_resolves_after_dynamic_instance_settings(monkeypatch):
         gemm_quantization_spec=GemmQuantizationSpec.parse("fp8"),
     )
     runner._customize_settings(SimpleNamespace())
-    monkeypatch.setattr(
-        fp8_backends, "fp8_backend_name", lambda _caps: fp8_backends.AITER_FP8
-    )
+    runner.fp8_impl = "aiter"
     monkeypatch.setattr(meta_load, "_is_cuda", lambda: False)
 
     loader = ModelLoader(runner)
     loader.backends = SimpleNamespace(
-        fp8=None,
-        format=None,
-        uses_blockwise_fp8=lambda: False,
+        impl_for=lambda _fmt: getattr(runner, "fp8_impl", "torchao"),
+        adapter_for=lambda _fmt: None,
         preflight=lambda: None,
+        assert_offload_is_compatible=lambda: None,
     )
     loader.preflight(world_size=2)
     fsdp_selected = loader.load_contract
@@ -680,10 +673,10 @@ def test_wan22_spec_resolves_after_dynamic_instance_settings(monkeypatch):
     # One loader owns one immutable preflight result; a changed run gets a new loader.
     loader = ModelLoader(runner)
     loader.backends = SimpleNamespace(
-        fp8=None,
-        format=None,
-        uses_blockwise_fp8=lambda: False,
+        impl_for=lambda _fmt: getattr(runner, "fp8_impl", "torchao"),
+        adapter_for=lambda _fmt: None,
         preflight=lambda: None,
+        assert_offload_is_compatible=lambda: None,
     )
     loader.preflight(world_size=2)
     replicated_selected = loader.load_contract
@@ -833,22 +826,12 @@ def test_build_transformer_routes_torchao_fp8_to_native_diffusers_config(
         QuantizationBackend,
         QuantizationFormat,
     )
-    from xfuser.model_executor.models.runner_models.loading.fp8_backends import (
-        Fp8BackendCapabilities,
-        select_fp8_backend,
-    )
 
     contract = SimpleNamespace(
         requested_format=QuantizationFormat.FP8,
         selected_backend=QuantizationBackend.TORCHAO,
     )
-    adapter = select_fp8_backend(
-        contract,
-        capabilities=Fp8BackendCapabilities(
-            torchao_fp8=True,
-            torchao_diffusers_streaming=True,
-        ),
-    )
+    adapter = _fp8_adapter("torchao", streams=True)
     calls = []
     sentinel = object()
 
@@ -982,10 +965,6 @@ def test_build_transformer_logs_explicit_torchao_post_load_fallback(monkeypatch)
         QuantizationBackend,
         QuantizationFormat,
     )
-    from xfuser.model_executor.models.runner_models.loading.fp8_backends import (
-        Fp8BackendCapabilities,
-        select_fp8_backend,
-    )
 
     calls = []
     logs = []
@@ -996,13 +975,7 @@ def test_build_transformer_logs_explicit_torchao_post_load_fallback(monkeypatch)
             calls.append(kwargs)
             return "loaded"
 
-    adapter = select_fp8_backend(
-        SimpleNamespace(
-            requested_format=QuantizationFormat.FP8,
-            selected_backend=QuantizationBackend.TORCHAO,
-        ),
-        capabilities=Fp8BackendCapabilities(torchao_fp8=True),
-    )
+    adapter = _fp8_adapter("torchao")
     runner = SimpleNamespace(
         _memory_efficient_fsdp_load=lambda: False,
         _replicated_broadcast_load=lambda: False,
@@ -1032,10 +1005,6 @@ def test_build_transformer_mapping_failure_falls_back_without_streaming_claim(
         QuantizationBackend,
         QuantizationFormat,
     )
-    from xfuser.model_executor.models.runner_models.loading.fp8_backends import (
-        Fp8BackendCapabilities,
-        select_fp8_backend,
-    )
 
     calls = []
     logs = []
@@ -1046,16 +1015,7 @@ def test_build_transformer_mapping_failure_falls_back_without_streaming_claim(
             calls.append(kwargs)
             return "loaded"
 
-    adapter = select_fp8_backend(
-        SimpleNamespace(
-            requested_format=QuantizationFormat.FP8,
-            selected_backend=QuantizationBackend.TORCHAO,
-        ),
-        capabilities=Fp8BackendCapabilities(
-            torchao_fp8=True,
-            torchao_diffusers_streaming=True,
-        ),
-    )
+    adapter = _fp8_adapter("torchao", streams=True)
     runner = SimpleNamespace(
         _memory_efficient_fsdp_load=lambda: False,
         _replicated_broadcast_load=lambda: False,
@@ -1146,10 +1106,6 @@ def test_build_transformer_preserves_aiter_native_streaming(monkeypatch):
         QuantizationBackend,
         QuantizationFormat,
     )
-    from xfuser.model_executor.models.runner_models.loading.fp8_backends import (
-        Fp8BackendCapabilities,
-        select_fp8_backend,
-    )
 
     calls = []
 
@@ -1159,13 +1115,7 @@ def test_build_transformer_preserves_aiter_native_streaming(monkeypatch):
             calls.append(kwargs)
             return "loaded"
 
-    adapter = select_fp8_backend(
-        SimpleNamespace(
-            requested_format=QuantizationFormat.FP8,
-            selected_backend=QuantizationBackend.AITER,
-        ),
-        capabilities=Fp8BackendCapabilities(aiter_block_scale=True),
-    )
+    adapter = _fp8_adapter("aiter", streams=True)
     sentinel = object()
     monkeypatch.setattr(adapter, "_stream_config_factory", lambda targets: sentinel)
     monkeypatch.setattr(
@@ -1321,6 +1271,22 @@ def test_build_transformer_records_only_streamed_nvfp4_leaves(monkeypatch):
     assert result == "streamed"
     assert runner.quantization_ledger.streaming_targets == {"transformer.blocks.0.keep"}
 
+
+
+def _fp8_adapter(impl, **measured):
+    """The FP8 adapter one implementation gives, from a measured record.
+
+    The loader builds every adapter this way now -- there is no per-format
+    selection function to call -- so the fixtures do too.
+    """
+    from xfuser.model_executor.models.runner_models.loading.quant_adapter import (
+        FormatCapability,
+        build_adapter,
+    )
+
+    return build_adapter(
+        "fp8", impl, capability=FormatCapability(available=True, **measured)
+    )
 
 
 def _attach_backends(runner):

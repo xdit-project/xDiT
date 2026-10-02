@@ -112,6 +112,7 @@ Individual model classes that inherit from `xFuserModel`:
 | FastH3 Preview v1 (Dense) | `FastH3-Dense`, `FastVideo/FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree` |
 | FastH3 V2 | `FastVideo/FastVideo-FastH3-8-Step-V2` |
 | Qwen-Image | `Qwen-Image`, `Qwen/Qwen-Image`, `Qwen-Image-2512`, `Qwen/Qwen-Image-2512` |
+| Qwen-Image-2.1 | `Qwen-Image-2.1`, `Qwen/Qwen-Image-2.1` |
 | Qwen-Image-Edit | `Qwen-Image-Edit`, `Qwen/Qwen-Image-Edit`, `Qwen-Image-Edit-2509`, `Qwen/Qwen-Image-Edit-2509`, `Qwen-Image-Edit-2511`, `Qwen/Qwen-Image-Edit-2511` |
 | Stable Diffusion 3.5 | `SD3.5`, `stable-diffusion-3.5-large`, `stabilityai/stable-diffusion-3.5-large` |
 | Wan 2.1 VACE | `Wan2.1-VACE-14B`, `Wan2.1-VACE-1.3B`, `Wan-AI/Wan2.1-VACE-14B-diffusers`, `Wan-AI/Wan2.1-VACE-1.3B-diffusers` |

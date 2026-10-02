@@ -755,6 +755,10 @@ class xFuserModel(abc.ABC):
     def _get_compile_dynamic(self) -> Optional[bool]:
         return None  # torch default (auto)
 
+    def _prefer_blockwise_compile(self) -> bool:
+        """Compile per block even without FSDP or caching, for forwards that sync to host outside the block loop."""
+        return False
+
     def _mark_cudagraph_steps(self, component: torch.nn.Module) -> None:
         """Tell CUDA Graphs where one inference step ends, so the next may reuse its buffers.
 
@@ -822,7 +826,11 @@ class xFuserModel(abc.ABC):
             component = getattr(self.pipe, component_name, None)
             if component is None:
                 continue
-            if self.config.fully_shard_degree > 1 or self.config.cache_method:
+            if (
+                self.config.fully_shard_degree > 1
+                or self.config.cache_method
+                or self._prefer_blockwise_compile()
+            ):
                 # Per-block compile: leaves transformer as original object so cache-dit's
                 # transformer.forward patch remains visible during compiled execution.
                 wrap_attrs = self.settings.fsdp_strategy.get(component_name, {}).get("wrap_attrs", [])

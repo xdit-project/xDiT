@@ -552,9 +552,9 @@ class xFuserFlux2PipelineBase(xFuserPipelineBaseWrapper):
                     patch_latents[patch_idx] = self._scheduler_step(
                         patch_latents[patch_idx], last_patch_latents[patch_idx], t
                     )
-                    if latents.dtype != latents_dtype:
+                    if patch_latents[patch_idx].dtype != latents_dtype:
                         if torch.backends.mps.is_available():
-                            latents = latents.to(latents_dtype)
+                            patch_latents[patch_idx] = patch_latents[patch_idx].to(latents_dtype)
                     if i != len(timesteps) - 1:
                         get_pp_group().pipeline_isend(
                             patch_latents[patch_idx], segment_idx=patch_idx
@@ -581,6 +581,16 @@ class xFuserFlux2PipelineBase(xFuserPipelineBaseWrapper):
                         get_pp_group().recv_next()
 
                 get_runtime_state().next_patch()
+
+            self._async_pipeline_step_end(
+                callback_on_step_end,
+                callback_on_step_end_tensor_inputs,
+                i + num_pipeline_warmup_steps,
+                t,
+                patch_latents,
+                -2,
+                locals(),
+            )
 
             if i == len(timesteps) - 1 or (
                 (i + num_pipeline_warmup_steps + 1) > num_warmup_steps

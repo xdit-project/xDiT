@@ -576,6 +576,39 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
 
         return patch_latents
 
+    def _async_pipeline_step_end(
+        self,
+        callback_on_step_end: Optional[Callable],
+        callback_on_step_end_tensor_inputs: List[str],
+        step: int,
+        t: torch.Tensor,
+        patch_latents: List[torch.Tensor],
+        patch_dim: int,
+        step_locals: Dict[str, Any],
+    ) -> None:
+        """Run ``callback_on_step_end`` once per PipeFusion async step.
+
+        Only the last pipeline stage holds denoised latents. By the end of a step it
+        has already sent every patch on to the next step, so the callback sees the
+        step's latents but cannot replace them.
+        """
+        if callback_on_step_end is None or not is_pipeline_last_stage():
+            return
+        callback_kwargs = {
+            k: torch.cat(patch_latents, dim=patch_dim) if k == "latents" else step_locals[k]
+            for k in callback_on_step_end_tensor_inputs
+        }
+        callback_outputs = callback_on_step_end(self, step, t, callback_kwargs)
+        replaced = [
+            k for k, v in (callback_outputs or {}).items()
+            if k in callback_kwargs and v is not callback_kwargs[k]
+        ]
+        if replaced:
+            logger.warning(
+                f"callback_on_step_end returned new {replaced}, which PipeFusion "
+                "cannot apply after a step has been sent; the values are ignored."
+            )
+
     def _process_cfg_split_batch(
         self,
         negative_embeds: torch.Tensor,

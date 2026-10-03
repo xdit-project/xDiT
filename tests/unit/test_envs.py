@@ -1,6 +1,9 @@
+import sys
+import types
 import unittest
 from unittest.mock import patch
 from xfuser import envs
+from xfuser.compat import declared_floor
 
 # get_device checks torch.version.cuda and torch.version.hip. Patch those checks directly so each
 # test is independent of the PyTorch build used to run it.
@@ -37,6 +40,33 @@ class TestEnvs(unittest.TestCase):
         self.assertEqual(device.type, "cpu")
         device_name = envs.get_device_name()
         self.assertEqual(device_name, "cpu")
+
+
+class TestFlashAttnFloor(unittest.TestCase):
+    """flash_attn before 2.7.0 takes ``window_size`` where yunchang passes
+    ``window_size_left``/``window_size_right``, so ring attention raises a TypeError (#547)."""
+
+    def _flash_attn_usable(self, version):
+        if declared_floor("flash-attn") is None:
+            self.skipTest("xfuser is not installed, so it declares no flash-attn floor")
+        flash_attn = types.ModuleType("flash_attn")
+        flash_attn.__version__ = version
+        flash_attn.flash_attn_func = lambda *args, **kwargs: None
+        checker = object.__new__(envs.PackagesEnvChecker)
+        with (
+            patch.dict(sys.modules, {"flash_attn": flash_attn}),
+            patch("xfuser.envs._is_npu", return_value=False),
+            patch("xfuser.envs._is_musa", return_value=False),
+            patch("torch.cuda.is_available", return_value=True),
+            patch("torch.cuda.get_device_name", return_value="NVIDIA H100"),
+        ):
+            return checker.check_flash_attn()
+
+    def test_release_with_split_window_size_is_used(self):
+        self.assertTrue(self._flash_attn_usable("2.7.0"))
+
+    def test_release_with_tuple_window_size_is_not_used(self):
+        self.assertFalse(self._flash_attn_usable("2.6.3"))
 
 
 if __name__ == "__main__":

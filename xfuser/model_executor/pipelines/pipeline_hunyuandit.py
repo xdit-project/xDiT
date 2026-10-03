@@ -615,7 +615,7 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
 
             if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                 progress_bar.update()
-            if callback_on_step_end is not None:
+            if callback_on_step_end is not None and is_pipeline_last_stage():
                 callback_kwargs = {}
                 for k in callback_on_step_end_tensor_inputs:
                     callback_kwargs[k] = locals()[k]
@@ -765,15 +765,15 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
                 and (i + num_pipeline_warmup_steps + 1) % self.scheduler.order == 0
             ):
                 progress_bar.update()
-            if callback_on_step_end is not None:
-                callback_kwargs = {}
-                for k in callback_on_step_end_tensor_inputs:
-                    callback_kwargs[k] = locals()[k]
-                callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
-
-                latents = callback_outputs.pop("latents", latents)
-                prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
-                prompt_embeds_2 = callback_outputs.pop("prompt_embeds_2", prompt_embeds_2)
+            self._async_pipeline_step_end(
+                callback_on_step_end,
+                callback_on_step_end_tensor_inputs,
+                i + num_pipeline_warmup_steps,
+                t,
+                patch_latents,
+                2,
+                locals(),
+            )
 
         latents = None
         if is_pipeline_last_stage():

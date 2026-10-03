@@ -587,19 +587,10 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
                         t,
                     )
 
-                    if latents.dtype != latents_dtype:
+                    if patch_latents[patch_idx].dtype != latents_dtype:
                         if torch.backends.mps.is_available():
                             # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
-                            latents = latents.to(latents_dtype)
-
-                    if callback_on_step_end is not None:
-                        callback_kwargs = {}
-                        for k in callback_on_step_end_tensor_inputs:
-                            callback_kwargs[k] = locals()[k]
-                        callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
-
-                        latents = callback_outputs.pop("latents", latents)
-                        prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
+                            patch_latents[patch_idx] = patch_latents[patch_idx].to(latents_dtype)
 
                     if i != len(timesteps) - 1:
                         get_pp_group().pipeline_isend(patch_latents[patch_idx], segment_idx=patch_idx)
@@ -623,6 +614,16 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
                         get_pp_group().recv_next()
 
                 get_runtime_state().next_patch()
+
+            self._async_pipeline_step_end(
+                callback_on_step_end,
+                callback_on_step_end_tensor_inputs,
+                i + num_pipeline_warmup_steps,
+                t,
+                patch_latents,
+                -2,
+                locals(),
+            )
 
             if i == len(timesteps) - 1 or (
                 (i + num_pipeline_warmup_steps + 1) > num_warmup_steps

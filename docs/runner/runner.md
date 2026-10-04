@@ -113,6 +113,8 @@ Individual model classes that inherit from `xFuserModel`:
 | FastH3 V2 | `FastVideo/FastVideo-FastH3-8-Step-V2` |
 | Qwen-Image | `Qwen-Image`, `Qwen/Qwen-Image`, `Qwen-Image-2512`, `Qwen/Qwen-Image-2512` |
 | Qwen-Image-Edit | `Qwen-Image-Edit`, `Qwen/Qwen-Image-Edit`, `Qwen-Image-Edit-2509`, `Qwen/Qwen-Image-Edit-2509`, `Qwen-Image-Edit-2511`, `Qwen/Qwen-Image-Edit-2511` |
+| SkyReels-V2 T2V | `SkyReels-V2-T2V-14B`, `Skywork/SkyReels-V2-T2V-14B-540P-Diffusers` |
+| SkyReels-V2 I2V | `SkyReels-V2-I2V-14B`, `SkyReels-V2-I2V-1.3B`, `Skywork/SkyReels-V2-I2V-14B-540P-Diffusers`, `Skywork/SkyReels-V2-I2V-1.3B-540P-Diffusers` |
 | Stable Diffusion 3.5 | `SD3.5`, `stable-diffusion-3.5-large`, `stabilityai/stable-diffusion-3.5-large` |
 | Wan 2.1 VACE | `Wan2.1-VACE-14B`, `Wan2.1-VACE-1.3B`, `Wan-AI/Wan2.1-VACE-14B-diffusers`, `Wan-AI/Wan2.1-VACE-1.3B-diffusers` |
 | Wan 2.1/2.2 I2V | `Wan2.1-I2V`, `Wan2.2-I2V`, `Wan-AI/Wan2.1-I2V-14B-720P-Diffusers`, `Wan-AI/Wan2.2-I2V-A14B-Diffusers` |
@@ -282,6 +284,7 @@ fill it from rank 0.
 | Qwen-Image and Qwen-Image-Edit variants | Streaming; transformer targets declared | `text_encoder` | Transformer + targeted text encoder | Yes |
 | Z-Image and Z-Image-Turbo | Streaming; transformer, noise refiner, and context refiner covered | `text_encoder` | Transformer + targeted text encoder | Yes |
 | Krea2-Raw and Krea2-Turbo | Streaming; transformer targets declared | Not declared for shared loading: the Qwen3VL ROCm float32-Linear workaround has no exact quantization target/API contract | Transformer only; text encoder loads normally | Transformer only; text encoder loads per rank |
+| SkyReels-V2 T2V and I2V | No shared load route declared; direct load through the shared transformer seam | None | Rejected before allocation: not yet verified against the meta-load routes | No |
 | Stable Diffusion 3.5 | No shared load route declared; direct/post-load only | `text_encoder_3`, post-load only | Rejected before allocation: the composition wrapper has no config-only transformer seam | No |
 | HunyuanVideo | Streaming from pinned revision `refs/pr/18`; both transformer block lists declared | `text_encoder`, the Llama encoder; the CLIP encoder is left at pipeline dtype | Transformer + targeted text encoder | Yes |
 | HunyuanVideo-1.5, distilled, and sparse/remapped variants | No shared load route declared; direct/remapped loading only | None | Rejected before allocation: separate wrapper/config and remapped sparse composition are not verified against the standard seam | No |

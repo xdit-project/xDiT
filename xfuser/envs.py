@@ -92,7 +92,8 @@ def _is_npu():
 
 
 def get_device(local_rank: int) -> torch.device:
-    if _is_cuda() or _is_hip():
+    # _is_cuda/_is_hip describe the torch build; a CUDA or ROCm wheel can run with no visible GPU.
+    if (_is_cuda() or _is_hip()) and torch.cuda.is_available():
         return torch.device("cuda", local_rank)
     elif _is_musa():
         return torch.device("musa", local_rank)

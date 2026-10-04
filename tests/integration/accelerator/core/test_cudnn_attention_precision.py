@@ -22,13 +22,16 @@ def test_cudnn_backend_matches_reference_attention(dtype):
     if unavailable is not None:
         pytest.skip(unavailable)
 
+    # Not a multiple of 32: the memory-efficient kernel pads its LSE to one.
+    seq_len = 50
     generator = torch.Generator(device="cuda").manual_seed(0)
-    query, key, value = (torch.randn(2, 3, 64, 8, device="cuda", generator=generator).to(dtype) for _ in range(3))
-    expected = torch.ops.aten._scaled_dot_product_attention_math(query.float(), key.float(), value.float())[0]
+    query, key, value = (torch.randn(2, 3, seq_len, 8, device="cuda", generator=generator).to(dtype) for _ in range(3))
+    scores = query.float() @ key.float().transpose(-1, -2) * query.shape[-1] ** -0.5
+    expected = torch.softmax(scores, dim=-1) @ value.float()
 
     output, lse = spec.run(query, key, value, AttnCall())
 
     assert output.dtype == dtype
     tolerance = 1e-4 if dtype == torch.float32 else 2e-2
     torch.testing.assert_close(output.float(), expected, rtol=tolerance, atol=tolerance)
-    assert lse is not None and torch.isfinite(lse).all()
+    torch.testing.assert_close(lse[..., :seq_len].float(), torch.logsumexp(scores, dim=-1), rtol=1e-3, atol=1e-3)

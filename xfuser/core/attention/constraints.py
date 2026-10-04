@@ -6,7 +6,8 @@ arrives. They cover tensor geometry (HEAD_DIM, MHA_ONLY, SELF_ATTENTION) and
 call parameters (NON_CAUSAL, NO_DROPOUT, NO_VARLEN, MASKED_VARLEN) alike.
 
 One declaration serves two readers: the pre-call check, and the conformance
-suite choosing which shapes to exercise.
+suite choosing which shapes to exercise. HALF_PRECISION, which limits the input
+dtype, is checked the same way.
 """
 
 from dataclasses import dataclass

@@ -34,7 +34,8 @@ SPECS = [
         ring=ALWAYS,
         # The aten cuDNN kernel returns NaN rather than raising for float32
         # inputs, which PyTorch's own dispatcher never sends it. Hand those to
-        # the memory-efficient kernel, which also returns the LSE ring needs.
+        # the memory-efficient kernel, which serves float32 and returns the
+        # query-length LSE ring attention needs.
         accepts=MASKED_VARLEN & HALF_PRECISION,
         fallback=AttentionBackendType.SDPA_EFFICIENT,
         requires=PLATFORM("cuda"),

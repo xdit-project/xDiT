@@ -1,4 +1,4 @@
-"""PipeFusion must run a float32 PixArt with the default attention backend.
+"""PipeFusion must run a float32 PixArt on the cuDNN attention backend.
 
 With every step synchronous, PipeFusion computes exactly what diffusers does, so
 two pipeline stages must reproduce the single-device output. In float32 they
@@ -67,7 +67,15 @@ def _worker(rank, world_size, init_method):
     device = torch.device("cuda", rank)
     init_distributed_environment(rank=rank, world_size=world_size, local_rank=rank, distributed_init_method=init_method)
     # Warm up for every step: synchronous PipeFusion is exact, so it must match diffusers.
-    args = xFuserArgs(model="tiny", pipefusion_parallel_degree=world_size, num_pipeline_patch=2, warmup_steps=STEPS)
+    # Pinned to cuDNN, the default on NVIDIA without FlashAttention, so the test does not
+    # depend on which backends are installed.
+    args = xFuserArgs(
+        model="tiny",
+        pipefusion_parallel_degree=world_size,
+        num_pipeline_patch=2,
+        warmup_steps=STEPS,
+        attention_backend="cudnn",
+    )
     engine_config, _ = args.create_config()
     engine_config.runtime_config.dtype = torch.float32
 
@@ -82,6 +90,7 @@ def _worker(rank, world_size, init_method):
     destroy_distributed_environment()
 
 
+@pytest.mark.nvidia
 @pytest.mark.multi_gpu
 def test_pipefusion_float32_pixart_matches_diffusers(accelerator_ranks):
     accelerator_ranks(_worker, world_size=2, timeout=240, init_filename="pipefusion-pixart-fp32")

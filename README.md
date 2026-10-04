@@ -200,7 +200,7 @@ Note that we use two self-maintained packages:
 1. [yunchang](https://github.com/feifeibear/long-context-attention)
 2. [DistVAE](https://github.com/xdit-project/DistVAE)
 
-The [flash_attn](https://github.com/Dao-AILab/flash-attention) used for yunchang should be >= 2.6.0
+The [flash_attn](https://github.com/Dao-AILab/flash-attention) used for yunchang should be >= 2.7.0
 
 ### 3. Docker
 

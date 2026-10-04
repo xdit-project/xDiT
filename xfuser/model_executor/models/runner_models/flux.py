@@ -246,9 +246,9 @@ class xFuserFluxKontextModel(xFuserModel):
         if input_args.get("resize_input_images", False):
             image = resize_and_crop_image(
                 image,
-                input_args["width"],
-                input_args["height"],
-                self.settings.mod_value,
+                target_height=input_args["height"],
+                target_width=input_args["width"],
+                mod_value=self.settings.mod_value,
             )
             input_args["height"], input_args["width"] = image.height, image.width
         input_args["image"] = image
@@ -385,11 +385,11 @@ class xFuserFlux2Model(xFuserModel):
             images = None
         elif input_args.get("resize_input_images", False):
             images = [
-                self._resize_and_crop_image(
+                resize_and_crop_image(
                     image,
-                    input_args["width"],
-                    input_args["height"],
-                    self.settings.mod_value,
+                    target_height=input_args["height"],
+                    target_width=input_args["width"],
+                    mod_value=self.settings.mod_value,
                 )
                 for image in images
             ]
@@ -449,6 +449,7 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         model_name="black-forest-labs/FLUX.2-klein-9B",
         output_name="flux_2_klein_9b",
         model_output_type="image",
+        mod_value=16,
         fp8_gemm_module_list=[
             "transformer.transformer_blocks",
             "transformer.single_transformer_blocks",
@@ -526,11 +527,11 @@ class xFuserFlux2Klein9BModel(xFuserModel):
             images = None
         elif input_args.get("resize_input_images", False):
             images = [
-                self._resize_and_crop_image(
+                resize_and_crop_image(
                     image,
-                    input_args["width"],
-                    input_args["height"],
-                    self.settings.mod_value,
+                    target_height=input_args["height"],
+                    target_width=input_args["width"],
+                    mod_value=self.settings.mod_value,
                 )
                 for image in images
             ]
@@ -552,6 +553,7 @@ class xFuserFlux2Klein4BModel(xFuserFlux2Klein9BModel):
         model_name="black-forest-labs/FLUX.2-klein-4B",
         output_name="flux_2_klein_4b",
         model_output_type="image",
+        mod_value=16,
         fp8_gemm_module_list=[
             "transformer.transformer_blocks",
             "transformer.single_transformer_blocks",

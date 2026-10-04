@@ -276,18 +276,15 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
             xFuserLingBotVideoTransformer3DWrapper,
         )
 
-        local_files_only = self.loader.checkpoint_request().local_files_only
         transformer = xFuserLingBotVideoTransformer3DWrapper.from_pretrained(
             model_name,
             torch_dtype=torch.bfloat16,
-            subfolder=transformer_subfolder,
-            local_files_only=local_files_only,
+            **self.loader.checkpoint_request(transformer_subfolder).from_pretrained_kwargs(),
         )
         vae = AutoencoderKLWan.from_pretrained(
             model_name,
             torch_dtype=torch.float32,
-            subfolder="vae",
-            local_files_only=local_files_only,
+            **self.loader.checkpoint_request("vae").from_pretrained_kwargs(),
         )
         text_encoder = Qwen3VLForConditionalGeneration.from_pretrained(
             model_name,

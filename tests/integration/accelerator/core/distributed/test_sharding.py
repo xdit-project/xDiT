@@ -7,6 +7,7 @@ preserving the parameter count.
 
 import gc
 import queue
+import time
 import traceback
 
 import pytest
@@ -83,7 +84,9 @@ def _check_parameter_count():
     )
 
 
-def _guard(init_method, check, result_queue):
+def _guard(init_method, check, result_queue, ready_queue):
+    # Unpickling this target imported the module (torch and xfuser), so the rank is ready.
+    ready_queue.put(None)
     torch.cuda.set_device(0)
     try:
         dist.init_process_group(
@@ -107,6 +110,9 @@ def _guard(init_method, check, result_queue):
     result_queue.put(None)
 
 
+_STARTUP_TIMEOUT = 900
+
+
 def _run_isolated(check, tmp_path):
     if not torch.cuda.is_available():
         pytest.skip("requires an accelerator device")
@@ -115,11 +121,21 @@ def _run_isolated(check, tmp_path):
 
     context = torch.multiprocessing.get_context("spawn")
     result_queue = context.Queue()
+    ready_queue = context.Queue()
     process = context.Process(
         target=_guard,
-        args=(f"file://{tmp_path / 'nccl-init'}", check, result_queue),
+        args=(f"file://{tmp_path / 'nccl-init'}", check, result_queue, ready_queue),
     )
     process.start()
+    # Starting the interpreter and importing torch and xfuser can take minutes on a slow
+    # filesystem; the 60 s hang budget starts once the rank is running.
+    deadline = time.monotonic() + _STARTUP_TIMEOUT
+    while process.is_alive() and time.monotonic() < deadline:
+        try:
+            ready_queue.get(timeout=1)
+            break
+        except queue.Empty:
+            pass
     process.join(60)
     if process.is_alive():
         process.terminate()

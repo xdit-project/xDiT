@@ -2,10 +2,12 @@ from typing import Optional, Tuple, Union
 
 import torch
 
+import diffusers.schedulers.scheduling_ddpm as diffusers_ddpm
 from diffusers.schedulers.scheduling_ddpm import (
     DDPMScheduler,
     DDPMSchedulerOutput,
 )
+from diffusers.utils.torch_utils import randn_tensor
 
 from xfuser.core.distributed import (
     get_runtime_state,
@@ -64,9 +66,11 @@ class xFuserDDPMSchedulerWrapper(xFuserSchedulerBaseWrapper):
         keep this rank's rows, so the generator advances exactly as it does on
         one device.
 
-        PipeFusion's patch mode steps one patch at a time and is left as is.
+        PipeFusion's patch mode steps one patch at a time; see _step_patch.
         """
-        if get_sequence_parallel_world_size() == 1 or get_runtime_state().patch_mode:
+        if get_runtime_state().patch_mode:
+            return self._step_patch(model_output, timestep, sample, generator, return_dict)
+        if get_sequence_parallel_world_size() == 1:
             return self.module.step(model_output, timestep, sample, generator, return_dict=return_dict)
 
         output = self.module.step(
@@ -81,3 +85,45 @@ class xFuserDDPMSchedulerWrapper(xFuserSchedulerBaseWrapper):
         if not return_dict:
             return (prev_sample, pred_original_sample)
         return DDPMSchedulerOutput(prev_sample=prev_sample, pred_original_sample=pred_original_sample)
+
+    def _step_patch(self, model_output, timestep, sample, generator, return_dict):
+        """DDPMScheduler.step on one PipeFusion patch.
+
+        Stepping a patch on its own would draw noise of the patch's shape, so the
+        patches would get unrelated draws instead of the slices of the one
+        full-size draw a single device makes, and with sequence parallelism every
+        rank would draw the same noise for its rows. Draw the whole latent's noise
+        once per step, at the first patch, and give each patch, on each rank, its
+        own rows of it.
+        """
+        state = get_runtime_state()
+        if timestep > 0 and state.pipeline_patch_idx == 0:
+            full_shape = (
+                sample.shape[0],
+                sample.shape[1],
+                state.input_config.height // state.vae_scale_factor,
+                state.input_config.width // state.vae_scale_factor,
+            )
+            object.__setattr__(
+                self,
+                "_step_noise",
+                randn_tensor(full_shape, generator=generator, device=model_output.device, dtype=model_output.dtype),
+            )
+        if timestep <= 0:
+            return self.module.step(model_output, timestep, sample, generator, return_dict=return_dict)
+
+        start, end = state.pp_patches_start_end_idx_global[state.pipeline_patch_idx]
+        noise = self._step_noise[..., start:end, :]
+
+        def patch_noise(shape, **kwargs):
+            if tuple(shape) != tuple(noise.shape):
+                raise RuntimeError(f"DDPM noise for a patch has shape {tuple(noise.shape)}, expected {tuple(shape)}")
+            return noise
+
+        # DDPMScheduler.step draws its noise through this module-level name.
+        draw = diffusers_ddpm.randn_tensor
+        diffusers_ddpm.randn_tensor = patch_noise
+        try:
+            return self.module.step(model_output, timestep, sample, generator, return_dict=return_dict)
+        finally:
+            diffusers_ddpm.randn_tensor = draw

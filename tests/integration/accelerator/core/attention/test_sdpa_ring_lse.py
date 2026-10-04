@@ -29,24 +29,34 @@ def _qkv(seq_len, dtype, device, seed=0):
     return [torch.randn(1, 2, seq_len, 64, generator=generator).to(device=device, dtype=dtype) for _ in range(3)]
 
 
+def _kernel_available(backend, query, key, value):
+    can_use = getattr(torch.backends.cuda, f"can_use_{backend}_attention", None)
+    if can_use is None:
+        return False
+    try:
+        params = torch.backends.cuda.SDPAParams(query, key, value, None, 0.0, False, False)
+    except TypeError:  # PyTorch before 2.5 has no enable_gqa argument
+        params = torch.backends.cuda.SDPAParams(query, key, value, None, 0.0, False)
+    return can_use(params)
+
+
 @pytest.mark.parametrize("seq_len", [15, 32, 33])
 @pytest.mark.parametrize(
-    "kernel_fn, dtype",
+    "kernel_fn, backend, dtype",
     [
-        pytest.param(kernel.sdpa_efficient, torch.float32, id="efficient-fp32"),
-        pytest.param(kernel.sdpa_efficient, torch.bfloat16, id="efficient-bf16"),
-        pytest.param(kernel.sdpa_flash, torch.bfloat16, id="flash-bf16"),
-        pytest.param(kernel.cudnn, torch.bfloat16, id="cudnn-bf16"),
+        pytest.param(kernel.sdpa_efficient, "efficient", torch.float32, id="efficient-fp32"),
+        pytest.param(kernel.sdpa_efficient, "efficient", torch.bfloat16, id="efficient-bf16"),
+        pytest.param(kernel.sdpa_flash, "flash", torch.bfloat16, id="flash-bf16"),
+        pytest.param(kernel.cudnn, "cudnn", torch.bfloat16, id="cudnn-bf16"),
     ],
 )
-def test_ring_capable_sdpa_kernels_return_one_lse_per_query(kernel_fn, dtype, seq_len):
+def test_ring_capable_sdpa_kernels_return_one_lse_per_query(kernel_fn, backend, dtype, seq_len):
     if not torch.cuda.is_available():
         pytest.skip("requires an accelerator")
     query, key, value = _qkv(seq_len, dtype, "cuda")
-    try:
-        _, lse = kernel_fn(query, key, value, AttnCall())
-    except RuntimeError as error:
-        pytest.skip(f"{kernel_fn.__name__} is unavailable here: {error}")
+    if not _kernel_available(backend, query, key, value):
+        pytest.skip(f"PyTorch's {backend} attention kernel is unavailable here")
+    _, lse = kernel_fn(query, key, value, AttnCall())
 
     scores = query.float() @ key.float().transpose(-1, -2) * query.shape[-1] ** -0.5
     expected = torch.logsumexp(scores, dim=-1)

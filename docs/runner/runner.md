@@ -117,6 +117,7 @@ Individual model classes that inherit from `xFuserModel`:
 | Wan 2.1 VACE | `Wan2.1-VACE-14B`, `Wan2.1-VACE-1.3B`, `Wan-AI/Wan2.1-VACE-14B-diffusers`, `Wan-AI/Wan2.1-VACE-1.3B-diffusers` |
 | Wan 2.1/2.2 I2V | `Wan2.1-I2V`, `Wan2.2-I2V`, `Wan-AI/Wan2.1-I2V-14B-720P-Diffusers`, `Wan-AI/Wan2.2-I2V-A14B-Diffusers` |
 | Wan 2.1/2.2 T2V | `Wan2.1-T2V`, `Wan2.2-T2V`, `Wan-AI/Wan2.1-T2V-14B-Diffusers`, `Wan-AI/Wan2.2-T2V-A14B-Diffusers` |
+| Wan 2.1 T2V 1.3B | `Wan2.1-T2V-1.3B`, `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` |
 | Wan 2.2 Distilled I2V (LightX2V 4-step) | `Wan2.2-Distilled-I2V` |
 | Wan 2.2 TI2V | `Wan2.2-TI2V`, `Wan-AI/Wan2.2-TI2V-5B-Diffusers` |
 | Z-Image | `Z-Image`, `Tongyi-MAI/Z-Image` |

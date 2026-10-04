@@ -115,6 +115,7 @@ The following open-sourced DiT Models are released with xDiT in day 1.
 | [🎬 CogVideoX](https://huggingface.co/THUDM/CogVideoX-2b) | ✔️ | ✔️ | ❎ | ❎ | ❎ | [Report](./docs/performance/cogvideo.md) |
 | [🎬 Latte](https://huggingface.co/maxin-cn/Latte-1) | ❎ | ✔️ | ❎ | ❎ | ❎ | [Report](./docs/performance/latte.md) |
 | [🎬 Wan2.1](https://huggingface.co/Wan-AI/Wan2.1-T2V-14B-Diffusers) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
+| [🎬 Wan2.1-T2V-1.3B](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🎬 Wan2.2](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B-Diffusers) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🎬 Wan2.2-Distilled (LightX2V 4-step)](https://huggingface.co/lightx2v/Wan2.2-Distill-Models) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🎬 CausalWan2.2](https://huggingface.co/FastVideo/CausalWan2.2-I2V-A14B-Preview-Diffusers) | ❎ | ❎ | ❎ | ❎ | ✔️ | NA |

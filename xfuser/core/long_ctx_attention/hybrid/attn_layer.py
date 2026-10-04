@@ -15,10 +15,16 @@ if torch.cuda.is_available() or envs._is_npu():
 
     from yunchang.comm.all_to_all import SeqAllToAll4D
     from yunchang.globals import HAS_SPARSE_SAGE_ATTENTION
+    from yunchang import globals as yunchang_globals
+
+    HAS_FLASH_ATTN = getattr(yunchang_globals, "HAS_FLASH_ATTN", False)
+    HAS_FLASH_ATTN_HOPPER = getattr(yunchang_globals, "HAS_FLASH_ATTN_HOPPER", False)
 else:
     LongContextAttention = object
     AttnType = None
     HAS_SPARSE_SAGE_ATTENTION = False
+    HAS_FLASH_ATTN = False
+    HAS_FLASH_ATTN_HOPPER = False
 
 
 from xfuser.logger import init_logger
@@ -28,6 +34,37 @@ from xfuser.core.distributed import (
 )
 
 logger = init_logger(__name__)
+
+
+def _resolve_attn_type(attn_type):
+    """The attention kernel to run, checking up front that it is installed.
+
+    With no attn_type, use FlashAttention when flash-attn is installed and
+    PyTorch's flash SDPA kernel otherwise; both return the log-sum-exp that ring
+    attention merges its steps with. An explicitly requested FlashAttention
+    kernel that is not installed fails here, rather than on the first forward.
+    """
+    if attn_type is None:
+        if HAS_FLASH_ATTN:
+            return AttnType.FA
+        logger.warning(
+            "flash-attn is not installed; xFuserLongContextAttention falls back to "
+            "PyTorch's flash SDPA kernel (attn_type=AttnType.TORCH_FLASH)."
+        )
+        return AttnType.TORCH_FLASH
+    if attn_type == AttnType.FA and not HAS_FLASH_ATTN:
+        raise ImportError(
+            "xFuserLongContextAttention was asked for attn_type=AttnType.FA, but flash-attn "
+            "is not installed. Install flash-attn, or leave attn_type unset to use PyTorch's "
+            "flash SDPA kernel."
+        )
+    if attn_type == AttnType.FA3 and not HAS_FLASH_ATTN_HOPPER:
+        raise ImportError(
+            "xFuserLongContextAttention was asked for attn_type=AttnType.FA3, but "
+            "FlashAttention-3 (flash_attn_interface) is not installed. Install it, or leave "
+            "attn_type unset to use an available kernel."
+        )
+    return attn_type
 
 
 class xFuserLongContextAttention(LongContextAttention):
@@ -54,14 +91,13 @@ class xFuserLongContextAttention(LongContextAttention):
             ring_impl_type: str = "basic", the ring implementation type, currently only support "basic"
             use_pack_qkv: bool = False, whether to use pack qkv in the input
             use_kv_cache: bool = False, whether to use kv cache in the attention layer, which is applied in PipeFusion.
-            attn_type: AttnType = AttnType.FA, the attention type supported inside long context attention, including "TORCH", "FA", "FA3", "SAGE_FP16", "SAGE_FP8"
+            attn_type: AttnType = None, the attention type supported inside long context attention, including "FA", "FA3", "TORCH_FLASH", "SAGE_FP16", "SAGE_FP8". None picks FA when flash-attn is installed and TORCH_FLASH otherwise.
             attn_processor: nn.Module = None, the attention processor can be passed in to replace the attention processor if attn_type is do not support it.
         """
 
-        # A workaround to allow running xDiT without having yunchang installed
-        # while still supporting AttnType.FA as the default value for legacy reasons
-        if attn_type is None:
-            attn_type = AttnType.FA
+        # attn_type defaults to None rather than AttnType.FA so that xDiT runs
+        # without yunchang installed; resolve it to a kernel that is installed.
+        attn_type = _resolve_attn_type(attn_type)
 
         super().__init__(
             scatter_idx=scatter_idx,

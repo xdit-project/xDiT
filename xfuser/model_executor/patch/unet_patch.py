@@ -44,7 +44,6 @@ def unet_cfg_parallel_monkey_patch_forward(
         pipeline is not None
         and getattr(pipeline, "_guidance_scale", None) is not None
         and pipeline.do_classifier_free_guidance
-        and batch_size % 2 == 0
     )
     if not split:
         return original_forward(self, sample, timestep, encoder_hidden_states, *args, return_dict=return_dict, **kwargs)
@@ -69,7 +68,6 @@ def unet_cfg_parallel_monkey_patch_forward(
 
 def apply_unet_cfg_parallel_monkey_patch(pipe):
     """Split the UNet batch across the two ranks of the CFG parallel group."""
-    if get_cfg_group().world_size == 2:
-        pipe.unet._xfuser_cfg_pipeline = weakref.ref(pipe)
-        pipe.unet.forward = types.MethodType(unet_cfg_parallel_monkey_patch_forward, pipe.unet)
+    pipe.unet._xfuser_cfg_pipeline = weakref.ref(pipe)
+    pipe.unet.forward = types.MethodType(unet_cfg_parallel_monkey_patch_forward, pipe.unet)
     return pipe

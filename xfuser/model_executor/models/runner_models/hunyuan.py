@@ -157,17 +157,16 @@ class xFuserHunyuanvideoModel(xFuserModel):
         # that don't produce the bad pattern (non-sage backends, symmetric SP).
         install_inductor_passes()
         if self.config.cache_method:
-            # The step cache patches transformer.forward after compilation, so the
-            # transformer must stay uncompiled: compile its blocks instead.
+            # The step cache patches transformer.forward, so compile its blocks instead.
             super()._compile_model(input_args)
             return
         super()._enable_compute_comm_overlap()
         self.pipe.transformer.compile()
 
         compile_args = copy.deepcopy(input_args)
-        # If a per-step attention schedule is active, do a full warmup to trigger all backend paths.
-        if not get_runtime_state().has_attention_schedule():
-            compile_args["num_inference_steps"] = 2  # Reduce steps for warmup
+        warmup_steps = self._get_compile_warmup_steps(input_args)
+        if warmup_steps is not None:
+            compile_args["num_inference_steps"] = warmup_steps
         self._run_timed_pipe(compile_args)
 
 
@@ -209,8 +208,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         fps=24,
         fp8_gemm_module_list=["transformer.transformer_blocks"],
         mod_value=16,
-        # Read by _compile_model as the blocks to compile one by one when a step
-        # cache is enabled. Nothing shards this model.
+        # Blocks that _compile_model compiles one by one under a step cache.
         fsdp_strategy={"transformer": {"wrap_attrs": ["transformer_blocks"]}},
         valid_tasks=["i2v", "t2v"],
         step_cache_config={
@@ -293,18 +291,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         # that don't produce the bad pattern (e.g., symmetric SP, non-sage
         # backends, models without the post-A2A joint cat).
         install_inductor_passes()
-        if self.config.cache_method:
-            # The step cache patches transformer.forward after compilation, so the
-            # transformer must stay uncompiled: compile its blocks instead.
-            super()._compile_model(input_args)
-            return
-        super()._enable_compute_comm_overlap()
-        self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
-
-        # two steps to warmup the torch compiler
-        compile_args = copy.deepcopy(input_args)
-        compile_args["num_inference_steps"] = 2
-        self._run_timed_pipe(compile_args)
+        super()._compile_model(input_args)
 
 
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled")

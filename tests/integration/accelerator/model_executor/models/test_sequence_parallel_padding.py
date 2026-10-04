@@ -417,6 +417,8 @@ _PARITY_CASES = [
     pytest.param("qwen_image", 3, ((5, 5), 7), id="qwen_image-padded-image-replicated-text"),
     # A batch of two prompts of different lengths, padded and masked.
     pytest.param("qwen_image", 2, ((4, 6), (8, 5)), id="qwen_image-batched"),
+    # Prompts of equal length: the mask is all True and masks nothing.
+    pytest.param("qwen_image", 2, ((4, 6), (8, 8)), id="qwen_image-batched-equal-lengths"),
     pytest.param("qwen_image", 2, ((5, 5), (8, 5)), id="qwen_image-batched-padded-image"),
     pytest.param("qwen_image", 2, ((4, 6), (7, 3)), id="qwen_image-batched-replicated-text"),
     pytest.param("qwen_image", 3, ((5, 5), (9, 4)), id="qwen_image-batched-padded-image-u3"),
@@ -509,8 +511,9 @@ def _ring_key_padding_mask_worker(rank, world_size, init_method):
         assert [x.shape for x in first] == [x.shape for x in inputs["x"]]
         assert all(torch.isfinite(x).all() for x in first)
         torch.testing.assert_close(first, second)
+        # Logged once, and only by rank 0.
         warnings = [m for m in records.messages if "Ring attention cannot apply the padding mask" in m]
-        assert len(warnings) == 1, records.messages
+        assert len(warnings) == (1 if rank == 0 else 0), records.messages
     finally:
         destroy_model_parallel()
         destroy_distributed_environment()

@@ -431,21 +431,13 @@ class SequenceParallelPadding:
         return sp_padding_attention_kwargs(local_kv_len, self.tokens, attention_kwargs)
 
 
-_warned_ring_key_padding_mask = False
-
-
-def _warn_ring_key_padding_mask_once():
-    global _warned_ring_key_padding_mask
-    if _warned_ring_key_padding_mask:
-        return
-    _warned_ring_key_padding_mask = True
-    logger.warning(
-        "The batch holds sequences of different lengths, so the shorter ones were "
-        "padded. Ring attention cannot apply the padding mask, so the padded tokens "
-        "act as attention keys and results are approximate. For results that match "
-        "a single device, run prompts of different lengths in separate batches, or "
-        "use Ulysses parallelism only."
-    )
+_RING_KEY_PADDING_MASK_WARNING = (
+    "The batch holds sequences of different lengths, so the shorter ones were "
+    "padded. Ring attention cannot apply the padding mask, so the padded tokens "
+    "act as attention keys and results are approximate. For results that match "
+    "a single device, run prompts of different lengths in separate batches, or "
+    "use Ulysses parallelism only."
+)
 
 
 def key_padding_mask_attention_kwargs(key_padding_mask, attention_kwargs=None):
@@ -466,7 +458,7 @@ def key_padding_mask_attention_kwargs(key_padding_mask, attention_kwargs=None):
     if key_padding_mask is None:
         return attention_kwargs, None
     if get_ring_parallel_world_size() > 1:
-        _warn_ring_key_padding_mask_once()
+        warn_once(logger, _RING_KEY_PADDING_MASK_WARNING)
         return attention_kwargs, None
     attn_mask = key_padding_mask.to(torch.bool)[:, None, None, :]
     return {**(attention_kwargs or {}), "attn_mask": attn_mask}, AttentionBackendType.SDPA

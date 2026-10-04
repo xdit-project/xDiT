@@ -206,10 +206,8 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
         max_seqlen = max(item_seqlens)
         if all(seq_len == max_seqlen for seq_len in item_seqlens):
             return None
-        mask = torch.zeros((len(item_seqlens), max_seqlen), dtype=torch.bool, device=device)
-        for i, seq_len in enumerate(item_seqlens):
-            mask[i, :seq_len] = 1
-        return mask
+        seqlens = torch.tensor(item_seqlens, device=device)
+        return torch.arange(max_seqlen, device=device) < seqlens[:, None]
 
     def _gather_and_unpad(self, x: torch.Tensor, pad_amount: int, dim: int) -> torch.Tensor:
         x = get_sp_group().all_gather(x, dim=dim)

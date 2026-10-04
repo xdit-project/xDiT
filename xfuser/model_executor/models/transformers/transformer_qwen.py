@@ -295,7 +295,10 @@ class xFuserQwenImageTransformerWrapper(QwenImageTransformer2DModel):
             block_attention_kwargs["sp_padding"] = pad_amount
         if replicated_text:
             block_attention_kwargs["sp_replicated_text"] = True
-        if encoder_hidden_states_mask is not None:
+        # An all-True mask (prompts of equal length, or a mask passed by the
+        # caller or an older diffusers pipeline) masks nothing; skipping it keeps
+        # the optimized backends, since any mask routes the call to SDPA.
+        if encoder_hidden_states_mask is not None and not encoder_hidden_states_mask.all():
             # Mask the padded prompt tokens of a batch with prompts of different
             # lengths, over the keys in the order the attention sees them: the
             # replicated text first, or each rank's [text, image] keys in rank

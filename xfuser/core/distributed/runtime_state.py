@@ -37,9 +37,16 @@ from xfuser.logger import init_logger, warn_once
 from .parallel_state import (
     destroy_distributed_environment,
     destroy_model_parallel,
+    get_classifier_free_guidance_world_size,
+    get_data_parallel_world_size,
+    get_dit_world_size,
+    get_fully_shard_world_size,
+    get_pipeline_parallel_world_size,
     get_pp_group,
+    get_ring_parallel_world_size,
     get_sequence_parallel_rank,
     get_sequence_parallel_world_size,
+    get_tensor_model_parallel_world_size,
     init_distributed_environment,
     initialize_model_parallel,
     model_parallel_is_initialized,
@@ -210,9 +217,9 @@ class RuntimeState(metaclass=ABCMeta):
         Select the best attention backend for the current environment.
         """
         if engine_config and engine_config.runtime_config.attention_backend:
-            backend = AttentionBackendType[engine_config.runtime_config.attention_backend.upper()]
+            return AttentionBackendType[engine_config.runtime_config.attention_backend.upper()]
 
-        elif envs._is_hip():
+        if envs._is_hip():
             if env_info["has_aiter"] and PACKAGES_CHECKER._on_rdna4():
                 backend = AttentionBackendType.AITER_FLYDSL
             elif env_info["has_aiter"]:
@@ -235,6 +242,11 @@ class RuntimeState(metaclass=ABCMeta):
         else:
             backend = AttentionBackendType.SDPA
 
+        # The choice above reads what torch was built with. A build without a
+        # visible device (a CUDA wheel on a CPU-only host) cannot run the
+        # device kernels, so fall back to SDPA rather than refuse to start.
+        if attention_registry.find(backend).unavailable() is not None:
+            backend = AttentionBackendType.SDPA
         return backend
 
     def _check_if_backend_compatible_with_current_configuration(self, attention_backend: AttentionBackendType):
@@ -909,11 +921,42 @@ class ExternalRuntimeState(RuntimeState):
 
     def __init__(self, config: Optional[EngineConfig] = None):
         if config is None:
-            config, _ = xFuserArgs().create_config()
+            config = _default_engine_config()
         super().__init__(config)
 
     def _check_distributed_env(self, parallel_config):
         pass
+
+
+def _default_engine_config() -> EngineConfig:
+    """An engine config whose parallel degrees describe the processes in place.
+
+    The default xFuserArgs describe a single process. On more ranks, take the
+    degrees of the model-parallel groups when they are initialized; otherwise
+    every rank runs the whole model, as one data-parallel replica.
+    """
+    args = xFuserArgs()
+    if model_parallel_is_initialized():
+        args.data_parallel_degree = get_data_parallel_world_size()
+        args.use_cfg_parallel = get_classifier_free_guidance_world_size() > 1
+        # The sequence-parallel group splits into Ulysses and ring subgroups
+        # only where yunchang can build them; its size is the product either way.
+        args.ring_degree = get_ring_parallel_world_size()
+        args.ulysses_degree = get_sequence_parallel_world_size() // args.ring_degree
+        args.pipefusion_parallel_degree = get_pipeline_parallel_world_size()
+        args.tensor_parallel_degree = get_tensor_model_parallel_world_size()
+        args.fully_shard_degree = get_fully_shard_world_size()
+        dit_world_size = get_dit_world_size()
+        vae_ranks = torch.distributed.get_world_size() - dit_world_size
+        if vae_ranks:
+            # Dedicated VAE ranks beyond the DiT ranks.
+            args.dit_parallel_size = dit_world_size
+            args.vae_parallel_size = vae_ranks
+            args.use_parallel_vae = True
+    elif torch.distributed.is_initialized():
+        args.data_parallel_degree = torch.distributed.get_world_size()
+    config, _ = args.create_config()
+    return config
 
 
 # _RUNTIME: Optional[RuntimeState] = None

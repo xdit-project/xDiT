@@ -669,6 +669,52 @@ class xFuserWan21T2VModel(xFuserWanModel):
         return None
 
 
+@register_model("Wan-AI/Wan2.1-T2V-1.3B-Diffusers")
+@register_model("Wan2.1-T2V-1.3B")
+class xFuserWan21T2V1_3BModel(xFuserWan21T2VModel):
+    """Wan2.1 text-to-video, 1.3B checkpoint.
+
+    Same diffusers WanTransformer3DModel as the 14B checkpoint, but with 12
+    attention heads and 30 blocks, trained for 480P.
+    """
+
+    attention_heads = 12
+
+    # Model card settings: 480x832, 81 frames, guidance 5.0, and the checkpoint
+    # scheduler's flow_shift of 3.0, which the Wan authors recommend for 480P.
+    default_input_values = replace(
+        xFuserWan21T2VModel.default_input_values,
+        height=480,
+        width=832,
+        num_inference_steps=50,
+        guidance_scale=5.0,
+        flow_shift=3.0,
+    )
+
+    def _customize_settings(self, config: xFuserArgs) -> None:
+        super()._customize_settings(config)
+        self.settings.model_name = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
+        self.settings.output_name = "wan2.1_t2v_1.3b"
+        # The 14B list keeps its first and last ten blocks in FP8 under --use_fp4_gemms
+        # and names blocks 30-39, which do not exist here. Apply the same rule to the
+        # 30 blocks of this checkpoint.
+        self.settings.fp8_precision_overrides = tuple(
+            f"{i}." for i in (*range(10), *range(20, 30))
+        )
+
+    def _validate_config(self, config: xFuserArgs) -> None:
+        super()._validate_config(config)
+        heads = self.attention_heads
+        ulysses_degree = config.ulysses_degree or 1
+        if heads % ulysses_degree != 0:
+            divisors = ", ".join(str(d) for d in range(1, heads + 1) if heads % d == 0)
+            raise ValueError(
+                f"Wan2.1-T2V-1.3B has {heads} attention heads, so --ulysses_degree must "
+                f"divide {heads} ({divisors}); got {ulysses_degree}. Use --ring_degree "
+                f"to scale sequence parallelism further."
+            )
+
+
 @register_model("Wan-AI/Wan2.2-T2V-A14B-Diffusers")
 @register_model("Wan2.2-T2V")
 class xFuserWan22T2VModel(xFuserWan21T2VModel):

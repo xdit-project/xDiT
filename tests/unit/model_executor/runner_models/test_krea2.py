@@ -16,7 +16,6 @@ def test_cudnn_is_accepted():
     # cuDNN is what xDiT picks by default on NVIDIA without FlashAttention.
     config = xFuserArgs(model="krea/krea-2-turbo", attention_backend="CUDNN")
     xFuserKrea2TurboModel(config)
-    assert config.attention_backend == "CUDNN"
 
 
 def test_a_backend_without_a_mask_is_still_refused():

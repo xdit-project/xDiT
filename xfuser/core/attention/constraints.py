@@ -173,6 +173,14 @@ class _SameQKV(CallConstraint):
         )
 
 
+@dataclass(frozen=True)
+class _HalfPrecision(CallConstraint):
+    def unmet(self, query, key, value, call) -> Optional[str]:
+        if query.dtype in (torch.float16, torch.bfloat16):
+            return None
+        return f"supports float16 and bfloat16 only, got {query.dtype}"
+
+
 NON_CAUSAL = _NonCausal()
 MHA_ONLY = _MhaOnly()
 SELF_ATTENTION = _SelfAttention()
@@ -182,3 +190,4 @@ PACKED_KEYS = _PackedKeys()
 NO_DROPOUT = _NoDropout()
 BF16 = _BFloat16()
 SAME_QKV = _SameQKV()
+HALF_PRECISION = _HalfPrecision()

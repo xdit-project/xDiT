@@ -1,7 +1,7 @@
 """PyTorch's own attention: the generic dispatcher, its three aten backends,
 and cuDNN. Always present, no vendor library, no layout conversion."""
 
-from xfuser.core.attention.constraints import MASKED_VARLEN, NO_VARLEN
+from xfuser.core.attention.constraints import HALF_PRECISION, MASKED_VARLEN, NO_VARLEN
 from xfuser.core.attention.requirements import ALWAYS, NEVER, PLATFORM
 from xfuser.core.attention.spec import AttentionBackendType, Impl, Spec
 
@@ -32,7 +32,11 @@ SPECS = [
         AttentionBackendType.CUDNN,
         impl=Impl("kernel:cudnn"),
         ring=ALWAYS,
-        accepts=MASKED_VARLEN,
+        # The aten cuDNN kernel returns NaN rather than raising for float32
+        # inputs, which PyTorch's own dispatcher never sends it. Hand those to
+        # the memory-efficient kernel, which also returns the LSE ring needs.
+        accepts=MASKED_VARLEN & HALF_PRECISION,
+        fallback=AttentionBackendType.SDPA_EFFICIENT,
         requires=PLATFORM("cuda"),
     ),
 ]

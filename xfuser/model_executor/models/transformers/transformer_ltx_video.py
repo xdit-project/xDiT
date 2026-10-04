@@ -33,11 +33,11 @@ from xfuser.core.distributed import (
     get_ring_parallel_world_size,
     get_sequence_parallel_rank,
     get_sequence_parallel_world_size,
-    get_sp_group,
     get_ulysses_parallel_world_size,
     model_parallel_is_initialized,
 )
 from xfuser.model_executor.layers.usp import USP, attention
+from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanTransformer3DWrapper
 
 __all__ = ["xFuserLTXVideoAttnProcessor", "xFuserLTXVideoTransformer3DWrapper"]
 
@@ -180,6 +180,10 @@ class xFuserLTXVideoTransformer3DWrapper(LTXVideoTransformer3DModel):
     installs the xDiT attention processors.
     """
 
+    # Same sequence-parallel split as Wan.
+    _chunk_and_pad_sequence = xFuserWanTransformer3DWrapper._chunk_and_pad_sequence
+    _gather_and_unpad = xFuserWanTransformer3DWrapper._gather_and_unpad
+
     def install_xdit_attention_processors(self):
         self._xdit_self_attn_processor = xFuserLTXVideoAttnProcessor(sequence_parallel=True)
         self._xdit_cross_attn_processor = xFuserLTXVideoAttnProcessor(sequence_parallel=False)
@@ -194,21 +198,6 @@ class xFuserLTXVideoTransformer3DWrapper(LTXVideoTransformer3DModel):
         model = result[0] if return_unused_kwargs else result
         model.install_xdit_attention_processors()
         return result
-
-    @staticmethod
-    def _chunk_and_pad_sequence(
-        x: torch.Tensor, sp_rank: int, sp_world_size: int, pad_amount: int, dim: int
-    ) -> torch.Tensor:
-        if pad_amount > 0:
-            pad_shape = list(x.shape)
-            pad_shape[dim] = pad_amount
-            x = torch.cat([x, x.new_zeros(pad_shape)], dim=dim)
-        return torch.chunk(x, sp_world_size, dim=dim)[sp_rank]
-
-    @staticmethod
-    def _gather_and_unpad(x: torch.Tensor, pad_amount: int, dim: int) -> torch.Tensor:
-        x = get_sp_group().all_gather(x.contiguous(), dim=dim)
-        return x.narrow(dim, 0, x.size(dim) - pad_amount)
 
     def forward(
         self,

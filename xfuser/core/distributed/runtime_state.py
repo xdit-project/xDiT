@@ -510,6 +510,8 @@ class DiTRuntimeState(RuntimeState):
             or (batch_size and self.input_config.batch_size != batch_size)
         ):
             self._input_size_change(height, width, batch_size)
+        else:
+            self._reset_recv_buffer()
 
         self.ready = True
 
@@ -538,6 +540,8 @@ class DiTRuntimeState(RuntimeState):
             or (batch_size and self.input_config.batch_size != batch_size)
         ):
             self._video_input_size_change(height, width, num_frames, batch_size)
+        else:
+            self._reset_recv_buffer()
 
         self.ready = True
 
@@ -878,6 +882,10 @@ class DiTRuntimeState(RuntimeState):
         self.pp_patches_token_num = pp_patches_token_num
 
     def _reset_recv_buffer(self):
+        # Pipeline stages exchange tensor shapes only the first time each
+        # (name, segment) is sent after a reset. Every request resets, so a
+        # request whose shapes differ from the previous one (for example a
+        # different text sequence length) handshakes again on every stage.
         get_pp_group().reset_buffer()
         get_pp_group().set_config(dtype=self.runtime_config.dtype)
 

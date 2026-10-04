@@ -155,6 +155,18 @@ class xFuserFluxAttnProcessor(FluxAttnProcessor):
         sp_text_tokens: Optional[int] = None,
         sp_padding: int = 0,
     ) -> torch.Tensor:
+        """Joint text-image attention under xDiT's parallelism.
+
+        `sp_text_tokens` is the number of text tokens this rank holds, used to
+        split off the replicated prompt when it is not sharded across sequence
+        parallel ranks. `sp_padding` is the number of zero image tokens that
+        xFuserFlux1Transformer2DWrapper appended so the image sequence divides
+        the sequence parallel degree; they are excluded from the keys.
+        """
+        if sp_padding and get_runtime_state().num_pipeline_patch > 1:
+            raise NotImplementedError(
+                "FLUX.1 PipeFusion does not support image tokens padded for sequence parallelism."
+            )
         query, key, value, encoder_query, encoder_key, encoder_value = _get_qkv_projections(
             attn, hidden_states, encoder_hidden_states
         )

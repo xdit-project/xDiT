@@ -103,7 +103,6 @@ def main():
                                     warmup_step,
                                 )
                             )
-                            # if num_pipeline_patches != last_num_patch:
                             if cfg_degree == 2:
                                 print(
                                     f"Running test for size {size}, split batch, warmup_step {warmup_step}, pp_degree {pp_degree}, ulysses_degree {ulysses_degree}, ring_degree {ring_degree}, num_pipeline_patches {num_pipeline_patches}",

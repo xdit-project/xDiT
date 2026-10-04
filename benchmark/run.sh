@@ -1,3 +1,4 @@
+#!/bin/bash
 set -x
 
 # This sweep drives the scripts in examples/. FLUX.1-dev and Stable Diffusion 3

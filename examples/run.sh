@@ -1,3 +1,6 @@
+#!/bin/bash
+# The *_ARGS variables each hold several flags and are word-split on purpose.
+# shellcheck disable=SC2086
 set -x
 
 export PYTHONPATH=$PWD:$PYTHONPATH

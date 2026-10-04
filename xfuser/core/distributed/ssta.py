@@ -33,6 +33,8 @@ class SSTAState:
     h: int
     w: int
     d: int
+    # Sequence-parallel padding of the text, dropped before tiling.
+    text_sp_pad_len: int = 0
 
 
 @dataclass
@@ -539,6 +541,9 @@ def _untile_ssta_output(o, ssta_state):
             text_o = o[:, :, -ssta_state.text_target_size : -ssta_state.text_pad_size, :]
         else:
             text_o = o[:, :, -ssta_state.text_target_size :, :]
+        # Re-append the text's SP padding dropped in setup_ssta.
+        if ssta_state.text_sp_pad_len > 0:
+            text_o = torch.nn.functional.pad(text_o, (0, 0, 0, ssta_state.text_sp_pad_len))
     else:
         image_o = o
 
@@ -714,6 +719,17 @@ def setup_ssta(query, key, value, attn_kwargs):
         key = _deinterleave(key, sp_size, encoder_sequence_length)
         value = _deinterleave(value, sp_size, encoder_sequence_length)
 
+    # A prompt that does not split evenly across the ranks is zero-padded
+    # before it is sharded, and after de-interleaving that padding ends the
+    # text. Drop it, so the text is tiled as on a single device: SSTA fills
+    # the last text block with its own zero padding and masks whole blocks
+    # only, so padding left in would serve as keys for every query.
+    text_sp_pad_len = attn_kwargs.get("encoder_sp_padding", 0)
+    if text_sp_pad_len > 0:
+        query = query[:, :, :-text_sp_pad_len]
+        key = key[:, :, :-text_sp_pad_len]
+        value = value[:, :, :-text_sp_pad_len]
+
     q, k, v, mask_config, ssta_state = _setup_ssta(
         query,
         key,
@@ -722,7 +738,7 @@ def setup_ssta(query, key, value, attn_kwargs):
         topk=ssta_topk,
         tile_thw=tile_size,
         kernel_thw=win_size,
-        text_len=encoder_sequence_length * sp_size,
+        text_len=encoder_sequence_length * sp_size - text_sp_pad_len,
         threshold=ssta_threshold,
         similarity_weight=ssta_lambda,
         pad_type=attn_pad_type,
@@ -732,6 +748,7 @@ def setup_ssta(query, key, value, attn_kwargs):
         text_valid_lens=text_valid_lens,
         sparse_text_to_image=sparse_text_to_image,
     )
+    ssta_state.text_sp_pad_len = text_sp_pad_len
 
     return q, k, v, mask_config, ssta_state
 

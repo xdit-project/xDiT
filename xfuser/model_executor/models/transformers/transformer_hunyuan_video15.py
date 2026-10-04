@@ -368,6 +368,7 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
         # dense path replicates the text instead: the gathered image keys then
         # end with the padding, which USP drops, and the text joins as joint keys.
         image_padded_dense = hidden_states_pad_amount > 0 and self.attention_kwargs is None
+        enc_pad = 0
         if encoder_hidden_states.shape[1] % sp_world_size != 0 or image_padded_dense:
             if self.attention_kwargs is not None:
                 # Sparse models requires symmetric [image, text] layout in Q/K/V.
@@ -385,6 +386,10 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
         else:
             get_runtime_state().split_text_embed_in_sp = True
             encoder_hidden_states = torch.chunk(encoder_hidden_states, sp_world_size, dim=1)[sp_world_rank]
+        if self.attention_kwargs is not None:
+            # SSTA gathers the text after the image, so this padding ends the
+            # gathered text; SSTA drops it, as it does the image padding.
+            self.attention_kwargs["encoder_sp_padding"] = enc_pad
 
         # 4. Transformer blocks
         if torch.is_grad_enabled() and self.gradient_checkpointing:

@@ -1,22 +1,22 @@
-"""xFuser pipeline wrappers for FLUX.2 dev and klein, with PipeFusion support.
+"""xFuser pipeline wrapper for FLUX.2 dev, with PipeFusion support.
 
 Modeled on pipeline_flux.py. The denoising loop is replaced by the sync/async
 patch-level pipeline (_sync_pipeline / _async_pipeline) inherited from the
 Flux1 implementation, adapted to Flux2's transformer signature (guidance
 embedding instead of pooled projections, modulation parameters).
 
-Both variants live here because the PipeFusion logic is identical. Note that this couples
-their availability: Flux2KleinPipeline landed in diffusers 0.37 and Flux2Pipeline in 0.36,
-so binding both here means neither wrapper is exported on 0.36, and FLUX.2 dev falls back
-to its non-PipeFusion path there. Importing this module is what tells the package whether
-either is available; see xfuser.compat.optional_exporter.
+The klein wrapper shares this PipeFusion logic but lives in pipeline_flux2_klein.py:
+Flux2Pipeline landed in diffusers 0.36 and Flux2KleinPipeline in 0.37, and importing a
+module is what tells the package whether its wrappers are available (see
+xfuser.compat.optional_exporter). Binding both here would hide FLUX.2 dev PipeFusion on
+0.36, the release FLUX.2 dev declares as its floor.
 """
 
 from typing import Callable, Dict, List, Optional
 
 import numpy as np
 import torch
-from diffusers import Flux2KleinPipeline, Flux2Pipeline
+from diffusers import Flux2Pipeline
 from diffusers.pipelines.flux2.pipeline_flux2 import (
     Flux2PipelineOutput,
     retrieve_timesteps,
@@ -559,10 +559,3 @@ class xFuserFlux2PipelineBase(xFuserPipelineBaseWrapper):
 @xFuserPipelineWrapperRegister.register(Flux2Pipeline)
 class xFuserFlux2Pipeline(xFuserFlux2PipelineBase):
     _diffusers_cls = Flux2Pipeline
-
-
-@xFuserPipelineWrapperRegister.register(Flux2KleinPipeline)
-class xFuserFlux2KleinPipeline(xFuserFlux2PipelineBase):
-    """Klein differs only in the diffusers class it binds; the PipeFusion logic is shared."""
-
-    _diffusers_cls = Flux2KleinPipeline

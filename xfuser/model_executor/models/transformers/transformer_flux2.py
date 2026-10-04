@@ -3,6 +3,7 @@ from typing import Optional, Tuple
 from diffusers.models.transformers.transformer_flux2 import (
     Flux2Attention,
     Flux2AttnProcessor,
+    Flux2Modulation,
     Flux2Transformer2DModel,
     Flux2ParallelSelfAttention,
     Flux2ParallelSelfAttnProcessor,
@@ -68,6 +69,13 @@ from xfuser.model_executor.models.transformers.base_transformer import (
 
 env_info = PACKAGES_CHECKER.get_packages_info()
 HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
+
+# diffusers 0.37 moved the modulation split into the blocks: the modulation layers
+# return one tensor, which blocks take as temb_mod_img / temb_mod_txt / temb_mod. In
+# 0.36 the layers returned the split parameter sets and blocks took them as
+# temb_mod_params_img / temb_mod_params_txt / temb_mod_params. The PipeFusion wrapper
+# calls the blocks itself, so it has to follow whichever API is installed.
+_BLOCKS_SPLIT_MODULATION = hasattr(Flux2Modulation, "split")
 
 
 @xFuserAttentionProcessorRegister.register(Flux2AttnProcessor)
@@ -533,6 +541,19 @@ class xFuserFlux2Transformer2DModelWrapper(xFuserTransformerBaseWrapper):
         double_stream_mod_img = self.double_stream_modulation_img(temb)
         double_stream_mod_txt = self.double_stream_modulation_txt(temb)
         single_stream_mod = self.single_stream_modulation(temb)
+        if _BLOCKS_SPLIT_MODULATION:
+            double_mod_kwargs = {
+                "temb_mod_img": double_stream_mod_img,
+                "temb_mod_txt": double_stream_mod_txt,
+            }
+            single_mod_kwargs = {"temb_mod": single_stream_mod}
+        else:
+            double_mod_kwargs = {
+                "temb_mod_params_img": double_stream_mod_img,
+                "temb_mod_params_txt": double_stream_mod_txt,
+            }
+            # the single-stream layer has one parameter set
+            single_mod_kwargs = {"temb_mod_params": single_stream_mod[0]}
 
         # 2. input projection (first stage only); other stages receive already
         #    embedded streams from the previous stage via P2P.
@@ -563,8 +584,7 @@ class xFuserFlux2Transformer2DModelWrapper(xFuserTransformerBaseWrapper):
             encoder_hidden_states, hidden_states = block(
                 hidden_states=hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
-                temb_mod_img=double_stream_mod_img,
-                temb_mod_txt=double_stream_mod_txt,
+                **double_mod_kwargs,
                 image_rotary_emb=concat_rotary_emb,
                 joint_attention_kwargs=joint_attention_kwargs,
             )
@@ -579,7 +599,7 @@ class xFuserFlux2Transformer2DModelWrapper(xFuserTransformerBaseWrapper):
                 hidden_states = block(
                     hidden_states=hidden_states,
                     encoder_hidden_states=None,
-                    temb_mod=single_stream_mod,
+                    **single_mod_kwargs,
                     image_rotary_emb=concat_rotary_emb,
                     joint_attention_kwargs=single_kwargs,
                 )

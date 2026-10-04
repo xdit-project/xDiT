@@ -266,9 +266,8 @@ class xFuserFluxKontextModel(xFuserModel):
 @register_model("black-forest-labs/FLUX.2-dev")
 @register_model("FLUX.2-dev")
 class xFuserFlux2Model(xFuserModel):
-    # Flux2Pipeline and the transformer symbols the wrapper needs all landed in 0.36.
-    # PipeFusion additionally needs 0.37, because xfuser's FLUX.2 pipeline module also
-    # binds Flux2KleinPipeline.
+    # Flux2Pipeline and the transformer symbols the wrapper needs, including the
+    # PipeFusion pipeline, all landed in 0.36.
     min_diffusers_version = "0.36.0"
 
     load_support = LoadSupport(
@@ -479,7 +478,7 @@ class xFuserFlux2Klein9BModel(xFuserModel):
 
     def _load_model(self) -> DiffusionPipeline:
         if self.config.pipefusion_parallel_degree > 1:
-            from xfuser.model_executor.pipelines.pipeline_flux2 import (
+            from xfuser.model_executor.pipelines.pipeline_flux2_klein import (
                 xFuserFlux2KleinPipeline,
             )
 

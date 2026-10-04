@@ -221,6 +221,7 @@ class FloorAuditor:
         subclasses, so walking within the file is enough.
         """
         runners = self.repo_root / RUNNER_PACKAGE.replace(".", "/")
+        from_source = _from_source_marker(self.repo_root)
         out = []
         for path in sorted(runners.glob("*.py")):
             tree = ast.parse(path.read_text(errors="replace"))
@@ -237,7 +238,7 @@ class FloorAuditor:
                         shared.add((module, symbol))
 
             classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
-            own_floor = {n: _declared_floor_of(c) for n, c in classes.items()}
+            own_floor = {n: _declared_floor_of(c, from_source) for n, c in classes.items()}
             own_reqs = {n: self._class_requirements(c, guarded) for n, c in classes.items()}
 
             for name in classes:
@@ -258,12 +259,21 @@ class FloorAuditor:
         return out
 
 
-def _declared_floor_of(class_node):
+def _declared_floor_of(class_node, from_source):
+    """The class's own min_diffusers_version: a version string, the from-source marker, or None.
+
+    Runners spell the marker as the DIFFUSERS_FROM_SOURCE name rather than its value.
+    """
     for node in class_node.body:
-        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Constant):
+        if not isinstance(node, ast.Assign):
             continue
-        if any(isinstance(t, ast.Name) and t.id == "min_diffusers_version" for t in node.targets):
+        if not any(isinstance(t, ast.Name) and t.id == "min_diffusers_version" for t in node.targets):
+            continue
+        if isinstance(node.value, ast.Constant):
             return node.value.value
+        if isinstance(node.value, ast.Name) and node.value.id == "DIFFUSERS_FROM_SOURCE":
+            return from_source
+        raise AssertionError(f"{class_node.name}.min_diffusers_version is not a literal: {ast.dump(node.value)}")
     return None
 
 

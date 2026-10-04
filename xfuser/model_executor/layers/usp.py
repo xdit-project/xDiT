@@ -28,6 +28,7 @@ from xfuser.logger import init_logger, warn_once
 from xfuser.core.attention import registry as attention_registry
 from xfuser.core.attention.spec import VarlenPacking
 from xfuser.core.attention.spec import AttnCall
+from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.core.distributed.fp8_comms import (
     fp8_attention_kwargs,
     fp8_comms_input_all_to_all,
@@ -428,6 +429,47 @@ class SequenceParallelPadding:
 
     def attention_kwargs(self, local_kv_len, attention_kwargs=None):
         return sp_padding_attention_kwargs(local_kv_len, self.tokens, attention_kwargs)
+
+
+_warned_ring_key_padding_mask = False
+
+
+def _warn_ring_key_padding_mask_once():
+    global _warned_ring_key_padding_mask
+    if _warned_ring_key_padding_mask:
+        return
+    _warned_ring_key_padding_mask = True
+    logger.warning(
+        "The batch holds sequences of different lengths, so the shorter ones were "
+        "padded. Ring attention cannot apply the padding mask, so the padded tokens "
+        "act as attention keys and results are approximate. For results that match "
+        "a single device, run prompts of different lengths in separate batches, or "
+        "use Ulysses parallelism only."
+    )
+
+
+def key_padding_mask_attention_kwargs(key_padding_mask, attention_kwargs=None):
+    """Attention kwargs and backend that keep masked keys out of USP attention.
+
+    ``key_padding_mask`` is a ``[batch, keys]`` bool mask, True for keys to
+    attend to, over the keys the backend sees and in that order: every rank's
+    local keys in rank order after the Ulysses all-to-all, less the padding
+    that ``valid_kv_len`` trims, with joint keys where USP concatenates them.
+    Most optimized backends ignore arbitrary masks, so the call is routed to
+    SDPA.
+
+    Returns ``(attention_kwargs, None)`` unchanged without a mask. Ring
+    attention sees one shard of keys per step and cannot apply the mask, so
+    with ``ring_degree > 1`` the masked keys stay in and a one-time warning
+    says the result is approximate.
+    """
+    if key_padding_mask is None:
+        return attention_kwargs, None
+    if get_ring_parallel_world_size() > 1:
+        _warn_ring_key_padding_mask_once()
+        return attention_kwargs, None
+    attn_mask = key_padding_mask.to(torch.bool)[:, None, None, :]
+    return {**(attention_kwargs or {}), "attn_mask": attn_mask}, AttentionBackendType.SDPA
 
 
 def _get_attention_function(backend=None):

@@ -7,7 +7,6 @@ preserving the parameter count.
 
 import gc
 import queue
-import time
 import traceback
 
 import pytest
@@ -16,6 +15,7 @@ import torch.nn as nn
 import torch.distributed as dist
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
+from _spawn_startup import wait_until_started
 from xfuser.core.distributed.sharding import shard_component
 
 
@@ -110,9 +110,6 @@ def _guard(init_method, check, result_queue, ready_queue):
     result_queue.put(None)
 
 
-_STARTUP_TIMEOUT = 900
-
-
 def _run_isolated(check, tmp_path):
     if not torch.cuda.is_available():
         pytest.skip("requires an accelerator device")
@@ -127,15 +124,8 @@ def _run_isolated(check, tmp_path):
         args=(f"file://{tmp_path / 'nccl-init'}", check, result_queue, ready_queue),
     )
     process.start()
-    # Starting the interpreter and importing torch and xfuser can take minutes on a slow
-    # filesystem; the 60 s hang budget starts once the rank is running.
-    deadline = time.monotonic() + _STARTUP_TIMEOUT
-    while process.is_alive() and time.monotonic() < deadline:
-        try:
-            ready_queue.get(timeout=1)
-            break
-        except queue.Empty:
-            pass
+    # The 60 s hang budget starts once the rank has started and imported torch and xfuser.
+    wait_until_started([process], ready_queue)
     process.join(60)
     if process.is_alive():
         process.terminate()

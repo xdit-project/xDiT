@@ -4,7 +4,6 @@ Each rank is a spawned interpreter so CUDA and HIP can initialize. The parent
 surfaces the child traceback; a non-zero exit alone hides the failure.
 """
 
-import importlib
 import os
 import queue
 import time
@@ -12,11 +11,9 @@ import traceback
 
 import pytest
 
+from _spawn_startup import import_and_signal_ready, wait_until_started
 
-# A spawned rank first starts an interpreter and imports torch and xfuser, which can take minutes on a
-# slow filesystem. Each rank does that before the hang budget (``timeout``) starts, so the budget
-# covers only the test body.
-_STARTUP_TIMEOUT = 900
+# Imported by each rank before the hang budget (``timeout``) starts.
 _WORKER_IMPORTS = ("torch.distributed", "xfuser.core.distributed")
 
 
@@ -41,7 +38,7 @@ def spawn_accelerator_ranks(worker, tmp_path, *, world_size, timeout=180, init_f
     for process in processes:
         process.start()
 
-    _wait_until_started(processes, ready_queue)
+    wait_until_started(processes, ready_queue)
     deadline = time.monotonic() + timeout
     for process in processes:
         process.join(max(0.0, deadline - time.monotonic()))
@@ -76,30 +73,12 @@ def spawn_accelerator_ranks(worker, tmp_path, *, world_size, timeout=180, init_f
         pytest.fail("\n".join(details))
 
 
-def _wait_until_started(processes, ready_queue):
-    deadline = time.monotonic() + _STARTUP_TIMEOUT
-    started = 0
-    while started < len(processes) and time.monotonic() < deadline:
-        try:
-            ready_queue.get(timeout=1)
-            started += 1
-        except queue.Empty:
-            if not all(process.is_alive() for process in processes):
-                return
-
-
 def _guard(rank, world_size, init_method, worker, result_queue, ready_queue, args):
     os.environ["RANK"] = str(rank)
     os.environ["LOCAL_RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(world_size)
     os.environ["MASTER_ADDR"] = "127.0.0.1"
-    try:
-        for module in _WORKER_IMPORTS:
-            importlib.import_module(module)
-    except Exception:  # noqa: BLE001 - the worker repeats the import and reports the failure itself
-        pass
-    finally:
-        ready_queue.put(None)
+    import_and_signal_ready(ready_queue, _WORKER_IMPORTS)
     try:
         worker(rank, world_size, init_method, *args)
     except Exception:

@@ -29,6 +29,8 @@ from xfuser.core.distributed import (
     get_classifier_free_guidance_rank,
     get_sequence_parallel_world_size,
     get_sequence_parallel_rank,
+    get_ring_parallel_world_size,
+    get_ulysses_parallel_world_size,
     get_cfg_group,
     get_sp_group,
 )
@@ -120,6 +122,17 @@ def _split_rotary_emb(image_rotary_emb, num_text_tokens: int, num_image_tokens: 
     return txt, img
 
 
+def _sp_padding_attention_kwargs(local_kv_len: int, sp_padding: int):
+    """Exclude the image tokens padded for sequence parallelism from the keys.
+
+    The padding sits at the end of the last rank's shard, so after the Ulysses
+    all-to-all it is a uniform suffix of the gathered keys.
+    """
+    if not sp_padding:
+        return None
+    return {"valid_kv_len": get_ulysses_parallel_world_size() * local_kv_len - sp_padding}
+
+
 @xFuserAttentionProcessorRegister.register(FluxAttnProcessor)
 class xFuserFluxAttnProcessor(FluxAttnProcessor):
     def __init__(self):
@@ -139,6 +152,8 @@ class xFuserFluxAttnProcessor(FluxAttnProcessor):
         encoder_hidden_states: torch.Tensor = None,
         attention_mask: Optional[torch.Tensor] = None,
         image_rotary_emb: Optional[torch.Tensor] = None,
+        sp_text_tokens: Optional[int] = None,
+        sp_padding: int = 0,
     ) -> torch.Tensor:
         query, key, value, encoder_query, encoder_key, encoder_value = _get_qkv_projections(
             attn, hidden_states, encoder_hidden_states
@@ -229,7 +244,35 @@ class xFuserFluxAttnProcessor(FluxAttnProcessor):
 
         uses_pipeline_parallelism = get_runtime_state().num_pipeline_patch > 1
         if not uses_pipeline_parallelism:
-            hidden_states = USP(query, key, value, combine_qkv_a2a=True, attn_layer=attn)
+            if get_runtime_state().split_text_embed_in_sp:
+                hidden_states = USP(
+                    query,
+                    key,
+                    value,
+                    combine_qkv_a2a=True,
+                    attn_layer=attn,
+                    attention_kwargs=_sp_padding_attention_kwargs(key.shape[2], sp_padding),
+                )
+            else:
+                # Every rank holds the whole prompt. Attend to it once as joint
+                # tokens: left in the sharded sequence, its keys would be
+                # gathered once per rank.
+                text_tokens = sp_text_tokens if sp_text_tokens is not None else num_encoder_hidden_states_tokens
+                joint_query, query = query.split([text_tokens, query.shape[2] - text_tokens], dim=2)
+                joint_key, key = key.split([text_tokens, key.shape[2] - text_tokens], dim=2)
+                joint_value, value = value.split([text_tokens, value.shape[2] - text_tokens], dim=2)
+                hidden_states = USP(
+                    query,
+                    key,
+                    value,
+                    combine_qkv_a2a=True,
+                    joint_query=joint_query,
+                    joint_key=joint_key,
+                    joint_value=joint_value,
+                    joint_strategy="front",
+                    attn_layer=attn,
+                    attention_kwargs=_sp_padding_attention_kwargs(key.shape[2], sp_padding),
+                )
             hidden_states = hidden_states.transpose(1, 2)
         else:
             if get_runtime_state().split_text_embed_in_sp:
@@ -349,8 +392,18 @@ class xFuserFlux1Transformer2DWrapper(FluxTransformer2DModel):
         sequence_length = hidden_states.shape[1]
         padding_length = (sp_world_size - (sequence_length % sp_world_size)) % sp_world_size
         if padding_length > 0:
-            hidden_states = self._pad_to_sp_divisible(hidden_states, padding_length, dim=1)
-            img_ids = self._pad_to_sp_divisible(img_ids, padding_length, dim=0)
+            if get_ring_parallel_world_size() > 1:
+                raise NotImplementedError(
+                    f"FLUX.1 with ring_degree > 1 needs the image token count ({sequence_length}) "
+                    f"to be divisible by the sequence parallel degree ({sp_world_size})."
+                )
+            if padding_length > (sequence_length + padding_length) // sp_world_size:
+                raise ValueError(
+                    f"{sequence_length} image tokens are too few to shard across "
+                    f"{sp_world_size} sequence parallel ranks."
+                )
+            hidden_states = self.pad_to_sp_divisible(hidden_states, padding_length, dim=1)
+            img_ids = self.pad_to_sp_divisible(img_ids, padding_length, dim=0)
         assert hidden_states.shape[0] % get_classifier_free_guidance_world_size() == 0, (
             f"Cannot split dim 0 of hidden_states ({hidden_states.shape[0]}) into {get_classifier_free_guidance_world_size()} parts."
         )
@@ -380,6 +433,11 @@ class xFuserFlux1Transformer2DWrapper(FluxTransformer2DModel):
         if get_runtime_state().split_text_embed_in_sp:
             txt_ids = torch.chunk(txt_ids, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
 
+        joint_attention_kwargs = dict(kwargs.pop("joint_attention_kwargs", None) or {})
+        joint_attention_kwargs.update(
+            sp_text_tokens=encoder_hidden_states.shape[-2],
+            sp_padding=padding_length,
+        )
         output = super().forward(
             hidden_states,
             encoder_hidden_states,
@@ -387,6 +445,7 @@ class xFuserFlux1Transformer2DWrapper(FluxTransformer2DModel):
             timestep=timestep,
             img_ids=img_ids,
             txt_ids=txt_ids,
+            joint_attention_kwargs=joint_attention_kwargs,
             **kwargs,
         )
 

@@ -1,5 +1,4 @@
 import torch
-import torch.nn.functional as F
 from typing import Optional, Union, Dict, Any, Tuple
 
 from diffusers.models.transformers.transformer_wan import (
@@ -26,7 +25,9 @@ class xFuserCausalWanAttnProcessor(WanAttnProcessor):
         super().__init__()
         self.is_cross_attention = is_cross_attention
 
-    def _get_qkv_projections(self, attn: "WanAttention", hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor):
+    def _get_qkv_projections(
+        self, attn: "WanAttention", hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor
+    ):
         if encoder_hidden_states is None:
             encoder_hidden_states = hidden_states
 
@@ -79,17 +80,27 @@ class xFuserCausalWanAttnProcessor(WanAttnProcessor):
         max_attention_size: int = 32760,
         **kwargs,
     ) -> torch.Tensor:
-
         if not self.is_cross_attention:
             return self._self_attention(
-                attn, hidden_states, encoder_hidden_states, attention_mask,
-                rotary_emb, kv_cache, current_start, local_attn_size,
-                sink_size, max_attention_size,
+                attn,
+                hidden_states,
+                encoder_hidden_states,
+                attention_mask,
+                rotary_emb,
+                kv_cache,
+                current_start,
+                local_attn_size,
+                sink_size,
+                max_attention_size,
             )
         else:
             return self._cross_attention(
-                attn, hidden_states, encoder_hidden_states, attention_mask,
-                rotary_emb, crossattn_cache,
+                attn,
+                hidden_states,
+                encoder_hidden_states,
+                attention_mask,
+                rotary_emb,
+                crossattn_cache,
             )
 
     def _self_attention(
@@ -120,8 +131,14 @@ class xFuserCausalWanAttnProcessor(WanAttnProcessor):
             key = self._apply_rotary_emb(key, *rotary_emb)
 
         hidden_states = self._cached_self_attention(
-            query, key, value, kv_cache, current_start,
-            local_attn_size, sink_size, max_attention_size,
+            query,
+            key,
+            value,
+            kv_cache,
+            current_start,
+            local_attn_size,
+            sink_size,
+            max_attention_size,
         )
 
         hidden_states = hidden_states.flatten(2, 3)
@@ -161,15 +178,20 @@ class xFuserCausalWanAttnProcessor(WanAttnProcessor):
             else int(kv_cache["local_end_index"])
         )
 
-        if local_attn_size != -1 and (current_end > global_end_index) and (
-                num_new_tokens + local_end_index_prev > kv_cache_size):
+        if (
+            local_attn_size != -1
+            and (current_end > global_end_index)
+            and (num_new_tokens + local_end_index_prev > kv_cache_size)
+        ):
             # Sliding window eviction: shift left, preserve sink tokens
             num_evicted_tokens = num_new_tokens + local_end_index_prev - kv_cache_size
             num_rolled_tokens = local_end_index_prev - num_evicted_tokens - sink_tokens
-            kv_cache["k"][:, sink_tokens:sink_tokens + num_rolled_tokens] = \
-                kv_cache["k"][:, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
-            kv_cache["v"][:, sink_tokens:sink_tokens + num_rolled_tokens] = \
-                kv_cache["v"][:, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
+            kv_cache["k"][:, sink_tokens : sink_tokens + num_rolled_tokens] = kv_cache["k"][
+                :, sink_tokens + num_evicted_tokens : sink_tokens + num_evicted_tokens + num_rolled_tokens
+            ].clone()
+            kv_cache["v"][:, sink_tokens : sink_tokens + num_rolled_tokens] = kv_cache["v"][
+                :, sink_tokens + num_evicted_tokens : sink_tokens + num_evicted_tokens + num_rolled_tokens
+            ].clone()
             local_end_index = local_end_index_prev + current_end - global_end_index - num_evicted_tokens
             local_start_index = local_end_index - num_new_tokens
             kv_cache["k"][:, local_start_index:local_end_index] = key
@@ -184,8 +206,8 @@ class xFuserCausalWanAttnProcessor(WanAttnProcessor):
 
         # Attention over cached keys/values
         # query: [B, seq, heads, head_dim] -> [B, heads, seq, head_dim]
-        attn_k = kv_cache["k"][:, max(0, local_end_index - max_attention_size):local_end_index]
-        attn_v = kv_cache["v"][:, max(0, local_end_index - max_attention_size):local_end_index]
+        attn_k = kv_cache["k"][:, max(0, local_end_index - max_attention_size) : local_end_index]
+        attn_v = kv_cache["v"][:, max(0, local_end_index - max_attention_size) : local_end_index]
 
         out = attention(query.transpose(1, 2), attn_k.transpose(1, 2), attn_v.transpose(1, 2)).transpose(1, 2)
 
@@ -234,8 +256,8 @@ class xFuserCausalWanAttnProcessor(WanAttnProcessor):
             key = key.unflatten(2, (attn.heads, -1))
             value = value.unflatten(2, (attn.heads, -1))
 
-            crossattn_cache["k"][:, :key.shape[1]] = key
-            crossattn_cache["v"][:, :value.shape[1]] = value
+            crossattn_cache["k"][:, : key.shape[1]] = key
+            crossattn_cache["v"][:, : value.shape[1]] = value
             crossattn_cache["is_init"] = True
             crossattn_cache["seq_len"] = key.shape[1]
         else:
@@ -251,10 +273,14 @@ class xFuserCausalWanAttnProcessor(WanAttnProcessor):
             key_img = key_img.unflatten(2, (attn.heads, -1))
             value_img = value_img.unflatten(2, (attn.heads, -1))
 
-            hidden_states_img = attention(query.transpose(1, 2), key_img.transpose(1, 2), value_img.transpose(1, 2), backend=backend).transpose(1, 2)
+            hidden_states_img = attention(
+                query.transpose(1, 2), key_img.transpose(1, 2), value_img.transpose(1, 2), backend=backend
+            ).transpose(1, 2)
             hidden_states_img = hidden_states_img.flatten(2, 3).type_as(query)
 
-        hidden_states = attention(query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), backend=backend).transpose(1, 2)
+        hidden_states = attention(
+            query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), backend=backend
+        ).transpose(1, 2)
         hidden_states = hidden_states.flatten(2, 3).type_as(query)
 
         if hidden_states_img is not None:
@@ -301,7 +327,10 @@ class xFuserCausalWanTransformerBlock(WanTransformerBlock):
         # 1. Self-attention (with causal kwargs)
         norm_hidden_states = (self.norm1(hidden_states.float()) * (1 + scale_msa) + shift_msa).type_as(hidden_states)
         attn_output = self.attn1(
-            norm_hidden_states, None, None, rotary_emb,
+            norm_hidden_states,
+            None,
+            None,
+            rotary_emb,
             kv_cache=kv_cache,
             current_start=current_start,
             local_attn_size=local_attn_size,
@@ -313,7 +342,10 @@ class xFuserCausalWanTransformerBlock(WanTransformerBlock):
         # 2. Cross-attention (with cache kwargs)
         norm_hidden_states = self.norm2(hidden_states.float()).type_as(hidden_states)
         attn_output = self.attn2(
-            norm_hidden_states, encoder_hidden_states, None, None,
+            norm_hidden_states,
+            encoder_hidden_states,
+            None,
+            None,
             crossattn_cache=crossattn_cache,
         )
         hidden_states = hidden_states + attn_output
@@ -392,7 +424,6 @@ class xFuserCausalWanTransformer3DWrapper(WanTransformer3DModel):
             causal_block.attn2.processor = xFuserCausalWanAttnProcessor(is_cross_attention=True)
             self.blocks[i] = causal_block
 
-
     def _compute_rope_with_offset(
         self,
         hidden_states: torch.Tensor,
@@ -412,11 +443,11 @@ class xFuserCausalWanTransformer3DWrapper(WanTransformer3DModel):
         freqs_sin = rope.freqs_sin.split(split_sizes, dim=1)
 
         # Apply start_frame offset to the temporal component
-        freqs_cos_f = freqs_cos[0][start_frame:start_frame + ppf].view(ppf, 1, 1, -1).expand(ppf, pph, ppw, -1)
+        freqs_cos_f = freqs_cos[0][start_frame : start_frame + ppf].view(ppf, 1, 1, -1).expand(ppf, pph, ppw, -1)
         freqs_cos_h = freqs_cos[1][:pph].view(1, pph, 1, -1).expand(ppf, pph, ppw, -1)
         freqs_cos_w = freqs_cos[2][:ppw].view(1, 1, ppw, -1).expand(ppf, pph, ppw, -1)
 
-        freqs_sin_f = freqs_sin[0][start_frame:start_frame + ppf].view(ppf, 1, 1, -1).expand(ppf, pph, ppw, -1)
+        freqs_sin_f = freqs_sin[0][start_frame : start_frame + ppf].view(ppf, 1, 1, -1).expand(ppf, pph, ppw, -1)
         freqs_sin_h = freqs_sin[1][:pph].view(1, pph, 1, -1).expand(ppf, pph, ppw, -1)
         freqs_sin_w = freqs_sin[2][:ppw].view(1, 1, ppw, -1).expand(ppf, pph, ppw, -1)
 
@@ -434,7 +465,6 @@ class xFuserCausalWanTransformer3DWrapper(WanTransformer3DModel):
         return_dict: bool = True,
         attention_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
-
         # Extract causal params from attention_kwargs
         attention_kwargs = attention_kwargs.copy()
         kv_cache = attention_kwargs["kv_cache"]

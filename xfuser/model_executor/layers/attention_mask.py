@@ -9,7 +9,7 @@ class AttentionMaskWithMeta:
     """Key-padding mask with pre-computed varlen indices.
 
     Passed as attention_mask through transformer block and attention stacks.
-    SDPA backends use only attn_mask. Varlen backends can use the additional 
+    SDPA backends use only attn_mask. Varlen backends can use the additional
     metadata to avoid re-computing indices and cumulative lengths per layer.
 
     Follows the flash-attention unpad_input pattern: the nonzero call that

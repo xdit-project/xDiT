@@ -19,6 +19,7 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
     STANDARD_LOAD_ROUTES,
 )
 
+
 @register_model("Qwen/Qwen-Image-Edit-2511")
 @register_model("Qwen/Qwen-Image-Edit-2509")
 @register_model("Qwen/Qwen-Image-Edit")
@@ -29,8 +30,8 @@ class xFuserQwenImageEditModel(xFuserModel):
     min_diffusers_version = "0.37.0"
 
     load_support = LoadSupport(
-        meta_transformers=('transformer',),
-        meta_text_encoders=('text_encoder',),
+        meta_transformers=("transformer",),
+        meta_text_encoders=("text_encoder",),
         replicated_meta=True,
         routes=STANDARD_LOAD_ROUTES,
     )
@@ -115,19 +116,21 @@ class xFuserQwenImageEditModel(xFuserModel):
             "true_cfg_scale": input_args["guidance_scale"],
             "generator": self._make_generator(input_args["seed"]),
         }
-        if "height" in input_args: kwargs["height"] = input_args["height"]
-        if "width" in input_args: kwargs["width"] = input_args["width"]
+        if "height" in input_args:
+            kwargs["height"] = input_args["height"]
+        if "width" in input_args:
+            kwargs["width"] = input_args["width"]
 
         output = self.pipe(**kwargs)
         return DiffusionOutput(images=output.images, pipe_args=input_args)
 
-
     def _validate_args(self, input_args: dict) -> None:
-        """ Validate input arguments """
+        """Validate input arguments"""
         super()._validate_args(input_args)
         images = input_args.get("input_images", [])
         if len(images) != 1:
             raise ValueError("Exactly one input image is required for Qwen Image Edit model.")
+
 
 @register_model("Qwen/Qwen-Image-2512")
 @register_model("Qwen/Qwen-Image")
@@ -137,8 +140,8 @@ class xFuserQwenImageModel(xFuserModel):
     min_diffusers_version = "0.37.0"
 
     load_support = LoadSupport(
-        meta_transformers=('transformer',),
-        meta_text_encoders=('text_encoder',),
+        meta_transformers=("transformer",),
+        meta_text_encoders=("text_encoder",),
         replicated_meta=True,
         routes=STANDARD_LOAD_ROUTES,
     )
@@ -181,7 +184,8 @@ class xFuserQwenImageModel(xFuserModel):
                     enable_separate_cfg=False,
                 ),
                 preset=DBCachePreset(Fn_compute_blocks=6, residual_diff_threshold=0.12, scm_policy="ultra"),
-        )},
+            )
+        },
     )
 
     def _customize_settings(self, config: xFuserArgs) -> None:

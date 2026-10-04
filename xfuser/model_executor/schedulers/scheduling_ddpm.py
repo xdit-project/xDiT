@@ -1,26 +1,17 @@
-from typing import Optional, Tuple, Union
+from typing import Tuple, Union
 
-import torch
-import torch.distributed
 
-from diffusers.utils.torch_utils import randn_tensor
 from diffusers.schedulers.scheduling_ddpm import (
     DDPMScheduler,
     DDPMSchedulerOutput,
 )
 
-from xfuser.core.distributed import (
-    get_pipeline_parallel_world_size,
-    get_sequence_parallel_world_size,
-    get_runtime_state,
-)
 from .register import xFuserSchedulerWrappersRegister
 from .base_scheduler import xFuserSchedulerBaseWrapper
 
 
 @xFuserSchedulerWrappersRegister.register(DDPMScheduler)
 class xFuserDDPMSchedulerWrapper(xFuserSchedulerBaseWrapper):
-
     @xFuserSchedulerBaseWrapper.check_to_use_naive_step
     def step(
         self,

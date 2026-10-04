@@ -42,29 +42,29 @@ VSA_H3_BACKENDS = attention_registry.types_where(sparsity=Sparsity.H3)
 
 # f4f4 is commented out of AITER's kernel manifest -- mxfp4 covers that row and claims the
 # same v_pack=1 FP6-P V order -- so selecting it lands on mxfp4 rather than a row of its own.
-_UNSERVED_MHA_V4_BACKENDS = frozenset({
-    AttentionBackendType.AITER_F4F4,
-})
+_UNSERVED_MHA_V4_BACKENDS = frozenset(
+    {
+        AttentionBackendType.AITER_F4F4,
+    }
+)
 # The remaining dense MHA v4 rows are in: MiniMax-H3 pads its packed sequence to
 # 64 rows and declares the pad through valid_kv_len, which those kernels serve by
 # slicing K/V instead of masking.
-_SUPPORTED_ATTN_BACKENDS = frozenset({
-    AttentionBackendType.AITER,
-    AttentionBackendType.AITER_FP8,
-    AttentionBackendType.CUDNN,
-    AttentionBackendType.SDPA,
-    AttentionBackendType.NVTE_FP8,
-}) | (AITER_MHA_V4_ONLY_BACKEND_SET - _UNSERVED_MHA_V4_BACKENDS)
+_SUPPORTED_ATTN_BACKENDS = frozenset(
+    {
+        AttentionBackendType.AITER,
+        AttentionBackendType.AITER_FP8,
+        AttentionBackendType.CUDNN,
+        AttentionBackendType.SDPA,
+        AttentionBackendType.NVTE_FP8,
+    }
+) | (AITER_MHA_V4_ONLY_BACKEND_SET - _UNSERVED_MHA_V4_BACKENDS)
 _FASTH3_ATTN_BACKENDS = VSA_H3_BACKENDS
 _SUPPORTED_ULYSSES_DEGREES = frozenset({1, 2, 4, 8})
 _SUPPORTED_TASKS = frozenset({"t2va", "i2va", "l2va", "fl2va", "ref2va"})
-FASTH3_V1_DATAFREE_MODEL_ID = (
-    "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree"
-)
+FASTH3_V1_DATAFREE_MODEL_ID = "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree"
 # Dense-attention ablation of the same 4-step preview: distilled without VSA
-FASTH3_V1_DENSE_DATAFREE_MODEL_ID = (
-    "FastVideo/FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree"
-)
+FASTH3_V1_DENSE_DATAFREE_MODEL_ID = "FastVideo/FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree"
 FASTH3_V2_MODEL_ID = "FastVideo/FastVideo-FastH3-8-Step-V2"
 FASTH3_MODEL_IDS = (
     FASTH3_V1_DATAFREE_MODEL_ID,
@@ -73,11 +73,13 @@ FASTH3_MODEL_IDS = (
 )
 # Full set of FastH3 V1-VSA IDs. Used in _customize_settings to route the
 # correct checkpoint into from_pretrained when a weight variant is requested.
-FASTH3_V1_MODEL_IDS = frozenset({
-    FASTH3_V1_DATAFREE_MODEL_ID,
-    "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1300",
-    "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1900",
-})
+FASTH3_V1_MODEL_IDS = frozenset(
+    {
+        FASTH3_V1_DATAFREE_MODEL_ID,
+        "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1300",
+        "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1900",
+    }
+)
 
 
 def _minimax_h3_parallel_decode_clip(self, z: torch.Tensor) -> torch.Tensor:
@@ -113,9 +115,7 @@ def _minimax_h3_parallel_decode_clip(self, z: torch.Tensor) -> torch.Tensor:
             y // ratio : y // ratio + tile_height // ratio,
             x // ratio : x // ratio + tile_width // ratio,
         ]
-        local_tiles[tile_index] = self.decoder(
-            self.post_quant_conv(tile)
-        ).contiguous()
+        local_tiles[tile_index] = self.decoder(self.post_quant_conv(tile)).contiguous()
 
     # Decode runs under the pipeline's float16 autocast, while the VAE
     # weights remain float32. Empty receive buffers must match that output
@@ -258,9 +258,7 @@ def _mark_dynamic_timestep(timestep):
     """
     from torch._dynamo import decorators as dynamo_decorators
 
-    mark = getattr(
-        dynamo_decorators, "mark_unbacked", dynamo_decorators.mark_dynamic
-    )
+    mark = getattr(dynamo_decorators, "mark_unbacked", dynamo_decorators.mark_dynamic)
     mark(timestep, 0)
 
 
@@ -384,9 +382,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
     def _get_runtime_state_pipeline(self):
         if self._transformer_component_name == "transformer":
             return self.pipe
-        return SimpleNamespace(
-            transformer=getattr(self.pipe, self._transformer_component_name)
-        )
+        return SimpleNamespace(transformer=getattr(self.pipe, self._transformer_component_name))
 
     def _validate_config(self, config) -> None:
         if config.task is None:
@@ -420,18 +416,14 @@ class xFuserMiniMaxH3Model(xFuserModel):
             backend_specs = [(config.attention_backend, "attention backend")]
 
         backends = [
-            backend
-            for value, label in backend_specs
-            if (backend := _parse_attention_backend(value, label)) is not None
+            backend for value, label in backend_specs if (backend := _parse_attention_backend(value, label)) is not None
         ]
         for backend in backends:
             if backend == AttentionBackendType.AITER_FP8:
                 try:
                     from aiter import flash_attn_varlen_fp8_pertensor_func  # noqa: F401
                 except ImportError:
-                    raise RuntimeError(
-                        "MiniMax-H3 FP8 attention requires AITER varlen FP8 flash attention."
-                    ) from None
+                    raise RuntimeError("MiniMax-H3 FP8 attention requires AITER varlen FP8 flash attention.") from None
 
         ulysses_degree = config.ulysses_degree or 1
         if ulysses_degree not in _SUPPORTED_ULYSSES_DEGREES:
@@ -447,13 +439,9 @@ class xFuserMiniMaxH3Model(xFuserModel):
                 "--text_encoder_tp_degree must be 1 or match --ulysses_degree."
             )
         if text_encoder_tp_degree > 1 and (
-            config.enable_model_cpu_offload
-            or config.enable_sequential_cpu_offload
-            or config.enable_group_cpu_offload
+            config.enable_model_cpu_offload or config.enable_sequential_cpu_offload or config.enable_group_cpu_offload
         ):
-            raise ValueError(
-                "MiniMax-H3 text encoder TP is incompatible with CPU offloading."
-            )
+            raise ValueError("MiniMax-H3 text encoder TP is incompatible with CPU offloading.")
         if config.batch_size is not None or config.dataset_path is not None:
             raise ValueError(
                 "MiniMax-H3 packs one request into one audiovisual sequence and "
@@ -461,8 +449,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
             )
         if config.task is not None and config.task not in _SUPPORTED_TASKS:
             raise ValueError(
-                f"Unsupported MiniMax-H3 task {config.task!r}. "
-                f"Supported tasks: {sorted(_SUPPORTED_TASKS)}."
+                f"Unsupported MiniMax-H3 task {config.task!r}. Supported tasks: {sorted(_SUPPORTED_TASKS)}."
             )
 
     def preprocess_args(self, input_args: dict) -> dict:
@@ -536,8 +523,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
         world_group = get_world_group()
         if degree != world_group.world_size:
             raise ValueError(
-                f"MiniMax-H3 text encoder TP degree {degree} must match world size "
-                f"{world_group.world_size}."
+                f"MiniMax-H3 text encoder TP degree {degree} must match world size {world_group.world_size}."
             )
 
         device = torch.device(f"cuda:{world_group.local_rank}")
@@ -547,9 +533,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
         parallelize_module(
             language_model,
             device_mesh=mesh,
-            parallelize_plan=self._build_text_encoder_tp_plan(
-                len(language_model.layers)
-            ),
+            parallelize_plan=self._build_text_encoder_tp_plan(len(language_model.layers)),
             src_data_rank=None,
         )
         text_encoder._xfuser_tp_mesh = mesh
@@ -568,9 +552,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
             "width": input_args["width"],
             "num_frames": input_args["num_frames"],
             "num_inference_steps": input_args["num_inference_steps"],
-            "generator": torch.Generator(device="cuda").manual_seed(
-                input_args["seed"]
-            ),
+            "generator": torch.Generator(device="cuda").manual_seed(input_args["seed"]),
             "output_type": "pt",
         }
         images = input_args.get("input_images") or []
@@ -590,9 +572,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
             pipe_args["last_image"] = images[0]
         else:
             if len(images) != 2:
-                raise ValueError(
-                    "FL2VA requires two input images: first frame followed by last frame."
-                )
+                raise ValueError("FL2VA requires two input images: first frame followed by last frame.")
             pipe_args["image"] = images[0]
             pipe_args["last_image"] = images[1]
 
@@ -615,19 +595,14 @@ class xFuserMiniMaxH3Model(xFuserModel):
         if isinstance(prompt, list) and len(prompt) != 1:
             raise ValueError("MiniMax-H3 currently supports one prompt per request.")
         if input_args.get("negative_prompt") is not None:
-            raise ValueError(
-                "MiniMax-H3 is guidance-distilled and does not accept a negative prompt."
-            )
+            raise ValueError("MiniMax-H3 is guidance-distilled and does not accept a negative prompt.")
 
     def _compile_model(self, input_args: dict) -> None:
         mode = self._get_compile_mode()
         vae = getattr(self.pipe, "vae", None)
         if vae is not None:
             vae.compile_repeated_blocks(mode=mode, fullgraph=False)
-            log(
-                "MiniMax-H3 torch.compile enabled for repeated video VAE "
-                "decoder blocks."
-            )
+            log("MiniMax-H3 torch.compile enabled for repeated video VAE decoder blocks.")
 
         if self.config.fully_shard_degree > 1:
             super()._compile_model(input_args)
@@ -644,23 +619,16 @@ class xFuserMiniMaxH3Model(xFuserModel):
 
         # Marking the timestep dynamic fixes a recompile: it avoids more than
         # one graph realizing after compile-warmup.
-        transformer.forward = _wrap_compiled_forward(
-            transformer, original_forward, compiled_forward
-        )
+        transformer.forward = _wrap_compiled_forward(transformer, original_forward, compiled_forward)
         compile_args = copy.deepcopy(input_args)
         if not get_runtime_state().has_attention_schedule():
-            compile_args["num_inference_steps"] = (
-                self._warmup_num_inference_steps
-            )
+            compile_args["num_inference_steps"] = self._warmup_num_inference_steps
         self._run_timed_pipe(compile_args)
 
     def _run_warmup_calls(self, input_args: dict) -> None:
         if not self.config.warmup_calls:
             return
-        log(
-            f"Warming up MiniMax-H3 with {self.config.warmup_calls} "
-            f"{self._warmup_num_inference_steps}-point calls..."
-        )
+        log(f"Warming up MiniMax-H3 with {self.config.warmup_calls} {self._warmup_num_inference_steps}-point calls...")
         warmup_args = copy.deepcopy(input_args)
         warmup_args["num_inference_steps"] = self._warmup_num_inference_steps
         for iteration in range(self.config.warmup_calls):
@@ -761,14 +729,11 @@ class xFuserFastH3Model(xFuserMiniMaxH3Model):
             self.settings.model_name = config.model
 
     def _validate_config(self, config) -> None:
-        backend = _parse_attention_backend(
-            config.attention_backend, "attention backend"
-        )
+        backend = _parse_attention_backend(config.attention_backend, "attention backend")
         if backend in VSA_H3_BACKENDS:
             if config.use_hybrid_attn_schedule:
                 raise ValueError(
-                    "VSA-H3 runs on every transformer step and does not "
-                    "support xDiT's hybrid attention schedule."
+                    "VSA-H3 runs on every transformer step and does not support xDiT's hybrid attention schedule."
                 )
         super()._validate_config(config)
 
@@ -831,8 +796,7 @@ class xFuserFastH3V2Model(xFuserFastH3Model):
         xFuserMiniMaxH3Model._validate_args(self, input_args)
         if input_args["num_inference_steps"] != 9:
             raise ValueError(
-                "FastH3 V2 requires 9 scheduler points, which produce "
-                "the checkpoint's trained 8 transformer forwards."
+                "FastH3 V2 requires 9 scheduler points, which produce the checkpoint's trained 8 transformer forwards."
             )
 
 
@@ -910,9 +874,7 @@ class xFuserMiniMaxH3Ref2VAModel(xFuserMiniMaxH3Model):
 
         images = input_args.get("input_images") or []
         if not images:
-            raise ValueError(
-                "MiniMax-H3 Ref2VA currently requires at least one image reference."
-            )
+            raise ValueError("MiniMax-H3 Ref2VA currently requires at least one image reference.")
         references = [MiniMaxH3ImageReference(image=image) for image in images]
         state = self.pipe(
             prompt=prompt,
@@ -921,9 +883,7 @@ class xFuserMiniMaxH3Ref2VAModel(xFuserMiniMaxH3Model):
             width=input_args["width"],
             num_frames=input_args["num_frames"],
             num_inference_steps=input_args["num_inference_steps"],
-            generator=torch.Generator(device="cuda").manual_seed(
-                input_args["seed"]
-            ),
+            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
             output_type="pt",
         )
         return MiniMaxH3DiffusionOutput(
@@ -936,11 +896,6 @@ class xFuserMiniMaxH3Ref2VAModel(xFuserMiniMaxH3Model):
     def _validate_args(self, input_args: dict) -> None:
         xFuserModel._validate_args(self, input_args)
         if input_args.get("negative_prompt") is not None:
-            raise ValueError(
-                "MiniMax-H3 is guidance-distilled and does not accept a negative prompt."
-            )
+            raise ValueError("MiniMax-H3 is guidance-distilled and does not accept a negative prompt.")
         if not input_args.get("input_images"):
-            raise ValueError(
-                "MiniMax-H3 Ref2VA currently requires image references through "
-                "--input_images."
-            )
+            raise ValueError("MiniMax-H3 Ref2VA currently requires image references through --input_images.")

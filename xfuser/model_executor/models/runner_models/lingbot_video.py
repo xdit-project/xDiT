@@ -6,7 +6,6 @@ from diffusers import AutoencoderKLWan
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from transformers import Qwen3VLForConditionalGeneration, Qwen3VLProcessor
 
-from xfuser import xFuserArgs
 from xfuser.model_executor.pipelines.pipeline_lingbot_video import (
     xFuserLingBotVideoPipeline,
     get_lingbot_video_pipeline_class,
@@ -23,8 +22,6 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     LoadRoute,
 )
-from xfuser.core.distributed.runtime_state import get_runtime_state
-from xfuser.core.distributed.parallel_state import get_vae_parallel_group
 from xfuser.core.utils.runner_utils import log
 
 
@@ -42,7 +39,7 @@ os.environ.setdefault("LINGBOT_MOE_PAD_BACKEND", "vectorized")
 # Refiner constants
 REFINER_BASE_HEIGHT = 480
 REFINER_BASE_WIDTH = 832
-REFINER_STEPS = 8        # canonical: refiner runs few steps on partially-noised input
+REFINER_STEPS = 8  # canonical: refiner runs few steps on partially-noised input
 REFINER_T_THRESH = 0.85  # canonical: noise level threshold for refiner init
 
 DEFAULT_NEGATIVE_PROMPT = (
@@ -157,13 +154,16 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
         # with ignored_params for minority-dtype (FP32 norms/router).
         if self.config.fully_shard_degree > 1:
             from lingbot_video.fsdp_inference import apply_fsdp_inference, init_fsdp_inference_mesh
+
             local_rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
             self.pipe.transformer.to(f"cuda:{local_rank}")
             mesh = init_fsdp_inference_mesh()
             info = apply_fsdp_inference(self.pipe.transformer, mesh)
-            log(f"FSDP: {info.wrapped_blocks} blocks sharded, "
+            log(
+                f"FSDP: {info.wrapped_blocks} blocks sharded, "
                 f"{info.ignored_params} FP32 params excluded, "
-                f"VRAM: {torch.cuda.memory_allocated(local_rank)/1e9:.1f}GB")
+                f"VRAM: {torch.cuda.memory_allocated(local_rank) / 1e9:.1f}GB"
+            )
             # Move remaining components to GPU
             self.pipe.vae.to(f"cuda:{local_rank}")
             self.pipe.text_encoder.to(f"cuda:{local_rank}")
@@ -177,6 +177,7 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
         # After quantization, patch blocks that lost .weight.dtype
         if self.config.use_fp4_gemms or self.config.use_fp8_gemms:
             from xfuser.model_executor.models.transformers.transformer_lingbot_video import _patch_block_bulk_dtype
+
             for block in self.pipe.transformer.blocks:
                 if hasattr(block, "_cached_bulk_dtype"):
                     _patch_block_bulk_dtype(block)
@@ -198,12 +199,15 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
         log("Loading refiner transformer...")
         model_name = self.settings.model_name
         refiner_transformer = xFuserLingBotVideoTransformer3DWrapper.from_pretrained(
-            model_name, torch_dtype=torch.bfloat16, subfolder="refiner",
+            model_name,
+            torch_dtype=torch.bfloat16,
+            subfolder="refiner",
         )
         local_rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
         refiner_transformer = refiner_transformer.to(f"cuda:{local_rank}")
         refiner_scheduler = FlowUniPCMultistepScheduler.from_pretrained(
-            model_name, subfolder="scheduler",
+            model_name,
+            subfolder="scheduler",
         )
         LingBotVideoPipeline = get_lingbot_video_pipeline_class()
         refiner_pipe = LingBotVideoPipeline(
@@ -222,6 +226,7 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
         if self.config.use_fp4_gemms or self.config.use_fp8_gemms:
             from xfuser.model_executor.models.transformers.transformer_lingbot_video import _patch_block_bulk_dtype
             from xfuser.core.utils.runner_utils import quantize_linear_layers_to_fp4, quantize_linear_layers_to_fp8
+
             # Cache bulk dtype before quantization replaces nn.Linear
             for block in refiner_transformer.blocks:
                 if hasattr(block, "attn") and hasattr(block.attn, "to_q"):
@@ -248,12 +253,17 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
         if self.config.fully_shard_degree > 1:
             from xfuser.core.distributed.parallel_state import get_fs_group
             from xfuser.core.distributed.sharding import shard_component
+
             device_group = get_fs_group().device_group
             fs_local_rank = get_fs_group().local_rank
             log("Sharding refiner transformer with FSDP...")
             refiner_pipe.transformer = shard_component(
-                refiner_transformer, ["blocks"], device_group, fs_local_rank,
-                torch.bfloat16, sync_module_states=False,
+                refiner_transformer,
+                ["blocks"],
+                device_group,
+                fs_local_rank,
+                torch.bfloat16,
+                sync_module_states=False,
             )
 
         self.refiner_pipe = refiner_pipe
@@ -267,22 +277,31 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
         )
 
         transformer = xFuserLingBotVideoTransformer3DWrapper.from_pretrained(
-            model_name, torch_dtype=torch.bfloat16, subfolder=transformer_subfolder,
+            model_name,
+            torch_dtype=torch.bfloat16,
+            subfolder=transformer_subfolder,
         )
         vae = AutoencoderKLWan.from_pretrained(
-            model_name, torch_dtype=torch.float32, subfolder="vae",
+            model_name,
+            torch_dtype=torch.float32,
+            subfolder="vae",
         )
         text_encoder = Qwen3VLForConditionalGeneration.from_pretrained(
-            model_name, torch_dtype=torch.bfloat16, subfolder="text_encoder",
+            model_name,
+            torch_dtype=torch.bfloat16,
+            subfolder="text_encoder",
         )
         processor = Qwen3VLProcessor.from_pretrained(
-            model_name, subfolder="processor",
+            model_name,
+            subfolder="processor",
         )
         scheduler = FlowUniPCMultistepScheduler.from_pretrained(
-            model_name, subfolder="scheduler",
+            model_name,
+            subfolder="scheduler",
         )
         if use_i2v:
             from lingbot_video.pipeline_lingbot_video_i2v import LingBotVideoImageToVideoPipeline
+
             BasePipeClass = LingBotVideoImageToVideoPipeline
         else:
             BasePipeClass = get_lingbot_video_pipeline_class()
@@ -347,13 +366,11 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
 
         # Refiner pass
         if use_refiner and output.frames:
-            output = self._run_refiner(output, input_args, prompt, generator,
-                                       refiner_height, refiner_width)
+            output = self._run_refiner(output, input_args, prompt, generator, refiner_height, refiner_width)
 
         return DiffusionOutput(videos=output.frames or None, pipe_args=input_args)
 
-    def _run_refiner(self, base_output, input_args, prompt, generator,
-                     refiner_height, refiner_width):
+    def _run_refiner(self, base_output, input_args, prompt, generator, refiner_height, refiner_width):
         from lingbot_video.utils import prepare_refiner_latent
         import numpy as np
 
@@ -369,10 +386,16 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
         num_frames = frames_cpu.shape[0]
 
         # Resize on CPU (avoids GPU allocation of full 1080p tensor)
-        frames_cpu = torch.nn.functional.interpolate(
-            frames_cpu, size=(refiner_height, refiner_width),
-            mode="bilinear", align_corners=False,
-        ).mul_(2.0).sub_(1.0)
+        frames_cpu = (
+            torch.nn.functional.interpolate(
+                frames_cpu,
+                size=(refiner_height, refiner_width),
+                mode="bilinear",
+                align_corners=False,
+            )
+            .mul_(2.0)
+            .sub_(1.0)
+        )
         # (T, 3, H, W) -> (1, 3, T, H, W), transfer to GPU only for VAE encode
         video_tensor = frames_cpu.unsqueeze(0).permute(0, 2, 1, 3, 4)
         del frames_cpu
@@ -385,15 +408,19 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
             del video_tensor
             torch.cuda.empty_cache()
             noise = torch.randn(
-                x_up.shape, device=x_up.device, dtype=x_up.dtype,
+                x_up.shape,
+                device=x_up.device,
+                dtype=x_up.dtype,
                 generator=refiner_generator,
             )
             initial_latent = prepare_refiner_latent(x_up, noise, REFINER_T_THRESH)
 
         guidance = input_args.get("guidance_scale_2") or input_args["guidance_scale"]
         shift = input_args.get("flow_shift", 3.0)
-        log(f"Running refiner: {refiner_height}x{refiner_width}, "
-            f"{REFINER_STEPS} steps, guidance={guidance}, t_thresh={REFINER_T_THRESH}")
+        log(
+            f"Running refiner: {refiner_height}x{refiner_width}, "
+            f"{REFINER_STEPS} steps, guidance={guidance}, t_thresh={REFINER_T_THRESH}"
+        )
         refiner_output = self.refiner_pipe(
             prompt=prompt,
             negative_prompt=input_args["negative_prompt"],
@@ -437,14 +464,19 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
 
         # Compile base transformer
         self._prepare_and_compile_transformer(
-            self.pipe, base_h, base_w, input_args["num_frames"],
+            self.pipe,
+            base_h,
+            base_w,
+            input_args["num_frames"],
         )
 
         # Compile refiner BEFORE warmup so warmup covers both
         if self.refiner_pipe is not None:
             log("Compiling refiner transformer...")
             self._prepare_and_compile_transformer(
-                self.refiner_pipe, refiner_h, refiner_w,
+                self.refiner_pipe,
+                refiner_h,
+                refiner_w,
                 input_args["num_frames"],
             )
 

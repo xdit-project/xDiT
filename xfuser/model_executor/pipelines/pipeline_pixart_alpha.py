@@ -25,7 +25,6 @@ from xfuser.core.distributed import (
     get_sp_group,
     is_pipeline_first_stage,
     is_pipeline_last_stage,
-    get_world_group
 )
 from xfuser.model_executor.pipelines import xFuserPipelineBaseWrapper
 from .register import xFuserPipelineWrapperRegister
@@ -33,7 +32,6 @@ from .register import xFuserPipelineWrapperRegister
 
 @xFuserPipelineWrapperRegister.register(PixArtAlphaPipeline)
 class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
-
     @classmethod
     def from_pretrained(
         cls,
@@ -42,9 +40,7 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
         return_org_pipeline: bool = False,
         **kwargs,
     ):
-        pipeline = PixArtAlphaPipeline.from_pretrained(
-            pretrained_model_name_or_path, **kwargs
-        )
+        pipeline = PixArtAlphaPipeline.from_pretrained(pretrained_model_name_or_path, **kwargs)
         if return_org_pipeline:
             return pipeline
         return cls(pipeline, engine_config)
@@ -177,9 +173,7 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
             else:
                 raise ValueError("Invalid sample size")
             orig_height, orig_width = height, width
-            height, width = self.image_processor.classify_height_width_bin(
-                height, width, ratios=aspect_ratio_bin
-            )
+            height, width = self.image_processor.classify_height_width_bin(height, width, ratios=aspect_ratio_bin)
 
         self.check_inputs(
             prompt,
@@ -280,20 +274,13 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
         # 6.1 Prepare micro-conditions.
         added_cond_kwargs = {"resolution": None, "aspect_ratio": None}
         if self.transformer.config.sample_size == 128:
-            resolution = torch.tensor([height, width]).repeat(
-                batch_size * num_images_per_prompt, 1
-            )
-            aspect_ratio = torch.tensor([float(height / width)]).repeat(
-                batch_size * num_images_per_prompt, 1
-            )
+            resolution = torch.tensor([height, width]).repeat(batch_size * num_images_per_prompt, 1)
+            aspect_ratio = torch.tensor([float(height / width)]).repeat(batch_size * num_images_per_prompt, 1)
             resolution = resolution.to(dtype=prompt_embeds.dtype, device=device)
             aspect_ratio = aspect_ratio.to(dtype=prompt_embeds.dtype, device=device)
 
             #! ---------------------------------------- MODIFIED BELOW ----------------------------------------
-            if (
-                do_classifier_free_guidance
-                and get_classifier_free_guidance_world_size() == 1
-            ):
+            if do_classifier_free_guidance and get_classifier_free_guidance_world_size() == 1:
                 resolution = torch.cat([resolution, resolution], dim=0)
                 aspect_ratio = torch.cat([aspect_ratio, aspect_ratio], dim=0)
 
@@ -306,17 +293,12 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
             added_cond_kwargs = {"resolution": resolution, "aspect_ratio": aspect_ratio}
 
         # 7. Denoising loop
-        num_warmup_steps = max(
-            len(timesteps) - num_inference_steps * self.scheduler.order, 0
-        )
+        num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         #! ---------------------------------------- MODIFIED BELOW ----------------------------------------
         num_pipeline_warmup_steps = get_runtime_state().runtime_config.warmup_steps
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            if (
-                get_pipeline_parallel_world_size() > 1
-                and len(timesteps) > num_pipeline_warmup_steps
-            ):
+            if get_pipeline_parallel_world_size() > 1 and len(timesteps) > num_pipeline_warmup_steps:
                 # * warmup stage
                 latents = self._sync_pipeline(
                     latents=latents,
@@ -365,19 +347,20 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
         # 8. Decode latents (only rank 0)
         #! ---------------------------------------- ADD BELOW ----------------------------------------
         def vae_decode(latents):
-            image = self.vae.decode(
-                latents / self.vae.config.scaling_factor, return_dict=False
-            )[0]
+            image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
             return image
-        
+
         image = None
         if not output_type == "latent":
-            if get_runtime_state().runtime_config.use_parallel_vae and get_runtime_state().parallel_config.vae_parallel_size > 0: 
+            if (
+                get_runtime_state().runtime_config.use_parallel_vae
+                and get_runtime_state().parallel_config.vae_parallel_size > 0
+            ):
                 # VAE is loaded in another worker
                 latents = self.gather_latents_for_vae(latents)
                 if latents is not None:
                     latents = latents / self.vae.config.scaling_factor
-                self.send_to_vae_decode(latents) 
+                self.send_to_vae_decode(latents)
             else:
                 if get_runtime_state().runtime_config.use_parallel_vae:
                     latents = self.gather_broadcast_latents(latents)
@@ -389,9 +372,7 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
             #! ---------------------------------------- ADD ABOVE ----------------------------------------
             if not output_type == "latent":
                 if use_resolution_binning:
-                    image = self.image_processor.resize_and_crop_tensor(
-                        image, orig_width, orig_height
-                    )
+                    image = self.image_processor.resize_and_crop_tensor(image, orig_width, orig_height)
             else:
                 image = latents
 
@@ -469,12 +450,8 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
             )
 
             if is_pipeline_last_stage():
-                latents = self._scheduler_step(
-                    latents, last_timestep_latents, t, extra_step_kwargs
-                )
-            if i == len(timesteps) - 1 or (
-                (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
-            ):
+                latents = self._scheduler_step(latents, last_timestep_latents, t, extra_step_kwargs)
+            if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                 progress_bar.update()
                 if callback is not None and i % callback_steps == 0:
                     step_idx = i // getattr(self.scheduler, "order", 1)
@@ -485,11 +462,7 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
             elif get_pipeline_parallel_world_size() > 1:
                 get_pp_group().pipeline_send(latents)
 
-        if (
-            sync_only
-            and get_sequence_parallel_world_size() > 1
-            and is_pipeline_last_stage()
-        ):
+        if sync_only and get_sequence_parallel_world_size() > 1 and is_pipeline_last_stage():
             sp_degree = get_sequence_parallel_world_size()
             sp_latents_list = get_sp_group().all_gather(latents, separate_tensors=True)
             latents_list = []
@@ -498,9 +471,9 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
                     sp_latents_list[sp_patch_idx][
                         :,
                         :,
-                        get_runtime_state()
-                        .pp_patches_start_idx_local[pp_patch_idx] : get_runtime_state()
-                        .pp_patches_start_idx_local[pp_patch_idx + 1],
+                        get_runtime_state().pp_patches_start_idx_local[
+                            pp_patch_idx
+                        ] : get_runtime_state().pp_patches_start_idx_local[pp_patch_idx + 1],
                         :,
                     ]
                     for sp_patch_idx in range(sp_degree)
@@ -533,11 +506,7 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
             latents=latents,
             num_pipeline_warmup_steps=num_pipeline_warmup_steps,
         )
-        last_patch_latents = (
-            [None for _ in range(num_pipeline_patch)]
-            if (is_pipeline_last_stage())
-            else None
-        )
+        last_patch_latents = [None for _ in range(num_pipeline_patch)] if (is_pipeline_last_stage()) else None
 
         first_async_recv = True
         for i, t in enumerate(timesteps):
@@ -551,9 +520,7 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
                     if first_async_recv:
                         get_pp_group().recv_next()
                         first_async_recv = False
-                    patch_latents[patch_idx] = get_pp_group().get_pipeline_recv_data(
-                        idx=patch_idx
-                    )
+                    patch_latents[patch_idx] = get_pp_group().get_pipeline_recv_data(idx=patch_idx)
                 patch_latents[patch_idx] = self._backbone_forward(
                     latents=patch_latents[patch_idx],
                     prompt_embeds=prompt_embeds,
@@ -570,13 +537,9 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
                         extra_step_kwargs,
                     )
                     if i != len(timesteps) - 1:
-                        get_pp_group().pipeline_isend(
-                            patch_latents[patch_idx], segment_idx=patch_idx
-                        )
+                        get_pp_group().pipeline_isend(patch_latents[patch_idx], segment_idx=patch_idx)
                 else:
-                    get_pp_group().pipeline_isend(
-                        patch_latents[patch_idx], segment_idx=patch_idx
-                    )
+                    get_pp_group().pipeline_isend(patch_latents[patch_idx], segment_idx=patch_idx)
 
                 if is_pipeline_first_stage() and i == 0:
                     pass
@@ -593,14 +556,9 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
                 and (i + num_pipeline_warmup_steps + 1) % self.scheduler.order == 0
             ):
                 progress_bar.update()
-                assert callback is None, "callback not supported in async " "pipeline"
-                if (
-                    callback is not None
-                    and i + num_pipeline_warmup_steps % callback_steps == 0
-                ):
-                    step_idx = (i + num_pipeline_warmup_steps) // getattr(
-                        self.scheduler, "order", 1
-                    )
+                assert callback is None, "callback not supported in async pipeline"
+                if callback is not None and i + num_pipeline_warmup_steps % callback_steps == 0:
+                    step_idx = (i + num_pipeline_warmup_steps) // getattr(self.scheduler, "order", 1)
                     callback(step_idx, t, patch_latents[patch_idx])
 
         latents = None
@@ -608,19 +566,15 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
             latents = torch.cat(patch_latents, dim=2)
             if get_sequence_parallel_world_size() > 1:
                 sp_degree = get_sequence_parallel_world_size()
-                sp_latents_list = get_sp_group().all_gather(
-                    latents, separate_tensors=True
-                )
+                sp_latents_list = get_sp_group().all_gather(latents, separate_tensors=True)
                 latents_list = []
                 for pp_patch_idx in range(get_runtime_state().num_pipeline_patch):
                     latents_list += [
                         sp_latents_list[sp_patch_idx][
                             ...,
-                            get_runtime_state()
-                            .pp_patches_start_idx_local[
+                            get_runtime_state().pp_patches_start_idx_local[
                                 pp_patch_idx
-                            ] : get_runtime_state()
-                            .pp_patches_start_idx_local[pp_patch_idx + 1],
+                            ] : get_runtime_state().pp_patches_start_idx_local[pp_patch_idx + 1],
                             :,
                         ]
                         for sp_patch_idx in range(sp_degree)
@@ -638,9 +592,7 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
         guidance_scale: float,
     ):
         if is_pipeline_first_stage():
-            latents = torch.cat(
-                [latents] * (2 // get_classifier_free_guidance_world_size())
-            )
+            latents = torch.cat([latents] * (2 // get_classifier_free_guidance_world_size()))
             latents = self.scheduler.scale_model_input(latents, t)
 
         current_timestep = t
@@ -653,9 +605,7 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
                 dtype = torch.float32 if is_mps else torch.float64
             else:
                 dtype = torch.int32 if is_mps else torch.int64
-            current_timestep = torch.tensor(
-                [current_timestep], dtype=dtype, device=latents.device
-            )
+            current_timestep = torch.tensor([current_timestep], dtype=dtype, device=latents.device)
         elif len(current_timestep.shape) == 0:
             current_timestep = current_timestep[None].to(latents.device)
         # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
@@ -674,17 +624,10 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
             if get_classifier_free_guidance_world_size() == 1:
                 noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
             elif get_classifier_free_guidance_world_size() == 2:
-                noise_pred_uncond, noise_pred_text = get_cfg_group().all_gather(
-                    noise_pred, separate_tensors=True
-                )
-            latents = noise_pred_uncond + guidance_scale * (
-                noise_pred_text - noise_pred_uncond
-            )
+                noise_pred_uncond, noise_pred_text = get_cfg_group().all_gather(noise_pred, separate_tensors=True)
+            latents = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
-            if (
-                self.transformer.config.out_channels // 2
-                == self.transformer.config.in_channels
-            ):
+            if self.transformer.config.out_channels // 2 == self.transformer.config.in_channels:
                 latents = latents.chunk(2, dim=1)[0]
         else:
             latents = noise_pred

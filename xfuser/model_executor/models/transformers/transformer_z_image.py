@@ -1,5 +1,4 @@
 import torch
-import math
 from torch.nn.utils.rnn import pad_sequence
 from typing import List, Optional
 
@@ -59,6 +58,7 @@ def _scatter_pad_token(x: torch.Tensor, mask: torch.Tensor, pad_token: torch.Ten
     x[mask] = pad_token
     return x
 
+
 class xFuserZSingleStreamAttnProcessor:
     """
     Processor for Z-Image single stream attention that adapts the existing Attention class to match the behavior of the
@@ -95,9 +95,7 @@ class xFuserZSingleStreamAttnProcessor:
         # unfused diffusers path (norm then complex rope) whenever the FlyDSL
         # stack is absent or the shape is out of envelope, so this call is
         # numerically interchangeable with the code it replaced.
-        query, key = flydsl_fused_qk_norm_rope(
-            query, key, attn.norm_q, attn.norm_k, freqs_cis
-        )
+        query, key = flydsl_fused_qk_norm_rope(query, key, attn.norm_q, attn.norm_k, freqs_cis)
 
         # Cast to correct dtype
         dtype = query.dtype
@@ -160,34 +158,32 @@ def z_image_attn_modules(transformer) -> list[torch.nn.Module]:
 
 
 class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
-
-    def __init__(
-        self,
-        **kwargs
-    ):
-        super().__init__(
-            **kwargs
-        )
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
         for layer in self.layers + self.context_refiner + self.noise_refiner:
             layer.attention.processor = xFuserZSingleStreamAttnProcessor()
         register_fp8_comms_eligible_modules(self, z_image_attn_modules(self))
 
-
-    def _chunk_and_pad_sequence(self, x: torch.Tensor, sp_world_rank: int, sp_world_size: int, pad_amount: int, dim: int) -> torch.Tensor:
+    def _chunk_and_pad_sequence(
+        self, x: torch.Tensor, sp_world_rank: int, sp_world_size: int, pad_amount: int, dim: int
+    ) -> torch.Tensor:
         if pad_amount > 0:
             if dim < 0:
                 dim = x.ndim + dim
             pad_shape = list(x.shape)
             pad_shape[dim] = pad_amount
-            x = torch.cat([x,
-                        torch.zeros(
-                            pad_shape,
-                            dtype=x.dtype,
-                            device=x.device,
-                        )], dim=dim)
-        x = torch.chunk(x,
-                        sp_world_size,
-                        dim=dim)[sp_world_rank]
+            x = torch.cat(
+                [
+                    x,
+                    torch.zeros(
+                        pad_shape,
+                        dtype=x.dtype,
+                        device=x.device,
+                    ),
+                ],
+                dim=dim,
+            )
+        x = torch.chunk(x, sp_world_size, dim=dim)[sp_world_rank]
         return x
 
     def _gather_and_unpad(self, x: torch.Tensor, pad_amount: int, dim: int) -> torch.Tensor:
@@ -271,7 +267,9 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
         pad_amount = (sp_world_size - (x.shape[1] % sp_world_size)) % sp_world_size
         x = self._chunk_and_pad_sequence(x, sp_world_rank, sp_world_size, pad_amount, dim=-2)
         x_attn_mask = self._chunk_and_pad_sequence(x_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1)
-        x_freqs_cis_chunked = self._chunk_and_pad_sequence(x_freqs_cis, sp_world_rank, sp_world_size, pad_amount, dim=-2)
+        x_freqs_cis_chunked = self._chunk_and_pad_sequence(
+            x_freqs_cis, sp_world_rank, sp_world_size, pad_amount, dim=-2
+        )
 
         if torch.is_grad_enabled() and self.gradient_checkpointing:
             for layer in self.noise_refiner:
@@ -292,7 +290,9 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
         cap_feats = self.cap_embedder(cap_feats)
         cap_feats = _scatter_pad_token(cap_feats, torch.cat(cap_inner_pad_mask), self.cap_pad_token)
         cap_feats = list(cap_feats.split(cap_item_seqlens, dim=0))
-        cap_freqs_cis = list(self.rope_embedder(torch.cat(cap_pos_ids, dim=0)).split([len(_) for _ in cap_pos_ids], dim=0))
+        cap_freqs_cis = list(
+            self.rope_embedder(torch.cat(cap_pos_ids, dim=0)).split([len(_) for _ in cap_pos_ids], dim=0)
+        )
 
         cap_feats = pad_sequence(cap_feats, batch_first=True, padding_value=0.0)
         cap_freqs_cis = pad_sequence(cap_freqs_cis, batch_first=True, padding_value=0.0)
@@ -303,12 +303,13 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
         for i, seq_len in enumerate(cap_item_seqlens):
             cap_attn_mask[i, :seq_len] = 1
 
-
         # SP support
         pad_amount = (sp_world_size - (cap_feats.shape[1] % sp_world_size)) % sp_world_size
         cap_feats = self._chunk_and_pad_sequence(cap_feats, sp_world_rank, sp_world_size, pad_amount, dim=-2)
         cap_attn_mask = self._chunk_and_pad_sequence(cap_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1)
-        cap_freqs_cis_chunked = self._chunk_and_pad_sequence(cap_freqs_cis, sp_world_rank, sp_world_size, pad_amount, dim=-2)
+        cap_freqs_cis_chunked = self._chunk_and_pad_sequence(
+            cap_freqs_cis, sp_world_rank, sp_world_size, pad_amount, dim=-2
+        )
 
         if torch.is_grad_enabled() and self.gradient_checkpointing:
             for layer in self.context_refiner:
@@ -319,7 +320,6 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
 
         # Gather SP outputs and remove padding
         cap_feats = self._gather_and_unpad(cap_feats, pad_amount, dim=-2)
-
 
         # unified
         unified = []
@@ -342,8 +342,12 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
         # SP support
         pad_amount = (sp_world_size - (unified.shape[1] % sp_world_size)) % sp_world_size
         unified = self._chunk_and_pad_sequence(unified, sp_world_rank, sp_world_size, pad_amount, dim=-2)
-        unified_attn_mask = self._chunk_and_pad_sequence(unified_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1)
-        unified_freqs_cis = self._chunk_and_pad_sequence(unified_freqs_cis, sp_world_rank, sp_world_size, pad_amount, dim=-2)
+        unified_attn_mask = self._chunk_and_pad_sequence(
+            unified_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1
+        )
+        unified_freqs_cis = self._chunk_and_pad_sequence(
+            unified_freqs_cis, sp_world_rank, sp_world_size, pad_amount, dim=-2
+        )
 
         if torch.is_grad_enabled() and self.gradient_checkpointing:
             for layer in self.layers:
@@ -370,4 +374,3 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
             return (x,)
 
         return Transformer2DModelOutput(sample=x)
-

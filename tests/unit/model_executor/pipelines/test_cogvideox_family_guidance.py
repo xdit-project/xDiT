@@ -23,10 +23,10 @@ from diffusers import (  # noqa: E402
     CogVideoXTransformer3DModel,
 )
 
-from xfuser.model_executor.pipelines.pipeline_cogvideox import (  # noqa: E402
-    xFuserCogVideoXPipeline,
-)
+from xfuser.model_executor.pipelines import base_pipeline, pipeline_cogvideox  # noqa: E402
+from xfuser.model_executor.pipelines.pipeline_cogvideox import xFuserCogVideoXPipeline  # noqa: E402
 from xfuser.model_executor.schedulers import (  # noqa: E402
+    base_scheduler,
     xFuserCogVideoXDDIMSchedulerWrapper,
     xFuserCogVideoXDPMSchedulerWrapper,
 )
@@ -34,7 +34,6 @@ from xfuser.model_executor.schedulers import (  # noqa: E402
 ConsisIDPipeline = getattr(diffusers, "ConsisIDPipeline", None)
 ConsisIDTransformer3DModel = getattr(diffusers, "ConsisIDTransformer3DModel", None)
 
-PIPELINES = "xfuser.model_executor.pipelines"
 TEXT_LEN = 16
 TEXT_DIM = 32
 
@@ -54,35 +53,29 @@ def _tiny_vae():
     ).eval()
 
 
-def _single_rank_patches():
-    """Pretend to run on one rank with no parallelism (2x2 latents, 1 token per frame)."""
-    runtime_state = SimpleNamespace(
+_SINGLE_RANK = {
+    "get_classifier_free_guidance_world_size": 1,
+    "get_pipeline_parallel_world_size": 1,
+    "get_sequence_parallel_world_size": 1,
+    "get_sequence_parallel_rank": 0,
+    "is_dp_last_group": True,
+}
+
+
+def _single_rank(pipeline_module):
+    """Run ``pipeline_module`` as one rank with no parallelism (2x2 latents, 1 token per frame)."""
+    state = SimpleNamespace(
         split_text_embed_in_sp=False,
         pp_patches_start_end_idx_global=[(0, 2)],
         pp_patches_token_start_end_idx_global=[(0, 1)],
         set_video_input_parameters=lambda **kwargs: None,
         set_patched_mode=lambda patch_mode: None,
     )
-    targets = {
-        f"{PIPELINES}.base_pipeline.get_runtime_state": runtime_state,
-        f"{PIPELINES}.base_pipeline.get_classifier_free_guidance_world_size": 1,
-        "xfuser.model_executor.schedulers.base_scheduler.get_pipeline_parallel_world_size": 1,
-        "xfuser.model_executor.schedulers.base_scheduler.get_sequence_parallel_world_size": 1,
-    }
-    for module in ("pipeline_cogvideox", "pipeline_consisid"):
-        targets.update(
-            {
-                f"{PIPELINES}.{module}.get_runtime_state": runtime_state,
-                f"{PIPELINES}.{module}.get_classifier_free_guidance_world_size": 1,
-                f"{PIPELINES}.{module}.get_pipeline_parallel_world_size": 1,
-                f"{PIPELINES}.{module}.get_sequence_parallel_world_size": 1,
-                f"{PIPELINES}.{module}.get_sequence_parallel_rank": 0,
-                f"{PIPELINES}.{module}.is_dp_last_group": True,
-            }
-        )
     stack = ExitStack()
-    for target, value in targets.items():
-        stack.enter_context(patch(target, return_value=value))
+    for module in (base_pipeline, base_scheduler, pipeline_module):
+        for name, value in {**_SINGLE_RANK, "get_runtime_state": state}.items():
+            if hasattr(module, name):
+                stack.enter_context(patch.object(module, name, return_value=value))
     return stack
 
 
@@ -155,7 +148,7 @@ def _run_cogvideox(guidance_scale):
     expected = pipe(**kwargs)[0]
 
     wrapper = _wrap(xFuserCogVideoXPipeline, pipe, xFuserCogVideoXDDIMSchedulerWrapper)
-    with _single_rank_patches():
+    with _single_rank(pipeline_cogvideox):
         actual = _call_wrapper(xFuserCogVideoXPipeline, wrapper, **kwargs)[0]
     return actual, expected
 
@@ -185,20 +178,13 @@ def _consisid_pipe():
         max_text_seq_length=TEXT_LEN,
         use_rotary_positional_embeddings=True,
         use_learned_positional_embeddings=True,
-        cross_attn_interval=1,
-        is_kps=False,
+        # Keep the face branch, but tiny.
         is_train_face=True,
-        cross_attn_dim_head=1,
-        cross_attn_num_heads=1,
+        cross_attn_interval=1,
         LFE_id_dim=2,
         LFE_vit_dim=2,
-        LFE_depth=5,
-        LFE_dim_head=8,
-        LFE_num_heads=2,
-        LFE_num_id_token=1,
-        LFE_num_querie=1,
+        LFE_depth=1,
         LFE_output_dim=21,
-        LFE_ff_mult=1,
         LFE_num_scale=1,
     ).eval()
     return ConsisIDPipeline(
@@ -214,9 +200,7 @@ def _consisid_pipe():
 @pytest.mark.parametrize("guidance_scale", [1.0, 6.0])
 def test_consisid_matches_diffusers_with_and_without_guidance(guidance_scale):
     pytest.importorskip("cv2", reason="ConsisIDPipeline requires OpenCV")
-    from xfuser.model_executor.pipelines.pipeline_consisid import (
-        xFuserConsisIDPipeline,
-    )
+    from xfuser.model_executor.pipelines import pipeline_consisid
 
     pipe = _consisid_pipe()
     prompt_embeds, negative_prompt_embeds = _embeds()
@@ -245,8 +229,9 @@ def test_consisid_matches_diffusers_with_and_without_guidance(guidance_scale):
 
     expected = pipe(**kwargs())[0]
 
-    wrapper = _wrap(xFuserConsisIDPipeline, pipe, xFuserCogVideoXDPMSchedulerWrapper)
-    with _single_rank_patches():
-        actual = _call_wrapper(xFuserConsisIDPipeline, wrapper, **kwargs())[0]
+    wrapper_cls = pipeline_consisid.xFuserConsisIDPipeline
+    wrapper = _wrap(wrapper_cls, pipe, xFuserCogVideoXDPMSchedulerWrapper)
+    with _single_rank(pipeline_consisid):
+        actual = _call_wrapper(wrapper_cls, wrapper, **kwargs())[0]
 
     torch.testing.assert_close(actual, expected)

@@ -1,5 +1,6 @@
 import torch
 import copy
+import dataclasses
 from typing import Optional
 import json
 import numpy as np
@@ -170,12 +171,27 @@ class xFuserHunyuanvideoModel(xFuserModel):
         self._run_timed_pipe(compile_args)
 
 
+# Each Diffusers checkpoint of HunyuanVideo-1.5, with the task its transformer was trained
+# for. A name in this table loads that checkpoint; the short aliases load the 720p one for
+# the requested task.
+HUNYUANVIDEO_15_CHECKPOINTS = {
+    "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v": "i2v",
+    "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v": "t2v",
+    "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v": "i2v",
+    "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v": "t2v",
+}
+HUNYUANVIDEO_15_DEFAULT_CHECKPOINTS = {
+    "i2v": "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v",
+    "t2v": "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v",
+}
+
+
 @register_model("tencent/HunyuanVideo-1.5")
 @register_model("Hunyuanvideo-1.5")
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v")
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v")
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v")
-@register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v")
+@register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v")
 class xFuserHunyuanvideo15Model(xFuserModel):
     min_diffusers_version = "0.36.0"
 
@@ -224,10 +240,18 @@ class xFuserHunyuanvideo15Model(xFuserModel):
 
     def _customize_settings(self, config: xFuserArgs) -> None:
         super()._customize_settings(config)
-        if config.task == "i2v":  # TODO: different model for 480p
-            self.settings.model_name = "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v"
-        else:
-            self.settings.model_name = "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v"
+        checkpoint_task = HUNYUANVIDEO_15_CHECKPOINTS.get(config.model)
+        if checkpoint_task is None:
+            # A short alias: the 720p checkpoint for the requested task
+            self.settings.model_name = HUNYUANVIDEO_15_DEFAULT_CHECKPOINTS["i2v" if config.task == "i2v" else "t2v"]
+            return
+        if config.task and config.task != checkpoint_task:
+            raise ValueError(f"{config.model} is a {checkpoint_task} checkpoint and cannot run --task {config.task}.")
+        self.settings.model_name = config.model
+        if "-480p_" in config.model:
+            # The 480p transformers are trained at a 640 target size; this is the 16:9
+            # resolution Diffusers picks for that size when none is given.
+            self.default_input_values = dataclasses.replace(self.default_input_values, height=480, width=848)
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import HunyuanVideo15Pipeline, HunyuanVideo15ImageToVideoPipeline

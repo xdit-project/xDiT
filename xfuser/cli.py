@@ -7,6 +7,7 @@ training support, equivalent to:
 
 """
 
+import argparse
 import math
 import sys
 import os
@@ -24,46 +25,58 @@ TORCHRUN_ARGS = {
 }
 
 
+# Runner flags whose product is the number of processes the run needs.
+DEGREE_ARGS = (
+    "--ulysses_degree",
+    "--tensor_parallel_degree",
+    "--ring_degree",
+    "--pipefusion_parallel_degree",
+    "--data_parallel_degree",
+)
+
+
+def _spellings(flag: str) -> List[str]:
+    """The runner's parser accepts each flag with underscores or dashes."""
+    return [flag, "--" + flag[2:].replace("_", "-")]
+
+
+def _degree_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    for flag in DEGREE_ARGS:
+        parser.add_argument(*_spellings(flag), dest=flag[2:], type=int, default=1)
+    parser.add_argument(*_spellings("--use_cfg_parallel"), dest="use_cfg_parallel", action="store_true")
+    return parser
+
+
 def get_nproc_from_args(args: List[str]) -> int:
     """
-    Infer the number of processes from the command line arguments.
+    Infer the total number of processes from the runner's parallel degrees.
     """
-    degree_args = [
-        "--ulysses_degree",
-        "--tensor_parallel_degree",
-        "--ring_degree",
-        "--pipefusion_parallel_degree",
-        "--data_parallel_degree",
-    ]
-    degree_args = degree_args + [arg.replace("_", "-") for arg in degree_args]
-    degrees = []
-    i = 0
-    while i < len(args):
-        arg = args[i]
-        matched = False
+    parsed, _ = _degree_parser().parse_known_args(args)
+    degrees = [getattr(parsed, flag[2:]) for flag in DEGREE_ARGS]
+    cfg_degree = 2 if parsed.use_cfg_parallel else 1
+    return math.prod(degrees) * cfg_degree
 
-        # Check for --arg=value format
-        for prefix in degree_args:
-            if arg.startswith(f"{prefix}="):
-                degrees.append(int(arg.split("=", 1)[1]))
-                matched = True
-                break
 
-        if not matched:
-            # Check for --arg value format
-            for prefix in degree_args:
-                if arg == prefix and i + 1 < len(args):
-                    degrees.append(int(args[i + 1]))
-                    i += 1  # Skip the value
-                    break
-
-        # Check for --use_cfg_parallel
-        if arg == "--use_cfg_parallel" or arg == "--use_cfg_parallel=True":
-            degrees.append(2)  # Assume 2 for cfg parallel if enabled
-
-        i += 1
-
-    return math.prod(degrees) if degrees else 1
+def get_nproc_per_node(args: List[str], nnodes: str) -> int:
+    """
+    The processes each node starts so that all nodes together run the
+    product of the parallel degrees.
+    """
+    try:
+        num_nodes = int(nnodes)
+    except ValueError:
+        raise ValueError(
+            f"Cannot infer --nproc_per_node from --nnodes={nnodes}; pass --nproc_per_node explicitly."
+        ) from None
+    if num_nodes < 1:
+        raise ValueError(f"--nnodes must be at least 1, got {nnodes}.")
+    total = get_nproc_from_args(args)
+    if total % num_nodes != 0:
+        raise ValueError(
+            f"The parallel degrees need {total} processes, which cannot be split evenly across --nnodes={num_nodes}."
+        )
+    return total // num_nodes
 
 
 def extract_torchrun_args(args: List[str]) -> Tuple[dict, List[str]]:
@@ -115,7 +128,11 @@ def main(args: Optional[List[str]] = None) -> None:
 
     # Infer nproc if not explicitly provided
     if torchrun_values["--nproc_per_node"] is None:
-        torchrun_values["--nproc_per_node"] = str(get_nproc_from_args(runner_args))
+        try:
+            nproc_per_node = get_nproc_per_node(runner_args, torchrun_values["--nnodes"])
+        except ValueError as error:
+            sys.exit(f"xdit: {error}")
+        torchrun_values["--nproc_per_node"] = str(nproc_per_node)
 
     runner_module = "xfuser.runner"
 

@@ -71,10 +71,6 @@ def _joint_sp_padding_attention_kwargs(query, encoder_query):
     return {"valid_kv_len": ulysses_size * local_sequence - pad}
 
 
-if HAS_LONG_CTX_ATTN:
-    pass
-
-
 def is_v100():
     if not torch.cuda.is_available():
         return False

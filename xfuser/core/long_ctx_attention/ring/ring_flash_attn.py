@@ -97,7 +97,7 @@ def xdit_ring_flash_attn_forward(
     window_size=(-1, -1),
     alibi_slopes=None,
     deterministic=False,
-    attn_type=AttnType.FA,
+    attn_type=None,
     attn_processor=None,
     attn_layer=None,
     joint_tensor_key=None,
@@ -107,6 +107,8 @@ def xdit_ring_flash_attn_forward(
     k_descale=None,
     v_descale=None,
 ):
+    if attn_type is None:
+        attn_type = AttnType.FA
     is_joint = False
     if joint_tensor_key is not None and joint_tensor_value is not None:
         supported_joint_strategy = ["front", "rear"]
@@ -307,28 +309,16 @@ class xFuserRingFlashAttnFunc(RingFlashAttnFunc):
         #              attn_type, attn_processor, attn_layer, joint_tensor_key,
         #              joint_tensor_value, joint_strategy, q_descale, k_descale,
         #              v_descale)
+        # fmt: off
         return (
-            dq,
-            dk,
-            dv,  # Gradients for q, k, v
-            None,
-            None,
-            None,
-            None,  # dropout_p, softmax_scale, causal, window_size
-            None,
-            None,
-            None,
-            None,  # alibi_slopes, deterministic, return_softmax, group
-            None,
-            None,  # attn_type, attn_processor
-            None,
-            None,
-            None,
-            None,  # attn_layer, joint_tensor_key, joint_tensor_value, joint_strategy
-            None,
-            None,
-            None,  # q_descale, k_descale, v_descale
+            dq, dk, dv,        # Gradients for q, k, v
+            None, None, None, None,  # dropout_p, softmax_scale, causal, window_size
+            None, None, None, None,  # alibi_slopes, deterministic, return_softmax, group
+            None, None,              # attn_type, attn_processor
+            None, None, None, None, # attn_layer, joint_tensor_key, joint_tensor_value, joint_strategy
+            None, None, None,       # q_descale, k_descale, v_descale
         )
+        # fmt: on
 
 
 def xdit_ring_flash_attn_func(
@@ -343,7 +333,7 @@ def xdit_ring_flash_attn_func(
     deterministic=False,
     return_attn_probs=False,
     group=None,
-    attn_type=AttnType.FA,
+    attn_type=None,
     attn_processor=None,
     attn_layer=None,
     joint_tensor_key=None,
@@ -353,6 +343,8 @@ def xdit_ring_flash_attn_func(
     k_descale=None,
     v_descale=None,
 ):
+    if attn_type is None:
+        attn_type = AttnType.FA
     return xFuserRingFlashAttnFunc.apply(
         q,
         k,

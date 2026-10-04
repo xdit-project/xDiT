@@ -4,15 +4,32 @@ import torch
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
 import xfuser.envs as envs
 
-if torch.cuda.is_available() or envs._is_npu():
-    from yunchang.ring.utils import RingComm, update_npu_out
-    from yunchang.ring.ring_npu_flash_attn import RingNpuFlashAttnFunc
+# The NPU ring helpers are imported only on NPU hosts: ``update_npu_out`` is in
+# no PyPI release of yunchang, so CUDA users with ``pip install yunchang`` must
+# still be able to import this package. Upstream later renamed it to
+# ``ring_npu_attention_out_update``, which is not a drop-in replacement (the
+# prev/cur arguments are swapped and the softmax statistics lose their trailing
+# dimension), so it is deliberately not used as a fallback here.
+if envs._is_npu():
+    from yunchang.ring.utils import RingComm
     from yunchang.kernels import select_flash_attn_impl, AttnType
+
+    try:
+        from yunchang.ring.utils import update_npu_out
+        from yunchang.ring.ring_npu_flash_attn import RingNpuFlashAttnFunc
+    except ImportError as e:
+        raise ImportError(
+            "xDiT ring attention on NPU requires a yunchang build that provides "
+            "`yunchang.ring.utils.update_npu_out`, which is not in any PyPI "
+            "release. Install it with: pip install "
+            "'yunchang @ git+https://github.com/feifeibear/long-context-attention.git@56118e0'"
+        ) from e
 else:
     RingComm = object
-    RingNPUFlashAttnFunc = object
+    RingNpuFlashAttnFunc = object
     AttnType = None
     select_flash_attn_impl = None
+    update_npu_out = None
 
 try:
     import flash_attn
@@ -31,13 +48,15 @@ def xdit_ring_npu_flash_attn_forward(
     layout=None,
     softmax_scale=None,
     causal=True,
-    attn_type=AttnType.NPU,
+    attn_type=None,
     attn_processor=None,
     attn_layer=None,
     joint_tensor_key=None,
     joint_tensor_value=None,
     joint_strategy="none",
 ):
+    if attn_type is None:
+        attn_type = AttnType.NPU
     is_joint = False
     if joint_tensor_key is not None and joint_tensor_value is not None:
         supported_joint_strategy = ["front", "rear"]
@@ -183,23 +202,15 @@ class xFuserRingNpuFlashAttnFunc(RingNpuFlashAttnFunc):
         #              return_softmax, group,
         #              attn_type, attn_processor, attn_layer,
         #              joint_tensor_key, joint_tensor_value, joint_strategy)
+        # fmt: off
         return (
-            dq,
-            dk,
-            dv,  # Gradients for q, k, v
-            None,
-            None,
-            None,
-            None,  # head_num, layout, softmax_scale, causal
-            None,
-            None,  # return_softmax, group
-            None,
-            None,
-            None,  # attn_type, attn_processor, attn_layer
-            None,
-            None,
-            None,  # joint_tensor_key, joint_tensor_value, joint_strategy
+            dq, dk, dv,  # Gradients for q, k, v
+            None, None, None, None,  # head_num, layout, softmax_scale, causal
+            None, None,              # return_softmax, group
+            None, None, None,        # attn_type, attn_processor, attn_layer
+            None, None, None,        # joint_tensor_key, joint_tensor_value, joint_strategy
         )
+        # fmt: on
 
 
 def xdit_ring_npu_flash_attn_func(
@@ -214,7 +225,7 @@ def xdit_ring_npu_flash_attn_func(
     deterministic=False,
     return_attn_probs=False,
     group=None,
-    attn_type=AttnType.NPU,
+    attn_type=None,
     attn_processor=None,
     attn_layer=None,
     joint_tensor_key=None,
@@ -224,6 +235,8 @@ def xdit_ring_npu_flash_attn_func(
     k_descale=None,
     v_descale=None,
 ):
+    if attn_type is None:
+        attn_type = AttnType.NPU
     head_num = q.shape[-2]
     layout = "BSND"
     if softmax_scale is None:

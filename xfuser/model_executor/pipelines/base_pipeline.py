@@ -547,21 +547,27 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         step: int,
         t: torch.Tensor,
         patch_latents: List[torch.Tensor],
+        *,
         patch_dim: int,
-        step_locals: Dict[str, Any],
+        step_tensors: Dict[str, torch.Tensor],
     ) -> None:
         """Run ``callback_on_step_end`` once per PipeFusion async step.
 
         Only the last pipeline stage holds denoised latents. By the end of a step it
         has already sent every patch on to the next step, so the callback sees the
-        step's latents but cannot replace them.
+        step's latents but cannot replace them. ``step_tensors`` holds the other
+        callback tensor inputs this pipeline's async loop can provide.
         """
         if callback_on_step_end is None or not is_pipeline_last_stage():
             return
-        callback_kwargs = {
-            k: torch.cat(patch_latents, dim=patch_dim) if k == "latents" else step_locals[k]
-            for k in callback_on_step_end_tensor_inputs
-        }
+        step_tensors = {**step_tensors, "latents": torch.cat(patch_latents, dim=patch_dim)}
+        missing = [k for k in callback_on_step_end_tensor_inputs if k not in step_tensors]
+        if missing:
+            raise ValueError(
+                f"callback_on_step_end_tensor_inputs {missing} are not available in the PipeFusion "
+                f"loop; available: {sorted(step_tensors)}"
+            )
+        callback_kwargs = {k: step_tensors[k] for k in callback_on_step_end_tensor_inputs}
         callback_outputs = callback_on_step_end(self, step, t, callback_kwargs)
         replaced = [
             k for k, v in (callback_outputs or {}).items() if k in callback_kwargs and v is not callback_kwargs[k]

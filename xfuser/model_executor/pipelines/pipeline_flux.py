@@ -621,8 +621,8 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
                 i + num_pipeline_warmup_steps,
                 t,
                 patch_latents,
-                -2,
-                locals(),
+                patch_dim=-2,
+                step_tensors={"prompt_embeds": prompt_embeds},
             )
 
             if i == len(timesteps) - 1 or (

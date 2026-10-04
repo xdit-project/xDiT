@@ -348,6 +348,13 @@ class xFuserModel(abc.ABC):
     fps: int = 0
     checkpoint_request_defaults: dict = {}
 
+    # Attention heads of the model's transformer(s). When set, a --ulysses_degree that
+    # does not divide it is refused while validating the config, before any weights are
+    # downloaded or loaded; runtime_state re-checks it against the loaded model. A runner
+    # whose registered names differ in head count sets it per instance in
+    # _customize_settings.
+    attention_heads: Optional[int] = None
+
     # Lowest diffusers release this model is expected to run on, used only to name an
     # upgrade target when a load fails. It never gates a load, so a value above the
     # true minimum costs an over-stated recommendation and blocks nothing, while a
@@ -615,6 +622,15 @@ class xFuserModel(abc.ABC):
         """Validate if the model supports requested config"""
         config._validate_gemm_quantization_flags()
         _validate_attention_head_dims(self, config)
+        heads = self.attention_heads
+        ulysses_degree = config.ulysses_degree or 1
+        if heads and heads % ulysses_degree != 0:
+            divisors = ", ".join(str(d) for d in range(1, heads + 1) if heads % d == 0)
+            raise ValueError(
+                f"{self.settings.model_name} has {heads} attention heads, so "
+                f"--ulysses_degree must divide {heads} ({divisors}); got {ulysses_degree}. "
+                f"Use --ring_degree to scale sequence parallelism further."
+            )
         for key in ModelCapabilities.__annotations__.keys():
             config_value = getattr(
                 config, key, None

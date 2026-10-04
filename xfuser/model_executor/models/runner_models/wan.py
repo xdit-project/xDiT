@@ -88,6 +88,9 @@ def _build_attention_kwargs(config: "xFuserArgs") -> dict:
 class xFuserWanModel(xFuserModel):
     """Common lifecycle hooks for Wan runners."""
 
+    # Every 14B and A14B Wan transformer; runners for other sizes override it.
+    attention_heads = 40
+
     def prepare_run(self, input_args: dict) -> None:
         super().prepare_run(input_args)
         get_runtime_state().reset_vsa_schedule_state(int(input_args["num_inference_steps"]))
@@ -838,6 +841,8 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
 @register_model("Wan-AI/Wan2.2-TI2V-5B-Diffusers")
 @register_model("Wan2.2-TI2V")
 class xFuserWan22TI2VModel(xFuserWan21T2VModel):
+    attention_heads = 24
+
     load_support = LoadSupport(
         meta_transformers=("transformer",),
         meta_text_encoders=("text_encoder",),
@@ -1049,6 +1054,7 @@ class xFuserWan21VACEModel(xFuserWanModel):
         else:
             self.settings.model_name = "Wan-AI/Wan2.1-VACE-1.3B-diffusers"
             self.settings.output_name = "wan.2.1_vace_1.3b"
+            self.attention_heads = 12
         # Only cache `blocks`; vace_blocks have a different forward pattern not supported by cache-dit.
         self.settings.step_cache_config = {
             "dbcache": DBCacheSettings(

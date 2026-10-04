@@ -324,12 +324,6 @@ class xFuserIdeogram4Model(xFuserModel):
         },
     )
 
-    def _validate_config(self, config) -> None:
-        super()._validate_config(config)
-        heads = self.attention_heads
-        if heads % config.ulysses_degree != 0:
-            raise ValueError(f"Ideogram 4 has {heads} attention heads, so --ulysses_degree must divide {heads}.")
-
     def _validate_args(self, input_args: dict) -> None:
         super()._validate_args(input_args)
         height = input_args["height"]

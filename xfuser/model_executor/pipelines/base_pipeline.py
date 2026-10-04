@@ -619,10 +619,10 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
     def _get_dp_last_group(self, dp_rank_list: List[int]):
         """Return the process group of the DP-last ranks, creating it once.
 
-        ``new_group`` is collective over the whole world and every call adds a
-        communicator, so it must not run per request. Every rank reaches this
-        with the same all-gathered rank list, so all ranks hit or miss the
-        cache together and the collective order stays identical across ranks.
+        ``new_group`` is collective and every call adds a communicator, so it
+        must not run per request. Every caller derives ``dp_rank_list`` from
+        the same all-gather, so all ranks hit or miss the cache together and
+        keep the same group-creation order.
         """
         # Bypass the wrapper's __getattr__, which forwards misses to the module.
         groups = self.__dict__.setdefault("_dp_last_groups", {})

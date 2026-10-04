@@ -45,7 +45,6 @@ from xfuser.core.fast_attention import (
     fast_attention_compression,
 )
 from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
-from xfuser.model_executor.schedulers.base_scheduler import xFuserSchedulerBaseWrapper
 
 from xfuser.envs import PACKAGES_CHECKER
 
@@ -54,7 +53,7 @@ from distvae.vae import parallelize_decoder
 PACKAGES_CHECKER.check_diffusers_version()
 
 # These imports follow the diffusers version check on purpose.
-from xfuser.model_executor.schedulers import xFuserSchedulerWrappersRegister  # noqa: E402
+from xfuser.model_executor.schedulers import xFuserSchedulerBaseWrapper, xFuserSchedulerWrappersRegister  # noqa: E402
 from xfuser.model_executor.models.transformers import xFuserTransformerWrappersRegister  # noqa: E402
 from xfuser.model_executor.layers.attention_processor import xFuserAttentionBaseWrapper  # noqa: E402
 from xfuser.model_executor.cache.adapters import apply_cache  # noqa: E402

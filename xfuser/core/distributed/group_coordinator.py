@@ -263,6 +263,8 @@ class GroupCoordinator:
         if dim < 0:
             # Convert negative dim to positive.
             dim += input_.dim()
+        # Collectives reject strided views; contiguous inputs are not copied.
+        input_ = input_.contiguous()
         # Allocate output tensor.
         if self.rank_in_group == dst:
             gather_list = [torch.empty_like(input_) for _ in range(world_size)]

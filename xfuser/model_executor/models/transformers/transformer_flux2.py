@@ -1,3 +1,4 @@
+import inspect
 import torch
 from typing import Optional, Tuple
 from diffusers.models.transformers.transformer_flux2 import (
@@ -403,6 +404,15 @@ class xFuserFlux2Transformer2DWrapper(Flux2Transformer2DModel):
         eps: float = 1e-6,
         guidance_embeds: bool = True,
     ):
+        # diffusers added guidance_embeds in 0.37, together with FLUX.2-klein, whose
+        # transformers have no guidance embedder. Earlier releases always build one, as
+        # FLUX.2-dev needs, and reject the argument, so leave it out for them. A
+        # request to drop the embedder is still passed on, and fails there, rather
+        # than silently building the wrong model.
+        guidance_kwargs = {"guidance_embeds": guidance_embeds}
+        base_params = inspect.signature(Flux2Transformer2DModel.__init__).parameters
+        if guidance_embeds and "guidance_embeds" not in base_params:
+            guidance_kwargs = {}
         super().__init__(
             patch_size=patch_size,
             in_channels=in_channels,
@@ -417,7 +427,7 @@ class xFuserFlux2Transformer2DWrapper(Flux2Transformer2DModel):
             axes_dims_rope=axes_dims_rope,
             rope_theta=rope_theta,
             eps=eps,
-            guidance_embeds=guidance_embeds,
+            **guidance_kwargs,
         )
 
         for block in self.transformer_blocks:

@@ -200,8 +200,9 @@ def _ring_worker(rank, world_size, init_method):
     # SDPA proper has no ring path; its memory-efficient kernel does.
     _, actual, messages = _run(rank, world_size, init_method, world_size, case, "SDPA_EFFICIENT")
     assert torch.isfinite(actual).all()
+    # Logged once, and only by rank 0.
     warnings = [m for m in messages if "Ring attention cannot apply the padding mask" in m]
-    assert len(warnings) == 1, messages
+    assert len(warnings) == (1 if rank == 0 else 0), messages
 
 
 @pytest.mark.multi_gpu

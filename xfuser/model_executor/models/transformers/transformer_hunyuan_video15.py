@@ -91,8 +91,7 @@ class xFuserHunyuanVideo15AttnProcessor:
             self.attention_kwargs["text_mask"] = attention_mask
             key_padding_mask = None
         else:
-            # The wrapper's [batch, keys] mask in the order the attention sees
-            # the keys, or None when every prompt has the same length.
+            # The wrapper's [batch, keys] mask, or None.
             key_padding_mask = attention_mask
         if get_sequence_parallel_world_size() > 1:
             if get_runtime_state().split_text_embed_in_sp:
@@ -410,12 +409,12 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
         sin = self._chunk_and_pad_sequence(sin, sp_world_rank, sp_world_size, hidden_states_pad_amount, dim=0)
         image_rotary_emb = (cos, sin)
 
-        # The dense attention masks each sample's padded text out of the keys.
-        # With the SDPA backend it keeps the stock layout, every text column
-        # with the same mask, so the output matches diffusers bit for bit.
-        # Other backends ignore masks: drop the text columns that no sample
-        # attends to, so a mask (and the SDPA fallback) is needed only for
-        # prompts of different lengths. Ring attention cannot apply a mask.
+        # With SDPA, keep every text column under the mask, as the stock model
+        # does, so the output is bit-identical to diffusers. This costs speed
+        # even for a single prompt: the padded text columns, most of the text
+        # for a short prompt, stay in as masked keys. Other backends ignore
+        # masks, so drop the columns no sample uses and mask only prompts of
+        # different lengths. Ring attention cannot apply a mask.
         keep_padded_text = (
             self.attention_kwargs is None
             and get_runtime_state().attention_backend == AttentionBackendType.SDPA
@@ -451,13 +450,15 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
             encoder_hidden_states = torch.chunk(encoder_hidden_states, sp_world_size, dim=1)[sp_world_rank]
 
         if self.attention_kwargs is None:
-            # The dense attention takes the key mask in place of the text mask.
-            encoder_attention_mask = self._key_padding_mask(
+            key_padding_mask = self._key_padding_mask(
                 encoder_attention_mask,
                 image_tokens,
                 sp_world_size,
                 split_text=get_runtime_state().split_text_embed_in_sp,
             )
+            attention_mask = key_padding_mask
+        else:
+            attention_mask = encoder_attention_mask
 
         # 4. Transformer blocks
         if torch.is_grad_enabled() and self.gradient_checkpointing:
@@ -467,7 +468,7 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
                     hidden_states,
                     encoder_hidden_states,
                     temb,
-                    encoder_attention_mask,
+                    attention_mask,
                     image_rotary_emb,
                 )
 
@@ -477,7 +478,7 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
                     hidden_states,
                     encoder_hidden_states,
                     temb,
-                    encoder_attention_mask,
+                    attention_mask,
                     image_rotary_emb,
                 )
 

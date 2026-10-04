@@ -35,6 +35,28 @@ from .register import xFuserPipelineWrapperRegister
 logger = init_logger(__name__)
 
 
+def _image_rotary_emb(transformer, height: int, width: int, device) -> Tuple[torch.Tensor, torch.Tensor]:
+    """The (cos, sin) 2-D RoPE of the image tokens, as tensors on ``device``.
+
+    get_2d_rotary_pos_embed defaults to output_type="np", whose removal
+    diffusers enforces from 0.33.0 -- the oldest release xDiT supports -- so
+    the default raises. Build it the way the stock diffusers pipeline does,
+    through the tensor path every supported release has.
+    """
+    patch_size = transformer.config.patch_size
+    grid_height = height // 8 // patch_size
+    grid_width = width // 8 // patch_size
+    base_size = 512 // 8 // patch_size
+    grid_crops_coords = get_resize_crop_region_for_grid((grid_height, grid_width), base_size)
+    return get_2d_rotary_pos_embed(
+        transformer.inner_dim // transformer.num_heads,
+        grid_crops_coords,
+        (grid_height, grid_width),
+        device=device,
+        output_type="pt",
+    )
+
+
 @xFuserPipelineWrapperRegister.register(HunyuanDiTPipeline)
 class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
     @classmethod
@@ -313,15 +335,7 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
 
         # 7 create image_rotary_emb, style embedding & time ids
-        grid_height = height // 8 // self.transformer.config.patch_size
-        grid_width = width // 8 // self.transformer.config.patch_size
-        base_size = 512 // 8 // self.transformer.config.patch_size
-        grid_crops_coords = get_resize_crop_region_for_grid((grid_height, grid_width), base_size)
-        image_rotary_emb = get_2d_rotary_pos_embed(
-            self.transformer.inner_dim // self.transformer.num_heads,
-            grid_crops_coords,
-            (grid_height, grid_width),
-        )
+        image_rotary_emb = _image_rotary_emb(self.transformer, height, width, device)
 
         style = torch.tensor([0], device=device)
 

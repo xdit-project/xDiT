@@ -1,10 +1,10 @@
 """Sequence-parallel transformer wrappers match the single-device model for any token count.
 
 When the token count does not divide the sequence parallel degree, the wrappers
-zero-pad the sequence before sharding it. Every case here compares a parallel
-wrapper against the stock diffusers transformer with the same tiny random
-weights, so a padded token that leaks into the attention keys shows up as a
-mismatch.
+zero-pad the sequence before sharding it, and a batch of prompts of different
+lengths pads the shorter prompts. Every case here compares a parallel wrapper
+against the stock diffusers transformer with the same tiny random weights, so a
+padded token that leaks into the attention keys shows up as a mismatch.
 """
 
 import functools
@@ -163,7 +163,11 @@ def _qwen_image(device, tokens):
         xFuserQwenImageTransformerWrapper,
     )
 
+    # text_tokens is a prompt length, or one per batch item, padded to the
+    # longest and masked as the pipeline does.
     (height, width), text_tokens = tokens
+    prompt_lengths = text_tokens if isinstance(text_tokens, tuple) else (text_tokens,)
+    batch, text_len = len(prompt_lengths), max(prompt_lengths)
     config = dict(
         patch_size=2,
         in_channels=16,
@@ -178,12 +182,15 @@ def _qwen_image(device, tokens):
     parallel = xFuserQwenImageTransformerWrapper(**config)
     generator = torch.Generator().manual_seed(0)
     inputs = dict(
-        hidden_states=_randn(generator, device, 1, height * width, 16),
-        encoder_hidden_states=_randn(generator, device, 1, text_tokens, 16),
-        timestep=torch.tensor([0.5], device=device),
-        img_shapes=[[(1, height, width)]],
+        hidden_states=_randn(generator, device, batch, height * width, 16),
+        encoder_hidden_states=_randn(generator, device, batch, text_len, 16),
+        timestep=torch.full((batch,), 0.5, device=device),
+        img_shapes=[[(1, height, width)]] * batch,
         return_dict=False,
     )
+    if batch > 1:
+        lengths = torch.tensor(prompt_lengths)[:, None]
+        inputs["encoder_hidden_states_mask"] = (torch.arange(text_len) < lengths).to(device)
     return reference, parallel, inputs, inputs
 
 
@@ -234,7 +241,9 @@ def _z_image(device, tokens):
         xFuserZImageTransformer2DWrapper,
     )
 
+    # text_tokens is a caption length, or one per batch item.
     (height, width), text_tokens = tokens
+    caption_lengths = text_tokens if isinstance(text_tokens, tuple) else (text_tokens,)
     config = dict(
         all_patch_size=(2,),
         all_f_patch_size=(1,),
@@ -246,15 +255,16 @@ def _z_image(device, tokens):
         n_kv_heads=_HEADS,
         cap_feat_dim=16,
         axes_dims=[4, 6, 6],
-        axes_lens=[64, 64, 64],
+        # Long enough for the image positions after a 96-token caption.
+        axes_lens=[128, 64, 64],
     )
     reference = ZImageTransformer2DModel(**config)
     parallel = xFuserZImageTransformer2DWrapper(**config)
     generator = torch.Generator().manual_seed(0)
     inputs = dict(
-        x=[_randn(generator, device, 4, 1, 2 * height, 2 * width)],
-        t=torch.tensor([0.5], device=device),
-        cap_feats=[_randn(generator, device, text_tokens, 16)],
+        x=[_randn(generator, device, 4, 1, 2 * height, 2 * width) for _ in caption_lengths],
+        t=torch.full((len(caption_lengths),), 0.5, device=device),
+        cap_feats=[_randn(generator, device, length, 16) for length in caption_lengths],
         return_dict=False,
     )
     return reference, parallel, inputs, inputs
@@ -405,6 +415,12 @@ _PARITY_CASES = [
     pytest.param("qwen_image", 2, ((5, 5), 8), id="qwen_image-padded-image"),
     pytest.param("qwen_image", 2, ((4, 6), 7), id="qwen_image-replicated-text"),
     pytest.param("qwen_image", 3, ((5, 5), 7), id="qwen_image-padded-image-replicated-text"),
+    # A batch of two prompts of different lengths, padded and masked.
+    pytest.param("qwen_image", 2, ((4, 6), (8, 5)), id="qwen_image-batched"),
+    pytest.param("qwen_image", 2, ((5, 5), (8, 5)), id="qwen_image-batched-padded-image"),
+    pytest.param("qwen_image", 2, ((4, 6), (7, 3)), id="qwen_image-batched-replicated-text"),
+    pytest.param("qwen_image", 3, ((5, 5), (9, 4)), id="qwen_image-batched-padded-image-u3"),
+    pytest.param("qwen_image", 3, ((5, 5), (7, 4)), id="qwen_image-batched-padded-image-replicated-text-u3"),
     # FLUX.2: (image tokens, text tokens); its wrapper shards the text evenly.
     pytest.param("flux2", 2, (16, 8), id="flux2-divisible"),
     pytest.param("flux2", 2, (15, 8), id="flux2-padded"),
@@ -413,6 +429,12 @@ _PARITY_CASES = [
     # that do not divide 32 need sequence-parallel padding.
     pytest.param("z_image", 2, ((4, 4), 10), id="z_image-divisible"),
     pytest.param("z_image", 3, ((4, 4), 10), id="z_image-padded-u3"),
+    # Two captions of different lengths, 32 and 64 tokens once padded to a
+    # multiple of 32, or 32 and 96: the caption and unified streams are masked,
+    # and at Ulysses 3 one or both of them are padded as well.
+    pytest.param("z_image", 2, ((4, 4), (10, 40)), id="z_image-batched"),
+    pytest.param("z_image", 3, ((4, 4), (10, 40)), id="z_image-batched-padded-caption-u3"),
+    pytest.param("z_image", 3, ((4, 4), (10, 70)), id="z_image-batched-padded-unified-u3"),
     # Cosmos3: ((frames, height, width) gen tokens, und tokens, KV heads). The
     # und tokens are replicated on every rank; grouped-query attention as in
     # the released checkpoints.
@@ -470,3 +492,30 @@ def _ring_padding_worker(rank, world_size, init_method):
 @pytest.mark.multi_gpu
 def test_ring_with_padding_warns_once_and_runs(accelerator_ranks):
     accelerator_ranks(_ring_padding_worker, world_size=2)
+
+
+def _ring_key_padding_mask_worker(rank, world_size, init_method):
+    engine_config = _init(rank, world_size, init_method, ulysses=1, ring=world_size)
+    records = _Records()
+    logging.getLogger("xfuser.model_executor.layers.usp").addHandler(records)
+    try:
+        device = torch.device("cuda", rank)
+        # Captions of 64 and 32 tokens: masked caption and unified streams, no
+        # sequence-parallel padding, and at least 32 queries per rank.
+        _, parallel, _, inputs = _build("z_image", ((8, 8), (40, 20)), device, engine_config, world_size)
+        with torch.no_grad():
+            first = parallel(**inputs)[0]
+            second = parallel(**inputs)[0]
+        assert [x.shape for x in first] == [x.shape for x in inputs["x"]]
+        assert all(torch.isfinite(x).all() for x in first)
+        torch.testing.assert_close(first, second)
+        warnings = [m for m in records.messages if "Ring attention cannot apply the padding mask" in m]
+        assert len(warnings) == 1, records.messages
+    finally:
+        destroy_model_parallel()
+        destroy_distributed_environment()
+
+
+@pytest.mark.multi_gpu
+def test_ring_with_batched_prompts_warns_once_and_runs(accelerator_ranks):
+    accelerator_ranks(_ring_key_padding_mask_worker, world_size=2)

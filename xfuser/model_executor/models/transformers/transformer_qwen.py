@@ -13,7 +13,7 @@ from diffusers.utils import (
     scale_lora_layers,
     unscale_lora_layers,
 )
-from xfuser.model_executor.layers.usp import USP, sp_padding_attention_kwargs
+from xfuser.model_executor.layers.usp import USP, key_padding_mask_attention_kwargs, sp_padding_attention_kwargs
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
 from xfuser.core.distributed import (
     get_sequence_parallel_rank,
@@ -56,7 +56,8 @@ class xFuserQwenDoubleStreamAttnProcessor:
     ) -> torch.FloatTensor:
         """``sp_padding`` image tokens were zero-padded for sequence parallelism.
         With ``sp_replicated_text`` every rank holds the whole prompt rather than
-        a shard of it."""
+        a shard of it. ``attention_mask``, when the prompts are padded, is the
+        wrapper's [batch, keys] mask in the order the attention sees the keys."""
 
         seq_txt = encoder_hidden_states.shape[1]
 
@@ -111,6 +112,11 @@ class xFuserQwenDoubleStreamAttnProcessor:
                 txt_query = apply_rotary_emb_qwen(txt_query, txt_freqs, use_real=False)
                 txt_key = apply_rotary_emb_qwen(txt_key, txt_freqs, use_real=False)
 
+        local_kv_len = img_key.shape[1] if sp_replicated_text else seq_txt + img_key.shape[1]
+        attention_kwargs, backend = key_padding_mask_attention_kwargs(
+            attention_mask, sp_padding_attention_kwargs(local_kv_len, sp_padding)
+        )
+
         if sp_replicated_text:
             # Attend to the replicated prompt once, as joint tokens: left in the
             # sharded sequence its keys would be gathered once per rank. The
@@ -126,7 +132,8 @@ class xFuserQwenDoubleStreamAttnProcessor:
                 joint_value=txt_value.transpose(1, 2),
                 joint_strategy="front",
                 attn_layer=attn,
-                attention_kwargs=sp_padding_attention_kwargs(img_key.shape[1], sp_padding),
+                backend=backend,
+                attention_kwargs=attention_kwargs,
             ).transpose(1, 2)
             joint_dtype = img_query.dtype
         else:
@@ -145,7 +152,8 @@ class xFuserQwenDoubleStreamAttnProcessor:
                 dropout_p=0.0,
                 is_causal=False,
                 attn_layer=attn,
-                attention_kwargs=sp_padding_attention_kwargs(joint_key.shape[1], sp_padding),
+                backend=backend,
+                attention_kwargs=attention_kwargs,
             ).transpose(1, 2)
             joint_dtype = joint_query.dtype
 
@@ -262,7 +270,8 @@ class xFuserQwenImageTransformerWrapper(QwenImageTransformer2DModel):
 
         image_rotary_emb = self.pos_embed(img_shapes, max_txt_seq_len=text_seq_len, device=hidden_states.device)
 
-        pad_amount = (sp_world_size - (hidden_states.shape[1] % sp_world_size)) % sp_world_size
+        image_seq_len = hidden_states.shape[1]
+        pad_amount = (sp_world_size - (image_seq_len % sp_world_size)) % sp_world_size
         hidden_states = chunk_and_pad_sequence(hidden_states, sp_world_rank, sp_world_size, pad_amount, dim=1)
         # A prompt that does not split evenly is replicated rather than padded,
         # so no padded text token can act as a key.
@@ -287,10 +296,23 @@ class xFuserQwenImageTransformerWrapper(QwenImageTransformer2DModel):
         if replicated_text:
             block_attention_kwargs["sp_replicated_text"] = True
         if encoder_hidden_states_mask is not None:
-            # Build joint mask: [text_mask, all_ones_for_image]
-            batch_size, image_seq_len = hidden_states.shape[:2]
-            image_mask = torch.ones((batch_size, image_seq_len), dtype=torch.bool, device=hidden_states.device)
-            joint_attention_mask = torch.cat([encoder_hidden_states_mask, image_mask], dim=1)
+            # Mask the padded prompt tokens of a batch with prompts of different
+            # lengths, over the keys in the order the attention sees them: the
+            # replicated text first, or each rank's [text, image] keys in rank
+            # order. USP drops the image padding at their end, so the mask does too.
+            batch_size = encoder_hidden_states_mask.shape[0]
+            image_mask = encoder_hidden_states_mask.new_ones((batch_size, image_seq_len + pad_amount))
+            if replicated_text:
+                joint_attention_mask = torch.cat([encoder_hidden_states_mask, image_mask], dim=1)
+            else:
+                joint_attention_mask = torch.cat(
+                    [
+                        encoder_hidden_states_mask.view(batch_size, sp_world_size, -1),
+                        image_mask.view(batch_size, sp_world_size, -1),
+                    ],
+                    dim=2,
+                ).flatten(1)
+            joint_attention_mask = joint_attention_mask[:, : joint_attention_mask.shape[1] - pad_amount]
             block_attention_kwargs["attention_mask"] = joint_attention_mask
 
         for index_block, block in enumerate(self.transformer_blocks):

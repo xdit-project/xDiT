@@ -2,7 +2,7 @@ import inspect
 from typing import Any
 
 import torch
-from diffusers import QwenImageEditPipeline
+from diffusers import QwenImageEditPipeline, QwenImageEditPlusPipeline
 
 from xfuser.core.distributed import (
     get_cfg_group,
@@ -11,8 +11,8 @@ from xfuser.core.distributed import (
 )
 
 
-class xFuserQwenImageEditPipeline(QwenImageEditPipeline):
-    """Qwen-Image-Edit pipeline with distributed true-CFG branches."""
+class _TrueCfgParallelMixin:
+    """Run Qwen-Image-Edit's true-CFG branches on the two CFG parallel ranks."""
 
     @torch.no_grad()
     def __call__(self, *args: Any, **kwargs: Any):
@@ -58,3 +58,11 @@ class xFuserQwenImageEditPipeline(QwenImageEditPipeline):
             return parent_call(*call_args.args, **call_args.kwargs)
         finally:
             hook.remove()
+
+
+class xFuserQwenImageEditPipeline(_TrueCfgParallelMixin, QwenImageEditPipeline):
+    """Qwen-Image-Edit pipeline with distributed true-CFG branches."""
+
+
+class xFuserQwenImageEditPlusPipeline(_TrueCfgParallelMixin, QwenImageEditPlusPipeline):
+    """Qwen-Image-Edit-2509/2511 (Edit Plus) pipeline with distributed true-CFG branches."""

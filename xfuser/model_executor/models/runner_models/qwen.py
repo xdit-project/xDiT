@@ -88,9 +88,16 @@ class xFuserQwenImageEditModel(xFuserModel):
             self.settings.model_name = "Qwen/Qwen-Image-Edit-2509"
             self.settings.output_name = "qwen_image_edit_2509"
 
+    @property
+    def _is_edit_plus(self) -> bool:
+        # 2509 and 2511 are Edit Plus checkpoints: diffusers loads them with
+        # QwenImageEditPlusPipeline, which conditions on a list of images.
+        return self.settings.model_name in ("Qwen/Qwen-Image-Edit-2509", "Qwen/Qwen-Image-Edit-2511")
+
     def _load_model(self) -> DiffusionPipeline:
         from xfuser.model_executor.pipelines.pipeline_qwen_image_edit import (
             xFuserQwenImageEditPipeline,
+            xFuserQwenImageEditPlusPipeline,
         )
         from xfuser.model_executor.models.transformers.transformer_qwen import (
             xFuserQwenImageTransformerWrapper,
@@ -98,7 +105,8 @@ class xFuserQwenImageEditModel(xFuserModel):
 
         transformer = self.loader.load_transformer(xFuserQwenImageTransformerWrapper)
         te_kwargs, te_quant = self.loader.plan_text_encoders()
-        pipe = xFuserQwenImageEditPipeline.from_pretrained(
+        pipeline_cls = xFuserQwenImageEditPlusPipeline if self._is_edit_plus else xFuserQwenImageEditPipeline
+        pipe = pipeline_cls.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             transformer=transformer,
             torch_dtype=torch.bfloat16,
@@ -108,8 +116,9 @@ class xFuserQwenImageEditModel(xFuserModel):
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
+        images = input_args["input_images"]
         kwargs = {
-            "image": input_args["input_images"][0],
+            "image": images if self._is_edit_plus else images[0],
             "prompt": input_args["prompt"],
             "negative_prompt": input_args["negative_prompt"],
             "num_inference_steps": input_args["num_inference_steps"],
@@ -128,7 +137,10 @@ class xFuserQwenImageEditModel(xFuserModel):
         """Validate input arguments"""
         super()._validate_args(input_args)
         images = input_args.get("input_images", [])
-        if len(images) != 1:
+        if self._is_edit_plus:
+            if not images:
+                raise ValueError(f"At least one input image is required for {self.settings.model_name}.")
+        elif len(images) != 1:
             raise ValueError("Exactly one input image is required for Qwen Image Edit model.")
 
 

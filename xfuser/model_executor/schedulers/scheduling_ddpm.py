@@ -1,7 +1,6 @@
 from typing import Optional, Tuple, Union
 
 import torch
-import torch.distributed
 
 from diffusers.schedulers.scheduling_ddpm import (
     DDPMScheduler,
@@ -75,8 +74,10 @@ class xFuserDDPMSchedulerWrapper(xFuserSchedulerBaseWrapper):
             timestep,
             _gather_sequence_parallel_rows(sample),
             generator,
-            return_dict=return_dict,
+            return_dict=True,
         )
+        prev_sample = _local_rows(output.prev_sample)
+        pred_original_sample = _local_rows(output.pred_original_sample)
         if not return_dict:
-            return tuple(_local_rows(x) if isinstance(x, torch.Tensor) else x for x in output)
-        return type(output)(**{k: _local_rows(v) if isinstance(v, torch.Tensor) else v for k, v in output.items()})
+            return (prev_sample, pred_original_sample)
+        return DDPMSchedulerOutput(prev_sample=prev_sample, pred_original_sample=pred_original_sample)

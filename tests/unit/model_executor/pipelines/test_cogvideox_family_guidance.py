@@ -213,6 +213,7 @@ def _consisid_pipe():
 @pytest.mark.skipif(ConsisIDPipeline is None, reason="diffusers has no ConsisID")
 @pytest.mark.parametrize("guidance_scale", [1.0, 6.0])
 def test_consisid_matches_diffusers_with_and_without_guidance(guidance_scale):
+    pytest.importorskip("cv2", reason="ConsisIDPipeline requires OpenCV")
     from xfuser.model_executor.pipelines.pipeline_consisid import (
         xFuserConsisIDPipeline,
     )

@@ -11,6 +11,7 @@ from xfuser.core.distributed import (
 )
 
 from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanAttnProcessor
+from xfuser.model_executor.layers.usp import SequenceParallelPadding
 from xfuser.model_executor.models.transformers.transformers_utils import (
     chunk_and_pad_sequence,
     gather_and_unpad,
@@ -60,14 +61,15 @@ class xFuserWanVACETransformer3DWrapper(WanVACETransformer3DModel):
             vace_in_channels,
         )
 
+        self.sp_padding = SequenceParallelPadding()
         for block in self.blocks:
-            block.attn1.processor = xFuserWanAttnProcessor()
+            block.attn1.processor = xFuserWanAttnProcessor(sp_padding=self.sp_padding)
             block.attn2.processor = xFuserWanAttnProcessor(
                 use_ulysses_parallel_attention=False, is_cross_attention=True
             )
 
         for block in self.vace_blocks:
-            block.attn1.processor = xFuserWanAttnProcessor()
+            block.attn1.processor = xFuserWanAttnProcessor(sp_padding=self.sp_padding)
             block.attn2.processor = xFuserWanAttnProcessor(
                 use_ulysses_parallel_attention=False, is_cross_attention=True
             )
@@ -118,6 +120,7 @@ class xFuserWanVACETransformer3DWrapper(WanVACETransformer3DModel):
         control_hidden_states = torch.cat([control_hidden_states, control_hidden_states_padding], dim=1)
 
         pad_amount = (sp_world_size - (hidden_states.shape[1] % sp_world_size)) % sp_world_size
+        self.sp_padding.tokens = pad_amount
         hidden_states = chunk_and_pad_sequence(hidden_states, sp_world_rank, sp_world_size, pad_amount, dim=1)
         control_hidden_states = chunk_and_pad_sequence(
             control_hidden_states, sp_world_rank, sp_world_size, pad_amount, dim=1

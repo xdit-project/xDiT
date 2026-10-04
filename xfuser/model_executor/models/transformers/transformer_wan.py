@@ -8,6 +8,7 @@ from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
 from xfuser.model_executor.layers.usp import (
     USP,
+    SequenceParallelPadding,
     attention,
 )
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
@@ -36,6 +37,7 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
         use_ulysses_parallel_attention: bool = True,
         is_cross_attention: bool = False,
         attention_kwargs: Optional[Dict[str, Any]] = None,
+        sp_padding: Optional[SequenceParallelPadding] = None,
     ) -> None:
         super().__init__()
         if use_ulysses_parallel_attention:
@@ -47,6 +49,9 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
         # (SSTA / sparge) to receive layout info like `thw`. Cross-attention and
         # the I2V image-context sub-call below are dense, so they don't read it.
         self.attention_kwargs = attention_kwargs
+        # Shared with the transformer wrapper, which records how many tokens it
+        # zero-padded for sequence parallelism so they are kept out of the keys.
+        self.sp_padding = sp_padding
 
     def _get_qkv_projections(
         self, attn: "WanAttention", hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor
@@ -136,12 +141,15 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
             hidden_states_img = hidden_states_img.flatten(2, 3)
             hidden_states_img = hidden_states_img.to(activation_dtype)
 
+        attention_kwargs = self.attention_kwargs
+        if self.sp_padding is not None:
+            attention_kwargs = self.sp_padding.attention_kwargs(key.shape[1], attention_kwargs)
         hidden_states = self.attention_function(
             query.transpose(1, 2),
             key.transpose(1, 2),
             value.transpose(1, 2),
             backend=backend,
-            attention_kwargs=self.attention_kwargs,
+            attention_kwargs=attention_kwargs,
             head_balance_layer=attn,
             attn_layer=None if self.is_cross_attention else attn,
         ).transpose(1, 2)
@@ -232,8 +240,11 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
             pos_embed_seq_len,
         )
         self.attention_kwargs = attention_kwargs
+        self.sp_padding = SequenceParallelPadding()
         for block in self.blocks:
-            block.attn1.processor = xFuserWanAttnProcessor(attention_kwargs=self.attention_kwargs)
+            block.attn1.processor = xFuserWanAttnProcessor(
+                attention_kwargs=self.attention_kwargs, sp_padding=self.sp_padding
+            )
             block.attn2.processor = xFuserWanAttnProcessor(
                 use_ulysses_parallel_attention=False, is_cross_attention=True
             )
@@ -349,6 +360,7 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
 
         # Part of sequence parallel: given the resolution, we may need to pad the sequence length to match this prior to chunking
         pad_amount = (sp_world_size - (hidden_states.shape[1] % sp_world_size)) % sp_world_size
+        self.sp_padding.tokens = pad_amount
         hidden_states = self._chunk_and_pad_sequence(hidden_states, sp_world_rank, sp_world_size, pad_amount, dim=1)
 
         if ts_seq_len is not None:  # (wan2.2 ti2v)

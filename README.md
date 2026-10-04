@@ -127,6 +127,7 @@ The following open-sourced DiT Models are released with xDiT in day 1.
 | [🟠 Flux 2](https://huggingface.co/black-forest-labs/FLUX.2-dev) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🟠 Flux](https://huggingface.co/black-forest-labs/FLUX.1-schnell) | NA | ✔️ | ✔️ | ❎ | ✔️ | [Report](./docs/performance/flux.md) |
 | [🟠 Flux Kontext](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) | ❎ | ✔️ |  ❎ | ❎ | ✔️ | NA |
+| [🟠 Chroma1-HD](https://huggingface.co/lodestones/Chroma1-HD) | ✔️ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🟢 Qwen Image](https://huggingface.co/Qwen/Qwen-Image-2512) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🟢 Qwen Image-Edit](https://huggingface.co/Qwen/Qwen-Image-Edit-2511) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🟢 Krea2-Raw](https://huggingface.co/krea/Krea-2-Raw) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |

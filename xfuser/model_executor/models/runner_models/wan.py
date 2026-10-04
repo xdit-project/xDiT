@@ -1107,6 +1107,13 @@ class xFuserWan21VACEModel(xFuserWanModel):
         input_args["mask"] = mask
         return input_args
 
+    def preprocess_args(self, input_args: dict) -> dict:
+        args = super().preprocess_args(input_args)
+        # --prompt arrives as a list; WanVACEPipeline only accepts a single string.
+        if isinstance(args.get("prompt"), list) and len(args["prompt"]) == 1:
+            args["prompt"] = args["prompt"][0]
+        return args
+
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         output = self.pipe(
             height=input_args["height"],
@@ -1125,6 +1132,9 @@ class xFuserWan21VACEModel(xFuserWanModel):
     def _validate_args(self, input_args: dict) -> None:
         """Validate input arguments"""
         super()._validate_args(input_args)
+        prompt = input_args["prompt"]
+        if isinstance(prompt, list) and len(prompt) != 1:
+            raise ValueError("Wan VACE supports one prompt per run; diffusers' WanVACEPipeline cannot batch prompts.")
         images = input_args.get("input_images", [])
         if len(images) != 2:
             raise ValueError("Exactly two input images are required for Wan VACE model (first frame and last frame).")

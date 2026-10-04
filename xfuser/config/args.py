@@ -1332,6 +1332,15 @@ class xFuserArgs:
             self.fully_shard_degree > 1 or self.memory_efficient_sharding or self.memory_efficient_replicated_load
         ):
             raise ValueError("A6W4 GEMMs currently support eager loading only.")
+        if not spec.is_tiered and (
+            self.fp8_precision_override_prefix_patterns is not None
+            or self.fp8_precision_override_suffix_patterns is not None
+        ):
+            raise ValueError(
+                "Precision override patterns require a tiered GEMM quantization profile, "
+                "such as --gemm_quantization low=fp4,high=fp8. "
+                "Use a tiered profile or drop the patterns."
+            )
         if self.use_fp8_text_encoder and "fp8" not in spec.formats:
             raise ValueError("--use_fp8_text_encoder requires a gemm_quantization profile containing FP8.")
         has_advanced_targets = (
@@ -1410,15 +1419,6 @@ class xFuserArgs:
         if self.group_offload_low_cpu_mem and not self.enable_group_cpu_offload:
             raise ValueError(
                 "--group_offload_low_cpu_mem only affects group CPU offload; pass --enable_group_cpu_offload too."
-            )
-
-        if (
-            self.fp8_precision_override_prefix_patterns is not None
-            or self.fp8_precision_override_suffix_patterns is not None
-        ) and not self.use_fp4_gemms:
-            raise ValueError(
-                "FP8 precision override patterns require --use_fp4_gemms: "
-                "overrides apply when quantizing linear layers for FP4 GEMMs."
             )
 
         model_config = ModelConfig(

@@ -1278,7 +1278,9 @@ class xFuserModel(abc.ABC):
         prompts = input_args.get("prompt")
         negative_prompts = input_args.get("negative_prompt")
 
-        if isinstance(prompts, str):
+        # --prompt takes nargs="*", so one prompt on the command line arrives
+        # as a one-element list.
+        if isinstance(prompts, str) or len(prompts) == 1:
             log(f"Single prompt with dp_world_size={dp_world_size}: all DP groups will process the same prompt.")
             return input_args
 

@@ -202,6 +202,14 @@ Note that we use two self-maintained packages:
 
 The [flash_attn](https://github.com/Dao-AILab/flash-attention) used for yunchang should be >= 2.6.0
 
+On Ascend NPU, ring attention needs `yunchang.ring.utils.update_npu_out`, which is not in any PyPI release of yunchang (checked up to 0.6.4). Install a yunchang commit that provides it:
+
+```
+pip install "yunchang @ git+https://github.com/feifeibear/long-context-attention.git@56118e0"
+```
+
+Later yunchang commits renamed that helper with a different signature and are not yet supported on NPU. CUDA and ROCm users can use the PyPI release.
+
 ### 3. Docker
 
 We provide a docker image for developers to develop with xDiT. The docker image is [thufeifeibear/xdit-dev](https://hub.docker.com/r/thufeifeibear/xdit-dev). For running with AMD GPUs (MI300X or newer), a monthly image with validated support for select models is available as well: [rocm/pytorch-xdit](https://hub.docker.com/r/rocm/pytorch-xdit)

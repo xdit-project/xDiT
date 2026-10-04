@@ -1,5 +1,6 @@
 """Spawned two-rank regressions: a load that fails must fail on every rank, not hang."""
 
+import importlib
 import queue
 import time
 import traceback
@@ -539,13 +540,53 @@ def _pinned_fp32_sharding_worker(rank, world_size, init_method, result_queue):
             dist.destroy_process_group()
 
 
+# A spawned rank first starts an interpreter and imports torch and xfuser, which can take minutes on a
+# slow filesystem. Each rank does that before the hang budget (``timeout``) starts, so the budget
+# covers only the collective under test.
+_STARTUP_TIMEOUT = 900
+_WORKER_IMPORTS = (
+    "torch.distributed",
+    "xfuser.core.distributed.sharding",
+    "xfuser.model_executor.layers.mxfp4_linear",
+    "xfuser.model_executor.models.runner_models.loading.meta_load",
+)
+
+
+def _import_then_run(ready_queue, worker, *args):
+    try:
+        for module in _WORKER_IMPORTS:
+            importlib.import_module(module)
+    except Exception:  # noqa: BLE001 - the worker repeats the import and reports the failure itself
+        pass
+    finally:
+        ready_queue.put(None)
+    worker(*args)
+
+
+def _wait_until_started(processes, ready_queue):
+    deadline = time.monotonic() + _STARTUP_TIMEOUT
+    started = 0
+    while started < len(processes) and time.monotonic() < deadline:
+        try:
+            ready_queue.get(timeout=1)
+            started += 1
+        except queue.Empty:
+            if not all(process.is_alive() for process in processes):
+                return
+
+
 def _run_spawned(torch, worker, init_method, *, timeout):
     context = torch.multiprocessing.get_context("spawn")
     result_queue = context.Queue()
-    processes = [context.Process(target=worker, args=(rank, 2, init_method, result_queue)) for rank in range(2)]
+    ready_queue = context.Queue()
+    processes = [
+        context.Process(target=_import_then_run, args=(ready_queue, worker, rank, 2, init_method, result_queue))
+        for rank in range(2)
+    ]
     for process in processes:
         process.start()
 
+    _wait_until_started(processes, ready_queue)
     deadline = time.monotonic() + timeout
     for process in processes:
         process.join(max(0.0, deadline - time.monotonic()))

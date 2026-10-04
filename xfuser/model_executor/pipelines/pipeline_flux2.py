@@ -135,6 +135,15 @@ class xFuserFlux2PipelineBase(xFuserPipelineBaseWrapper):
         if "guidance_scale" in inspect.signature(self.check_inputs).parameters:
             _check_inputs_kwargs["guidance_scale"] = guidance_scale
         self.check_inputs(**_check_inputs_kwargs)
+        # Undistilled klein (base) checkpoints apply classifier-free guidance in
+        # diffusers; this loop has no unconditional branch, so refuse rather than
+        # silently return an unguided image.
+        if guidance_scale > 1 and getattr(self.config, "is_distilled", True) is False:
+            raise NotImplementedError(
+                "This FLUX.2 klein checkpoint is not step-distilled and needs classifier-free guidance "
+                f"(guidance_scale={guidance_scale}), which xDiT's PipeFusion and sequence-parallel loop for "
+                "FLUX.2 does not implement. Pass guidance_scale<=1, or run without these parallel modes."
+            )
 
         self._guidance_scale = guidance_scale
         self._attention_kwargs = attention_kwargs

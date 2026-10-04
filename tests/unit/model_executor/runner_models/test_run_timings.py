@@ -1,5 +1,6 @@
 """xFuserModel.run reports the timings of the iterations it measured."""
 
+import itertools
 from types import SimpleNamespace
 
 import pytest
@@ -49,48 +50,29 @@ def _runner(monkeypatch, *, warmup_calls, num_iterations, batch_size=None):
     model._split_prompts_for_dp = lambda input_args: input_args
     model._gather_dp_outputs = lambda output: output
 
-    calls = []
+    call_number = itertools.count(1)
 
     def _run_timed_pipe(input_args):
-        calls.append(input_args["prompt"])
-        return DiffusionOutput(images=[len(calls)], pipe_args=[]), float(len(calls))
+        n = next(call_number)
+        return DiffusionOutput(images=[n], pipe_args=[]), float(n)
 
     model._run_timed_pipe = _run_timed_pipe
-    return model, calls
+    return model
 
 
-@pytest.mark.parametrize("warmup_calls", [1, 2])
-def test_warmup_calls_leave_every_measured_iteration_in_the_timings(monkeypatch, warmup_calls):
-    model, calls = _runner(monkeypatch, warmup_calls=warmup_calls, num_iterations=3)
+@pytest.mark.parametrize(
+    "warmup_calls, num_iterations, batch_size, prompt, expected",
+    [
+        pytest.param(1, 3, None, "p", [2.0, 3.0, 4.0], id="warmup-keeps-every-iteration"),
+        pytest.param(1, 1, 1, ["a", "b"], [2.0, 3.0], id="warmup-keeps-every-batch"),
+        pytest.param(0, 3, None, "p", [2.0, 3.0], id="no-warmup-drops-the-first-iteration"),
+        pytest.param(0, 1, None, "p", [1.0], id="no-warmup-keeps-a-single-iteration"),
+    ],
+)
+def test_run_reports_the_measured_timings(monkeypatch, warmup_calls, num_iterations, batch_size, prompt, expected):
+    # The stubbed pipe takes 1.0 s on its first call, 2.0 s on its second, and so on.
+    model = _runner(monkeypatch, warmup_calls=warmup_calls, num_iterations=num_iterations, batch_size=batch_size)
 
-    _, timings = model.run({"prompt": "p"})
+    _, timings = model.run({"prompt": prompt})
 
-    assert len(calls) == warmup_calls + 3
-    # The warmup calls took the first durations; all three measured ones remain.
-    assert timings == [float(warmup_calls + i) for i in (1, 2, 3)]
-
-
-def test_without_warmup_calls_the_first_iteration_is_left_out(monkeypatch):
-    model, _ = _runner(monkeypatch, warmup_calls=0, num_iterations=3)
-
-    _, timings = model.run({"prompt": "p"})
-
-    assert timings == [2.0, 3.0]
-
-
-def test_without_warmup_calls_a_single_iteration_is_kept(monkeypatch):
-    model, _ = _runner(monkeypatch, warmup_calls=0, num_iterations=1)
-
-    _, timings = model.run({"prompt": "p"})
-
-    assert timings == [1.0]
-
-
-def test_warmup_calls_keep_every_batch_of_a_batched_run(monkeypatch):
-    model, calls = _runner(monkeypatch, warmup_calls=1, num_iterations=1, batch_size=1)
-
-    _, timings = model.run({"prompt": ["a", "b"]})
-
-    # One warmup call on the first batch, then one timed call per batch.
-    assert calls == [["a"], ["a"], ["b"]]
-    assert timings == [2.0, 3.0]
+    assert timings == expected

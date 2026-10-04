@@ -14,6 +14,8 @@ def test_ring_degree_reaches_the_parallel_config(monkeypatch):
     # "parallel_world_size 2 must be equal to dit_parallel_size 4".
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
     monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 4)
+    # Only the configuration is built, so the sequence-parallel kit need not be installed.
+    monkeypatch.setattr("xfuser.config.config.HAS_LONG_CTX_ATTN", True)
     args = _parse("--world_size", "4", "--ulysses_parallel_degree", "2", "--ring_degree", "2")
 
     engine_config, _ = to_xfuser_args(args).create_config()

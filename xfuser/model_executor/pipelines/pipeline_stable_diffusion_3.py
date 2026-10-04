@@ -310,6 +310,34 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
 
         device = self._execution_device
 
+        # 3. Prepare timesteps first: the runtime state below needs their final count, which custom sigmas or
+        # timesteps can change. As in diffusers, `mu` comes from the latent size.
+        scheduler_kwargs = {}
+        if self.scheduler.config.get("use_dynamic_shifting", None) and mu is None:
+            patch_size = self.transformer.config.patch_size
+            latent_height = int(height) // self.vae_scale_factor
+            latent_width = int(width) // self.vae_scale_factor
+            image_seq_len = (latent_height // patch_size) * (latent_width // patch_size)
+            mu = calculate_shift(
+                image_seq_len,
+                self.scheduler.config.get("base_image_seq_len", 256),
+                self.scheduler.config.get("max_image_seq_len", 4096),
+                self.scheduler.config.get("base_shift", 0.5),
+                self.scheduler.config.get("max_shift", 1.16),
+            )
+        if mu is not None:
+            scheduler_kwargs["mu"] = mu
+        timesteps, num_inference_steps = retrieve_timesteps(
+            self.scheduler,
+            num_inference_steps,
+            device,
+            timesteps,
+            sigmas,
+            **scheduler_kwargs,
+        )
+        num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
+        self._num_timesteps = len(timesteps)
+
         #! ---------------------------------------- ADDED BELOW ----------------------------------------
         # * set runtime state input parameters
         get_runtime_state().set_input_parameters(
@@ -377,34 +405,7 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
             latents,
         )
 
-        # 5. Prepare timesteps
-        scheduler_kwargs = {}
-        if self.scheduler.config.get("use_dynamic_shifting", None) and mu is None:
-            _, _, latent_height, latent_width = latents.shape
-            image_seq_len = (latent_height // self.transformer.config.patch_size) * (
-                latent_width // self.transformer.config.patch_size
-            )
-            mu = calculate_shift(
-                image_seq_len,
-                self.scheduler.config.get("base_image_seq_len", 256),
-                self.scheduler.config.get("max_image_seq_len", 4096),
-                self.scheduler.config.get("base_shift", 0.5),
-                self.scheduler.config.get("max_shift", 1.16),
-            )
-        if mu is not None:
-            scheduler_kwargs["mu"] = mu
-        timesteps, num_inference_steps = retrieve_timesteps(
-            self.scheduler,
-            num_inference_steps,
-            device,
-            timesteps,
-            sigmas,
-            **scheduler_kwargs,
-        )
-        num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
-        self._num_timesteps = len(timesteps)
-
-        # 6. Denoising loop
+        # 5. Denoising loop
         num_pipeline_warmup_steps = get_runtime_state().runtime_config.warmup_steps
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             if get_pipeline_parallel_world_size() > 1 and len(timesteps) > num_pipeline_warmup_steps:

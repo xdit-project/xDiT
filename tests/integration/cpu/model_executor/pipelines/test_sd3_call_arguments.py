@@ -3,10 +3,10 @@
 The wrapper runs its own denoising loop under sequence parallelism, PipeFusion
 and CFG parallelism, and hands the call to diffusers otherwise. Its loop took
 any keyword through ``**kwargs`` and dropped it, so ``sigmas``, ``mu`` and
-``max_sequence_length`` changed nothing, skip-layer guidance was silently off,
-and guidance turned off crashed. Its own ``timesteps`` argument, which diffusers
-does not take, raised once the call reached diffusers. One CPU rank compares the
-wrapper with the diffusers pipeline it wraps.
+``max_sequence_length`` changed nothing and skip-layer guidance was silently
+off. Its own ``timesteps`` argument, which diffusers does not take, raised once
+the call reached diffusers. One CPU rank compares the wrapper with the diffusers
+pipeline it wraps.
 """
 
 import queue
@@ -77,6 +77,8 @@ def _call_kwargs(torch, num_images_per_prompt=1, **overrides):
 # name -> (dynamic shifting scheduler, call overrides)
 MATCHES_DIFFUSERS = {
     "sigmas": (False, {"sigmas": [1.0, 0.7, 0.4]}),
+    # More sigmas than ``num_inference_steps``: the sigmas set the step count.
+    "sigmas_longer_than_num_inference_steps": (False, {"sigmas": [1.0, 0.85, 0.7, 0.55, 0.4]}),
     "dynamic_shifting_default_mu": (True, {}),
     "dynamic_shifting_explicit_mu": (True, {"mu": 0.3}),
     "guidance_off": (False, {"guidance_scale": 1.0}),
@@ -99,7 +101,7 @@ def _worker(rank, world_size, init_method, result_queue):
 
         import xfuser.envs as envs
         from xfuser.config.args import xFuserArgs
-        from xfuser.core.distributed import parallel_state
+        from xfuser.core.distributed import get_runtime_state, parallel_state
         from xfuser.model_executor.pipelines.base_pipeline import xFuserPipelineBaseWrapper
         from xfuser.model_executor.pipelines.pipeline_stable_diffusion_3 import xFuserStableDiffusion3Pipeline
 
@@ -121,13 +123,12 @@ def _worker(rank, world_size, init_method, result_queue):
                 return xFuserStableDiffusion3Pipeline(_tiny_sd3(dynamic_shifting), engine_config)
 
             # One rank has no parallelism, so the wrapper hands calls to diffusers
-            # unless they need its own loop; ``timesteps`` is such a call.
+            # unless they need its own loop; ``timesteps`` is such a call. Diffusers
+            # takes no ``timesteps``, but the same schedule as sigmas (t / 1000).
             try:
-                kwargs = _call_kwargs(torch, timesteps=[1000.0, 800.0, 600.0])
-                images = wrap()(**kwargs).images
-                results["timesteps_without_parallelism"] = (
-                    "ok" if images.shape == (1, 4, 16, 16) and torch.isfinite(images).all() else repr(images)
-                )
+                expected = _tiny_sd3()(**_call_kwargs(torch, sigmas=[1.0, 0.8, 0.6])).images
+                actual = wrap()(**_call_kwargs(torch, timesteps=[1000.0, 800.0, 600.0])).images
+                results["timesteps_without_parallelism"] = (actual - expected).abs().max().item()
             except Exception as error:  # noqa: BLE001 - report which case broke
                 results["timesteps_without_parallelism"] = f"{type(error).__name__}: {error}"
 
@@ -141,6 +142,8 @@ def _worker(rank, world_size, init_method, result_queue):
                         results[name] = (actual - expected).abs().max().item()
                     except Exception as error:  # noqa: BLE001
                         results[name] = f"{type(error).__name__}: {error}"
+                    if "sigmas" in overrides:
+                        results[f"{name}_runtime_steps"] = get_runtime_state().input_config.num_inference_steps
                 for name, (overrides, expected_error) in REJECTED.items():
                     try:
                         wrap()(**_call_kwargs(torch, **overrides))
@@ -187,11 +190,12 @@ def test_sd3_wrapper_honours_diffusers_call_arguments(tmp_path):
     status, _, results = result
     assert status == "returned", results
     failures = {}
-    if results["timesteps_without_parallelism"] != "ok":
-        failures["timesteps_without_parallelism"] = results["timesteps_without_parallelism"]
-    for name in MATCHES_DIFFUSERS:
+    for name in ["timesteps_without_parallelism", *MATCHES_DIFFUSERS]:
         if not isinstance(results[name], float) or results[name] > 1e-4:
             failures[name] = results[name]
+        overrides = MATCHES_DIFFUSERS.get(name, (None, {}))[1]
+        if "sigmas" in overrides and results[f"{name}_runtime_steps"] != len(overrides["sigmas"]):
+            failures[f"{name}_runtime_steps"] = results[f"{name}_runtime_steps"]
     for name in REJECTED:
         if results[name] != "raised":
             failures[name] = results[name]

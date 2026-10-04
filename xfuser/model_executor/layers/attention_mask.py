@@ -1,4 +1,5 @@
 import dataclasses
+import weakref
 
 import torch
 import torch.nn.functional as F
@@ -39,3 +40,60 @@ def make_attn_mask_with_meta(mask_2d: torch.Tensor) -> AttentionMaskWithMeta:
         cu_seqlens_k=cu_seqlens_k,
         max_seqlen_k=max_seqlen_k,
     )
+
+
+class MaskMetaCache:
+    """The AttentionMaskWithMeta built for the last few masks a model saw.
+
+    A denoising loop hands the transformer the same mask tensor at every step,
+    and building the metadata costs a host sync, so it is built once per mask.
+    Entries are keyed on the mask tensor itself -- a weak reference and its
+    version counter -- never on its address: once one request's mask is freed,
+    the next request's mask of the same shape commonly lands at that address,
+    and an address key would hand it the previous request's valid positions.
+    A freed mask's entry can never match, and an in-place write to a cached
+    mask bumps its version so that it misses too.
+
+    Bounded at ``capacity`` entries, least recently used evicted: classifier-
+    free guidance alternates two masks per step, and a single entry would
+    rebuild on every call.
+    """
+
+    def __init__(self, capacity: int = 4):
+        self.capacity = capacity
+        self._entries: list = []  # [(weakref to mask, version, extra, meta)], most recent last
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    @staticmethod
+    def _version(mask: torch.Tensor):
+        # Inference-mode tensors keep no version counter.
+        return None if mask.is_inference() else mask._version
+
+    # Weak references and version counters are host-side bookkeeping that
+    # Dynamo cannot trace; keep the lookup, and the build behind it, eager.
+    @torch.compiler.disable
+    def get(self, mask: torch.Tensor, build=make_attn_mask_with_meta, *extra) -> AttentionMaskWithMeta:
+        """``build(mask, *extra)``, called only when no entry matches.
+
+        ``extra`` is whatever else the metadata depends on, such as a padded
+        length, and is part of the key, so it must be hashable plain values.
+        """
+        version = self._version(mask)
+        live = []
+        hit = None
+        for entry in self._entries:
+            cached = entry[0]()
+            if cached is None:
+                continue  # its mask was freed; nothing can match it again
+            if cached is mask and entry[1] != version:
+                continue  # its mask was written in place since
+            if cached is mask and entry[2] == extra:
+                hit = entry
+            else:
+                live.append(entry)
+        if hit is None:
+            hit = (weakref.ref(mask), version, extra, build(mask, *extra))
+        self._entries = (live + [hit])[-self.capacity :]
+        return hit[3]

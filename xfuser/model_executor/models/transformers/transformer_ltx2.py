@@ -16,20 +16,18 @@ from xfuser.core.distributed import (
 )
 from xfuser.model_executor.layers.attention_mask import (
     AttentionMaskWithMeta,
+    MaskMetaCache,
     make_attn_mask_with_meta,
 )
 from xfuser.model_executor.layers.norms import _replace_rms_norms_with_aiter
 from xfuser.model_executor.layers.usp import USP, attention
 
 
-def _get_mask_meta(cache: dict, mask: torch.Tensor | None) -> object | None:
+def _get_mask_meta(cache: MaskMetaCache, mask: torch.Tensor | None) -> object | None:
     """Convert a 2-D key-padding mask (1=valid, 0=pad) to AttentionMaskWithMeta, cached per tensor."""
     if mask is None or mask.ndim != 2:
         return mask
-    key = (mask.data_ptr(), tuple(mask.shape))
-    if key not in cache:
-        cache[key] = make_attn_mask_with_meta(mask)
-    return cache[key]
+    return cache.get(mask, make_attn_mask_with_meta)
 
 
 class xFuserLTX2PerturbedAttnProcessor:
@@ -322,8 +320,8 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
             use_keyframes_abs_pos_embedding=use_keyframes_abs_pos_embedding,
         )
 
-        self._enc_mask_cache: dict = {}
-        self._audio_enc_mask_cache: dict = {}
+        self._enc_mask_cache = MaskMetaCache()
+        self._audio_enc_mask_cache = MaskMetaCache()
 
         # If AITER is available, replace diffusers RMSNorm (slow float32 cast)
         # with AITER RMSNorm.

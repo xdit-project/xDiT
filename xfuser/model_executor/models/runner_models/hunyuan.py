@@ -229,7 +229,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         transformer = xFuserHunyuanVideo15Transformer3DWrapper.from_pretrained(
             self.settings.model_name,
             torch_dtype=torch.bfloat16,
-            subfolder="transformer",
+            **self.loader.checkpoint_request("transformer").from_pretrained_kwargs(),
         )
         pipe = pipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
@@ -392,6 +392,7 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
             self.pipe_name,
             subfolder="transformer",
             torch_dtype=torch.bfloat16,
+            local_files_only=self.loader.checkpoint_request().local_files_only,
         )
         distilled_state = distilled_transformer.state_dict()
 

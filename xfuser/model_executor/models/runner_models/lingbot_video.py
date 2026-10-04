@@ -201,7 +201,7 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
         refiner_transformer = xFuserLingBotVideoTransformer3DWrapper.from_pretrained(
             model_name,
             torch_dtype=torch.bfloat16,
-            subfolder="refiner",
+            **self.loader.checkpoint_request("refiner").from_pretrained_kwargs(),
         )
         local_rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
         refiner_transformer = refiner_transformer.to(f"cuda:{local_rank}")
@@ -276,15 +276,18 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
             xFuserLingBotVideoTransformer3DWrapper,
         )
 
+        local_files_only = self.loader.checkpoint_request().local_files_only
         transformer = xFuserLingBotVideoTransformer3DWrapper.from_pretrained(
             model_name,
             torch_dtype=torch.bfloat16,
             subfolder=transformer_subfolder,
+            local_files_only=local_files_only,
         )
         vae = AutoencoderKLWan.from_pretrained(
             model_name,
             torch_dtype=torch.float32,
             subfolder="vae",
+            local_files_only=local_files_only,
         )
         text_encoder = Qwen3VLForConditionalGeneration.from_pretrained(
             model_name,

@@ -507,8 +507,8 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
             transformer = xFuserWanTransformer3DWrapper.from_pretrained(
                 pretrained_model_name_or_path=self._BASE_MODEL,
                 torch_dtype=torch.bfloat16,
-                subfolder=component_name,
                 low_cpu_mem_usage=True,
+                **self.loader.checkpoint_request(component_name).from_pretrained_kwargs(),
                 **init_kwargs,
             )
             _load_distilled_weights(transformer, path)

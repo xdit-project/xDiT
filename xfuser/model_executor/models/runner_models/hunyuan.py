@@ -1,5 +1,6 @@
 import torch
 import copy
+from typing import Optional
 import json
 import numpy as np
 from safetensors.torch import load_file
@@ -144,6 +145,10 @@ class xFuserHunyuanvideoModel(xFuserModel):
         )
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
+    def _get_compile_warmup_steps(self, input_args: dict) -> Optional[int]:
+        # A per-step attention schedule needs a full warmup to trigger every backend path.
+        return None if get_runtime_state().has_attention_schedule() else 2
+
     def _compile_model(self, input_args: dict) -> None:
         """Compile the model using torch.compile"""
         # Install Inductor post-grad pass that defeats a scheduler bug in the
@@ -151,6 +156,11 @@ class xFuserHunyuanvideoModel(xFuserModel):
         # is pattern-matched on the FX graph and is a no-op for configurations
         # that don't produce the bad pattern (non-sage backends, symmetric SP).
         install_inductor_passes()
+        if self.config.cache_method:
+            # The step cache patches transformer.forward after compilation, so the
+            # transformer must stay uncompiled: compile its blocks instead.
+            super()._compile_model(input_args)
+            return
         super()._enable_compute_comm_overlap()
         self.pipe.transformer.compile()
 
@@ -199,6 +209,9 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         fps=24,
         fp8_gemm_module_list=["transformer.transformer_blocks"],
         mod_value=16,
+        # Read by _compile_model as the blocks to compile one by one when a step
+        # cache is enabled. Nothing shards this model.
+        fsdp_strategy={"transformer": {"wrap_attrs": ["transformer_blocks"]}},
         valid_tasks=["i2v", "t2v"],
         step_cache_config={
             "dbcache": DBCacheSettings(
@@ -280,6 +293,11 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         # that don't produce the bad pattern (e.g., symmetric SP, non-sage
         # backends, models without the post-A2A joint cat).
         install_inductor_passes()
+        if self.config.cache_method:
+            # The step cache patches transformer.forward after compilation, so the
+            # transformer must stay uncompiled: compile its blocks instead.
+            super()._compile_model(input_args)
+            return
         super()._enable_compute_comm_overlap()
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
 

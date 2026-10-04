@@ -55,7 +55,6 @@ logger = init_logger(__name__)
 env_info = PACKAGES_CHECKER.get_packages_info()
 HAS_AITER = env_info["has_aiter"]
 HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
-HAS_FLASH_ATTN = env_info["has_flash_attn"]
 
 
 def _joint_sp_padding_attention_kwargs(query, encoder_query):
@@ -1085,6 +1084,7 @@ class xFuserSanaAttnProcessor2_0(SanaAttnProcessor2_0):
 
         query = attn.to_q(hidden_states)
 
+        is_cross_attention = encoder_hidden_states is not None
         if encoder_hidden_states is None:
             encoder_hidden_states = hidden_states
 
@@ -1110,10 +1110,9 @@ class xFuserSanaAttnProcessor2_0(SanaAttnProcessor2_0):
         # )
         if get_runtime_state().split_text_embed_in_sp:
             raise NotImplementedError("Currently SANA not support split_text_embed_in_sp!")
-        elif attention_mask is not None and encoder_hidden_states is not hidden_states:
-            # Cross-attention to the prompt: every rank holds the whole prompt, so
-            # its image rows can attend to it locally. USP takes no key mask here,
-            # and the prompt's padding tokens must stay masked as in diffusers.
+        elif is_cross_attention:
+            # Every rank holds the whole prompt, so its image rows attend to it
+            # locally, with the prompt's padding masked as in diffusers.
             hidden_states = F.scaled_dot_product_attention(
                 query.transpose(1, 2),
                 key.transpose(1, 2),
@@ -1153,8 +1152,6 @@ class xFuserSanaLinearAttnProcessor2_0(SanaLinearAttnProcessor2_0):
         if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
             from xfuser.core.long_ctx_attention import xFuserSanaLinearLongContextAttention
 
-            # Linear attention runs its own kernel, so yunchang's attention type is
-            # never used here; AttnType.TORCH no longer exists in yunchang 0.6.4+.
             self.hybrid_seq_parallel_attn = xFuserSanaLinearLongContextAttention(
                 use_kv_cache=self.use_long_ctx_attn_kvcache,
             )

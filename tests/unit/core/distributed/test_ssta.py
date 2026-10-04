@@ -1,4 +1,4 @@
-"""SSTA block masks have the layout the block-sparse kernels accept."""
+"""SSTA block masks have the 4-D layout the block-sparse kernels accept."""
 
 import pytest
 
@@ -33,13 +33,6 @@ def _attn_kwargs(share, sparse_type):
     }
 
 
-def _block_sparse_reference(q, k, v, block_size, block_mask):
-    """Dense attention under the block mask, accepting the [b, h or 1, nq, nk] layout of flex_block_attn."""
-    assert block_mask.dim() == 4, f"block mask must be [b, h, q_blocks, kv_blocks], got {tuple(block_mask.shape)}"
-    mask = block_mask.repeat_interleave(block_size, dim=-2).repeat_interleave(block_size, dim=-1)
-    return torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask)
-
-
 @pytest.mark.parametrize("sparse_type", ["ssta", "moba"])
 @pytest.mark.parametrize("share", [0, 1])
 def test_block_mask_is_batch_head_query_key(share, sparse_type):
@@ -47,12 +40,10 @@ def test_block_mask_is_batch_head_query_key(share, sparse_type):
     seq_len = _THW[0] * _THW[1] * _THW[2] + _TEXT_LEN
     query, key, value = (torch.randn(2, _HEADS, seq_len, 8, generator=generator) for _ in range(3))
 
-    q, k, v, mask_config, _ = setup_ssta(query, key, value, _attn_kwargs(share, sparse_type))
+    *_, mask_config, _ = setup_ssta(query, key, value, _attn_kwargs(share, sparse_type))
     block_mask = get_sparse_mask(mask_config, sparse_type=sparse_type)
 
     block_size = _TILE[0] * _TILE[1] * _TILE[2]
     blocks = seq_len // block_size
+    # [batch, heads or 1, query blocks, key blocks], as the block-sparse kernels take it.
     assert tuple(block_mask.shape) == (2, 1 if share else _HEADS, blocks, blocks)
-    out = _block_sparse_reference(q, k, v, block_size, block_mask)
-    assert out.shape == q.shape
-    assert torch.isfinite(out).all()

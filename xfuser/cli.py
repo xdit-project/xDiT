@@ -36,12 +36,12 @@ DEGREE_ARGS = (
 
 
 def _spellings(flag: str) -> List[str]:
-    """The runner's parser accepts each flag with underscores or dashes."""
+    """Like the runner's parser, accept each flag with underscores or dashes."""
     return [flag, "--" + flag[2:].replace("_", "-")]
 
 
 def _degree_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser = argparse.ArgumentParser(prog="xdit", add_help=False, allow_abbrev=False)
     for flag in DEGREE_ARGS:
         parser.add_argument(*_spellings(flag), dest=flag[2:], type=int, default=1)
     parser.add_argument(*_spellings("--use_cfg_parallel"), dest="use_cfg_parallel", action="store_true")
@@ -87,27 +87,19 @@ def extract_torchrun_args(args: List[str]) -> Tuple[dict, List[str]]:
         Tuple of (torchrun_args dict, remaining runner args)
     """
     torchrun_values = dict(TORCHRUN_ARGS)  # Copy defaults
+    flags = {spelling: flag for flag in TORCHRUN_ARGS for spelling in _spellings(flag)}
     runner_args = []
 
     i = 0
     while i < len(args):
         arg = args[i]
-        matched = False
-
-        for torchrun_arg in TORCHRUN_ARGS:
-            # Handle --arg=value format
-            if arg.startswith(f"{torchrun_arg}="):
-                torchrun_values[torchrun_arg] = arg.split("=", 1)[1]
-                matched = True
-                break
-            # Handle --arg value format
-            elif arg == torchrun_arg and i + 1 < len(args):
-                torchrun_values[torchrun_arg] = args[i + 1]
-                i += 1  # Skip the value
-                matched = True
-                break
-
-        if not matched:
+        key, has_value, value = arg.partition("=")
+        if has_value and key in flags:  # --arg=value
+            torchrun_values[flags[key]] = value
+        elif arg in flags and i + 1 < len(args):  # --arg value
+            torchrun_values[flags[arg]] = args[i + 1]
+            i += 1  # Skip the value
+        else:
             runner_args.append(arg)
         i += 1
 

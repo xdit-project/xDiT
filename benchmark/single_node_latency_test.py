@@ -34,7 +34,7 @@ def main():
         "--script",
         type=str,
         required=True,
-        help="Script to run (e.g., tests/test_pixartalpha.py)",
+        help="Script to run (e.g., examples/pixartalpha_example.py)",
     )
     parser.add_argument("--n_gpus", type=int, default=8, help="Number of GPUs to use")
     parser.add_argument(

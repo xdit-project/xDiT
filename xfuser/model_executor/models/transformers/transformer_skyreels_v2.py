@@ -26,13 +26,13 @@ from xfuser.core.distributed import (
     get_runtime_state,
     get_sequence_parallel_rank,
     get_sequence_parallel_world_size,
-    get_sp_group,
 )
 from xfuser.model_executor.layers.attention_processor import (
     xFuserAttentionProcessorRegister,
 )
 from xfuser.model_executor.models.transformers.transformer_wan import (
     xFuserWanAttnProcessor,
+    xFuserWanTransformer3DWrapper,
 )
 
 
@@ -56,15 +56,11 @@ class xFuserSkyReelsV2AttnProcessor(xFuserWanAttnProcessor, SkyReelsV2AttnProces
         return super().__call__(attn, hidden_states, encoder_hidden_states, None, rotary_emb)
 
 
-def _pad_and_chunk(x: torch.Tensor, rank: int, world_size: int, pad_amount: int, dim: int) -> torch.Tensor:
-    if pad_amount > 0:
-        pad_shape = list(x.shape)
-        pad_shape[dim] = pad_amount
-        x = torch.cat([x, x.new_zeros(pad_shape)], dim=dim)
-    return torch.chunk(x, world_size, dim=dim)[rank]
-
-
 class xFuserSkyReelsV2Transformer3DWrapper(SkyReelsV2Transformer3DModel):
+    # Same sequence-parallel split as Wan.
+    _chunk_and_pad_sequence = xFuserWanTransformer3DWrapper._chunk_and_pad_sequence
+    _gather_and_unpad = xFuserWanTransformer3DWrapper._gather_and_unpad
+
     def __init__(
         self,
         patch_size: Tuple[int, ...] = (1, 2, 2),
@@ -184,8 +180,10 @@ class xFuserSkyReelsV2Transformer3DWrapper(SkyReelsV2Transformer3DModel):
             )
         self._usp_attention_kwargs["valid_kv_len"] = seq_len if pad_amount else None
 
-        hidden_states = _pad_and_chunk(hidden_states, sp_rank, sp_world_size, pad_amount, dim=1)
-        rotary_emb = tuple(_pad_and_chunk(freqs, sp_rank, sp_world_size, pad_amount, dim=1) for freqs in rotary_emb)
+        hidden_states = self._chunk_and_pad_sequence(hidden_states, sp_rank, sp_world_size, pad_amount, dim=1)
+        rotary_emb = tuple(
+            self._chunk_and_pad_sequence(freqs, sp_rank, sp_world_size, pad_amount, dim=1) for freqs in rotary_emb
+        )
 
         if torch.is_grad_enabled() and self.gradient_checkpointing:
             for block in self.blocks:
@@ -204,8 +202,7 @@ class xFuserSkyReelsV2Transformer3DWrapper(SkyReelsV2Transformer3DModel):
         hidden_states = self.proj_out(hidden_states)
 
         if sp_world_size > 1:
-            hidden_states = get_sp_group().all_gather(hidden_states, dim=-2)
-            hidden_states = hidden_states.narrow(-2, 0, seq_len)
+            hidden_states = self._gather_and_unpad(hidden_states, pad_amount, dim=-2)
 
         hidden_states = hidden_states.reshape(
             batch_size, post_patch_num_frames, post_patch_height, post_patch_width, p_t, p_h, p_w, -1

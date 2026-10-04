@@ -161,6 +161,7 @@ def _run_single_rank(torch, init_method, timeout=300):
 @pytest.mark.slow
 def test_wrapper_without_parallelism_matches_diffusers(tmp_path):
     torch = pytest.importorskip("torch")
+    pytest.importorskip("cv2", reason="ConsisIDPipeline requires OpenCV")
     if not torch.distributed.is_available() or not torch.distributed.is_gloo_available():
         pytest.skip("torch.distributed gloo backend is unavailable")
 

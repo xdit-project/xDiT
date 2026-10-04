@@ -598,11 +598,9 @@ def _get_ssta_mask(mask_config):
         )
         mask_list.append(bm)
 
-    block_mask = torch.stack(mask_list, dim=0)
-    if mask_config.mask_share_within_head:
-        block_mask = block_mask.unsqueeze(1)  # [b, 1, s_block, s_block]
-
-    return block_mask
+    # [b, H, s_block, s_block], or [b, 1, s_block, s_block] when the mask is
+    # shared within the head dimension (each sample's mask keeps a head dim of 1).
+    return torch.stack(mask_list, dim=0)
 
 
 def _get_moba_mask(mask_config):

@@ -2,7 +2,12 @@ import inspect
 from typing import Any
 
 import torch
-from diffusers import QwenImageEditPipeline, QwenImageEditPlusPipeline
+from diffusers import QwenImageEditPipeline
+
+try:
+    from diffusers import QwenImageEditPlusPipeline
+except ImportError:  # diffusers releases before Qwen-Image-Edit-2509
+    QwenImageEditPlusPipeline = None
 
 from xfuser.core.distributed import (
     get_cfg_group,
@@ -64,5 +69,10 @@ class xFuserQwenImageEditPipeline(_TrueCfgParallelMixin, QwenImageEditPipeline):
     """Qwen-Image-Edit pipeline with distributed true-CFG branches."""
 
 
-class xFuserQwenImageEditPlusPipeline(_TrueCfgParallelMixin, QwenImageEditPlusPipeline):
-    """Qwen-Image-Edit-2509/2511 (Edit Plus) pipeline with distributed true-CFG branches."""
+if QwenImageEditPlusPipeline is not None:
+
+    class xFuserQwenImageEditPlusPipeline(_TrueCfgParallelMixin, QwenImageEditPlusPipeline):
+        """Qwen-Image-Edit-2509/2511 (Edit Plus) pipeline with distributed true-CFG branches."""
+
+else:
+    xFuserQwenImageEditPlusPipeline = None

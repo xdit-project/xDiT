@@ -81,18 +81,17 @@ class xFuserQwenImageEditModel(xFuserModel):
 
     def _customize_settings(self, config: xFuserArgs) -> None:
         super()._customize_settings(config)
+        # 2509 and 2511 are Edit Plus checkpoints: diffusers loads them with
+        # QwenImageEditPlusPipeline, which conditions on a list of images.
+        self._is_edit_plus = False
         if "2511" in config.model:
             self.settings.model_name = "Qwen/Qwen-Image-Edit-2511"
             self.settings.output_name = "qwen_image_edit_2511"
+            self._is_edit_plus = True
         elif "2509" in config.model:
             self.settings.model_name = "Qwen/Qwen-Image-Edit-2509"
             self.settings.output_name = "qwen_image_edit_2509"
-
-    @property
-    def _is_edit_plus(self) -> bool:
-        # 2509 and 2511 are Edit Plus checkpoints: diffusers loads them with
-        # QwenImageEditPlusPipeline, which conditions on a list of images.
-        return self.settings.model_name in ("Qwen/Qwen-Image-Edit-2509", "Qwen/Qwen-Image-Edit-2511")
+            self._is_edit_plus = True
 
     def _load_model(self) -> DiffusionPipeline:
         from xfuser.model_executor.pipelines.pipeline_qwen_image_edit import (
@@ -106,6 +105,8 @@ class xFuserQwenImageEditModel(xFuserModel):
         transformer = self.loader.load_transformer(xFuserQwenImageTransformerWrapper)
         te_kwargs, te_quant = self.loader.plan_text_encoders()
         pipeline_cls = xFuserQwenImageEditPlusPipeline if self._is_edit_plus else xFuserQwenImageEditPipeline
+        if pipeline_cls is None:
+            raise ImportError(f"{self.settings.model_name} needs a diffusers release with QwenImageEditPlusPipeline.")
         pipe = pipeline_cls.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             transformer=transformer,

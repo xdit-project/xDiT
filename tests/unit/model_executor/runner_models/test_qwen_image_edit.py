@@ -7,8 +7,15 @@ images. The runner loaded them through QwenImageEditPipeline instead.
 
 from types import SimpleNamespace
 
+import diffusers
 import pytest
-from diffusers import DiffusionPipeline, QwenImageEditPipeline, QwenImageEditPlusPipeline
+from diffusers import DiffusionPipeline, QwenImageEditPipeline
+
+# Diffusers added the Edit Plus pipeline after Qwen-Image-Edit itself.
+QwenImageEditPlusPipeline = getattr(diffusers, "QwenImageEditPlusPipeline", None)
+requires_edit_plus = pytest.mark.skipif(
+    QwenImageEditPlusPipeline is None, reason="this diffusers release has no QwenImageEditPlusPipeline"
+)
 
 
 @pytest.fixture
@@ -46,6 +53,7 @@ def _load(model):
     model._load_model()
 
 
+@requires_edit_plus
 @pytest.mark.parametrize(
     ("name", "checkpoint"),
     [
@@ -70,7 +78,7 @@ def test_original_edit_checkpoint_keeps_the_edit_pipeline(build, loaded_classes,
     [(pipeline_cls, loaded_checkpoint)] = loaded_classes
     assert loaded_checkpoint == "Qwen/Qwen-Image-Edit"
     assert issubclass(pipeline_cls, QwenImageEditPipeline)
-    assert not issubclass(pipeline_cls, QwenImageEditPlusPipeline)
+    assert QwenImageEditPlusPipeline is None or not issubclass(pipeline_cls, QwenImageEditPlusPipeline)
 
 
 def test_edit_plus_passes_every_reference_image(build):

@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from xfuser.core.attention.spec import AttnCall
 
 aten = torch.ops.aten
+_BIAS_ALIGNMENT = 16
 
 
 def sdpa(query, key, value, call: AttnCall):
@@ -54,7 +55,7 @@ def sdpa_efficient(query, key, value, call: AttnCall):
         query,
         key,
         value,
-        attn_bias=None,
+        attn_bias=_attn_bias(query, key, call.attention_kwargs.get("attn_mask")),
         compute_log_sumexp=True,
         dropout_p=call.dropout_p,
         is_causal=call.is_causal,
@@ -65,10 +66,11 @@ def sdpa_efficient(query, key, value, call: AttnCall):
 def _attn_bias(query, key, attn_mask):
     """attn_mask as the additive bias the aten kernels take, or None.
 
-    The aten ops add whatever they are given to the scores, so a boolean mask
-    would add 0/1 rather than exclude keys. F.scaled_dot_product_attention
-    converts it, and broadcasts it to the full score shape, before it reaches
-    a kernel; do the same.
+    Does what F.scaled_dot_product_attention does before it reaches a kernel: the
+    aten ops add whatever they are given to the scores, so a boolean mask becomes
+    0 / -inf, and the bias is broadcast to the full score shape. The memory-efficient
+    kernel also needs the bias's row stride aligned to 16 elements, so the key
+    dimension is padded and sliced back.
     """
     if attn_mask is None:
         return None
@@ -76,6 +78,9 @@ def _attn_bias(query, key, attn_mask):
         attn_mask = torch.zeros_like(attn_mask, dtype=query.dtype).masked_fill_(~attn_mask, float("-inf"))
     else:
         attn_mask = attn_mask.to(query.dtype)
+    kv_len = attn_mask.shape[-1]
+    if kv_len % _BIAS_ALIGNMENT:
+        attn_mask = F.pad(attn_mask, (0, _BIAS_ALIGNMENT - kv_len % _BIAS_ALIGNMENT))[..., :kv_len]
     return attn_mask.expand(query.shape[0], query.shape[1], query.shape[2], key.shape[2])
 
 

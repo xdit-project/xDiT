@@ -103,17 +103,9 @@ class _NoVarlen(CallConstraint):
 
 @dataclass(frozen=True)
 class _MaskedVarlen(CallConstraint):
-    """Packed keys are acceptable when a dense key mask travels with them.
-
-    Models that pad their keys (Krea-2, LTX-2 cross attention) hand over an
-    ``attn_mask`` and, derived from that same mask, the packing a varlen kernel
-    would use instead. A kernel that applies ``attn_mask`` therefore needs no
-    packing: the mask already excludes exactly the keys the packing leaves
-    out, so the kernel attends over the full K/V and ignores the packing.
-
-    Without a mask there is nothing such a kernel could apply, and serving the
-    call would attend over the padded keys, so it is refused as NO_VARLEN does.
-    """
+    """Packed keys are acceptable when the ``attn_mask`` they were derived from comes
+    with them: a kernel that applies the mask excludes the same keys and can ignore the
+    packing. Without a mask the call is refused, as NO_VARLEN does."""
 
     def unmet(self, query, key, value, call) -> Optional[str]:
         if call.varlen is None or call.attention_kwargs.get("attn_mask") is not None:

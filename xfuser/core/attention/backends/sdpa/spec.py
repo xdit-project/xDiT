@@ -15,11 +15,11 @@ SPECS = [
         AttentionBackendType.SDPA_EFFICIENT,
         impl=Impl("kernel:sdpa_efficient"),
         ring=ALWAYS,
-        accepts=NO_VARLEN,
+        accepts=MASKED_VARLEN,
         requires=ALWAYS,
     ),
-    # cuDNN applies attn_mask as its additive bias, so it serves a padded call
-    # through the mask and ignores the packing.
+    # cuDNN, like SDPA_EFFICIENT above, applies attn_mask as its additive bias, so it
+    # serves a padded call through the mask and ignores the packing.
     Spec(
         AttentionBackendType.CUDNN,
         impl=Impl("kernel:cudnn"),

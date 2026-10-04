@@ -364,6 +364,9 @@ class xFuserModel(abc.ABC):
         self._validate_config(config)
         self._update_model_settings(config)
         self.config = config
+        # Every saver below writes into this directory; create it now rather
+        # than lose the outputs to a missing directory after the whole run.
+        os.makedirs(config.output_directory, exist_ok=True)
         self.pipe = None
         from .loading.meta_load import ModelLoader
 

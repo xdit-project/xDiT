@@ -7,6 +7,7 @@ weights, so a padded token that leaks into the attention keys shows up as a
 mismatch.
 """
 
+import functools
 import logging
 
 import pytest
@@ -110,7 +111,7 @@ def _hunyuan_video15(device, tokens):
     return reference, parallel, inputs, inputs
 
 
-def _ltx2(device, tokens):
+def _ltx2(device, tokens, rope_type="split"):
     from diffusers.models.transformers.transformer_ltx2 import (
         LTX2VideoTransformer3DModel,
     )
@@ -133,8 +134,8 @@ def _ltx2(device, tokens):
         audio_cross_attention_dim=_HEADS * _HEAD_DIM // 2,
         num_layers=2,
         caption_channels=16,
-        # As in the released LTX-2 checkpoint.
-        rope_type="split",
+        # "split" as in the released LTX-2 checkpoint.
+        rope_type=rope_type,
     )
     reference = LTX2VideoTransformer3DModel(**config)
     parallel = xFuserLTX2VideoTransformer3DWrapper(**config)
@@ -311,6 +312,7 @@ _MODELS = {
     "wan": _wan,
     "hunyuan_video15": _hunyuan_video15,
     "ltx2": _ltx2,
+    "ltx2_interleaved": functools.partial(_ltx2, rope_type="interleaved"),
     "qwen_image": _qwen_image,
     "flux2": _flux2,
     "z_image": _z_image,
@@ -396,6 +398,8 @@ _PARITY_CASES = [
     # LTX-2: video tokens = frames * height * width; audio and text replicated.
     pytest.param("ltx2", 2, (2, 3, 4), id="ltx2-divisible"),
     pytest.param("ltx2", 2, (3, 3, 3), id="ltx2-padded"),
+    # Interleaved RoPE keeps cos/sin as [B, S, D] rather than [B, H, S, D].
+    pytest.param("ltx2_interleaved", 2, (3, 3, 3), id="ltx2-interleaved-padded"),
     # Qwen-Image: ((height, width) in packed tokens, text tokens).
     pytest.param("qwen_image", 2, ((4, 6), 8), id="qwen_image-divisible"),
     pytest.param("qwen_image", 2, ((5, 5), 8), id="qwen_image-padded-image"),

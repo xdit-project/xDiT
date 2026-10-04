@@ -70,7 +70,7 @@ class xFuserLTX2PerturbedAttnProcessor:
             pad = self.sp_padding.tokens if self.sp_padding is not None else 0
             if pad:
                 encoder_hidden_states = encoder_hidden_states[:, :-pad]
-                key_rotary_emb = [x[:, :, :-pad] for x in key_rotary_emb]
+                key_rotary_emb = [x[..., :-pad, :] for x in key_rotary_emb]
 
         if isinstance(attention_mask, AttentionMaskWithMeta):
             attn_kw = {
@@ -190,7 +190,7 @@ class xFuserLTX2AudioVideoAttnProcessor:
             pad = self.sp_padding.tokens if self.sp_padding is not None else 0
             if pad:
                 encoder_hidden_states = encoder_hidden_states[:, :-pad]
-                key_rotary_emb = [x[:, :, :-pad] for x in key_rotary_emb]
+                key_rotary_emb = [x[..., :-pad, :] for x in key_rotary_emb]
 
         if isinstance(attention_mask, AttentionMaskWithMeta):
             attn_kw = {

@@ -54,7 +54,7 @@ def _inputs(image_tokens, text_tokens, device):
     )
 
 
-def _flux_worker(rank, world_size, init_method, ulysses, ring, image_tokens, text_tokens, error):
+def _flux_worker(rank, world_size, init_method, ulysses, ring, image_tokens, text_tokens, error, pipeline_patches=1):
     torch.cuda.set_device(rank)
     init_distributed_environment(
         rank=rank,
@@ -72,6 +72,7 @@ def _flux_worker(rank, world_size, init_method, ulysses, ring, image_tokens, tex
         # SDPA proper has no ring path; its memory-efficient kernel does.
         get_runtime_state().set_attention_backend("SDPA_EFFICIENT" if ring > 1 else "SDPA")
         get_runtime_state().max_condition_sequence_length = text_tokens
+        get_runtime_state().num_pipeline_patch = pipeline_patches
 
         device = torch.device("cuda", rank)
         torch.manual_seed(0)
@@ -121,4 +122,13 @@ def test_flux_ring_rejects_image_tokens_it_cannot_shard(accelerator_ranks):
         _flux_worker,
         world_size=2,
         args=(1, 2, 15, 8, NotImplementedError),
+    )
+
+
+@pytest.mark.multi_gpu
+def test_flux_pipefusion_rejects_padded_image_tokens(accelerator_ranks):
+    accelerator_ranks(
+        _flux_worker,
+        world_size=2,
+        args=(2, 1, 15, 8, NotImplementedError, 2),
     )

@@ -62,12 +62,29 @@ def sdpa_efficient(query, key, value, call: AttnCall):
     return output, softmax_lse
 
 
+def _attn_bias(query, key, attn_mask):
+    """attn_mask as the additive bias the aten kernels take, or None.
+
+    The aten ops add whatever they are given to the scores, so a boolean mask
+    would add 0/1 rather than exclude keys. F.scaled_dot_product_attention
+    converts it, and broadcasts it to the full score shape, before it reaches
+    a kernel; do the same.
+    """
+    if attn_mask is None:
+        return None
+    if attn_mask.dtype == torch.bool:
+        attn_mask = torch.zeros_like(attn_mask, dtype=query.dtype).masked_fill_(~attn_mask, float("-inf"))
+    else:
+        attn_mask = attn_mask.to(query.dtype)
+    return attn_mask.expand(query.shape[0], query.shape[1], query.shape[2], key.shape[2])
+
+
 def cudnn(query, key, value, call: AttnCall):
     output, softmax_lse, *_ = aten._scaled_dot_product_cudnn_attention(
         query,
         key,
         value,
-        attn_bias=None,
+        attn_bias=_attn_bias(query, key, call.attention_kwargs.get("attn_mask")),
         compute_log_sumexp=True,
         dropout_p=call.dropout_p,
         is_causal=call.is_causal,

@@ -3,7 +3,7 @@
 Distinct from requirements: a requirement is about the machine and resolves
 once at startup; these are about the call and can only be checked when it
 arrives. They cover tensor geometry (HEAD_DIM, MHA_ONLY, SELF_ATTENTION) and
-call parameters (NON_CAUSAL, NO_DROPOUT, NO_VARLEN) alike.
+call parameters (NON_CAUSAL, NO_DROPOUT, NO_VARLEN, MASKED_VARLEN) alike.
 
 One declaration serves two readers: the pre-call check, and the conformance
 suite choosing which shapes to exercise.
@@ -101,6 +101,26 @@ class _NoVarlen(CallConstraint):
         return "does not support varlen packed keys" if call.varlen else None
 
 
+@dataclass(frozen=True)
+class _MaskedVarlen(CallConstraint):
+    """Packed keys are acceptable when a dense key mask travels with them.
+
+    Models that pad their keys (Krea-2, LTX-2 cross attention) hand over an
+    ``attn_mask`` and, derived from that same mask, the packing a varlen kernel
+    would use instead. A kernel that applies ``attn_mask`` therefore needs no
+    packing: the mask already excludes exactly the keys the packing leaves
+    out, so the kernel attends over the full K/V and ignores the packing.
+
+    Without a mask there is nothing such a kernel could apply, and serving the
+    call would attend over the padded keys, so it is refused as NO_VARLEN does.
+    """
+
+    def unmet(self, query, key, value, call) -> Optional[str]:
+        if call.varlen is None or call.attention_kwargs.get("attn_mask") is not None:
+            return None
+        return "does not support varlen packed keys without an attn_mask"
+
+
 class _PackedKeys(CallConstraint):
     """Packed keys are acceptable, however the kernel chooses to serve them.
 
@@ -143,5 +163,6 @@ NON_CAUSAL = _NonCausal()
 MHA_ONLY = _MhaOnly()
 SELF_ATTENTION = _SelfAttention()
 NO_VARLEN = _NoVarlen()
+MASKED_VARLEN = _MaskedVarlen()
 PACKED_KEYS = _PackedKeys()
 NO_DROPOUT = _NoDropout()

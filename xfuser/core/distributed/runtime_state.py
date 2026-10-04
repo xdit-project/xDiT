@@ -242,10 +242,15 @@ class RuntimeState(metaclass=ABCMeta):
         else:
             backend = AttentionBackendType.SDPA
 
-        # The choice above reads what torch was built with. A build without a
-        # visible device (a CUDA wheel on a CPU-only host) cannot run the
-        # device kernels, so fall back to SDPA rather than refuse to start.
-        if attention_registry.find(backend).unavailable() is not None:
+        # The choice above reads what torch and the installed packages were
+        # built with, not what this host can run (a CUDA wheel on a CPU-only
+        # host, say). Fall back to SDPA rather than refuse to start, and say so.
+        unavailable = attention_registry.find(backend).unavailable()
+        if unavailable is not None:
+            logger.warning(
+                f"Automatically selected attention backend {backend.name} is unavailable: {unavailable}. "
+                "Falling back to SDPA; set attention_backend to choose a backend explicitly."
+            )
             backend = AttentionBackendType.SDPA
         return backend
 

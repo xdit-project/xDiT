@@ -150,6 +150,7 @@ class _Krea2BaseModel(xFuserModel):
             num_inference_steps=input_args["num_inference_steps"],
             max_condition_sequence_length=max_seq,
             split_text_embed_in_sp=False,
+            split_latents_by_rows=False,
         )
 
         output = self.pipe(

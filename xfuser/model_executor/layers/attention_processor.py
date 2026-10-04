@@ -1110,6 +1110,18 @@ class xFuserSanaAttnProcessor2_0(SanaAttnProcessor2_0):
         # )
         if get_runtime_state().split_text_embed_in_sp:
             raise NotImplementedError("Currently SANA not support split_text_embed_in_sp!")
+        elif attention_mask is not None and encoder_hidden_states is not hidden_states:
+            # Cross-attention to the prompt: every rank holds the whole prompt, so
+            # its image rows can attend to it locally. USP takes no key mask here,
+            # and the prompt's padding tokens must stay masked as in diffusers.
+            hidden_states = F.scaled_dot_product_attention(
+                query.transpose(1, 2),
+                key.transpose(1, 2),
+                value.transpose(1, 2),
+                attn_mask=attention_mask,
+                dropout_p=0.0,
+                is_causal=False,
+            ).transpose(1, 2)
         else:
             query = query.transpose(1, 2)
             key = key.transpose(1, 2)

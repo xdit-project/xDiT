@@ -1,9 +1,11 @@
 """Sana Sprint under sequence parallelism must denoise like diffusers on one device.
 
-Without flash-attn, Sana's linear-attention processor built its Ulysses layer with
-yunchang's AttnType.TORCH, which released yunchang no longer defines, so Sana and
-Sana Sprint failed to load under sequence parallelism. Two ranks with Ulysses
-attention run a tiny Sana Sprint for two steps and compare with diffusers.
+Two things kept it from doing so. Without flash-attn, Sana's linear-attention
+processor built its Ulysses layer with yunchang's AttnType.TORCH, which released
+yunchang no longer defines, so the model failed to load. And xDiT's cross-attention
+processor dropped the prompt's attention mask, so image tokens also attended to the
+prompt's padding tokens. Two ranks with Ulysses attention run a tiny Sana Sprint
+with a padded prompt for two steps and compare with diffusers.
 """
 
 import pytest
@@ -42,7 +44,8 @@ def _call_kwargs(device):
     generator = torch.Generator().manual_seed(1)
     return {
         "prompt_embeds": torch.randn(1, 6, 8, generator=generator).to(device),
-        "prompt_attention_mask": torch.ones(1, 6, dtype=torch.long, device=device),
+        # A padded prompt, as the tokenizer produces: the last two tokens are padding.
+        "prompt_attention_mask": torch.tensor([[1, 1, 1, 1, 0, 0]], device=device),
         "latents": torch.randn(1, 4, 16, 16, generator=generator).to(device),
         "height": 512,
         "width": 512,

@@ -324,7 +324,10 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
         rotary_emb = self.rope(hidden_states)
 
         hidden_states = self.patch_embedding(hidden_states)
-        hidden_states = hidden_states.flatten(2).transpose(1, 2)
+        # The transpose leaves channels strided by the sequence length. Every residual add and
+        # dtype cast in the blocks keeps its input layout, so without a copy here the whole
+        # residual stream runs through slow uncoalesced elementwise kernels.
+        hidden_states = hidden_states.flatten(2).transpose(1, 2).contiguous()
 
         # timestep shape: batch_size, or batch_size, seq_len (wan 2.2 ti2v)
         if timestep.ndim == 2:

@@ -3,11 +3,6 @@ from typing import Optional, Tuple, Union
 import torch
 
 import diffusers.schedulers.scheduling_ddpm as diffusers_ddpm
-from diffusers.schedulers.scheduling_ddpm import (
-    DDPMScheduler,
-    DDPMSchedulerOutput,
-)
-from diffusers.utils.torch_utils import randn_tensor
 
 from xfuser.core.distributed import (
     get_runtime_state,
@@ -45,7 +40,7 @@ def _local_rows(full: torch.Tensor) -> torch.Tensor:
     )
 
 
-@xFuserSchedulerWrappersRegister.register(DDPMScheduler)
+@xFuserSchedulerWrappersRegister.register(diffusers_ddpm.DDPMScheduler)
 class xFuserDDPMSchedulerWrapper(xFuserSchedulerBaseWrapper):
     @xFuserSchedulerBaseWrapper.check_to_use_naive_step
     def step(
@@ -55,7 +50,7 @@ class xFuserDDPMSchedulerWrapper(xFuserSchedulerBaseWrapper):
         sample: torch.Tensor,
         generator: Optional[torch.Generator] = None,
         return_dict: bool = True,
-    ) -> Union[DDPMSchedulerOutput, Tuple]:
+    ) -> Union[diffusers_ddpm.DDPMSchedulerOutput, Tuple]:
         """DDPMScheduler.step on a latent split across sequence-parallel ranks.
 
         DDPM adds fresh noise of ``model_output.shape`` at every step. On a
@@ -84,34 +79,31 @@ class xFuserDDPMSchedulerWrapper(xFuserSchedulerBaseWrapper):
         pred_original_sample = _local_rows(output.pred_original_sample)
         if not return_dict:
             return (prev_sample, pred_original_sample)
-        return DDPMSchedulerOutput(prev_sample=prev_sample, pred_original_sample=pred_original_sample)
+        return diffusers_ddpm.DDPMSchedulerOutput(prev_sample=prev_sample, pred_original_sample=pred_original_sample)
 
     def _step_patch(self, model_output, timestep, sample, generator, return_dict):
-        """DDPMScheduler.step on one PipeFusion patch.
+        """DDPMScheduler.step on one PipeFusion patch, with its rows of one full-size noise draw.
 
-        Stepping a patch on its own would draw noise of the patch's shape, so the
-        patches would get unrelated draws instead of the slices of the one
-        full-size draw a single device makes, and with sequence parallelism every
-        rank would draw the same noise for its rows. Draw the whole latent's noise
-        once per step, at the first patch, and give each patch, on each rank, its
-        own rows of it.
+        Stepping a patch alone would draw noise of the patch's shape, unrelated to
+        the full-size draw a single device makes (and identical on every
+        sequence-parallel rank). Draw the whole latent's noise at the first patch
+        of each step and give each patch, on each rank, its own rows.
         """
+        if timestep <= 0:
+            # Diffusers adds no noise at the last step and draws none.
+            return self.module.step(model_output, timestep, sample, generator, return_dict=return_dict)
+
         state = get_runtime_state()
-        if timestep > 0 and state.pipeline_patch_idx == 0:
+        if state.pipeline_patch_idx == 0:
             full_shape = (
                 sample.shape[0],
                 sample.shape[1],
                 state.input_config.height // state.vae_scale_factor,
                 state.input_config.width // state.vae_scale_factor,
             )
-            object.__setattr__(
-                self,
-                "_step_noise",
-                randn_tensor(full_shape, generator=generator, device=model_output.device, dtype=model_output.dtype),
+            self._step_noise = diffusers_ddpm.randn_tensor(
+                full_shape, generator=generator, device=model_output.device, dtype=model_output.dtype
             )
-        if timestep <= 0:
-            return self.module.step(model_output, timestep, sample, generator, return_dict=return_dict)
-
         start, end = state.pp_patches_start_end_idx_global[state.pipeline_patch_idx]
         noise = self._step_noise[..., start:end, :]
 
@@ -120,7 +112,11 @@ class xFuserDDPMSchedulerWrapper(xFuserSchedulerBaseWrapper):
                 raise RuntimeError(f"DDPM noise for a patch has shape {tuple(noise.shape)}, expected {tuple(shape)}")
             return noise
 
-        # DDPMScheduler.step draws its noise through this module-level name.
+        # DDPMScheduler.step takes no noise argument (unlike DDIM's variance_noise);
+        # it draws through the module-level name randn_tensor. Swap that name for
+        # the duration of this call so the rest of the step stays diffusers' code.
+        # The swap is process-global: any other DDPM step running in this process
+        # at the same time would receive this patch's noise.
         draw = diffusers_ddpm.randn_tensor
         diffusers_ddpm.randn_tensor = patch_noise
         try:

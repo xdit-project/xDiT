@@ -171,18 +171,11 @@ class xFuserHunyuanvideoModel(xFuserModel):
         self._run_timed_pipe(compile_args)
 
 
-# Each Diffusers checkpoint of HunyuanVideo-1.5, with the task its transformer was trained
-# for. A name in this table loads that checkpoint; the short aliases load the 720p one for
-# the requested task.
+# The task each Diffusers HunyuanVideo-1.5 checkpoint was trained for.
 HUNYUANVIDEO_15_CHECKPOINTS = {
-    "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v": "i2v",
-    "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v": "t2v",
-    "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v": "i2v",
-    "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v": "t2v",
-}
-HUNYUANVIDEO_15_DEFAULT_CHECKPOINTS = {
-    "i2v": "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v",
-    "t2v": "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v",
+    f"hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-{size}_{task}": task
+    for size in ("480p", "720p")
+    for task in ("i2v", "t2v")
 }
 
 
@@ -242,15 +235,14 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         super()._customize_settings(config)
         checkpoint_task = HUNYUANVIDEO_15_CHECKPOINTS.get(config.model)
         if checkpoint_task is None:
-            # A short alias: the 720p checkpoint for the requested task
-            self.settings.model_name = HUNYUANVIDEO_15_DEFAULT_CHECKPOINTS["i2v" if config.task == "i2v" else "t2v"]
+            task = "i2v" if config.task == "i2v" else "t2v"
+            self.settings.model_name = f"hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_{task}"
             return
         if config.task and config.task != checkpoint_task:
             raise ValueError(f"{config.model} is a {checkpoint_task} checkpoint and cannot run --task {config.task}.")
         self.settings.model_name = config.model
         if "-480p_" in config.model:
-            # The 480p transformers are trained at a 640 target size; this is the 16:9
-            # resolution Diffusers picks for that size when none is given.
+            # The 16:9 size Diffusers picks for the 480p checkpoints' 640 target size.
             self.default_input_values = dataclasses.replace(self.default_input_values, height=480, width=848)
 
     def _load_model(self) -> DiffusionPipeline:

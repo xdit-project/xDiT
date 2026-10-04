@@ -266,26 +266,6 @@ def _default_guidance_schedule(num_inference_steps: int) -> list[float]:
     return [7.0] * (num_inference_steps - polish_steps) + [3.0] * polish_steps
 
 
-# The checkpoints a registered name loads. The aliases load the official FP8 checkpoint; a
-# Diffusers BF16 conversion loads as itself.
-IDEOGRAM4_DEFAULT_CHECKPOINT = "ideogram-ai/ideogram-4-fp8"
-IDEOGRAM4_CHECKPOINTS = {
-    "Ideogram-4": IDEOGRAM4_DEFAULT_CHECKPOINT,
-    "ideogram-ai/ideogram-v4": IDEOGRAM4_DEFAULT_CHECKPOINT,
-    "ideogram-ai/ideogram-4-fp8": "ideogram-ai/ideogram-4-fp8",
-    "CalamitousFelicitousness/Ideogram-4-bf16-Diffusers": "CalamitousFelicitousness/Ideogram-4-bf16-Diffusers",
-}
-# NF4-quantized checkpoints. _load_model reads an FP8 checkpoint, dequantizing it itself, or
-# a plain BF16 one; it has no NF4 path, so these are refused by name rather than loaded as
-# something else.
-IDEOGRAM4_NF4_CHECKPOINTS = frozenset(
-    {
-        "ideogram-ai/ideogram-4-nf4",
-        "ideogram-ai/ideogram-4-nf4-diffusers",
-    }
-)
-
-
 @register_model("ideogram-ai/ideogram-v4")
 @register_model("ideogram-ai/ideogram-4-nf4")
 @register_model("ideogram-ai/ideogram-4-nf4-diffusers")
@@ -325,7 +305,7 @@ class xFuserIdeogram4Model(xFuserModel):
         max_sequence_length=2048,
     )
     settings = ModelSettings(
-        model_name=IDEOGRAM4_DEFAULT_CHECKPOINT,
+        model_name="ideogram-ai/ideogram-4-fp8",
         output_name="ideogram4",
         model_output_type="image",
         mod_value=16,
@@ -359,14 +339,16 @@ class xFuserIdeogram4Model(xFuserModel):
 
     def _customize_settings(self, config) -> None:
         super()._customize_settings(config)
-        if config.model in IDEOGRAM4_NF4_CHECKPOINTS:
+        if "nf4" in config.model:
             raise ValueError(
                 f"{config.model} is an NF4 checkpoint, which xDiT cannot load for "
-                f"Ideogram 4. Use {IDEOGRAM4_DEFAULT_CHECKPOINT} (or the "
+                "Ideogram 4. Use ideogram-ai/ideogram-4-fp8 (or the "
                 "Ideogram-4 alias) or a BF16 Diffusers checkpoint such as "
                 "CalamitousFelicitousness/Ideogram-4-bf16-Diffusers."
             )
-        self.settings.model_name = IDEOGRAM4_CHECKPOINTS.get(config.model, IDEOGRAM4_DEFAULT_CHECKPOINT)
+        # Ideogram-4 and ideogram-ai/ideogram-v4 are aliases of the default FP8 checkpoint.
+        if config.model not in ("Ideogram-4", "ideogram-ai/ideogram-v4"):
+            self.settings.model_name = config.model
 
     def _load_fp8_transformer(
         self,

@@ -132,6 +132,14 @@ class CachedTransformerBlocks(torch.nn.Module, ABC):
     @abstractmethod
     def get_modulated_inputs(self, hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor, *args, **kwargs): pass
 
+    def _store_modulated_inputs(self, tensor: torch.Tensor) -> None:
+        self.cache_context.modulated_inputs = tensor
+
+    def reset_cache_state(self) -> None:
+        self.cnt = torch.zeros_like(self.cnt)
+        self.accumulated_rel_l1_distance = torch.zeros_like(self.accumulated_rel_l1_distance)
+        self.use_cache = torch.zeros_like(self.use_cache)
+
     def process_blocks(self, start_idx: int, hidden: torch.Tensor, encoder: torch.Tensor, *args, **kwargs):
         for block in self.transformer_blocks[start_idx:]:
             hidden, encoder = block(hidden, encoder, *args, **kwargs)
@@ -162,6 +170,12 @@ class CachedTransformerBlocks(torch.nn.Module, ABC):
 
         self.cache_context.original_hidden_states = orig_hidden
         self.cache_context.original_encoder_hidden_states = orig_encoder
+
+        if prev_modulated is not None and prev_modulated.shape != modulated.shape:
+            # A new request with a different token count: nothing cached applies.
+            self.reset_cache_state()
+            self._store_modulated_inputs(modulated)
+            prev_modulated = None
 
         self.use_cache = self.are_two_tensor_similar(prev_modulated, modulated, self.rel_l1_thresh) \
             if prev_modulated is not None else torch.tensor(False, dtype=torch.bool)
@@ -215,7 +229,7 @@ class FBCachedTransformerBlocks(CachedTransformerBlocks):
         first_hidden_states_residual = hidden_states - original_hidden_states
         prev_first_hidden_states_residual = self.cache_context.modulated_inputs
         if not self.use_cache:
-           self.cache_context.modulated_inputs = first_hidden_states_residual
+            self._store_modulated_inputs(first_hidden_states_residual)
 
         return first_hidden_states_residual, prev_first_hidden_states_residual, hidden_states, encoder_hidden_states
 

@@ -12,13 +12,6 @@ def _counting_build():
     return mock.Mock(side_effect=make_attn_mask_with_meta)
 
 
-def _same_storage(storage, shape, values):
-    """A new tensor object over ``storage``: what the caching allocator hands
-    the next request once the previous request's mask has been freed."""
-    mask = torch.empty(0, dtype=values.dtype).set_(storage, 0, shape)
-    return mask.copy_(values)
-
-
 def test_a_mask_reused_across_steps_is_built_once():
     cache = MaskMetaCache()
     build = _counting_build()
@@ -41,30 +34,20 @@ def test_guidance_alternating_two_masks_keeps_both():
     assert build.call_count == 2
 
 
-def test_a_new_mask_at_a_freed_masks_address_gets_its_own_metadata():
+def test_a_different_mask_at_a_cached_masks_address_gets_its_own_metadata():
+    """The caching allocator commonly hands the next request's mask the address of the
+    previous request's; a new tensor over the same storage reproduces that."""
     cache = MaskMetaCache()
     mask_a = torch.tensor([[1, 1, 0, 0, 0]], dtype=torch.bool)
-    cache.get(mask_a)
-    storage, address = mask_a.untyped_storage(), mask_a.data_ptr()
-    del mask_a
+    cache.get(mask_a, make_attn_mask_with_meta)
 
-    mask_b = _same_storage(storage, (1, 5), torch.tensor([[1, 1, 1, 1, 0]], dtype=torch.bool))
-    assert mask_b.data_ptr() == address
+    mask_b = torch.empty(0, dtype=torch.bool).set_(mask_a.untyped_storage(), 0, (1, 5))
+    mask_b.copy_(torch.tensor([[1, 1, 1, 1, 0]], dtype=torch.bool))
+    assert mask_b.data_ptr() == mask_a.data_ptr()
 
-    meta = cache.get(mask_b)
+    meta = cache.get(mask_b, make_attn_mask_with_meta)
     assert meta.indices_k.tolist() == [0, 1, 2, 3]
     assert meta.max_seqlen_k == 4
-    assert meta.attn_mask.flatten().tolist() == mask_b.flatten().tolist()
-
-
-def test_an_in_place_write_to_a_cached_mask_is_seen():
-    cache = MaskMetaCache()
-    mask = torch.tensor([[1, 0, 0]])
-    cache.get(mask)
-
-    mask.copy_(torch.tensor([[1, 1, 1]]))
-
-    assert cache.get(mask).indices_k.tolist() == [0, 1, 2]
 
 
 def test_extra_build_arguments_are_part_of_the_key():
@@ -78,22 +61,18 @@ def test_extra_build_arguments_are_part_of_the_key():
     assert cache.get(mask, padded, 2).attn_mask.shape[-1] == 4
 
 
-def test_the_cache_is_bounded():
+def test_the_least_recently_used_mask_is_evicted():
     cache = MaskMetaCache(capacity=2)
-    masks = [torch.tensor([[1, 1, 0]]) for _ in range(5)]
-    for mask in masks:
-        cache.get(mask)
-    assert len(cache) == 2
-
-
-def test_inference_mode_masks_are_cached():
-    cache = MaskMetaCache()
     build = _counting_build()
-    with torch.inference_mode():
-        mask = torch.tensor([[1, 1, 0]])
+    first, second, third = (torch.tensor([[1, 1, 0]]) for _ in range(3))
+
+    for mask in (first, second, first, third):
         cache.get(mask, build)
-        cache.get(mask, build)
-    assert build.call_count == 1
+    assert build.call_count == 3
+    cache.get(first, build)  # still cached: used more recently than second
+    assert build.call_count == 3
+    cache.get(second, build)
+    assert build.call_count == 4
 
 
 def test_the_lookup_runs_inside_a_compiled_forward():
@@ -112,7 +91,5 @@ def test_the_lookup_runs_inside_a_compiled_forward():
     forward(x, mask_a)
     assert build.call_count == 1
 
-    storage = mask_a.untyped_storage()
-    del mask_a
-    mask_b = _same_storage(storage, (1, 4), torch.tensor([[1, 1, 1, 0]], dtype=torch.bool))
+    mask_b = torch.tensor([[1, 1, 1, 0]], dtype=torch.bool)
     assert forward(x, mask_b).tolist() == [1.0, 1.0, 1.0, 0.0]

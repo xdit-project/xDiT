@@ -1,5 +1,5 @@
 import dataclasses
-import weakref
+from typing import NamedTuple
 
 import torch
 import torch.nn.functional as F
@@ -42,58 +42,39 @@ def make_attn_mask_with_meta(mask_2d: torch.Tensor) -> AttentionMaskWithMeta:
     )
 
 
+class _MaskMetaEntry(NamedTuple):
+    mask: torch.Tensor
+    extra: tuple
+    meta: AttentionMaskWithMeta
+
+
 class MaskMetaCache:
     """The AttentionMaskWithMeta built for the last few masks a model saw.
 
-    A denoising loop hands the transformer the same mask tensor at every step,
-    and building the metadata costs a host sync, so it is built once per mask.
-    Entries are keyed on the mask tensor itself -- a weak reference and its
-    version counter -- never on its address: once one request's mask is freed,
-    the next request's mask of the same shape commonly lands at that address,
-    and an address key would hand it the previous request's valid positions.
-    A freed mask's entry can never match, and an in-place write to a cached
-    mask bumps its version so that it misses too.
-
-    Bounded at ``capacity`` entries, least recently used evicted: classifier-
-    free guidance alternates two masks per step, and a single entry would
-    rebuild on every call.
+    A denoising loop hands the transformer the same mask tensor at every step, and
+    building the metadata costs a host sync, so it is built once per mask. Entries match
+    on tensor identity, never on address: the next request's mask commonly lands where
+    the previous one was freed. Each entry holds its mask, so a cached mask's address
+    cannot be reused while the entry exists. Bounded at ``capacity`` entries, least
+    recently used evicted first; classifier-free guidance alternates two masks per step.
     """
 
     def __init__(self, capacity: int = 4):
         self.capacity = capacity
-        self._entries: list = []  # [(weakref to mask, version, extra, meta)], most recent last
+        self._entries: list[_MaskMetaEntry] = []  # most recently used last
 
-    def __len__(self) -> int:
-        return len(self._entries)
-
-    @staticmethod
-    def _version(mask: torch.Tensor):
-        # Inference-mode tensors keep no version counter.
-        return None if mask.is_inference() else mask._version
-
-    # Weak references and version counters are host-side bookkeeping that
-    # Dynamo cannot trace; keep the lookup, and the build behind it, eager.
+    # The lookup, and the host-syncing build behind it, stay out of compiled graphs.
     @torch.compiler.disable
-    def get(self, mask: torch.Tensor, build=make_attn_mask_with_meta, *extra) -> AttentionMaskWithMeta:
+    def get(self, mask: torch.Tensor, build, *extra) -> AttentionMaskWithMeta:
         """``build(mask, *extra)``, called only when no entry matches.
 
-        ``extra`` is whatever else the metadata depends on, such as a padded
-        length, and is part of the key, so it must be hashable plain values.
+        ``extra`` is whatever else the metadata depends on, such as a padded length,
+        and is compared as part of the key.
         """
-        version = self._version(mask)
-        live = []
-        hit = None
-        for entry in self._entries:
-            cached = entry[0]()
-            if cached is None:
-                continue  # its mask was freed; nothing can match it again
-            if cached is mask and entry[1] != version:
-                continue  # its mask was written in place since
-            if cached is mask and entry[2] == extra:
-                hit = entry
-            else:
-                live.append(entry)
-        if hit is None:
-            hit = (weakref.ref(mask), version, extra, build(mask, *extra))
-        self._entries = (live + [hit])[-self.capacity :]
-        return hit[3]
+        for i, entry in enumerate(self._entries):
+            if entry.mask is mask and entry.extra == extra:
+                self._entries.append(self._entries.pop(i))
+                return entry.meta
+        entry = _MaskMetaEntry(mask, extra, build(mask, *extra))
+        self._entries = (self._entries + [entry])[-self.capacity :]
+        return entry.meta

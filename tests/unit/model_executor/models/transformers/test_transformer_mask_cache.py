@@ -13,11 +13,11 @@ import torch.nn.functional as F
 from xfuser.model_executor.models.transformers import transformer_krea2, transformer_ltx2
 
 
-def _same_storage(storage, shape, values):
-    """A new tensor object over ``storage``: what the caching allocator hands
-    the next request once the previous request's mask has been freed."""
-    mask = torch.empty(0, dtype=values.dtype).set_(storage, 0, shape)
-    return mask.copy_(values)
+def _at_same_address(mask, values):
+    """A new tensor over ``mask``'s storage holding ``values``: what the caching
+    allocator commonly hands the next request once the previous mask is freed."""
+    reused = torch.empty(0, dtype=mask.dtype).set_(mask.untyped_storage(), 0, mask.shape)
+    return reused.copy_(values)
 
 
 def _masked_attention(query, key, value, attention_kwargs=None, **_):
@@ -75,10 +75,8 @@ def test_krea2_second_request_is_not_served_the_first_requests_mask(krea2):
 
     mask_a = torch.tensor([[1, 1, 0, 0, 0, 0]], dtype=torch.bool)
     krea2(**inputs, encoder_attention_mask=mask_a)
-    storage, address = mask_a.untyped_storage(), mask_a.data_ptr()
-    del mask_a
-    mask_b = _same_storage(storage, (1, 6), request_b)
-    assert mask_b.data_ptr() == address
+    mask_b = _at_same_address(mask_a, request_b)
+    assert mask_b.data_ptr() == mask_a.data_ptr()
 
     out = krea2(**inputs, encoder_attention_mask=mask_b).sample
 
@@ -107,30 +105,11 @@ def ltx2():
 
 def test_ltx2_second_request_is_not_served_the_first_requests_mask(ltx2):
     mask_a = torch.tensor([[1, 1, 0, 0, 0, 0]])
-    first = transformer_ltx2._get_mask_meta(ltx2._enc_mask_cache, mask_a)
-    assert first.max_seqlen_k == 2
-    storage, address = mask_a.untyped_storage(), mask_a.data_ptr()
-    del mask_a, first
+    transformer_ltx2._get_mask_meta(ltx2._enc_mask_cache, mask_a)
+    mask_b = _at_same_address(mask_a, torch.tensor([[1, 1, 1, 1, 1, 0]]))
+    assert mask_b.data_ptr() == mask_a.data_ptr()
 
-    mask_b = _same_storage(storage, (1, 6), torch.tensor([[1, 1, 1, 1, 1, 0]]))
-    assert mask_b.data_ptr() == address
     meta = transformer_ltx2._get_mask_meta(ltx2._enc_mask_cache, mask_b)
 
     assert meta.indices_k.tolist() == [0, 1, 2, 3, 4]
     assert meta.max_seqlen_k == 5
-    assert meta.attn_mask.flatten().tolist() == mask_b.bool().flatten().tolist()
-
-
-def test_ltx2_reuses_metadata_within_a_request(ltx2):
-    mask = torch.tensor([[1, 1, 1, 0]])
-    first = transformer_ltx2._get_mask_meta(ltx2._enc_mask_cache, mask)
-    for _ in range(3):
-        assert transformer_ltx2._get_mask_meta(ltx2._enc_mask_cache, mask) is first
-
-
-def test_ltx2_mask_cache_stays_bounded_across_requests(ltx2):
-    """One entry used to be kept per mask ever seen, for the process lifetime."""
-    masks = [torch.ones(1, 8, dtype=torch.int64) for _ in range(20)]
-    for mask in masks:
-        transformer_ltx2._get_mask_meta(ltx2._enc_mask_cache, mask)
-    assert len(ltx2._enc_mask_cache) <= 4

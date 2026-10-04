@@ -45,6 +45,7 @@ from xfuser.core.fast_attention import (
     fast_attention_compression,
 )
 from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
+from xfuser.model_executor.schedulers.base_scheduler import xFuserSchedulerBaseWrapper
 
 from xfuser.envs import PACKAGES_CHECKER
 
@@ -272,12 +273,30 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             and get_runtime_state().parallel_config.vae_parallel_size == 0
         )
 
+    def _naive_forward(self, *args, **kwargs):
+        """Run the wrapped diffusers pipeline with the scheduler it was built with.
+
+        The xDiT scheduler wrapper is not an instance of the scheduler class it
+        wraps, so diffusers pipelines that branch on ``isinstance(self.scheduler,
+        ...)`` (CogVideoX and ConsisID with CogVideoXDPMScheduler, for example)
+        would take the wrong branch. Diffusers gets the plain scheduler back for
+        the call; both share the same state.
+        """
+        scheduler = getattr(self.module, "scheduler", None)
+        if not isinstance(scheduler, xFuserSchedulerBaseWrapper):
+            return self.module(*args, **kwargs)
+        self.module.scheduler = scheduler.module
+        try:
+            return self.module(*args, **kwargs)
+        finally:
+            self.module.scheduler = scheduler
+
     @staticmethod
     def check_to_use_naive_forward(func):
         @wraps(func)
         def check_naive_forward_fn(self, *args, **kwargs):
             if self.use_naive_forward():
-                return self.module(*args, **kwargs)
+                return self._naive_forward(*args, **kwargs)
             else:
                 return func(self, *args, **kwargs)
 

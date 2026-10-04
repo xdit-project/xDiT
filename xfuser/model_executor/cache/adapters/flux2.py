@@ -13,10 +13,7 @@ Key differences from FLUX.1:
     Input hidden_states is already [txt || img] concatenated.
     Returns: hidden_states (no split)
 
-  - These are the diffusers 0.37+ names. diffusers 0.36 blocks take the modulation
-    already split, as temb_mod_params_img / temb_mod_params_txt / temb_mod_params.
-    Dual-stream blocks receive whatever keywords the model's own forward passes, so
-    only the single-stream call below has to follow the installed version.
+  - These are the diffusers 0.37+ names; see _BLOCKS_SPLIT_MODULATION for 0.36.
 
   - Modulation tensors are pre-computed ONCE before all block loops:
         double_stream_mod_img  -> passed to every dual-stream block
@@ -44,19 +41,11 @@ from torch import nn
 
 from xfuser.model_executor.cache import utils
 
-# diffusers 0.37 moved the modulation split into the blocks: the modulation layers
-# return one tensor, which single-stream blocks take as temb_mod. In 0.36 the layers
-# returned the split parameter sets, and single-stream blocks took them as
-# temb_mod_params. Flux2Modulation.split arrived together with that change.
+# diffusers 0.37 added Flux2Modulation.split and moved the split into the blocks. Before
+# that (0.36) the modulation layers returned split parameter sets, and blocks took them
+# as temb_mod_params*. Dual-stream blocks get whatever the model's own forward passes,
+# so only the single-stream call below depends on this.
 _BLOCKS_SPLIT_MODULATION = hasattr(Flux2Modulation, "split")
-
-
-def _single_block_modulation_kwargs(single_stream_mod):
-    """Pass single_stream_modulation's output to a single-stream block."""
-    if _BLOCKS_SPLIT_MODULATION:
-        return {"temb_mod": single_stream_mod}
-    # the single-stream layer has one parameter set
-    return {"temb_mod_params": single_stream_mod[0]}
 
 
 class Flux2FBCachedTransformerBlocks(utils.FBCachedTransformerBlocks):
@@ -217,7 +206,11 @@ class Flux2FBCachedTransformerBlocks(utils.FBCachedTransformerBlocks):
             encoder_seq_len = encoder.shape[1]
 
             image_rotary_emb = kwargs.get("image_rotary_emb", None)
-            single_mod_kwargs = _single_block_modulation_kwargs(self._single_stream_mod)
+            if _BLOCKS_SPLIT_MODULATION:
+                single_mod_kwargs = {"temb_mod": self._single_stream_mod}
+            else:
+                # 0.36's single-stream layer returns one parameter set
+                single_mod_kwargs = {"temb_mod_params": self._single_stream_mod[0]}
             single_jkw = self._single_joint_attn_kwargs
 
             for block in self.single_transformer_blocks:

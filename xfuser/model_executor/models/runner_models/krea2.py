@@ -33,6 +33,9 @@ KREA2_SUPPORTED_ATTN_BACKENDS = frozenset(
         AttentionBackendType.AITER,
         AttentionBackendType.SDPA,
         AttentionBackendType.SDPA_MATH,
+        # cuDNN applies the key-padding mask as its additive bias, so it excludes
+        # the padded keys without the packing.
+        AttentionBackendType.CUDNN,
         AttentionBackendType.FLASH,
         AttentionBackendType.FLASH_3,
         AttentionBackendType.FLASH_4,

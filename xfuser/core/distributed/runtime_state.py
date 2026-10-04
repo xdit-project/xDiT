@@ -498,8 +498,6 @@ class DiTRuntimeState(RuntimeState):
         self.max_condition_sequence_length = max_condition_sequence_length
         self.split_text_embed_in_sp = split_text_embed_in_sp
         self.text_embed_sp_pad = 0
-        if self.runtime_config.warmup_steps > self.input_config.num_inference_steps:
-            self.runtime_config.warmup_steps = self.input_config.num_inference_steps
         if seed is not None and seed != self.input_config.seed:
             self.input_config.seed = seed
             set_random_seed(seed)
@@ -526,8 +524,6 @@ class DiTRuntimeState(RuntimeState):
         split_text_embed_in_sp: bool = True,
     ):
         self.input_config.num_inference_steps = num_inference_steps or self.input_config.num_inference_steps
-        if self.runtime_config.warmup_steps > self.input_config.num_inference_steps:
-            self.runtime_config.warmup_steps = self.input_config.num_inference_steps
         self.split_text_embed_in_sp = split_text_embed_in_sp
         if seed is not None and seed != self.input_config.seed:
             self.input_config.seed = seed

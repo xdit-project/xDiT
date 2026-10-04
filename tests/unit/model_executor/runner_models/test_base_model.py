@@ -19,6 +19,16 @@ def _model_class(**attributes):
     return type("ConfigOnlyModel", (xFuserModel,), {"_load_model": _load_model, "_run_pipe": _run_pipe, **attributes})
 
 
+def test_video_model_without_fps_is_refused_at_config_time():
+    from xfuser import xFuserArgs
+    from xfuser.model_executor.models.runner_models.base_model import ModelSettings
+
+    model_class = _model_class(settings=ModelSettings(model_name="video-without-fps", model_output_type="video"))
+
+    with pytest.raises(ValueError, match="produces video output but fps is not set"):
+        model_class(xFuserArgs(model="video-without-fps"))
+
+
 def test_ulysses_degree_that_does_not_divide_heads_is_refused_at_config_time():
     from xfuser import xFuserArgs
     from xfuser.model_executor.models.runner_models.base_model import ModelCapabilities, ModelSettings

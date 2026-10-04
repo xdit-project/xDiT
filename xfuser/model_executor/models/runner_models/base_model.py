@@ -344,8 +344,6 @@ class xFuserModel(abc.ABC):
     capabilities: ModelCapabilities = ModelCapabilities()
     default_input_values: DefaultInputValues = DefaultInputValues()
     settings: ModelSettings = ModelSettings()
-    model_output_type: str = ""
-    fps: int = 0
     checkpoint_request_defaults: dict = {}
 
     # Attention heads of the model's transformer(s). When set, a --ulysses_degree that
@@ -717,7 +715,7 @@ class xFuserModel(abc.ABC):
 
         validate_fp8_comms_config(config, self.capabilities, self.settings)
 
-        if self.model_output_type == "video" and not self.fps:
+        if self.settings.model_output_type == "video" and not self.settings.fps:
             raise ValueError(f"Model {self.settings.model_name} produces video output but fps is not set.")
 
         if config.use_int8_gemms and _is_hip():

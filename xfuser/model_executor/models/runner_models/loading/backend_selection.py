@@ -55,15 +55,41 @@ class QuantizationBackends:
         converted leaf, where it would be an AttributeError mid-load.
         """
 
+        from .contracts import UnsupportedLoadContract
+
         if not getattr(self.model.config, "use_hybrid_gemm_schedule", False):
             return
         plan = self.loader.quantization_plan.gemm_plan
         if plan is None or plan.high is None:
             return
         companion = self.adapter_for(plan.high)
-        if companion is not None:
-            # Raises for an implementation with no single-leaf seam, naming it.
-            companion.layer_factory(device=None)
+        if companion is not None and not companion.builds_one_layer():
+            raise UnsupportedLoadContract(
+                f"{companion.impl} {companion.format_name} cannot install one "
+                "layer at a time, so it cannot be the high half of a per-step "
+                "GEMM schedule; drop --use_hybrid_gemm_schedule or name a "
+                "high format that can"
+            )
+
+    def hybrid_companion(self, format_name: str, *, device):
+        """The per-step alternate the schedule pairs with `format_name`, if any.
+
+        The run names both formats and the plan says which is which, so the
+        pairing is composed here rather than inside either converter. `device`
+        is the one the low half is being built on: the companion is the same
+        leaf in another precision and belongs beside it, not wherever the
+        source weight happened to be resting.
+        """
+
+        if not getattr(self.model.config, "use_hybrid_gemm_schedule", False):
+            return None
+        plan = self.loader.quantization_plan.gemm_plan
+        if plan is None or plan.high is None or format_name != plan.low:
+            return None
+        companion = self.adapter_for(plan.high)
+        if companion is None:
+            return None
+        return companion.layer_factory(device=device)
 
     @functools.cached_property
     def capabilities(self):

@@ -248,7 +248,9 @@ def build_block_quantize_fn(
         for format_name in present:
             adapter = adapters[format_name]
             convert_kwargs = {}
-            companion = _hybrid_companion(loader, plan, format_name)
+            companion = loader.backends.hybrid_companion(
+                format_name, device=device
+            )
             if companion is not None:
                 convert_kwargs.update(companion=companion)
             adapter.convert_block(
@@ -259,22 +261,6 @@ def build_block_quantize_fn(
             )
 
     return quantize_fn
-
-
-def _hybrid_companion(loader, plan, format_name):
-    """The per-step alternate the hybrid schedule pairs with this format.
-
-    The run names both formats and the plan says which is which, so the walk
-    composes the pair. Neither converter learns about the other.
-    """
-    if not getattr(loader.model.config, "use_hybrid_gemm_schedule", False):
-        return None
-    if plan.high is None or format_name != plan.low:
-        return None
-    companion = loader.backends.adapter_for(plan.high)
-    if companion is None:
-        return None
-    return companion.layer_factory(device=None)
 
 
 def _plan_target_filter(plan, block_path, format_name):

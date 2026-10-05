@@ -190,7 +190,8 @@ class CachedTransformerBlocks(torch.nn.Module, ABC):
         self.cache_context.original_encoder_hidden_states = orig_encoder
 
         if prev_modulated is not None and prev_modulated.shape != modulated.shape:
-            # A new request with a different token count: nothing cached applies.
+            # Incompatible shapes cannot share step-cache state. Request boundaries
+            # must reset it separately, including when the shape stays the same.
             self.reset_cache_state()
             self._store_modulated_inputs(modulated)
             prev_modulated = None

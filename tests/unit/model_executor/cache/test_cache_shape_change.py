@@ -1,4 +1,4 @@
-"""Step caches must survive a new request whose token count differs (#548)."""
+"""Step caches recompute when the token count changes without an explicit reset (#548)."""
 
 from unittest.mock import patch
 
@@ -55,12 +55,12 @@ def test_new_token_count_recomputes_then_caches_again(cache_on_cpu, cls):
     blocks = [_Block(), _Block()]
     cached = _make(cls, blocks)
 
-    # A previous request at 16 tokens that ends with the cache in use.
+    # Run at 16 tokens until the cache is in use.
     for _ in range(3):
         _step(cached, 16)
 
-    # The next request has 9 tokens: it must run every block, not reuse
-    # residuals of the old shape.
+    # Change to 9 tokens without a request-boundary reset: every block must
+    # run rather than reuse residuals of the old shape.
     calls_before = blocks[1].calls
     hidden, encoder, (out_hidden, out_encoder) = _step(cached, 9)
 

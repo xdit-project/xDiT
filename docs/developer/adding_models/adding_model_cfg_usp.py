@@ -17,9 +17,11 @@ import torch
 from diffusers import DiffusionPipeline, CogVideoXPipeline
 
 import torch.distributed as dist
+from xfuser import xFuserArgs
 from xfuser.core.distributed import (
     init_distributed_environment,
     initialize_model_parallel,
+    initialize_runtime_state,
     get_world_group,
     get_classifier_free_guidance_world_size,
     get_classifier_free_guidance_rank,
@@ -208,6 +210,15 @@ if __name__ == "__main__":
         ulysses_degree=int(sys.argv[3]),
         classifier_free_guidance_degree=2,
     )
+    # USP reads the attention backend from xDiT's runtime state, so describe
+    # the same parallel layout to it.
+    engine_config, _ = xFuserArgs(
+        model=sys.argv[1],
+        ring_degree=int(sys.argv[2]),
+        ulysses_degree=int(sys.argv[3]),
+        use_cfg_parallel=True,
+    ).create_config()
+    initialize_runtime_state(engine_config=engine_config)
     pipe = CogVideoXPipeline.from_pretrained(
         pretrained_model_name_or_path=sys.argv[1],
         torch_dtype=torch.bfloat16,

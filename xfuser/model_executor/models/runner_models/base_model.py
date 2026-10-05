@@ -351,9 +351,9 @@ class xFuserModel(abc.ABC):
     # Lowest diffusers release this model is expected to run on, used only to name an
     # upgrade target when a load fails. It never gates a load, so a value above the
     # true minimum costs an over-stated recommendation and blocks nothing, while a
-    # value below it is a bug that tests/core/test_diffusers_floors.py catches. Use
-    # DIFFUSERS_FROM_SOURCE when the model's support has not been released yet, and
-    # leave None when no floor is known.
+    # value below it is a bug that tests/integration/cpu/repository/test_diffusers_floors.py
+    # catches. Use DIFFUSERS_FROM_SOURCE when the model's support has not been released yet,
+    # and leave None when no floor is known.
     min_diffusers_version: Optional[str] = None
 
     def __init__(self, config: xFuserArgs) -> None:

@@ -480,8 +480,9 @@ def test_find_returns_none_rather_than_raising():
     """usp and runtime_state look a backend up before knowing it is
     registered, and do so inside a traced region -- so this reads the dict,
     not the REGISTRY proxy, which Dynamo cannot subscript by a non-constant
-    key. tests/test_minimax_h3.py's fullgraph cases are what catch a
-    regression here."""
+    key. The fullgraph cases in
+    tests/unit/model_executor/runner_models/test_minimax_h3.py are what catch
+    a regression here."""
     spec = _spec(AttentionBackendType.SDPA)
     with registry.using([spec]):
         assert registry.find(AttentionBackendType.SDPA) is spec

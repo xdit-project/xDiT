@@ -11,9 +11,7 @@ def _import_av():
     try:
         import av
     except ImportError as error:
-        raise ImportError(
-            "PyAV is required to encode videos with audio. Install it with `pip install av`."
-        ) from error
+        raise ImportError("PyAV is required to encode videos with audio. Install it with `pip install av`.") from error
     return av
 
 
@@ -86,7 +84,7 @@ def encode_video_with_audio(
     if isinstance(video, list):
         video = torch.from_numpy(np.stack([np.asarray(frame) for frame in video]))
     elif isinstance(video, np.ndarray):
-        if np.all((video >= 0) & (video <= 1)):
+        if np.issubdtype(video.dtype, np.floating) and np.all((video >= 0) & (video <= 1)):
             video = (video * 255).round().astype(np.uint8)
         video = torch.from_numpy(video)
 

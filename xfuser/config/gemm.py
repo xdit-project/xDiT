@@ -164,11 +164,14 @@ def _normalize_config_setting(key: str, value):
             raise TypeError(f"{key} must be a string, list of strings, or null")
         if value is not None:
             tokens = tuple(token.strip().lower() for token in value.split(","))
-            if not tokens or any(
-                token not in {"fp8", "fp6", "fp4"} for token in tokens
-            ):
+            # Any format this build knows, rather than the three that existed
+            # when the schedule was written: which pair can actually drive a
+            # per-step schedule is measured at load time, not listed here.
+            schedulable = _KNOWN_FORMATS - {"none"}
+            if not tokens or any(token not in schedulable for token in tokens):
                 raise ValueError(
-                    f"{key} entries must be fp8, fp6, or fp4, got {value!r}"
+                    f"{key} entries must name a quantization format "
+                    f"({', '.join(sorted(schedulable))}), got {value!r}"
                 )
             return ",".join(tokens)
         return value

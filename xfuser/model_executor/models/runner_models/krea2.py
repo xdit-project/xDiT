@@ -10,7 +10,6 @@ from xfuser.envs import _is_hip
 from xfuser.core.attention.backends.aiter_mha_v4.spec import DENSE_BACKENDS
 from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.model_executor.models.runner_models.base_model import (
-    DIFFUSERS_FROM_SOURCE,
     DefaultInputValues,
     DiffusionOutput,
     ModelCapabilities,
@@ -79,8 +78,8 @@ class _Krea2BaseModel(xFuserModel):
     # From the registered checkpoint's transformer config.
     attention_heads = 48
 
-    # No released diffusers ships Krea2Transformer2DModel yet.
-    min_diffusers_version = DIFFUSERS_FROM_SOURCE
+    # diffusers 0.39.0 is the first release with Krea2Transformer2DModel.
+    min_diffusers_version = "0.39.0"
 
     load_support = LoadSupport(
         meta_transformers=("transformer",),

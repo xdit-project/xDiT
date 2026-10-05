@@ -308,6 +308,7 @@ def _make_xfuser_cosmos3_pipeline_class():
                         action_timesteps=action_timesteps_t,
                         action_noisy_frame_indexes=my_packed_static.get("action_noisy_frame_indexes"),
                         action_domain_ids=[action_domain_id] if action_domain_id is not None else None,
+                        return_dict=False,
                     )
                     my_v_vision, my_v_sound, my_v_action = self._mask_velocity_predictions(
                         preds_vision,

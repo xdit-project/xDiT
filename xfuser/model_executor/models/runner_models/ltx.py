@@ -10,7 +10,6 @@ from xfuser.core.utils.runner_utils import log
 from xfuser.core.utils.video_utils import encode_video_with_audio
 from xfuser.envs import PACKAGES_CHECKER
 from xfuser.model_executor.models.runner_models.base_model import (
-    DIFFUSERS_FROM_SOURCE,
     DefaultInputValues,
     DiffusionOutput,
     ModelCapabilities,
@@ -460,7 +459,8 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
     _AUDIO_MODALITY_SCALE: float = 1.0
     _AUDIO_GUIDANCE_RESCALE: float = 0.0
 
-    min_diffusers_version = DIFFUSERS_FROM_SOURCE
+    # diffusers 0.40.0 is the first release with LTX2VideoDiffusionDecodePipeline.
+    min_diffusers_version = "0.40.0"
 
     # Video blocks are 128 wide and audio blocks 64. A backend serving only 128 still applies to
     # the video ones, and the audio blocks fall back per call, so both are declared.

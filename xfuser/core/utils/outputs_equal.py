@@ -84,7 +84,9 @@ def _ndarrays_equal(a: np.ndarray, b: np.ndarray, path: str) -> bool:
             if not _payloads_equal(left, right, _index_path(path, index)):
                 return False
         return True
-    return bool(np.array_equal(a, b, equal_nan=True))
+    if np.issubdtype(a.dtype, np.complexfloating):
+        return _ndarrays_equal(a.real, b.real, path) and _ndarrays_equal(a.imag, b.imag, path)
+    return bool(np.array_equal(a, b, equal_nan=np.issubdtype(a.dtype, np.floating)))
 
 
 def _pil_palette_data(image: Image):
@@ -109,9 +111,7 @@ def _payloads_equal(a, b, path: str) -> bool:
     family_b = _payload_family(b)
     if family_a is None or family_b is None:
         unsupported = a if family_a is None else b
-        raise TypeError(
-            f"Unsupported payload type {type(unsupported).__name__} at {path or '<root>'}"
-        )
+        raise TypeError(f"Unsupported payload type {type(unsupported).__name__} at {path or '<root>'}")
     if family_a != family_b:
         return False
     if family_a == "none":
@@ -155,9 +155,7 @@ def _payloads_equal(a, b, path: str) -> bool:
     if keys_a != keys_b:
         return False
     for name in keys_a:
-        if not _payloads_equal(
-            a.__dict__[name], b.__dict__[name], f"{path}.{name}" if path else name
-        ):
+        if not _payloads_equal(a.__dict__[name], b.__dict__[name], f"{path}.{name}" if path else name):
             return False
     return True
 

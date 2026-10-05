@@ -168,6 +168,34 @@ def _record_determinism_checks(model):
 # --- NumPy -----------------------------------------------------------------
 
 
+@pytest.mark.parametrize("dtype", ["U3", "S3"])
+def test_output_string_array_metadata_compares_without_nan_operations(dtype):
+    expected = DiffusionOutput(pipe_args=[])
+    expected.labels = np.array(["cat"], dtype=dtype)
+    actual = copy.deepcopy(expected)
+    assert outputs_equal(expected, actual)
+    actual.labels[0] = "dog"
+    assert not outputs_equal(expected, actual)
+
+
+@pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
+@pytest.mark.parametrize(
+    "expected_value, changed_value",
+    [
+        (complex(np.nan, 1), complex(np.nan, 2)),
+        (complex(1, np.nan), complex(2, np.nan)),
+        (complex(np.nan, 1), complex(1, np.nan)),
+    ],
+)
+def test_output_complex_array_nan_does_not_hide_component_changes(dtype, expected_value, changed_value):
+    expected = DiffusionOutput(pipe_args=[])
+    expected.spectrum = np.array([expected_value], dtype=dtype)
+    actual = copy.deepcopy(expected)
+    assert outputs_equal(expected, actual)
+    actual.spectrum[0] = changed_value
+    assert not outputs_equal(expected, actual)
+
+
 def test_numpy_identical_arrays_match():
     a = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
     b = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)

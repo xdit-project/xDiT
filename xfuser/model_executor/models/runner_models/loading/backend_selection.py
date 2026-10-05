@@ -255,7 +255,13 @@ class QuantizationBackends:
             return False
         roots = plan.walk_roots(
             format_name,
-            paired=bool(self.model.config.use_hybrid_gemm_schedule),
+            # Only the high format is installed everywhere the low walk goes.
+            # Asking for both widened the low format onto subtrees it never
+            # touches, which could refuse a placement that was always fine.
+            paired=(
+                bool(self.model.config.use_hybrid_gemm_schedule)
+                and format_name == plan.high
+            ),
         )
         return any(
             module_paths_overlap(root, fsdp_path)

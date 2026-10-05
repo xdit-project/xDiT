@@ -211,10 +211,10 @@ class GemmPlan:
         inside targets the other format owns, so reaching it means walking
         those too and letting `format_for` reject the rest.
 
-        `paired` says the run builds both formats at every leaf rather than
-        splitting the leaves between them -- the hybrid schedule -- so each
-        format reaches wherever any target does. The caller knows that about
-        the run; the plan only knows what it means for where a walk starts.
+        `paired` says this format is the hybrid schedule's companion, built
+        at every leaf the low walk reaches rather than only where the plan
+        assigns it. The caller knows which format that is; the plan only knows
+        what it means for where a walk starts.
         """
         found = list(self.roots(format_name))
         widen = paired or (format_name == self.high and self.keep_high.suffixes)

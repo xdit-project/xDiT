@@ -15,16 +15,10 @@ if torch.cuda.is_available() or envs._is_npu():
 
     from yunchang.comm.all_to_all import SeqAllToAll4D
     from yunchang.globals import HAS_SPARSE_SAGE_ATTENTION
-    from yunchang import globals as yunchang_globals
-
-    HAS_FLASH_ATTN = getattr(yunchang_globals, "HAS_FLASH_ATTN", False)
-    HAS_FLASH_ATTN_HOPPER = getattr(yunchang_globals, "HAS_FLASH_ATTN_HOPPER", False)
 else:
     LongContextAttention = object
     AttnType = None
     HAS_SPARSE_SAGE_ATTENTION = False
-    HAS_FLASH_ATTN = False
-    HAS_FLASH_ATTN_HOPPER = False
 
 
 from xfuser.logger import init_logger
@@ -34,35 +28,23 @@ from xfuser.core.distributed import (
 )
 
 logger = init_logger(__name__)
+env_info = envs.PACKAGES_CHECKER.get_packages_info()
 
 
 def _resolve_attn_type(attn_type):
-    """The attention kernel to run, checking up front that it is installed.
-
-    With no attn_type, use FlashAttention when flash-attn is installed and
-    PyTorch's flash SDPA kernel otherwise; both return the log-sum-exp that ring
-    attention merges its steps with. An explicitly requested FlashAttention
-    kernel that is not installed fails here, rather than on the first forward.
-    """
+    """Pick the default kernel for this machine, or fail early if a requested FlashAttention is missing."""
     if attn_type is None:
-        if HAS_FLASH_ATTN:
+        if envs._is_npu():
+            return AttnType.NPU
+        if env_info["has_flash_attn"]:
             return AttnType.FA
-        logger.warning(
-            "flash-attn is not installed; xFuserLongContextAttention falls back to "
-            "PyTorch's flash SDPA kernel (attn_type=AttnType.TORCH_FLASH)."
-        )
+        logger.warning("flash-attn is not available; xFuserLongContextAttention uses AttnType.TORCH_FLASH.")
         return AttnType.TORCH_FLASH
-    if attn_type == AttnType.FA and not HAS_FLASH_ATTN:
+    required = {AttnType.FA: ("has_flash_attn", "flash-attn"), AttnType.FA3: ("has_flash_attn_3", "FlashAttention-3")}
+    if attn_type in required and not env_info[required[attn_type][0]]:
         raise ImportError(
-            "xFuserLongContextAttention was asked for attn_type=AttnType.FA, but flash-attn "
-            "is not installed. Install flash-attn, or leave attn_type unset to use PyTorch's "
-            "flash SDPA kernel."
-        )
-    if attn_type == AttnType.FA3 and not HAS_FLASH_ATTN_HOPPER:
-        raise ImportError(
-            "xFuserLongContextAttention was asked for attn_type=AttnType.FA3, but "
-            "FlashAttention-3 (flash_attn_interface) is not installed. Install it, or leave "
-            "attn_type unset to use an available kernel."
+            f"xFuserLongContextAttention was asked for {attn_type}, but {required[attn_type][1]} is not "
+            "available here. Leave attn_type unset to use a kernel that is."
         )
     return attn_type
 
@@ -91,12 +73,10 @@ class xFuserLongContextAttention(LongContextAttention):
             ring_impl_type: str = "basic", the ring implementation type, currently only support "basic"
             use_pack_qkv: bool = False, whether to use pack qkv in the input
             use_kv_cache: bool = False, whether to use kv cache in the attention layer, which is applied in PipeFusion.
-            attn_type: AttnType = None, the attention type supported inside long context attention, including "FA", "FA3", "TORCH_FLASH", "SAGE_FP16", "SAGE_FP8". None picks FA when flash-attn is installed and TORCH_FLASH otherwise.
+            attn_type: AttnType = None, the attention type supported inside long context attention, including "FA", "FA3", "TORCH_FLASH", "SAGE_FP16", "SAGE_FP8", "NPU". None picks NPU on Ascend, else FA when flash-attn is available, else TORCH_FLASH.
             attn_processor: nn.Module = None, the attention processor can be passed in to replace the attention processor if attn_type is do not support it.
         """
 
-        # attn_type defaults to None rather than AttnType.FA so that xDiT runs
-        # without yunchang installed; resolve it to a kernel that is installed.
         attn_type = _resolve_attn_type(attn_type)
 
         super().__init__(

@@ -14,12 +14,11 @@ def _worker(rank, world_size, init_method, ulysses, ring):
 
     from xfuser.core.distributed import init_distributed_environment, initialize_model_parallel
     from xfuser.core.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
+    from xfuser import envs
     from xfuser.core.long_ctx_attention import xFuserLongContextAttention
-    from xfuser.core.long_ctx_attention.hybrid import attn_layer
 
-    # As if flash-attn (and FlashAttention-3) were not installed.
-    attn_layer.HAS_FLASH_ATTN = False
-    attn_layer.HAS_FLASH_ATTN_HOPPER = False
+    # As if flash-attn (and FlashAttention-3) were not installed. Each rank is its own process.
+    envs.PACKAGES_CHECKER.get_packages_info().update(has_flash_attn=False, has_flash_attn_3=False)
 
     torch.cuda.set_device(rank)
     init_distributed_environment(rank=rank, world_size=world_size, local_rank=rank, distributed_init_method=init_method)

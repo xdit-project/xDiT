@@ -206,12 +206,23 @@ def build_block_quantize_fn(
     """
     model = loader.model
     config, settings = model.config, model.settings
-    if not (config.use_fp4_gemms or config.use_fp8_gemms or config.use_int8_gemms):
+    use_fp6 = bool(getattr(config, "use_fp6_gemms", False))
+    use_fp6_mixed = use_fp6 and config.use_fp4_gemms
+    pure_fp6 = use_fp6 and not config.use_fp4_gemms
+    if not (
+        config.use_fp4_gemms
+        or config.use_fp8_gemms
+        or config.use_int8_gemms
+        or use_fp6
+    ):
         return None
 
     device = f"cuda:{local_rank}"
     fp4_list = set(loader.quantization_plan.module_list("fp4"))
     fp8_list = set(loader.quantization_plan.module_list())
+    fp6_list = (
+        set(loader.quantization_plan.module_list("fp6")) if pure_fp6 else set()
+    )
     fp8_overrides = settings.fp8_precision_overrides or ()
     fp8_suffix_overrides = settings.fp8_precision_override_suffixes
     int8_list = set(loader.quantization_plan.module_list("int8"))
@@ -224,13 +235,21 @@ def build_block_quantize_fn(
         )
 
     use_fp4_here = config.use_fp4_gemms and overlaps_any(fp4_list)
+    use_fp6_here = (pure_fp6 and overlaps_any(fp6_list)) or (
+        use_fp6_mixed and overlaps_any(fp8_list)
+    )
     # fp8-only: in fp8 list but not fp4 list (e.g. transformer_2 in Wan2.2 FP4 mode)
-    use_fp8_here = (config.use_fp8_gemms and overlaps_any(fp8_list)) or (
-        config.use_fp4_gemms and overlaps_any(fp8_list) and not overlaps_any(fp4_list)
+    use_fp8_here = not use_fp6 and (
+        (config.use_fp8_gemms and overlaps_any(fp8_list))
+        or (
+            config.use_fp4_gemms
+            and overlaps_any(fp8_list)
+            and not overlaps_any(fp4_list)
+        )
     )
     use_int8_here = config.use_int8_gemms and overlaps_any(int8_list)
 
-    if not use_fp4_here and not use_fp8_here and not use_int8_here:
+    if not use_fp4_here and not use_fp6_here and not use_fp8_here and not use_int8_here:
         return None
 
     block_paths = (
@@ -252,18 +271,35 @@ def build_block_quantize_fn(
         )
         local_fp4_targets = _block_local_targets(fp4_list, block_path)
         local_fp8_targets = _block_local_targets(fp8_list, block_path)
+        local_fp6_targets = _block_local_targets(fp6_list, block_path)
         local_int8_targets = _block_local_targets(int8_list, block_path)
         use_fp4_block = config.use_fp4_gemms and local_fp4_targets is not None
-        use_fp8_block = (config.use_fp8_gemms and local_fp8_targets is not None) or (
-            config.use_fp4_gemms
+        use_fp6_block = (pure_fp6 and local_fp6_targets is not None) or (
+            use_fp6_mixed
             and local_fp8_targets is not None
             and (
                 local_fp4_targets is None
                 or _has_unowned_target(local_fp8_targets, local_fp4_targets)
             )
         )
+        use_fp8_block = not use_fp6 and (
+            (config.use_fp8_gemms and local_fp8_targets is not None)
+            or (
+                config.use_fp4_gemms
+                and local_fp8_targets is not None
+                and (
+                    local_fp4_targets is None
+                    or _has_unowned_target(local_fp8_targets, local_fp4_targets)
+                )
+            )
+        )
         use_int8_block = config.use_int8_gemms and local_int8_targets is not None
-        if not use_fp4_block and not use_fp8_block and not use_int8_block:
+        if (
+            not use_fp4_block
+            and not use_fp6_block
+            and not use_fp8_block
+            and not use_int8_block
+        ):
             return
 
         block_prefix = f"{block_idx}."
@@ -289,6 +325,26 @@ def build_block_quantize_fn(
                 hybrid=config.use_hybrid_gemm_schedule,
                 device=device,
                 filter_fn=_target_filter(local_fp4_targets),
+            )
+        if use_fp6_block:
+            adapter = loader.backends.format if pure_fp6 else loader.backends.fp6
+            if adapter is None:
+                raise RuntimeError(
+                    "MXFP6 block conversion requested without a selected backend"
+                )
+            targets = local_fp6_targets if pure_fp6 else local_fp8_targets
+            adapter.convert_block(
+                block,
+                device=device,
+                filter_fn=_target_filter(
+                    targets,
+                    (local_fp4_targets if use_fp6_mixed and use_fp4_block else ()),
+                    (
+                        getattr(settings, "fp8_gemm_include_suffixes", None)
+                        if use_fp6_mixed
+                        else None
+                    ),
+                ),
             )
         if use_fp8_block:
             adapter = loader.backends.blockwise_fp8

@@ -1,13 +1,23 @@
 from __future__ import annotations
 
 import copy
-from types import SimpleNamespace
+import functools
+import inspect
+from types import MethodType, SimpleNamespace
 
 import numpy as np
 import torch
 
-from xfuser.core.distributed.attention_backend import AttentionBackendType
-from xfuser.core.distributed import get_runtime_state, get_world_group
+from xfuser.core.attention import registry as attention_registry
+from xfuser.core.attention.backends.aiter_mha_v4.spec import (
+    DENSE_BACKENDS as AITER_MHA_V4_ONLY_BACKEND_SET,
+)
+from xfuser.core.attention.spec import AttentionBackendType, Sparsity
+from xfuser.core.distributed import (
+    get_runtime_state,
+    get_vae_parallel_group,
+    get_world_group,
+)
 from xfuser.core.utils.runner_utils import log
 from xfuser.core.utils.video_utils import encode_video_with_audio
 from xfuser.model_executor.models.runner_models.base_model import (
@@ -26,15 +36,145 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
 )
 
 
+# Both VSA-H3 backends declare the same sparsity strategy, so the set follows
+# from the specs rather than being listed here.
+VSA_H3_BACKENDS = attention_registry.types_where(sparsity=Sparsity.H3)
+
+# f4f4 is commented out of AITER's kernel manifest -- mxfp4 covers that row and claims the
+# same v_pack=1 FP6-P V order -- so selecting it lands on mxfp4 rather than a row of its own.
+_UNSERVED_MHA_V4_BACKENDS = frozenset({
+    AttentionBackendType.AITER_F4F4,
+})
+# The remaining dense MHA v4 rows are in: MiniMax-H3 pads its packed sequence to
+# 64 rows and declares the pad through valid_kv_len, which those kernels serve by
+# slicing K/V instead of masking.
 _SUPPORTED_ATTN_BACKENDS = frozenset({
     AttentionBackendType.AITER,
     AttentionBackendType.AITER_FP8,
     AttentionBackendType.CUDNN,
     AttentionBackendType.SDPA,
     AttentionBackendType.NVTE_FP8,
-})
+}) | (AITER_MHA_V4_ONLY_BACKEND_SET - _UNSERVED_MHA_V4_BACKENDS)
+_FASTH3_ATTN_BACKENDS = VSA_H3_BACKENDS
 _SUPPORTED_ULYSSES_DEGREES = frozenset({1, 2, 4, 8})
 _SUPPORTED_TASKS = frozenset({"t2va", "i2va", "l2va", "fl2va", "ref2va"})
+FASTH3_V1_DATAFREE_MODEL_ID = (
+    "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree"
+)
+# Dense-attention ablation of the same 4-step preview: distilled without VSA
+FASTH3_V1_DENSE_DATAFREE_MODEL_ID = (
+    "FastVideo/FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree"
+)
+FASTH3_V2_MODEL_ID = "FastVideo/FastVideo-FastH3-8-Step-V2"
+FASTH3_MODEL_IDS = (
+    FASTH3_V1_DATAFREE_MODEL_ID,
+    FASTH3_V1_DENSE_DATAFREE_MODEL_ID,
+    FASTH3_V2_MODEL_ID,
+)
+# Full set of FastH3 V1-VSA IDs. Used in _customize_settings to route the
+# correct checkpoint into from_pretrained when a weight variant is requested.
+FASTH3_V1_MODEL_IDS = frozenset({
+    FASTH3_V1_DATAFREE_MODEL_ID,
+    "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1300",
+    "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1900",
+})
+
+
+def _minimax_h3_parallel_decode_clip(self, z: torch.Tensor) -> torch.Tensor:
+    vae_group = get_vae_parallel_group()
+    if vae_group.world_size == 1 or not self.use_tiling:
+        return self._xfuser_original_decode_clip(z)
+
+    height = z.shape[-2] * self.spatial_compression_ratio
+    width = z.shape[-1] * self.spatial_compression_ratio
+    y_indices, y_lengths, y_overlaps = self._split_tiles(
+        height,
+        self.tile_sample_min_height,
+        self.tile_sample_min_overlap_height,
+    )
+    x_indices, x_lengths, x_overlaps = self._split_tiles(
+        width,
+        self.tile_sample_min_width,
+        self.tile_sample_min_overlap_width,
+    )
+
+    ratio = self.spatial_compression_ratio
+    tile_specs = [
+        (y, tile_height, x, tile_width)
+        for y, tile_height in zip(y_indices, y_lengths)
+        for x, tile_width in zip(x_indices, x_lengths)
+    ]
+    local_tiles = {}
+    for tile_index, (y, tile_height, x, tile_width) in enumerate(tile_specs):
+        if tile_index % vae_group.world_size != vae_group.rank_in_group:
+            continue
+        tile = z[
+            ...,
+            y // ratio : y // ratio + tile_height // ratio,
+            x // ratio : x // ratio + tile_width // ratio,
+        ]
+        local_tiles[tile_index] = self.decoder(
+            self.post_quant_conv(tile)
+        ).contiguous()
+
+    # Decode runs under the pipeline's float16 autocast, while the VAE
+    # weights remain float32. Empty receive buffers must match that output
+    # dtype. Cache it so we do not broadcast_object_list on every clip.
+    output_dtype = getattr(self, "_xfuser_tile_decode_dtype", None)
+    if output_dtype is None:
+        if len(tile_specs) >= vae_group.world_size:
+            output_dtype = next(iter(local_tiles.values())).dtype
+        else:
+            dtype_holder = [None]
+            if vae_group.rank_in_group == 0:
+                dtype_holder[0] = local_tiles[0].dtype
+            vae_group.broadcast_object_list(dtype_holder, src=0)
+            output_dtype = dtype_holder[0]
+        self._xfuser_tile_decode_dtype = output_dtype
+
+    rows = []
+    tile_index = 0
+    for tile_height in y_lengths:
+        row = []
+        for tile_width in x_lengths:
+            owner = tile_index % vae_group.world_size
+            if vae_group.rank_in_group == owner:
+                decoded_tile = local_tiles[tile_index]
+            else:
+                decoded_tile = torch.empty(
+                    (
+                        z.shape[0],
+                        self.decoder.out_channels,
+                        z.shape[2] * self.decoder.patch_size_t,
+                        tile_height,
+                        tile_width,
+                    ),
+                    device=z.device,
+                    dtype=output_dtype,
+                )
+            row.append(vae_group.broadcast(decoded_tile, src=owner))
+            tile_index += 1
+        rows.append(row)
+
+    return self._stitch_tiles(rows, y_overlaps, x_overlaps)
+
+
+def install_minimax_h3_vae_tile_parallel(vae) -> None:
+    """Distribute MiniMax-H3 spatial VAE tiles across the existing VAE ranks.
+
+    DistVAE does not reimplement MiniMax-H3's clip/tile/stitch decode loop, so
+    this keeps that native loop and only shards complete spatial tiles.
+    """
+    if getattr(vae, "_xfuser_tile_parallel", False):
+        return
+
+    vae._xfuser_original_decode_clip = vae._decode_clip
+    vae._decode_clip = MethodType(_minimax_h3_parallel_decode_clip, vae)
+    vae._xfuser_tile_parallel = True
+    log(
+        "MiniMax-H3 parallel VAE enabled: distributing spatial decode tiles "
+        f"across {get_vae_parallel_group().world_size} ranks."
+    )
 
 
 def _patch_minimax_h3_text_encoder_broadcast() -> None:
@@ -106,6 +246,65 @@ def _patch_minimax_h3_text_encoder_broadcast() -> None:
     encoders._xfuser_broadcast_patched = True
 
 
+def _mark_dynamic_timestep(timestep):
+    """Keep the timestep's length out of dynamo's guards.
+
+    Without this dynamo specializes on timestep shape 1 vs >1 and recompiles
+    when it changes; the timestep is a 1-D tensor whose length varies along the
+    denoising steps. ``mark_unbacked`` is only exposed on
+    ``torch._dynamo.decorators``, not on ``torch._dynamo`` itself, and
+    ``mark_dynamic`` is the weaker fallback: it avoids specializing on the exact
+    size but still splits 1 from >1.
+    """
+    from torch._dynamo import decorators as dynamo_decorators
+
+    mark = getattr(
+        dynamo_decorators, "mark_unbacked", dynamo_decorators.mark_dynamic
+    )
+    mark(timestep, 0)
+
+
+def _wrap_compiled_forward(transformer, original_forward, compiled_forward):
+    """Do everything that has to happen outside the compiled region.
+
+    Two jobs, both of which would otherwise force a recompile or a graph break:
+
+    * mark the timestep's length dynamic, since marking must happen outside the
+      compiled region to take effect;
+    * prime VSA-H3's tile geometry, which is recovered from ``position_ids``
+      *values*. That forces device syncs and cannot be traced, so
+      ``fullgraph=True`` would reject it. It is constant for a run, so priming
+      the cache here leaves the lookup inside ``forward`` as a branch that folds
+      against the shape guards. Skipped for non-VSA-H3 backends.
+
+    One ``signature.bind`` serves both, which is also what lets the timestep be
+    found by name whether it arrived positionally or not.
+    """
+    signature = inspect.signature(original_forward)
+    prime_vsa_h3 = getattr(transformer, "use_vsa_h3", False)
+
+    def forward_outside_the_graph(*args, **kwargs):
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        timestep = bound.arguments.get("timestep")
+        if isinstance(timestep, torch.Tensor) and timestep.dim() > 0:
+            _mark_dynamic_timestep(timestep)
+        if prime_vsa_h3:
+            transformer.prepare_vsa_h3_metadata(
+                bound.arguments["position_ids"],
+                bound.arguments["video_indices"],
+                bound.arguments["audio_indices"],
+                bound.arguments["text_indices"],
+            )
+        return compiled_forward(*args, **kwargs)
+
+    # The denoise block picks which layout fields to pass by inspecting
+    # signature(transformer.forward), so the wrapper has to expose the real
+    # parameter list rather than (*args, **kwargs).
+    functools.update_wrapper(forward_outside_the_graph, original_forward)
+    return forward_outside_the_graph
+
+
 class MiniMaxH3DiffusionOutput(DiffusionOutput):
     def __init__(
         self,
@@ -169,7 +368,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
         data_parallel_degree=False,
         text_encoder_tp_degree=True,
         use_cfg_parallel=False,
-        use_parallel_vae=False,
+        use_parallel_vae=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
         use_fp4_gemms=True,
@@ -178,6 +377,9 @@ class xFuserMiniMaxH3Model(xFuserModel):
         enable_tiling=False,
     )
     _transformer_component_name = "transformer"
+    _warmup_num_inference_steps = 3
+    _enable_fasth3_vsa = False
+    supported_attn_backends = _SUPPORTED_ATTN_BACKENDS
 
     def _get_runtime_state_pipeline(self):
         if self._transformer_component_name == "transformer":
@@ -197,6 +399,12 @@ class xFuserMiniMaxH3Model(xFuserModel):
             else:
                 config.task = "fl2va"
         super()._validate_config(config)
+        if config.use_parallel_vae and config.vae_parallel_size > 0:
+            raise ValueError(
+                "MiniMax-H3 parallel VAE distributes spatial tiles across the "
+                "existing model ranks and does not support dedicated VAE-only "
+                "ranks; leave --vae_parallel_size at 0."
+            )
         if config.use_hybrid_attn_schedule:
             backend_specs = [
                 (
@@ -217,14 +425,6 @@ class xFuserMiniMaxH3Model(xFuserModel):
             if (backend := _parse_attention_backend(value, label)) is not None
         ]
         for backend in backends:
-            if backend not in _SUPPORTED_ATTN_BACKENDS:
-                supported = ", ".join(
-                    sorted(item.name for item in _SUPPORTED_ATTN_BACKENDS)
-                )
-                raise ValueError(
-                    f"MiniMax-H3 does not support attention backend {backend.name}. "
-                    f"Supported backends: {supported}."
-                )
             if backend == AttentionBackendType.AITER_FP8:
                 try:
                     from aiter import flash_attn_varlen_fp8_pertensor_func  # noqa: F401
@@ -289,6 +489,11 @@ class xFuserMiniMaxH3Model(xFuserModel):
             self.settings.model_name,
             subfolder="transformer",
             dtype=torch.bfloat16,
+            enable_fasth3_vsa=self._enable_fasth3_vsa,
+            attention_backend=_parse_attention_backend(
+                getattr(self.config, "attention_backend", None),
+                "attention backend",
+            ),
         )
         pipe.update_components(transformer=transformer)
         pipe.load_components(dtype=torch.bfloat16)
@@ -366,7 +571,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
             "generator": torch.Generator(device="cuda").manual_seed(
                 input_args["seed"]
             ),
-            "output_type": "np",
+            "output_type": "pt",
         }
         images = input_args.get("input_images") or []
         task = input_args.get("task")
@@ -394,7 +599,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
         state = self.pipe(
             **pipe_args,
         )
-        videos = state.get("videos")
+        videos = self._decoded_videos_to_frames(state.get("videos"))
         audio = state.get("audio")
         sampling_rate = int(state.get("sampling_rate"))
         return MiniMaxH3DiffusionOutput(
@@ -415,20 +620,38 @@ class xFuserMiniMaxH3Model(xFuserModel):
             )
 
     def _compile_model(self, input_args: dict) -> None:
+        mode = self._get_compile_mode()
+        vae = getattr(self.pipe, "vae", None)
+        if vae is not None:
+            vae.compile_repeated_blocks(mode=mode, fullgraph=False)
+            log(
+                "MiniMax-H3 torch.compile enabled for repeated video VAE "
+                "decoder blocks."
+            )
+
         if self.config.fully_shard_degree > 1:
             super()._compile_model(input_args)
             return
         self._enable_compute_comm_overlap()
         transformer = getattr(self.pipe, self._transformer_component_name)
         use_hybrid = get_runtime_state().has_attention_schedule()
-        transformer.forward = torch.compile(
-            transformer.forward,
-            mode=self._get_compile_mode(),
+        original_forward = transformer.forward
+        compiled_forward = torch.compile(
+            original_forward,
+            mode=mode,
             fullgraph=not use_hybrid,
+        )
+
+        # Marking the timestep dynamic fixes a recompile: it avoids more than
+        # one graph realizing after compile-warmup.
+        transformer.forward = _wrap_compiled_forward(
+            transformer, original_forward, compiled_forward
         )
         compile_args = copy.deepcopy(input_args)
         if not get_runtime_state().has_attention_schedule():
-            compile_args["num_inference_steps"] = 3
+            compile_args["num_inference_steps"] = (
+                self._warmup_num_inference_steps
+            )
         self._run_timed_pipe(compile_args)
 
     def _run_warmup_calls(self, input_args: dict) -> None:
@@ -436,14 +659,29 @@ class xFuserMiniMaxH3Model(xFuserModel):
             return
         log(
             f"Warming up MiniMax-H3 with {self.config.warmup_calls} "
-            "three-point calls..."
+            f"{self._warmup_num_inference_steps}-point calls..."
         )
         warmup_args = copy.deepcopy(input_args)
-        warmup_args["num_inference_steps"] = 3
+        warmup_args["num_inference_steps"] = self._warmup_num_inference_steps
         for iteration in range(self.config.warmup_calls):
             log(f"Warmup iteration {iteration + 1}/{self.config.warmup_calls}")
             self._run_timed_pipe(warmup_args)
         log("Warmup complete.")
+
+    @staticmethod
+    def _decoded_videos_to_frames(videos) -> list[torch.Tensor]:
+        # postprocess_video(output_type="np") copies the float video to the host
+        # and transposes it there. At 768x1344x124 that is a 1.43 GiB transfer
+        # plus a single-threaded 1.43 GiB NumPy transpose with the GPU idle.
+        # Quantizing and transposing on the device makes it a 366 MiB transfer
+        # already in the [F, H, W, C] layout encode_video_with_audio wants.
+        frames = []
+        for video in videos:
+            if video.dtype != torch.uint8:
+                video = video.float().mul(255).round_().clamp_(0, 255)
+                video = video.to(torch.uint8)
+            frames.append(video.permute(0, 2, 3, 1).contiguous().cpu())
+        return frames
 
     @staticmethod
     def _video_to_uint8(video) -> torch.Tensor:
@@ -481,6 +719,121 @@ class xFuserMiniMaxH3Model(xFuserModel):
                 output_path=output_path,
             )
             log(f"Output video with audio saved to {output_path}")
+
+
+@register_model(FASTH3_V1_DATAFREE_MODEL_ID)
+@register_model("FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1300")
+@register_model("FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1900")
+@register_model("FastH3")
+class xFuserFastH3Model(xFuserMiniMaxH3Model):
+    """FastH3 Preview v1 runner.
+
+    Transformer attention goes through USP's backend selector.
+    ``TRITON_VSA_H3`` is the default and runs the sparse-distilled VSA-H3
+    kernel; ``FLEX_VSA_H3`` runs the same selection through FlexAttention;
+    other MiniMax-H3 backends stay dense when selected explicitly.
+    """
+
+    default_input_values = DefaultInputValues(
+        height=768,
+        width=1344,
+        num_frames=124,
+        # MiniMaxH3Scheduler includes the terminal zero sigma, so five points
+        # produce the four transformer forwards used to train FastH3.
+        num_inference_steps=5,
+    )
+
+    settings = copy.deepcopy(xFuserMiniMaxH3Model.settings)
+    settings.model_name = FASTH3_V1_DATAFREE_MODEL_ID
+    settings.output_name = "fasth3"
+    settings.valid_tasks = ["t2va"]
+    settings.default_attention_backend = AttentionBackendType.TRITON_VSA_H3.name
+
+    _warmup_num_inference_steps = 5
+    _enable_fasth3_vsa = True
+    supported_attn_backends = _SUPPORTED_ATTN_BACKENDS | _FASTH3_ATTN_BACKENDS
+
+    def _customize_settings(self, config) -> None:
+        super()._customize_settings(config)
+        # Use the caller-supplied HF ID so variant weights load correctly.
+        # Fall back to the primary DataFree checkpoint for short aliases ("FastH3").
+        if config.model in FASTH3_V1_MODEL_IDS:
+            self.settings.model_name = config.model
+
+    def _validate_config(self, config) -> None:
+        backend = _parse_attention_backend(
+            config.attention_backend, "attention backend"
+        )
+        if backend in VSA_H3_BACKENDS:
+            if config.use_hybrid_attn_schedule:
+                raise ValueError(
+                    "VSA-H3 runs on every transformer step and does not "
+                    "support xDiT's hybrid attention schedule."
+                )
+        super()._validate_config(config)
+
+    def _validate_args(self, input_args: dict) -> None:
+        super()._validate_args(input_args)
+        if input_args["num_inference_steps"] != 5:
+            raise ValueError(
+                "FastH3 Preview v1 requires 5 scheduler points, which produce "
+                "the checkpoint's trained 4 transformer forwards."
+            )
+
+
+@register_model(FASTH3_V1_DENSE_DATAFREE_MODEL_ID)
+@register_model("FastH3-Dense")
+class xFuserFastH3DenseModel(xFuserFastH3Model):
+    """FastH3 Preview v1 Dense-DataFree runner.
+
+    The dense ablation was distilled without VSA, so its checkpoint carries no
+    ``to_gate_compress`` weights and attention stays dense on whichever
+    MiniMax-H3 backend is selected. Like MiniMax-H3 it declares no default
+    backend.
+    """
+
+    settings = copy.deepcopy(xFuserFastH3Model.settings)
+    settings.model_name = FASTH3_V1_DENSE_DATAFREE_MODEL_ID
+    settings.output_name = "fasth3_dense"
+    settings.default_attention_backend = None
+
+    _enable_fasth3_vsa = False
+    supported_attn_backends = _SUPPORTED_ATTN_BACKENDS
+
+    def _validate_config(self, config) -> None:
+        # Skip V1's VSA/hybrid-schedule check: no VSA backend is supported here,
+        # and dense attention works with the hybrid schedule.
+        xFuserMiniMaxH3Model._validate_config(self, config)
+
+
+@register_model(FASTH3_V2_MODEL_ID)
+class xFuserFastH3V2Model(xFuserFastH3Model):
+    """FastH3 V2 runner. Same VSA-H3 attention backend as V1 but trained for 9
+    scheduler points (8 transformer forwards)."""
+
+    default_input_values = DefaultInputValues(
+        height=768,
+        width=1344,
+        num_frames=124,
+        # MiniMaxH3Scheduler includes the terminal zero sigma, so nine points
+        # produce the eight transformer forwards used to train FastH3 V2.
+        num_inference_steps=9,
+    )
+
+    settings = copy.deepcopy(xFuserFastH3Model.settings)
+    settings.model_name = FASTH3_V2_MODEL_ID
+    settings.output_name = "fasth3_v2"
+
+    _warmup_num_inference_steps = 9
+
+    def _validate_args(self, input_args: dict) -> None:
+        # Skip the V1 step-count check; delegate to xFuserMiniMaxH3Model.
+        xFuserMiniMaxH3Model._validate_args(self, input_args)
+        if input_args["num_inference_steps"] != 9:
+            raise ValueError(
+                "FastH3 V2 requires 9 scheduler points, which produce "
+                "the checkpoint's trained 8 transformer forwards."
+            )
 
 
 @register_model("MiniMax-H3-Ref2VA")
@@ -534,6 +887,10 @@ class xFuserMiniMaxH3Ref2VAModel(xFuserMiniMaxH3Model):
             self.settings.model_name,
             subfolder="transformer_ref",
             dtype=torch.bfloat16,
+            attention_backend=_parse_attention_backend(
+                getattr(self.config, "attention_backend", None),
+                "attention backend",
+            ),
         )
         pipe.update_components(transformer_ref=transformer)
         pipe.load_components(dtype=torch.bfloat16)
@@ -567,10 +924,10 @@ class xFuserMiniMaxH3Ref2VAModel(xFuserMiniMaxH3Model):
             generator=torch.Generator(device="cuda").manual_seed(
                 input_args["seed"]
             ),
-            output_type="np",
+            output_type="pt",
         )
         return MiniMaxH3DiffusionOutput(
-            videos=state.get("videos"),
+            videos=self._decoded_videos_to_frames(state.get("videos")),
             audio=state.get("audio"),
             audio_sample_rate=int(state.get("sampling_rate")),
             pipe_args=input_args,

@@ -5,8 +5,9 @@ The stock ``LTX2VideoDiffusionDecoderModel.tiled_decode`` runs a triple-nested l
 + ``denoise`` (8 neighbourhood-attention blocks each).
 
 ``xFuserLTX2VideoDiffusionDecoderWrapper`` distributes those tiles across the SP group
-via round-robin ownership, then does one small all_reduce for shape metadata followed by
-per-tile broadcasts to reassemble the full video on every rank.  Communication is a
+using deterministic greedy load balancing, then does one small all_reduce for shape
+metadata followed by per-tile broadcasts to reassemble the full video on every rank.
+Communication is a
 single collective per tile.
 
 Tile geometry for the default 1024×1536×121 config: 12 tiles, adequate for 2/4/8 GPUs.
@@ -27,6 +28,8 @@ from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
     get_sp_group,
 )
+
+from .tile_assignment import assign_tiles_to_ranks
 
 
 class xFuserLTX2VideoDiffusionDecoderWrapper(LTX2VideoDiffusionDecoderModel):
@@ -49,7 +52,7 @@ class xFuserLTX2VideoDiffusionDecoderWrapper(LTX2VideoDiffusionDecoderModel):
         num_inference_steps: int | None = None,
     ) -> torch.Tensor:
         """Decode with tiles distributed across SP ranks.
-        Each rank owns a round-robin subset of tiles.  Owned tiles are computed locally;
+        Each rank owns a load-balanced subset of tiles.  Owned tiles are computed locally;
         all ranks gather all tiles via a shape-metadata all_reduce + per-tile broadcast,
         then run the stock blend/assembly loop to produce the full video.
         Noise determinism:
@@ -115,6 +118,16 @@ class xFuserLTX2VideoDiffusionDecoderWrapper(LTX2VideoDiffusionDecoderModel):
 
         n_tiles = len(temporal_tiles) * len(height_tiles) * len(width_tiles)
 
+        # Feature-grid volume is a deterministic proxy for tile decode cost. The
+        # intervals and resulting ownership map are identical on every rank.
+        tile_volumes = [
+            (t1 - t0) * (h1 - h0) * (w1 - w0)
+            for t0, t1 in temporal_tiles
+            for h0, h1 in height_tiles
+            for w0, w1 in width_tiles
+        ]
+        tile_owners = assign_tiles_to_ranks(tile_volumes, sp_world_size)
+
         # Fall back to stock when there are too few tiles to distribute.
         if n_tiles < 2:
             return super().tiled_decode(z, generator=generator,
@@ -160,7 +173,7 @@ class xFuserLTX2VideoDiffusionDecoderWrapper(LTX2VideoDiffusionDecoderModel):
 
             for h_idx, (h0, h1) in enumerate(height_tiles):
                 for w_idx, (w0, w1) in enumerate(width_tiles):
-                    owner = tile_idx % sp_world_size
+                    owner = tile_owners[tile_idx]
 
                     if owner == sp_rank:
                         context = decoder.forward_stage_4(
@@ -216,7 +229,7 @@ class xFuserLTX2VideoDiffusionDecoderWrapper(LTX2VideoDiffusionDecoderModel):
 
         gathered: dict[int, torch.Tensor] = {}
         for i in range(n_tiles):
-            owner = i % sp_world_size
+            owner = tile_owners[i]
             T_px = int(shape_table[i, 0])
             H_px = int(shape_table[i, 1])
             W_px = int(shape_table[i, 2])

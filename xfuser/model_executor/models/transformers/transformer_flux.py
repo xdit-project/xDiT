@@ -53,6 +53,7 @@ from xfuser.model_executor.layers.attention_processor import (
     xFuserAttentionProcessorRegister
 )
 from xfuser.model_executor.layers.usp import USP
+from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
 from xfuser.model_executor.layers.fused_qk_rope_flydsl import (
     flydsl_fused_qk_norm_rope,
     _HAS_FLYDSL,
@@ -245,7 +246,9 @@ class xFuserFluxAttnProcessor(FluxAttnProcessor):
 
         uses_pipeline_parallelism = get_runtime_state().num_pipeline_patch > 1
         if not uses_pipeline_parallelism:
-            hidden_states = USP(query, key, value, combine_qkv_a2a=True)
+            hidden_states = USP(
+                query, key, value, combine_qkv_a2a=True, attn_layer=attn
+            )
             hidden_states = hidden_states.transpose(1, 2)
         else:
             if get_runtime_state().split_text_embed_in_sp:
@@ -276,6 +279,7 @@ class xFuserFluxAttnProcessor(FluxAttnProcessor):
                 joint_value=encoder_hidden_states_value_proj,
                 joint_strategy="front",
                 attn_layer=None if distri_cache_updated else attn,
+                head_balance_layer=attn,
             )
             hidden_states = hidden_states.transpose(1, 2)
 
@@ -296,6 +300,21 @@ class xFuserFluxAttnProcessor(FluxAttnProcessor):
             return hidden_states
 
 
+
+
+def flux_attn_modules(transformer) -> list[torch.nn.Module]:
+    """Self-attention modules of a Flux1/Flux2 transformer, in block order.
+
+    `single_transformer_blocks` is empty for pipefusion stages that hold none and for
+    Flux2 configs without them.
+    """
+    return [
+        block.attn
+        for block in (
+            *transformer.transformer_blocks,
+            *transformer.single_transformer_blocks,
+        )
+    ]
 
 
 class xFuserFlux1Transformer2DWrapper(FluxTransformer2DModel):
@@ -330,6 +349,7 @@ class xFuserFlux1Transformer2DWrapper(FluxTransformer2DModel):
 
         for block in self.transformer_blocks + self.single_transformer_blocks:
             block.attn.processor = xFuserFluxAttnProcessor()
+        register_fp8_comms_eligible_modules(self, flux_attn_modules(self))
 
     def pad_to_sp_divisible(self, tensor: torch.Tensor, padding_length: int, dim: int) -> torch.Tensor:
         padding =  torch.zeros(
@@ -430,6 +450,7 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
         self.encoder_hidden_states_cache = [
             None for _ in range(len(self.transformer_blocks))
         ]
+        register_fp8_comms_eligible_modules(self, flux_attn_modules(self))
 
     def forward(
         self,

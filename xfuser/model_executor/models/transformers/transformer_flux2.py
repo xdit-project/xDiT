@@ -46,11 +46,13 @@ from xfuser.core.distributed.parallel_state import _SP
 from xfuser.envs import PACKAGES_CHECKER
 
 from xfuser.model_executor.layers.usp import USP
+from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
 from xfuser.model_executor.layers import (
     xFuserLayerWrappersRegister,
     xFuserLayerBaseWrapper,
 )
 from xfuser.model_executor.models.transformers.transformer_flux import (
+    flux_attn_modules,
     xFuserFluxAttentionWrapper,
     _split_rotary_emb,
 )
@@ -214,7 +216,7 @@ class xFuserFlux2AttnProcessor(Flux2AttnProcessor):
                 attn_layer=attn,
             )
         else:
-            hidden_states = USP(query, key, value)
+            hidden_states = USP(query, key, value, attn_layer=attn)
 
         # Transpose back to original shape
         hidden_states = hidden_states.transpose(1, 2)
@@ -359,7 +361,9 @@ class xFuserFlux2ParallelSelfAttnProcessor(Flux2ParallelSelfAttnProcessor):
                 combine_qkv_a2a=True,
             )
         else:
-            hidden_states = USP(query, key, value, combine_qkv_a2a=True)
+            hidden_states = USP(
+                query, key, value, combine_qkv_a2a=True, attn_layer=attn
+            )
 
         # Transpose back to original shape
         hidden_states = hidden_states.transpose(1, 2)
@@ -477,6 +481,7 @@ class xFuserFlux2Transformer2DWrapper(Flux2Transformer2DModel):
             block.attn.processor = xFuserFlux2AttnProcessor()
         for block in self.single_transformer_blocks:
             block.attn.processor = xFuserFlux2ParallelSelfAttnProcessor()
+        register_fp8_comms_eligible_modules(self, flux_attn_modules(self))
 
     def _pad_to_sp_divisible(
         self, tensor: torch.Tensor, padding_length: int, dim: int
@@ -577,6 +582,7 @@ class xFuserFlux2Transformer2DModelWrapper(xFuserTransformerBaseWrapper):
             submodule_name_to_wrap=["attn"],
             transformer_blocks_name=["transformer_blocks", "single_transformer_blocks"],
         )
+        register_fp8_comms_eligible_modules(self, flux_attn_modules(self))
 
     def forward(
         self,

@@ -1,6 +1,7 @@
-import sys
 import argparse
 import dataclasses
+import os
+import sys
 import warnings
 from dataclasses import dataclass
 from typing import Optional, List, Tuple, Union
@@ -10,7 +11,13 @@ import torch.distributed
 
 from xfuser.logger import init_logger
 from xfuser.core.distributed import init_distributed_environment
+from xfuser.config.gemm import (
+    GemmQuantizationSpec,
+    load_gemm_config,
+    parse_gemm_quantization,
+)
 from xfuser.config.config import (
+    DEFAULT_FP8_COMMS_SAFETY_FACTOR,
     EngineConfig,
     FastAttnConfig,
     ParallelConfig,
@@ -67,6 +74,90 @@ def nullable_str(val: str):
     if not val or val == "None":
         return None
     return val
+
+
+_DETERMINISM_CHECK_HELP = (
+    "Set to a positive failure threshold to compare every timed iteration with "
+    "the first using exact equality, not a tolerance. The failure handler is "
+    "called for each rank enabled by --determinism_check_report_ranks on each "
+    "divergence until the threshold is reached. "
+    "Disabled at 0 or below. Enabling retains and compares full output payloads, "
+    "which adds memory, synchronization, and transfer overhead."
+)
+
+_DETERMINISM_CHECK_REPORT_RANKS_DEFAULT = "last"
+
+_DETERMINISM_CHECK_REPORT_RANKS_HELP = (
+    "Ranks on which determinism failures save serialized outputs. Accepts a "
+    "comma-separated list of integers, an empty value, or one of: all, first, "
+    "last, none. Empty and none select no ranks. "
+    f"Defaults to {_DETERMINISM_CHECK_REPORT_RANKS_DEFAULT}. Many failures "
+    "may produce many large output files; restrict output to selected ranks "
+    "based on model specifics. The none value is useful with a positive "
+    "--determinism_check when only log messages, but no files, are needed."
+)
+
+
+def _normalize_determinism_check_report_ranks(value: str) -> frozenset[int]:
+    """Resolve a rank string; ``none`` and empty values select no ranks."""
+    try:
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    except ValueError as exc:
+        raise ValueError("WORLD_SIZE must be a positive integer") from exc
+    if world_size <= 0:
+        raise ValueError("WORLD_SIZE must be a positive integer")
+    if not isinstance(value, str):
+        raise TypeError("determinism_check_report_ranks must be a string")
+
+    value = value.strip()
+    if value == "all":
+        ranks = frozenset(range(world_size))
+    elif value == "first":
+        ranks = frozenset({0})
+    elif value == "last":
+        ranks = frozenset({world_size - 1})
+    elif value in ("none", ""):
+        ranks = frozenset()
+    else:
+        parts = [p.strip() for p in value.split(",")]
+        if any(not part for part in parts):
+            raise ValueError(
+                "determinism_check_report_ranks must be a comma-separated list "
+                "of integers, empty, or one of: all, first, last, none"
+            )
+        try:
+            ranks = frozenset(int(part) for part in parts)
+        except ValueError as exc:
+            raise ValueError(
+                "determinism_check_report_ranks must be a comma-separated list "
+                "of integers, empty, or one of: all, first, last, none"
+            ) from exc
+
+    invalid_ranks = sorted(rank for rank in ranks if rank < 0 or rank >= world_size)
+    if invalid_ranks:
+        raise ValueError(
+            "determinism_check_report_ranks contains ranks outside "
+            f"0..{world_size - 1}: {invalid_ranks}"
+        )
+    return ranks
+
+
+def _add_gemm_profile_args(parser) -> None:
+    parser.add_argument(
+        "--gemm_quantization",
+        type=parse_gemm_quantization,
+        default=None,
+        help=(
+            "Transformer GEMM precision: none, fp8, fp4, fp6, a6w4, "
+            "int8, or a supported low=fp4,high=<format> pair."
+        ),
+    )
+    parser.add_argument(
+        "--gemm_config",
+        type=nullable_str,
+        default=None,
+        help="Optional YAML file with advanced GEMM target or schedule settings.",
+    )
 
 
 @dataclass
@@ -146,15 +237,31 @@ class xFuserArgs:
     shard_t5_encoder: bool = False
     attention_backend: Optional[str] = None
     cross_attention_backend: Optional[str] = None
+    gemm_quantization: Union[GemmQuantizationSpec, str, None] = None
+    gemm_config: Optional[str] = None
     use_int8_gemms: bool = False
     use_fp8_gemms: bool = False
     use_fp8_text_encoder: bool = False
     use_fp4_gemms: bool = False
+    # Internal compatibility bridge derived from gemm_quantization.
+    use_fp6_gemms: bool = False
+    use_a6w4_gemms: bool = False
     fp8_precision_override_prefix_patterns: Optional[str] = None
     fp8_precision_override_suffix_patterns: Optional[str] = None
+    use_fp8_comms: bool = False
+    fp8_comms_scale: Optional[float] = None
+    fp8_comms_safety_factor: float = DEFAULT_FP8_COMMS_SAFETY_FACTOR
+    gemm_high_precision_targets: str = "model"
+    gemm_high_precision_module_patterns: Optional[str] = None
+    gemm_high_precision_prefix_patterns: Optional[str] = None
+    gemm_high_precision_suffix_patterns: Optional[str] = None
     # Model runner specific
     num_iterations: int = 1
+    determinism_check: int = 0
+    determinism_check_report_ranks: str | frozenset[int] = "all"
     profile: bool = False
+    profile_capture_phase: bool = False
+    profile_with_stack: bool = False
     profile_wait: int = 2
     profile_warmup: int = 2
     profile_active: int = 1
@@ -180,6 +287,7 @@ class xFuserArgs:
     # Hybrid GEMM schedule (FP8 high precision + FP4 low precision)
     use_hybrid_gemm_schedule: bool = False
     num_hybrid_gemm_high_precision_steps: Optional[int] = None
+    hybrid_gemm_schedule: Optional[str] = None
     # SSTA arguments
     use_ssta_sparse_text_to_image: Optional[bool] = False
     # Sparge attention
@@ -203,6 +311,17 @@ class xFuserArgs:
     distilled_transformer_2_path: Optional[str] = None
 
     def __post_init__(self):
+        self.determinism_check_report_ranks = (
+            _normalize_determinism_check_report_ranks(
+                self.determinism_check_report_ranks
+            )
+        )
+        if self.profile_with_stack and not self.profile:
+            logger.warning(
+                "--profile_with_stack has no effect without --profile; "
+                "no profiles will be outputted."
+            )
+        self._resolve_gemm_quantization()
         if self.cache_method is None:
             if self.use_fbcache:
                 warnings.warn(
@@ -218,6 +337,112 @@ class xFuserArgs:
                     stacklevel=2,
                 )
                 self.cache_method = "teacache"
+
+    @property
+    def gemm_quantization_spec(self) -> GemmQuantizationSpec:
+        return self.gemm_quantization
+
+    def _warn_deprecated_gemm_options(
+        self,
+        names: tuple[str, ...],
+        *,
+        ignored: bool = False,
+    ) -> None:
+        if not names:
+            return
+        action = "ignored" if ignored else "used"
+        message = (
+            f"Deprecated GEMM option(s) {action}: "
+            + ", ".join(f"--{name}" for name in names)
+            + "; use --gemm_quantization and --gemm_config"
+        )
+        warnings.warn(message, FutureWarning, stacklevel=2)
+
+    def _resolve_gemm_quantization(self) -> None:
+        explicit_spec = self.gemm_quantization is not None
+        spec = GemmQuantizationSpec.parse(self.gemm_quantization)
+        legacy_formats = tuple(
+            name
+            for name in (
+                "use_fp8_gemms",
+                "use_fp4_gemms",
+                "use_int8_gemms",
+            )
+            if getattr(self, name)
+        )
+        legacy_patterns = tuple(
+            name
+            for name in (
+                "fp8_precision_override_prefix_patterns",
+                "fp8_precision_override_suffix_patterns",
+            )
+            if getattr(self, name) is not None
+        )
+
+        if not explicit_spec and (
+            self.use_fp6_gemms
+            or self.use_a6w4_gemms
+        ):
+            raise ValueError(
+                "MXFP6 and mixed-MXFP formats must be selected through "
+                "gemm_quantization."
+            )
+
+        if explicit_spec:
+            self._warn_deprecated_gemm_options(legacy_formats, ignored=True)
+            self.use_fp8_gemms = False
+            self.use_fp4_gemms = False
+            self.use_fp6_gemms = False
+            self.use_a6w4_gemms = False
+            self.use_int8_gemms = False
+            if spec.is_pure("fp8"):
+                self.use_fp8_gemms = True
+            elif spec.is_pure("fp4"):
+                self.use_fp4_gemms = True
+            elif spec.is_pure("fp6"):
+                self.use_fp6_gemms = True
+            elif spec.is_pure("a6w4"):
+                self.use_a6w4_gemms = True
+            elif spec.is_pure("int8"):
+                self.use_int8_gemms = True
+            elif spec.is_tiered:
+                self.use_fp4_gemms = True
+                self.use_fp6_gemms = spec.high == "fp6"
+                self.use_a6w4_gemms = spec.high == "a6w4"
+        else:
+            if self.use_fp4_gemms:
+                spec = GemmQuantizationSpec("fp4", "fp8")
+            elif self.use_fp8_gemms:
+                spec = GemmQuantizationSpec("fp8")
+            elif self.use_int8_gemms:
+                spec = GemmQuantizationSpec("int8")
+            self._warn_deprecated_gemm_options(legacy_formats)
+
+        self._gemm_config_loaded = False
+        if self.gemm_config is not None:
+            advanced = load_gemm_config(self.gemm_config)
+            if advanced.settings.get("hybrid_gemm_schedule") is not None and (
+                self.use_hybrid_gemm_schedule
+                or self.num_hybrid_gemm_high_precision_steps is not None
+            ):
+                raise ValueError(
+                    "YAML hybrid_gemm_schedule cannot be combined with the "
+                    "simple hybrid GEMM schedule flags"
+                )
+            for name, value in advanced.settings.items():
+                setattr(self, name, value)
+            if self.hybrid_gemm_schedule is not None:
+                self.use_hybrid_gemm_schedule = True
+            if legacy_patterns:
+                self.fp8_precision_override_prefix_patterns = None
+                self.fp8_precision_override_suffix_patterns = None
+                self._warn_deprecated_gemm_options(legacy_patterns, ignored=True)
+            self._gemm_config_loaded = True
+            logger.info("Loaded GEMM configuration from %s", advanced.path)
+        else:
+            self._warn_deprecated_gemm_options(legacy_patterns)
+
+        self.gemm_quantization = spec
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser):
@@ -500,6 +725,7 @@ class xFuserArgs:
             action="store_true",
             help="Quantize the T5 text encoder.",
         )
+        _add_gemm_profile_args(runtime_group)
         runtime_group.add_argument(
             "--use_fp8_gemms",
             action="store_true",
@@ -509,6 +735,25 @@ class xFuserArgs:
             "--use_int8_gemms",
             action="store_true",
             help="Quantize the transformer linear layers (selected models only).",
+        )
+        runtime_group.add_argument(
+            "--use_fp8_comms",
+            action="store_true",
+            help="Quantize Ulysses all-to-all communication to FP8.",
+        )
+        runtime_group.add_argument(
+            "--fp8_comms_scale",
+            type=float,
+            default=None,
+            help="Override the model-specific FP8 communication scale.",
+        )
+        runtime_group.add_argument(
+            "--fp8_comms_safety_factor",
+            type=float,
+            default=DEFAULT_FP8_COMMS_SAFETY_FACTOR,
+            help="Safety factor for the calibrated FP8 comms scale: scale = amax / "
+                 "(FP8_MAX * safety_factor). LOWER it (e.g. 0.4) to enlarge the scale and "
+                 "leave more headroom before fp8 saturation. Default 0.85.",
         )
 
         # DiTFastAttn arguments
@@ -546,6 +791,18 @@ class xFuserArgs:
             "--use_cache",
             action="store_true",
             help="Use cache config for attention compression.",
+        )
+        runtime_group.add_argument(
+            "--determinism_check",
+            type=int,
+            default=0,
+            help=_DETERMINISM_CHECK_HELP,
+        )
+        runtime_group.add_argument(
+            "--determinism_check_report_ranks",
+            type=str,
+            default=_DETERMINISM_CHECK_REPORT_RANKS_DEFAULT,
+            help=_DETERMINISM_CHECK_REPORT_RANKS_HELP,
         )
 
         return parser
@@ -772,6 +1029,7 @@ class xFuserArgs:
                  "--enable_tiling. Must be used with --vae_tile_overlap_height. Height and width "
                  "may differ; use 0 for an inactive strip axis.",
         )
+        _add_gemm_profile_args(parser)
         parser.add_argument(
             "--use_int8_gemms",
             action="store_true",
@@ -786,7 +1044,7 @@ class xFuserArgs:
             "--use_fp8_text_encoder",
             action="store_true",
             help="Also quantize the text encoder's linear layers to FP8 (selected models only). "
-                 "Requires --use_fp8_gemms, which covers the transformer alone. Frees several GB "
+                 "Requires a GEMM profile containing FP8. Frees several GB "
                  "for large bf16 text encoders, at whatever output-quality cost FP8 carries for "
                  "the encoder; off by default because that is a quality trade-off, not a free win.",
         )
@@ -807,12 +1065,42 @@ class xFuserArgs:
             default=None,
             help="Comma-delimited FQN suffix patterns to keep in FP8 during FP4 GEMMs.",
         )
-
+        parser.add_argument(
+            "--use_fp8_comms",
+            action="store_true",
+            help="Quantize Ulysses all-to-all communication to FP8.",
+        )
+        parser.add_argument(
+            "--fp8_comms_scale",
+            type=float,
+            default=None,
+            help="Override the model-specific FP8 communication scale.",
+        )
+        parser.add_argument(
+            "--fp8_comms_safety_factor",
+            type=float,
+            default=DEFAULT_FP8_COMMS_SAFETY_FACTOR,
+            help="Safety factor for the calibrated FP8 comms scale: scale = amax / "
+                 "(FP8_MAX * safety_factor). LOWER it (e.g. 0.4) to enlarge the scale and "
+                 "leave more headroom before fp8 saturation. Default 0.85.",
+        )
         parser.add_argument(
             "--num_iterations",
             type=int,
             default=1,
             help="Number of iterations to run the model."
+        )
+        parser.add_argument(
+            "--determinism_check",
+            type=int,
+            default=0,
+            help=_DETERMINISM_CHECK_HELP,
+        )
+        parser.add_argument(
+            "--determinism_check_report_ranks",
+            type=str,
+            default=_DETERMINISM_CHECK_REPORT_RANKS_DEFAULT,
+            help=_DETERMINISM_CHECK_REPORT_RANKS_HELP,
         )
         parser.add_argument(
             "--profile",
@@ -837,6 +1125,16 @@ class xFuserArgs:
             type=int,
             default=1,
             help="active argument for torch.profiler.schedule. Only used with --profile.",
+        )
+        parser.add_argument(
+            "--profile_capture_phase",
+            action="store_true",
+            help="Profile the CUDA graph recording phase and save the capture trace.",
+        )
+        parser.add_argument(
+            "--profile_with_stack",
+            action="store_true",
+            help="Record call stack info in the profiler. Only used with --profile.",
         )
         parser.add_argument(
             "--warmup_calls",
@@ -912,7 +1210,7 @@ class xFuserArgs:
             "--use_hybrid_gemm_schedule",
             action="store_true",
             default=False,
-            help="Enable hybrid GEMM schedule: FP8 at start/end and MXFP4 in the middle.",
+            help="Use the profile's high format at denoising endpoints and FP4 in the middle.",
         )
         parser.add_argument(
             "--num_hybrid_gemm_high_precision_steps",
@@ -1082,6 +1380,70 @@ class xFuserArgs:
 
     def _validate_gemm_quantization_flags(self) -> None:
         """Validate ownership of mutually exclusive generic GEMM quantizers."""
+        spec = self.gemm_quantization_spec
+        uses_mixed_mxfp = self.use_a6w4_gemms
+        if uses_mixed_mxfp and (
+            self.enable_model_cpu_offload
+            or self.enable_sequential_cpu_offload
+            or self.enable_group_cpu_offload
+        ):
+            raise ValueError("A6W4 GEMMs do not support CPU offload.")
+        if uses_mixed_mxfp and (
+            self.fully_shard_degree > 1
+            or self.memory_efficient_sharding
+            or self.memory_efficient_replicated_load
+        ):
+            raise ValueError(
+                "A6W4 GEMMs currently support eager loading only."
+            )
+        if self.use_fp8_text_encoder and "fp8" not in spec.formats:
+            raise ValueError(
+                "--use_fp8_text_encoder requires a gemm_quantization profile "
+                "containing FP8."
+            )
+        has_advanced_targets = (
+            self.gemm_high_precision_targets != "model"
+            or self.gemm_high_precision_module_patterns is not None
+            or self.gemm_high_precision_prefix_patterns is not None
+            or self.gemm_high_precision_suffix_patterns is not None
+        )
+        if has_advanced_targets and not spec.is_tiered:
+            raise ValueError(
+                "Advanced GEMM target settings require a low/high "
+                "--gemm_quantization profile."
+            )
+        if self.use_hybrid_gemm_schedule and not spec.is_tiered:
+            raise ValueError(
+                "Hybrid GEMM scheduling requires a low/high "
+                "--gemm_quantization profile."
+            )
+        if (
+            self.hybrid_gemm_schedule is not None
+            and self.num_hybrid_gemm_high_precision_steps is not None
+        ):
+            raise ValueError(
+                "YAML hybrid_gemm_schedule cannot be combined with "
+                "--num_hybrid_gemm_high_precision_steps."
+            )
+        if self.hybrid_gemm_schedule is not None:
+            scheduled_formats = {
+                token.strip().lower()
+                for token in self.hybrid_gemm_schedule.split(",")
+            }
+            if scheduled_formats - spec.formats:
+                raise ValueError(
+                    "YAML hybrid_gemm_schedule entries must match "
+                    f"--gemm_quantization {spec}."
+                )
+        if self.use_fp6_gemms and self.use_fp8_gemms:
+            raise ValueError(
+                "--use_fp8_gemms cannot be combined with --use_fp6_gemms; "
+                "MXFP6 already owns every declared FP8 target."
+            )
+        if self.use_fp6_gemms and self.use_int8_gemms:
+            raise ValueError(
+                "--use_int8_gemms cannot be combined with --use_fp6_gemms."
+            )
         if self.use_int8_gemms and (self.use_fp8_gemms or self.use_fp4_gemms):
             raise ValueError(
                 "--use_int8_gemms cannot be combined with --use_fp8_gemms or "
@@ -1138,12 +1500,6 @@ class xFuserArgs:
                 "--enable_group_cpu_offload too."
             )
 
-        if self.use_fp8_text_encoder and not self.use_fp8_gemms:
-            raise ValueError(
-                "--use_fp8_text_encoder extends --use_fp8_gemms, which covers the transformer "
-                "alone, to the text encoder; pass --use_fp8_gemms too."
-            )
-
         if (
             self.fp8_precision_override_prefix_patterns is not None
             or self.fp8_precision_override_suffix_patterns is not None
@@ -1184,6 +1540,9 @@ class xFuserArgs:
             use_vsa_static_block_mask=self.use_vsa_static_block_mask,
             use_vsa_first_frame_mask=self.use_vsa_first_frame_mask,
             vsa_collect_density=self.vsa_collect_density,
+            use_fp8_comms=self.use_fp8_comms,
+            fp8_comms_scale=self.fp8_comms_scale,
+            fp8_comms_safety_factor=self.fp8_comms_safety_factor,
         )
 
         parallel_config = ParallelConfig(

@@ -2,6 +2,8 @@ import abc
 import torch
 import copy
 import json
+import os
+from pathlib import Path
 from PIL.Image import Image
 from typing import Callable, List, Optional, Tuple, Generator
 from dataclasses import dataclass, field, replace
@@ -17,8 +19,10 @@ from xfuser.envs import (
     _is_hip,
     _is_cuda,
 )
+from xfuser.core.utils.outputs_equal import outputs_equal
 from xfuser.core.utils.runner_utils import (
     log,
+    log_error,
     load_dataset_prompts,
     rgetattr,
 )
@@ -30,6 +34,7 @@ from xfuser.model_executor.models.runner_models.vae_manager import (
 from xfuser.model_executor.cache.presets import DBCacheSettings, ModelCacheConfig
 from xfuser.core.distributed import (
     get_world_group,
+    get_model_replica_group,
     get_data_parallel_rank,
     get_data_parallel_world_size,
     get_sequence_parallel_rank,
@@ -37,10 +42,18 @@ from xfuser.core.distributed import (
     get_pipeline_parallel_world_size,
     initialize_runtime_state,
     get_runtime_state,
+    runtime_state_is_initialized,
     init_distributed_environment,
 )
-from xfuser.core.distributed.attention_backend import AttentionBackendType
-from xfuser.core.distributed.attention_schedule import AttentionSchedule, create_hybrid_attn_schedule, create_hybrid_gemm_schedule
+from xfuser.core.attention import registry as attention_registry
+from xfuser.core.attention.spec import AttentionBackendType, Sparsity
+from xfuser.core.distributed.fp8_comms import setup_fp8_comms, validate_fp8_comms_config
+from xfuser.core.distributed.attention_schedule import (
+    AttentionSchedule,
+    GemmPrecisionSchedule,
+    create_hybrid_attn_schedule,
+    create_hybrid_gemm_schedule,
+)
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     LoadRoute,
@@ -67,17 +80,14 @@ def register_model(name: str) -> Callable:
     return decorator
 
 
-_SPARSE_ATTENTION_BACKENDS = frozenset({
-    AttentionBackendType.AITER_SPARSE_SAGE,
-    AttentionBackendType.AITER_SPARSE_SAGE_V2,
-    AttentionBackendType.FLEX_BLOCK_ATTN
-})
-_SPARGE_ATTENTION_BACKENDS = frozenset({
-    AttentionBackendType.AITER_SPARGE,
-    AttentionBackendType.AITER_SPARGE_V2,
-    AttentionBackendType.AITER_VSA,
-    AttentionBackendType.FLEX_BLOCK_SPARGE,
-})
+# Derived from the backend specs rather than listed here: each backend declares
+# its sparsity strategy, so adding one cannot miss these sets. SPARGE and VSA
+# are grouped because both need a separate, dense cross-attention backend.
+_SPARSE_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SSTA)
+_SPARGE_ATTENTION_BACKENDS = (
+    attention_registry.types_where(sparsity=Sparsity.SPARGE)
+    | attention_registry.types_where(sparsity=Sparsity.VSA)
+)
 
 
 def _parse_attention_backend(name: Optional[str], kind: str) -> Optional[AttentionBackendType]:
@@ -108,6 +118,59 @@ def _validate_cross_attention_for_sparge(config: xFuserArgs) -> None:
         )
 
 
+def _selected_attention_backends(config: xFuserArgs) -> list[AttentionBackendType]:
+    """Every backend the run would actually dispatch to, named as the user named them."""
+    if config.use_hybrid_attn_schedule:
+        specs = [
+            (config.hybrid_attn_high_precision_backend, "hybrid attention high precision backend"),
+            (config.hybrid_attn_low_precision_backend, "hybrid attention low precision backend"),
+        ]
+    else:
+        specs = [(config.attention_backend, "attention backend")]
+    specs.append((config.cross_attention_backend, "cross attention backend"))
+    return [
+        backend
+        for value, kind in specs
+        if (backend := _parse_attention_backend(value, kind)) is not None
+    ]
+
+
+def _validate_attention_head_dims(model: "xFuserModel", config: xFuserArgs) -> None:
+    """Refuse a backend that cannot serve any head dimension the model runs.
+
+    Disjoint rather than subset on purpose: LTX-2 pairs 128-wide video blocks with 64-wide
+    audio ones and the odd size falls back per call, so a model keeps a backend as long as
+    one of its dimensions is served.
+
+    The widths come from the backend's own `accepts`, so a backend that declares no
+    HEAD_DIM makes no claim and is never refused here: silence means unknown rather than
+    unrestricted, and guessing would trade a silent bypass for a wrong refusal.
+    """
+    required = getattr(model, "attention_head_dims", None)
+    if not required:
+        return
+    for backend in _selected_attention_backends(config):
+        spec = attention_registry.find(backend)
+        supported = spec.accepts.head_dims() if spec is not None else None
+        if supported is None or not set(supported).isdisjoint(required):
+            continue
+        # What a rejected call does differs by backend, and the difference is the
+        # whole reason to refuse here: one wastes the selection, the other stops
+        # the run at the first layer.
+        outcome = (
+            f"every layer would fall through to {spec.fallback.name} and the "
+            "selection would have no effect"
+            if spec.fallback is not None
+            else "every layer would be refused"
+        )
+        raise ValueError(
+            f"{model.settings.model_name} does not support --attention_backend "
+            f"{backend.name}: it runs head dimension "
+            f"{', '.join(str(d) for d in sorted(required))} and that backend serves only "
+            f"{', '.join(str(d) for d in sorted(supported))}, so {outcome}."
+        )
+
+
 @dataclass(frozen=True)
 class ModelCapabilities:
     """ Class to define model capabilities """
@@ -131,13 +194,17 @@ class ModelCapabilities:
     use_fp8_gemms: bool = False
     use_fp8_text_encoder: bool = False
     use_fp4_gemms: bool = False
+    use_fp6_gemms: bool = False
+    use_a6w4_gemms: bool = False
     supports_step_caching: bool = False
+    use_fp8_comms: bool = False
     use_hybrid_attn_schedule: bool = False
     use_hybrid_gemm_schedule: bool = False
     cross_attention_backend: bool = False
     supports_sparse_attention_backends: bool = False
     supports_sparge_attention_backends: bool = False
     supports_distilled_weights: bool = False
+    profile_capture_phase: bool = False
 
 @dataclass(frozen=True)
 class DefaultInputValues:
@@ -185,6 +252,9 @@ class ModelSettings:
         }
     })
     valid_tasks: List[str] = field(default_factory=list)
+    # Attention backend used when --attention_backend is omitted. Leave None to
+    # keep the global default.
+    default_attention_backend: Optional[str] = None
     resolution_divisor: Optional[int] = None
     transformer_attr_names: List[str] = field(default_factory=lambda: ["transformer"])
 
@@ -194,7 +264,7 @@ class DiffusionOutput:
         self.images = images
         if isinstance(videos, np.ndarray) and videos.ndim == 5:
             videos = list(videos)
-        elif not isinstance(videos, list):
+        elif videos is not None and not isinstance(videos, list):
             videos = [videos]
         self.videos = videos
         if not isinstance(pipe_args, list):
@@ -232,12 +302,17 @@ class DiffusionOutput:
             for video, single_pipe_args in zip(self.videos, self.pipe_args):
                 yield (video, single_pipe_args)
 
+
 class xFuserModel(abc.ABC):
     """ Base class for xFuser models """
 
     # torch.compile modes that run the graph under CUDA Graphs, whose outputs live in a fixed
     # buffer pool and are therefore only valid until the next replay.
     CUDAGRAPH_COMPILE_MODES = frozenset({"reduce-overhead", "max-autotune"})
+
+    # Head dimensions this model's attention runs at, checked against what a backend serves.
+    # Left empty where the value is only known from the loaded checkpoint; empty means no claim.
+    attention_head_dims: frozenset[int] = frozenset()
 
     # Shared loading is opt-in; subclasses must declare verified routes explicitly.
     load_support: LoadSupport = LoadSupport(
@@ -246,6 +321,15 @@ class xFuserModel(abc.ABC):
         replicated_meta=False,
         routes=LoadRoute.NONE,
     )
+    # Backends this model is known to produce correct output with. None means
+    # no numerical restriction. Distinct from ModelCapabilities, which is
+    # structural ("does this model supply what sparse backends need"): this is
+    # empirical, measured per model, and cannot be derived from a spec.
+    # Default-deny on purpose -- a backend nobody has run against this model
+    # should be refused, not assumed correct.
+    supported_attn_backends: Optional[frozenset] = None
+    unsupported_attn_backend_reason: str = ""
+
     capabilities: ModelCapabilities = ModelCapabilities()
     default_input_values: DefaultInputValues = DefaultInputValues()
     settings: ModelSettings = ModelSettings()
@@ -265,6 +349,7 @@ class xFuserModel(abc.ABC):
         self.settings = copy.deepcopy(self.__class__.settings)
         self._customize_settings(config)
         self._vae_manager = VAEManager(config, self.capabilities, self.settings)
+        self._apply_default_attention_backend(config)
         self._validate_config(config)
         self._update_model_settings(config)
         self.config = config
@@ -341,6 +426,16 @@ class xFuserModel(abc.ABC):
         if self.config.use_parallel_vae:
             self._vae_manager.setup_parallel_vae(self._decoding_vaes())
         self._enable_options()
+        fp8_comms = get_runtime_state().fp8_comms if runtime_state_is_initialized() else None
+        if fp8_comms is not None:
+            setup_fp8_comms(
+                fp8_comms,
+                self.pipe,
+                input_args,
+                run_pipe_fn=self._run_timed_pipe,
+                split_prompts_fn=self._split_prompts_for_dp,
+                batch_size=self.config.batch_size,
+            )
 
         # Compile and warm the original blocks before cache adapters replace or
         # patch them, keeping stateful cross-step cache logic out of traced graphs.
@@ -464,9 +559,62 @@ class xFuserModel(abc.ABC):
             [self.pipe, getattr(self, "second_pipe", None)]
         )
 
+    def _apply_default_attention_backend(self, config: xFuserArgs) -> None:
+        """Fill in the model's preferred attention backend when the CLI left it unset."""
+        default = self.settings.default_attention_backend
+        if default is None or config.attention_backend is not None:
+            return
+        _parse_attention_backend(default, f"default attention backend for {self.settings.model_name}")
+        config.attention_backend = default
+        log(f"--attention_backend not set, using {self.settings.model_name} default: {default}")
+
+    def _validate_supported_attn_backends(self, config: xFuserArgs) -> None:
+        """Refuse backends this model is not known to be correct with.
+
+        Checks every backend the run could reach: the explicit one and, under a
+        hybrid schedule, each scheduled backend.
+        """
+        allowed = self.supported_attn_backends
+        if allowed is None:
+            return
+
+        if config.use_hybrid_attn_schedule and config.hybrid_attn_schedule:
+            candidates = list(
+                AttentionSchedule.from_comma_delimited_string(
+                    config.hybrid_attn_schedule
+                ).backends
+            )
+        else:
+            candidates = [
+                _parse_attention_backend(value, label)
+                for value, label in (
+                    (config.attention_backend, "attention backend"),
+                    (config.cross_attention_backend, "cross attention backend"),
+                    (config.hybrid_attn_low_precision_backend,
+                     "hybrid low-precision attention backend"),
+                    (config.hybrid_attn_high_precision_backend,
+                     "hybrid high-precision attention backend"),
+                )
+            ]
+
+        for backend in candidates:
+            if backend is None or backend in allowed:
+                continue
+            supported = ", ".join(sorted(b.name for b in allowed))
+            reason = (
+                f" {self.unsupported_attn_backend_reason}"
+                if self.unsupported_attn_backend_reason
+                else ""
+            )
+            raise ValueError(
+                f"{self.settings.model_name} does not support attention backend "
+                f"{backend.name}.{reason} Supported backends: {supported}."
+            )
+
     def _validate_config(self, config: xFuserArgs) -> None:
         """ Validate if the model supports requested config """
         config._validate_gemm_quantization_flags()
+        _validate_attention_head_dims(self, config)
         for key in ModelCapabilities.__annotations__.keys():
             config_value = getattr(config, key, None)  # Some config options might not be set in the CLI, such as support for specific attention backends.
             if isinstance(config_value, int) and not isinstance(config_value, bool):
@@ -487,6 +635,8 @@ class xFuserModel(abc.ABC):
                     f"Model {self.settings.model_name} does not support --cache_method {config.cache_method}. "
                     f"Supported: {', '.join(supported_methods)}"
                 )
+
+        self._validate_supported_attn_backends(config)
 
         backend = _parse_attention_backend(config.attention_backend, "attention backend")
         supports_sparse = self.capabilities.supports_sparse_attention_backends
@@ -546,12 +696,41 @@ class xFuserModel(abc.ABC):
         if config.dataset_path and not config.batch_size:
             raise ValueError("Dataset path specified without batch size. Please specify batch size for dataset inference.")
 
+        validate_fp8_comms_config(config, self.capabilities, self.settings)
+
         if self.model_output_type == "video" and not self.fps:
             raise ValueError(f"Model {self.settings.model_name} produces video output but fps is not set.")
 
         if config.use_int8_gemms and _is_hip():
             raise ValueError("Int8 GEMMs on ROCm are not supported.")
             
+        if config.use_fp6_gemms and _is_cuda():
+            raise ValueError(
+                "--use_fp6_gemms requires the AITER MXFP6 ASM backend on ROCm gfx950; "
+                "CUDA is not supported."
+            )
+        if (
+            config.use_fp6_gemms
+            and _is_hip()
+            and not packages_info.get("has_aiter", False)
+        ):
+            raise ValueError(
+                "MXFP6 GEMMs on ROCm gfx950 require AITER with the A6W6 " "ASM backend."
+            )
+        if config.use_a6w4_gemms and _is_cuda():
+            raise ValueError(
+                "A6W4 requires the AITER mixed-MXFP ASM backend on "
+                "ROCm gfx950; CUDA is not supported."
+            )
+        if (
+            config.use_a6w4_gemms
+            and _is_hip()
+            and not packages_info.get("has_aiter", False)
+        ):
+            raise ValueError(
+                "A6W4 on ROCm gfx950 requires AITER mixed-MXFP ASM."
+            )
+
         if config.use_fp4_gemms:
             if _is_hip() and not packages_info.get("has_aiter", False):
                 raise ValueError("FP4 GEMMs on ROCm require AITER.")
@@ -609,6 +788,13 @@ class xFuserModel(abc.ABC):
         pipeline-parallel models that don't respect the SPMD assumption and could
         deadlock in torch's compiler spmd_check()."""
         torch._inductor.config.reorder_for_compute_comm_overlap = True
+        # Restore the list of compute-communication overlap passes that was
+        # default in torch<2.10
+        torch._inductor.config.reorder_for_compute_comm_overlap_passes = [
+            "reorder_compute_for_overlap",
+            "sink_waits",
+            "raise_comms",
+        ]
 
         # torch >= ~2.13: enabling the overlap machinery activates an SPMD
         # graph-consistency check that issues a WORLD-group all_gather_object at
@@ -660,21 +846,92 @@ class xFuserModel(abc.ABC):
         warmup_steps = self._get_compile_warmup_steps(input_args)
         if warmup_steps is not None:
             compile_args["num_inference_steps"] = warmup_steps
-        self._run_timed_pipe(compile_args)
+        self._run_compile_warmup(compile_args)
+
+    def _save_determinism_check_failed_outputs(
+        self,
+        output: DiffusionOutput,
+        iteration: int,
+        rank: int,
+    ) -> None:
+        if not output or (not output.images and not output.videos):
+            return  # otherwise save_output() will throw or die
+
+        orig_get_output_name = self.get_output_name
+        def _get_output_name(*args, **kwargs):
+            return (
+                orig_get_output_name(*args, **kwargs)
+                + f"_rank_{rank:02d}_iteration_{iteration:03d}"
+                # WARNING: xfuser/core/utils/determinism_check_results.py depends on the
+                # specific format of the filename, keep it in sync.
+            )
+
+        self.get_output_name = _get_output_name
+        try:
+            self.save_output(output)
+        finally:
+            self.get_output_name = orig_get_output_name
+
+
+    def _determinism_check(
+        self,
+        iteration: int,
+        expected_output: DiffusionOutput,
+        output: DiffusionOutput,
+        determinism_failures: int,
+    ) -> tuple[int, DiffusionOutput]:
+        """Determinism check implementation."""
+        if iteration == 0:
+            expected_output = copy.deepcopy(output)
+        elif not outputs_equal(expected_output, output):
+            rank = get_world_group().rank
+            # WARNING: xfuser/core/utils/determinism_check_results.py depends on this log
+            # message format, keep it in sync.
+            log_error(
+                f"determinism_check[rank {rank}]: iteration {iteration + 1} diverged!",
+                log_from_all_processes=True,
+            )
+            determinism_failures += 1
+
+            if (
+                determinism_failures <= self.config.determinism_check
+                and rank in self.config.determinism_check_report_ranks
+            ):
+                if determinism_failures == 1:
+                    self._save_determinism_check_failed_outputs(expected_output, 0, rank)
+                self._save_determinism_check_failed_outputs(output, iteration, rank)
+            # else: do nothing, above is enough
+
+        return determinism_failures, expected_output
 
 
     def run(self, input_args: dict) -> Tuple[DiffusionOutput, list]:
-        """ Run the model with given input arguments and return output and timings """
+        """Run the model and optionally check repeated outputs for determinism.
+
+        A positive ``determinism_check`` value enables exact comparisons against
+        the first timed output and sets the failure count at which the failure
+        handler starts being called.
+        """
         self._validate_args(input_args)
         input_args = self._split_prompts_for_dp(input_args)
         timings = []
         output: DiffusionOutput = None
+        expected_output = None
+        determinism_failures = 0
 
         if self.config.warmup_calls:
             warmup_args = copy.deepcopy(input_args)
             if self.config.batch_size and isinstance(warmup_args.get("prompt"), list):
                 warmup_args["prompt"] = warmup_args["prompt"][: self.config.batch_size]
             self._run_warmup_calls(warmup_args)
+
+        if self.config.determinism_check > 0:
+            log(
+                f"Since determinism check is enabled ({self.config.determinism_check}), "
+                "'Total time spent' reported at the end of all iterations will be "
+                "inflated and include the time spent on the check. "
+                "Individual iteration timings will not be affected."
+            )
 
         inference_start = torch.cuda.Event(enable_timing=True)
         inference_end = torch.cuda.Event(enable_timing=True)
@@ -691,6 +948,14 @@ class xFuserModel(abc.ABC):
                 output, timing = self._run_timed_pipe(input_args)
                 timings.append(timing)
                 log(f"Iteration {iteration + 1} completed in {timing:.2f}s")
+
+            if self.config.determinism_check > 0:
+                determinism_failures, expected_output = self._determinism_check(
+                    iteration,
+                    expected_output,
+                    output,
+                    determinism_failures,
+                )
 
         inference_end.record()
         torch.cuda.synchronize()
@@ -745,16 +1010,21 @@ class xFuserModel(abc.ABC):
             active=self.config.profile_active,
         )
         num_repetitions = self.config.profile_wait + self.config.profile_warmup + self.config.profile_active
+        with_stack = self.config.profile_with_stack
+        batch_size = self.config.batch_size or 1
+        height = input_args.get("height", 0)
+        width = input_args.get("width", 0)
+        annotation = f"execute_diffusion_{batch_size}_{height}x{width}"
 
         with profile(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
             schedule=schedule,
             record_shapes=True,
-            with_stack=False,
+            with_stack=with_stack,
         ) as profile_object:
             for iteration in range(num_repetitions):
                 log(f"Profiling iteration {iteration + 1}/{num_repetitions}")
-                with record_function("model_inference"):
+                with record_function(annotation):
                     if self.config.batch_size: # Run in batched mode
                         output, batch_timings = self._run_pipe_batched(input_args)
                         timing = sum(batch_timings)
@@ -831,20 +1101,59 @@ class xFuserModel(abc.ABC):
         self._vae_manager.prepare_run(self._decoding_vaes(), input_args)
 
     def _run_timed_pipe(self, input_args: dict) -> Tuple[DiffusionOutput, float]:
-        """ Run a a full pipeline with timing information """
+        """ Run the pipeline and time its latency from the synchronized across all ranks beginning
+        of the model execution, till the moment the current rank finishes.
+        
+        Later, we typically discard timings of all ranks except the last one, which is assumed to
+        be the rank providing model's output.
+        """
 
         self.prepare_run(input_args)
+        replica = get_model_replica_group()
+
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
+
         torch.cuda.synchronize()
+        replica.barrier()     # aligns all ranks in the replica as closely as possible
 
         start.record()
         out = self._run_pipe(input_args)
         end.record()
+        end.synchronize()   # we don't care about other streams if there are any
 
-        torch.cuda.synchronize()
         elapsed_time = start.elapsed_time(end) / 1000  # Convert to seconds
         return out, elapsed_time
+
+    def _run_compile_warmup(self, compile_args: dict) -> None:
+        """Run compilation warmup, optionally profiling the CUDA graph recording phase."""
+        enable_capture = (
+            self.config.profile_capture_phase
+            and self._get_compile_mode() == "reduce-overhead"
+            and not self.pipe.scheduler.config.shift_terminal
+        )
+        if not enable_capture:
+            self._run_timed_pipe(compile_args)
+            return
+
+        # Phase 1: Dynamo trace + Inductor compile + eager warmup (1 step).
+        compile_args["num_inference_steps"] = 1
+        self._run_timed_pipe(compile_args)
+
+        # Phase 2: CUDA graph recording under profiler (1 step).
+        log("Profiling CUDA graph recording phase for shape trace...")
+        capture_dir = f"{self.config.output_directory}/capture_traces"
+        os.makedirs(capture_dir, exist_ok=True)
+        rank = get_world_group().rank
+        capture_path = f"{capture_dir}/capture_trace_rank_{rank}.json.gz"
+        with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            record_shapes=True,
+            with_stack=True,
+            on_trace_ready=lambda prof: prof.export_chrome_trace(capture_path),
+        ) as capture_prof:
+            self._run_timed_pipe(compile_args)
+        log(f"Capture trace saved to {capture_path}")
 
     def get_output_name(self, input_args) -> str:
         """ Generate a unique output name based on model and config """
@@ -908,18 +1217,40 @@ class xFuserModel(abc.ABC):
 
     def _setup_hybrid_gemm_schedule(self, input_args: dict) -> None:
         """
-        Setup hybrid GEMM schedule: high precision FP8 GEMMs at start/end, MXFP4 GEMMs in the middle.
+        Use the selected profile's high GEMM format at denoising endpoints.
         """
-        if input_args["num_hybrid_gemm_high_precision_steps"] is None:
-            raise ValueError("You must provide 'num_hybrid_gemm_high_precision_steps' to use the hybrid GEMM schedule.")
         multiplier = self._calculate_hybrid_attention_step_multiplier(input_args)
         total_steps = input_args["num_inference_steps"] * multiplier
-        num_high_precision_steps = input_args["num_hybrid_gemm_high_precision_steps"] * multiplier
 
-        gemm_schedule = create_hybrid_gemm_schedule(
-            num_high_precision_steps=num_high_precision_steps,
-            total_steps=total_steps,
-        )
+        if self.config.hybrid_gemm_schedule is not None:
+            denoising_schedule = GemmPrecisionSchedule.from_comma_delimited_string(
+                self.config.hybrid_gemm_schedule,
+                low_format=self.config.gemm_quantization_spec.low,
+                high_format=self.config.gemm_quantization_spec.high,
+            )
+            if denoising_schedule.total_steps != input_args["num_inference_steps"]:
+                raise ValueError(
+                    f"GEMM schedule has {denoising_schedule.total_steps} entries, "
+                    f"expected {input_args['num_inference_steps']} denoising steps."
+                )
+            gemm_schedule = GemmPrecisionSchedule(
+                [
+                    precision
+                    for precision in denoising_schedule.use_high_precision_schedule
+                    for _ in range(multiplier)
+                ]
+            )
+        else:
+            count = input_args["num_hybrid_gemm_high_precision_steps"]
+            if count is None:
+                raise ValueError(
+                    "Hybrid GEMM scheduling requires "
+                    "num_hybrid_gemm_high_precision_steps."
+                )
+            gemm_schedule = create_hybrid_gemm_schedule(
+                num_high_precision_steps=count * multiplier,
+                total_steps=total_steps,
+            )
 
         log("Enabling hybrid GEMM schedule")
         log(f"Hybrid GEMM schedule (high precision=True): {gemm_schedule.use_high_precision_schedule}", debug=True)

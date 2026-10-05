@@ -13,6 +13,7 @@ from .pipeline_stable_diffusion_xl import xFuserStableDiffusionXLPipeline
 from .pipeline_sana import xFuserSanaPipeline
 from .pipeline_sana_sprint import xFuserSanaSprintPipeline
 from .pipeline_causal_wan import xFuserCausalWanPipeline
+from .pipeline_lumina2 import xFuserLumina2Pipeline
 
 __all__ = [
     "xFuserPipelineBaseWrapper",
@@ -28,6 +29,7 @@ __all__ = [
     "xFuserSanaPipeline",
     "xFuserSanaSprintPipeline",
     "xFuserCausalWanPipeline",
+    "xFuserLumina2Pipeline",
 ]
 
 # These need diffusers symbols newer than the install floor, so they are gated on their

@@ -61,6 +61,9 @@ class CacheManager:
             )
         self.cache[layer_type, layer] = CacheEntry(cache_type)
 
+    def has_cache_entry(self, layer, layer_type: str = "attn") -> bool:
+        return (layer_type, layer) in self.cache
+
     def update_and_get_kv_cache(
         self,
         new_kv: Union[torch.Tensor, List[torch.Tensor]],

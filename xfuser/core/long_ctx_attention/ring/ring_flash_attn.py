@@ -1,4 +1,5 @@
 from typing import List
+import inspect
 import math
 import torch
 import torch.nn.functional as F
@@ -24,6 +25,75 @@ except ImportError:
     flash_attn = None
     _flash_attn_forward = None
 
+
+def _call_fa3_forward(
+    fn,
+    q: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    *,
+    dropout_p: float,
+    softmax_scale,
+    causal: bool,
+    window_size,
+    softcap: float,
+    alibi_slopes,
+    return_softmax: bool,
+    q_descale=None,
+    k_descale=None,
+    v_descale=None,
+):
+    """Call a FlashAttention-3 forward adapter across yunchang versions.
+
+    The FA3 adapter in older yunchang releases does not expose the optional
+    descaling arguments.  Passing ``None`` for those arguments still raises a
+    ``TypeError`` on such releases, so only non-``None`` scales are added when
+    the selected adapter advertises them.  A supplied scale is never silently
+    discarded: adapters that do not support it fail with a useful error.
+    """
+    call_kwargs = {
+        "dropout_p": dropout_p,
+        "softmax_scale": softmax_scale,
+        "causal": causal,
+        "window_size": window_size,
+        "softcap": softcap,
+        "alibi_slopes": alibi_slopes,
+        "return_softmax": return_softmax,
+    }
+    descales = {
+        "q_descale": q_descale,
+        "k_descale": k_descale,
+        "v_descale": v_descale,
+    }
+    supplied = {name: value for name, value in descales.items() if value is not None}
+    if supplied:
+        try:
+            parameters = inspect.signature(fn).parameters
+        except (TypeError, ValueError):
+            # Extension callables may not expose a Python signature.  Let the
+            # kernel validate the arguments in that case.
+            parameters = None
+
+        accepts_kwargs = parameters is None or any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+        unsupported = (
+            []
+            if accepts_kwargs or parameters is None
+            else [name for name in supplied if name not in parameters]
+        )
+        if unsupported:
+            names = ", ".join(unsupported)
+            raise TypeError(
+                "The selected FlashAttention-3 adapter does not support "
+                f"descaling arguments: {names}"
+            )
+        call_kwargs.update(supplied)
+
+    return fn(q, key, value, **call_kwargs)
+
+
 def xdit_ring_flash_attn_forward(
     process_group,
     q: torch.Tensor,
@@ -43,7 +113,7 @@ def xdit_ring_flash_attn_forward(
     joint_strategy="none",
     q_descale=None,
     k_descale=None,
-    v_descale=None
+    v_descale=None,
 ):
     is_joint = False
     if (joint_tensor_key is not None and 
@@ -104,7 +174,8 @@ def xdit_ring_flash_attn_forward(
         if not causal or step <= comm.rank:
             fn = select_flash_attn_impl(attn_type, stage="fwd-only", attn_processor=attn_processor)
             if attn_type == AttnType.FA3: 
-                block_out, block_lse = fn(
+                block_out, block_lse = _call_fa3_forward(
+                    fn,
                     q,
                     key,
                     value,
@@ -117,7 +188,7 @@ def xdit_ring_flash_attn_forward(
                     return_softmax=True and dropout_p > 0,
                     q_descale=q_descale,
                     k_descale=k_descale,
-                    v_descale=v_descale
+                    v_descale=v_descale,
                 )
             else:
                 block_out, block_lse = fn(
@@ -169,6 +240,9 @@ class xFuserRingFlashAttnFunc(RingFlashAttnFunc):
         joint_tensor_key,
         joint_tensor_value,
         joint_strategy,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
     ):
         if softmax_scale is None:
             softmax_scale = 1.0 / math.sqrt(q.size(-1))
@@ -194,6 +268,9 @@ class xFuserRingFlashAttnFunc(RingFlashAttnFunc):
             joint_tensor_key=joint_tensor_key,
             joint_tensor_value=joint_tensor_value,
             joint_strategy=joint_strategy,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
         )
         # this should be out_padded
         ctx.save_for_backward(q, k, v, out, softmax_lse)
@@ -207,6 +284,9 @@ class xFuserRingFlashAttnFunc(RingFlashAttnFunc):
         ctx.group = group
         ctx.attn_type = attn_type
         ctx.attn_processor = attn_processor
+        ctx.q_descale = q_descale
+        ctx.k_descale = k_descale
+        ctx.v_descale = v_descale
         return out if not return_softmax else (out, softmax_lse, None)
     
     @staticmethod
@@ -230,18 +310,20 @@ class xFuserRingFlashAttnFunc(RingFlashAttnFunc):
             attn_type=ctx.attn_type,
         )
         
-        # Return gradients: 3 tensor gradients + 14 None values for non-tensor params
+        # Return gradients: 3 tensor gradients + 17 None values for non-tensor params
         # Order matches forward parameters:
         # dq, dk, dv, (dropout_p, softmax_scale, causal, window_size,
         #              alibi_slopes, deterministic, return_softmax, group,
         #              attn_type, attn_processor, attn_layer, joint_tensor_key,
-        #              joint_tensor_value, joint_strategy)
+        #              joint_tensor_value, joint_strategy, q_descale, k_descale,
+        #              v_descale)
         return (
             dq, dk, dv,        # Gradients for q, k, v
             None, None, None, None,  # dropout_p, softmax_scale, causal, window_size
             None, None, None, None,  # alibi_slopes, deterministic, return_softmax, group
             None, None,              # attn_type, attn_processor
-            None, None, None, None   # attn_layer, joint_tensor_key, joint_tensor_value, joint_strategy
+            None, None, None, None, # attn_layer, joint_tensor_key, joint_tensor_value, joint_strategy
+            None, None, None,       # q_descale, k_descale, v_descale
         )
 
 
@@ -267,49 +349,28 @@ def xdit_ring_flash_attn_func(
     k_descale=None,
     v_descale=None,
 ):
-    if attn_type == AttnType.FA3:
-        return xFuserRingFlashAttnFunc.apply(
-            q,
-            k,
-            v,
-            dropout_p,
-            softmax_scale,
-            causal,
-            window_size,
-            alibi_slopes,
-            deterministic,
-            return_attn_probs,
-            group,
-            attn_type,
-            attn_processor,
-            attn_layer,
-            joint_tensor_key,
-            joint_tensor_value,
-            joint_strategy,
-            q_descale=q_descale,
-            k_descale=k_descale,
-            v_descale=v_descale
-        )
-    else:
-        return xFuserRingFlashAttnFunc.apply(
-            q,
-            k,
-            v,
-            dropout_p,
-            softmax_scale,
-            causal,
-            window_size,
-            alibi_slopes,
-            deterministic,
-            return_attn_probs,
-            group,
-            attn_type,
-            attn_processor,
-            attn_layer,
-            joint_tensor_key,
-            joint_tensor_value,
-            joint_strategy,
-        )
+    return xFuserRingFlashAttnFunc.apply(
+        q,
+        k,
+        v,
+        dropout_p,
+        softmax_scale,
+        causal,
+        window_size,
+        alibi_slopes,
+        deterministic,
+        return_attn_probs,
+        group,
+        attn_type,
+        attn_processor,
+        attn_layer,
+        joint_tensor_key,
+        joint_tensor_value,
+        joint_strategy,
+        q_descale,
+        k_descale,
+        v_descale,
+    )
 
 def xdit_sana_ring_flash_attn_forward(
     process_group,

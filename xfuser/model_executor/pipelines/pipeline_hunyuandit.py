@@ -646,14 +646,8 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
 
                 latents = callback_outputs.pop("latents", latents)
                 prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
-                negative_prompt_embeds = callback_outputs.pop(
-                    "negative_prompt_embeds", negative_prompt_embeds
-                )
                 prompt_embeds_2 = callback_outputs.pop(
                     "prompt_embeds_2", prompt_embeds_2
-                )
-                negative_prompt_embeds_2 = callback_outputs.pop(
-                    "negative_prompt_embeds_2", negative_prompt_embeds_2
                 )
 
             if sync_only and is_pipeline_last_stage() and i == len(timesteps) - 1:
@@ -839,14 +833,8 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
 
                 latents = callback_outputs.pop("latents", latents)
                 prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
-                negative_prompt_embeds = callback_outputs.pop(
-                    "negative_prompt_embeds", negative_prompt_embeds
-                )
                 prompt_embeds_2 = callback_outputs.pop(
                     "prompt_embeds_2", prompt_embeds_2
-                )
-                negative_prompt_embeds_2 = callback_outputs.pop(
-                    "negative_prompt_embeds_2", negative_prompt_embeds_2
                 )
 
         latents = None

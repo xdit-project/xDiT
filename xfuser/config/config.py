@@ -16,6 +16,8 @@ from typing import Union, Optional, List
 
 env_info = PACKAGES_CHECKER.get_packages_info()
 HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
+
+DEFAULT_FP8_COMMS_SAFETY_FACTOR = 0.85
 HAS_FLASH_ATTN = env_info["has_flash_attn"]
 
 
@@ -80,6 +82,9 @@ class RuntimeConfig:
     use_vsa_static_block_mask: bool = True
     use_vsa_first_frame_mask: bool = True
     vsa_collect_density: bool = False
+    use_fp8_comms: bool = False
+    fp8_comms_scale: Optional[float] = None
+    fp8_comms_safety_factor: float = DEFAULT_FP8_COMMS_SAFETY_FACTOR
 
     def __post_init__(self):
         check_packages()

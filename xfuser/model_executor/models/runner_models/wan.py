@@ -1,5 +1,6 @@
 import re
 import torch
+from dataclasses import replace
 from typing import List, Optional
 from PIL import Image
 from diffusers import FlowMatchEulerDiscreteScheduler
@@ -25,7 +26,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
 )
 from xfuser.core.distributed.runtime_state import get_runtime_state
-from xfuser.core.distributed.attention_backend import AttentionBackendType
+from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.core.utils.runner_utils import (
     log,
     resize_and_crop_image,
@@ -164,7 +165,7 @@ class xFuserWan21I2VModel(xFuserWanModel):
 
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
         do_cfg = input_args["guidance_scale"] > 1.0
-        if do_cfg:
+        if do_cfg and not self.config.use_cfg_parallel:
             return 2
         return 1
 
@@ -182,6 +183,8 @@ class xFuserWan21I2VModel(xFuserWanModel):
         use_fp8_text_encoder=True,
         use_cfg_parallel=True,
         use_fp4_gemms=True,
+        use_fp6_gemms=True,
+        use_a6w4_gemms=True,
         use_hybrid_attn_schedule=True,
         use_parallel_vae=True,
         use_parallel_vae_encoder=True,
@@ -306,6 +309,8 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
     # WAN has no in-tree FBCache adapter (that path is FLUX.2-specific). FBCache is a
     # special case of DBCache (first-block cache), so expose "fbcache" as DBCache with
     # Fn_compute_blocks=1; base_model routes it through the cache-dit (dbcache) engine.
+    capabilities = replace(xFuserWan21I2VModel.capabilities, use_fp8_comms=True)
+
     def _customize_settings(self, config: xFuserArgs) -> None:
         super()._customize_settings(config)
         self.settings.model_name = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
@@ -405,6 +410,7 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
         use_fp8_text_encoder=True,
         use_cfg_parallel=False,
         use_fp4_gemms=True,
+        use_fp6_gemms=True,
         use_hybrid_attn_schedule=True,
         use_parallel_vae=True,
         use_parallel_vae_encoder=True,
@@ -543,7 +549,7 @@ class xFuserWan21T2VModel(xFuserWanModel):
 
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
         do_cfg = input_args["guidance_scale"] > 1.0
-        if do_cfg:
+        if do_cfg and not self.config.use_cfg_parallel:
             return 2
         return 1
 
@@ -584,6 +590,8 @@ class xFuserWan21T2VModel(xFuserWanModel):
         fully_shard_degree=True,
         use_fp8_gemms=True,
         use_fp4_gemms=True,
+        use_fp6_gemms=True,
+        use_a6w4_gemms=True,
         use_hybrid_attn_schedule=True,
         use_parallel_vae=True,
         cross_attention_backend=True,
@@ -672,6 +680,8 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
     )
 
     # See xFuserWan22I2VModel: "fbcache" == DBCache first-block (Fn_compute_blocks=1).
+    capabilities = replace(xFuserWan21T2VModel.capabilities, use_fp8_comms=True)
+
     def _customize_settings(self, config: xFuserArgs) -> None:
         super()._customize_settings(config)
         self.settings.model_name = "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
@@ -752,9 +762,13 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         ulysses_degree=True,
         ring_degree=True,
         fully_shard_degree=True,
+        use_cfg_parallel=True,
         use_fp8_gemms=True,
         use_fp8_text_encoder=True,
         use_fp4_gemms=True,
+        use_fp8_comms=True,
+        use_fp6_gemms=True,
+        use_a6w4_gemms=True,
         use_hybrid_attn_schedule=True,
         use_hybrid_gemm_schedule=True,
         use_parallel_vae=True,
@@ -765,6 +779,14 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         enable_slicing=True,
         supports_step_caching=True,
     )
+
+    def _validate_config(self, config: xFuserArgs) -> None:
+        super()._validate_config(config)
+        if config.use_cfg_parallel and config.task != "i2v":
+            raise ValueError(
+                "Wan2.2-TI2V supports CFG parallelism only for the i2v task."
+            )
+
     default_input_values = DefaultInputValues(
         height=736,
         width=1280,

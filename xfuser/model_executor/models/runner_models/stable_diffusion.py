@@ -40,6 +40,7 @@ class xFuserStableDiffusionModel(xFuserModel):
         enable_slicing=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
+        use_fp8_comms=True,
         supports_step_caching=True,
         use_fp8_text_encoder=True,
         use_parallel_vae=True,

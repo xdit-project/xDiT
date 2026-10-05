@@ -45,6 +45,14 @@ _DP: Optional[GroupCoordinator] = None
 _FS: Optional[GroupCoordinator] = None
 _DIT: Optional[GroupCoordinator] = None
 _VAE: Optional[GroupCoordinator] = None
+_MODEL_REPLICA: Optional[GroupCoordinator] = None
+
+
+def get_model_replica_group() -> GroupCoordinator:
+    """Return a group of ranks constituting current DP replica, i.e.
+    the ranks with varying "tp-sp-pp-cfg" grid coordinates"""
+    assert _MODEL_REPLICA is not None
+    return _MODEL_REPLICA
 
 
 # * QUERY
@@ -286,7 +294,8 @@ def init_distributed_environment(
 def model_parallel_is_initialized():
     """Check if tensor and pipeline parallel groups are initialized."""
     return (
-        _DP is not None
+        _MODEL_REPLICA is not None
+        and _DP is not None
         and _CFG is not None
         and _SP is not None
         and _PP is not None
@@ -309,6 +318,7 @@ def init_model_parallel_group(
         "classifier_free_guidance",
         "fully_shard",
         "vae",
+        "model_replica",
     ], f"parallel_mode {parallel_mode} is not supported"
     if parallel_mode == "pipeline":
         return PipelineGroupCoordinator(
@@ -461,6 +471,16 @@ def initialize_model_parallel(
         fully_shard_degree,
         "tp-sp-pp-cfg-dp",
     )
+
+    global _MODEL_REPLICA
+    assert _MODEL_REPLICA is None
+    _MODEL_REPLICA = init_model_parallel_group(
+        group_ranks=rank_generator.get_ranks("tp-sp-pp-cfg"),
+        local_rank=get_world_group().local_rank,
+        backend=backend,
+        parallel_mode="model_replica",
+    )
+
     global _DP
     assert _DP is None, "data parallel group is already initialized"
     _DP = init_model_parallel_group(
@@ -554,6 +574,11 @@ def initialize_model_parallel(
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
+    global _MODEL_REPLICA
+    if _MODEL_REPLICA:
+        _MODEL_REPLICA.destroy()
+    _MODEL_REPLICA = None
+    
     global _DP
     if _DP:
         _DP.destroy()

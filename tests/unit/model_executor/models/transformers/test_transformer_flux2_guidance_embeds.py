@@ -33,7 +33,6 @@ def diffusers_without_guidance_embeds(monkeypatch):
         init(self, **kwargs)
 
     monkeypatch.setattr(Flux2Transformer2DModel, "__init__", init_before_0_37)
-    monkeypatch.setattr(transformer_flux2, "_ACCEPTS_GUIDANCE_EMBEDS", False)
 
 
 def _has_guidance_embedder(model):

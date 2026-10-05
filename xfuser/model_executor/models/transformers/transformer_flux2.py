@@ -386,10 +386,14 @@ class xFuserFlux2ParallelSelfAttention(xFuserAttentionBaseWrapper):
         return self.processor(self, hidden_states, attention_mask, image_rotary_emb, **kwargs)
 
 
-# diffusers added guidance_embeds in 0.37, together with FLUX.2-klein, whose transformers
-# have no guidance embedder. Earlier releases always build one, as FLUX.2-dev needs, and
-# reject the argument.
-_ACCEPTS_GUIDANCE_EMBEDS = "guidance_embeds" in inspect.signature(Flux2Transformer2DModel.__init__).parameters
+def _accepts_guidance_embeds() -> bool:
+    """Whether the installed Flux2Transformer2DModel takes ``guidance_embeds``.
+
+    diffusers added it in 0.37, together with FLUX.2-klein, whose transformers have no
+    guidance embedder. Earlier releases always build one, as FLUX.2-dev needs, and
+    reject the argument.
+    """
+    return "guidance_embeds" in inspect.signature(Flux2Transformer2DModel.__init__).parameters
 
 
 class xFuserFlux2Transformer2DWrapper(Flux2Transformer2DModel):
@@ -410,11 +414,11 @@ class xFuserFlux2Transformer2DWrapper(Flux2Transformer2DModel):
         eps: float = 1e-6,
         guidance_embeds: bool = True,
     ):
-        # Without _ACCEPTS_GUIDANCE_EMBEDS the embedder is always built, so leave the
-        # argument out. A request to drop it is still passed on, and fails there,
-        # rather than silently building the wrong model.
+        # Where the argument is not accepted the embedder is always built, so leave it
+        # out. A request to drop it is still passed on, and fails there, rather than
+        # silently building the wrong model.
         guidance_kwargs = {"guidance_embeds": guidance_embeds}
-        if guidance_embeds and not _ACCEPTS_GUIDANCE_EMBEDS:
+        if guidance_embeds and not _accepts_guidance_embeds():
             guidance_kwargs = {}
         super().__init__(
             patch_size=patch_size,

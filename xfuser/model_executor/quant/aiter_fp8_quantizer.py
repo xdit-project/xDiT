@@ -12,7 +12,7 @@ module holds one thin adapter per framework over a shared swap + quant path:
 Both swap targeted ``nn.Linear`` leaves for meta ``xFuserFP8BlockScaleLinear`` before load, then
 quantize each weight as it streams off disk. So the full bf16 module never materializes on host:
 peak ~= one streamed weight + accumulating fp8. This is the load-time complement to the post-load
-walk in ``runner_utils.quantize_linear_layers_to_fp8_blockscale``.
+walk in ``runner_utils.replace_linears``.
 
 On multi-GPU FP8 FSDP the encoder is the larger win: the DiT already streams fp8, while a
 Mistral3 or Qwen3 encoder otherwise lands full bf16 on every node-local rank and dominates

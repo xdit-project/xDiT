@@ -54,7 +54,6 @@ from xfuser.core.utils.checkpoint_io import (
 )
 from xfuser.core.utils.dtype_policy import cast_preserving_fp32_modules
 from xfuser.core.utils.runner_utils import log, rgetattr
-from xfuser.envs import _is_cuda
 from .checkpoint import CheckpointManifest, CheckpointRequest
 from .contracts import (
     LoadDeclaration,

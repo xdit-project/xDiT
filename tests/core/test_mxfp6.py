@@ -258,10 +258,11 @@ def test_fp4_hybrid_builds_whatever_companion_it_is_given(monkeypatch):
     monkeypatch.setattr(mxfp6_linear, "xFuserMXFP6Linear", StubFP6)
     model = torch.nn.Sequential(torch.nn.Linear(4, 3, bias=False, dtype=torch.bfloat16))
 
-    runner_utils.quantize_linear_layers_to_fp4(
+    runner_utils.replace_linears(
         model,
-        device="cpu",
-        companion=runner_utils.packed_layer_factory(StubFP6, "cpu"),
+        runner_utils.mxfp4_layer_factory(
+            "cpu", companion=runner_utils.packed_layer_factory(StubFP6, "cpu")
+        ),
     )
 
     assert isinstance(model[0], xFuserHybridLinear)

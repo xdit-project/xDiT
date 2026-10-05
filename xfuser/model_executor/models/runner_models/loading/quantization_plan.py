@@ -1,7 +1,6 @@
 """Backend-neutral quantization target planning for one model run."""
 
 from dataclasses import replace
-from typing import Optional
 
 from xfuser.config.gemm import GemmQuantizationSpec
 from xfuser.core.utils.runner_utils import log

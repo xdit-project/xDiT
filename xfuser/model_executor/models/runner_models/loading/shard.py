@@ -193,7 +193,6 @@ def build_block_quantize_fn(
     if plan is None or not plan.quantizes:
         return None
 
-    model = loader.model
     device = f"cuda:{local_rank}"
 
     formats = plan.formats_in_play

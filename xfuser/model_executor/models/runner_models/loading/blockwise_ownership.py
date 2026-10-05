@@ -11,8 +11,6 @@ wrapped, and a target below a block is kept as-is; ``blockwise_owned_targets`` r
 shortest paths that cover it.
 """
 
-from dataclasses import replace
-
 from xfuser.core.utils.runner_utils import log
 from .quant_adapter import module_path_is_covered
 

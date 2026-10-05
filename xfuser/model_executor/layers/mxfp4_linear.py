@@ -7,7 +7,6 @@ try:
 except ImportError:
     pass # Error will be thrown in base_model.py, if mxfp4 gemms are enabled but AITER is not available.
 from typing import Optional
-from xfuser.core.distributed.runtime_state import get_runtime_state
 
 
 @torch.library.custom_op("xfuser::mxfp4_gemm", mutates_args=())

@@ -14,11 +14,7 @@ from diffusers.utils import load_image, export_to_video
 import numpy as np
 from xfuser.compat import is_diffusers_import_error
 from xfuser.config import xFuserArgs
-from xfuser.envs import (
-    PACKAGES_CHECKER,
-    _is_hip,
-    _is_cuda,
-)
+from xfuser.envs import PACKAGES_CHECKER
 from xfuser.core.utils.outputs_equal import outputs_equal
 from xfuser.core.utils.runner_utils import (
     log,

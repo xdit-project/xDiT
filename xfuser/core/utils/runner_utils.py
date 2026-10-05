@@ -7,7 +7,7 @@ import torch
 import functools
 import numpy as np
 from PIL.Image import Image
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional
 from xfuser.envs import _is_cuda, _is_hip, PACKAGES_CHECKER
 
 logger = logging.getLogger(__name__)
@@ -536,7 +536,6 @@ def quantize_linear_layers_to_int8(
 def quantize_linear_layers_to_fp8(
     module_or_module_list_to_quantize,
     filter_fn=None,
-    include_suffixes: Optional[Tuple[str, ...]] = None,
     device: Optional[torch.device] = None,
 ) -> None:
     """Quantize the selected linear layers to torchao per-tensor FP8."""
@@ -545,10 +544,6 @@ def quantize_linear_layers_to_fp8(
     from torchao.quantization.quant_api import (
         Float8DynamicActivationFloat8WeightConfig,
     )
-
-    if filter_fn is None and include_suffixes:
-        def filter_fn(_mod, fqn):
-            return fqn.endswith(tuple(include_suffixes))
 
     quantize_with_torchao(
         module_or_module_list_to_quantize,
@@ -617,50 +612,6 @@ def torchao_layer_factory(config, device):
     return make_layer
 
 
-def quantize_linear_layers_to_fp6(
-    model: torch.nn.Module,
-    parent_name: str = "",
-    filter_fn=None,
-    device: Optional[torch.device] = None,
-    offload_to_cpu: bool = False,
-) -> int:
-    """Replace selected ``nn.Linear`` leaves with AITER MXFP6 linears."""
-
-    from xfuser.model_executor.layers.mxfp6_linear import xFuserMXFP6Linear
-
-    return replace_linears(
-        model,
-        packed_layer_factory(xFuserMXFP6Linear, device),
-        filter_fn=filter_fn,
-        offload_to_cpu=offload_to_cpu,
-        parent_name=parent_name,
-    )
-
-
-def quantize_linear_layers_to_fp8_blockscale(
-    model: torch.nn.Module,
-    parent_name: str = "",
-    device: Optional[torch.device] = None,
-    offload_to_cpu: bool = False,
-    filter_fn=None,
-) -> int:
-    """Replace nn.Linear layers with xFuserFP8BlockScaleLinear (AITER gemm_a8w8_blockscale).
-
-    Weights are pre-quantized to FP8 block-128 at call time. Returns the number
-    of leaves replaced (0 when they are already FP8, e.g. after a streamed load).
-    """
-
-    from xfuser.model_executor.layers.fp8_linear import xFuserFP8BlockScaleLinear
-
-    return replace_linears(
-        model,
-        packed_layer_factory(xFuserFP8BlockScaleLinear, device),
-        filter_fn=filter_fn,
-        offload_to_cpu=offload_to_cpu,
-        parent_name=parent_name,
-    )
-
-
 def paired_layer_factory(low_factory, companion=None):
     """Pair any two layer factories into one per-step wrapper.
 
@@ -705,23 +656,6 @@ def mxfp4_layer_factory(device, companion=None):
         return low
 
     return paired_layer_factory(make_layer, companion)
-
-
-def quantize_linear_layers_to_fp4(
-    model,
-    parent_name: str = "",
-    device: Optional[torch.device] = None,
-    filter_fn: Optional[Callable[[torch.nn.Module, str], bool]] = None,
-    companion=None,
-) -> int:
-    """Replace selected ``nn.Linear`` leaves with AITER MXFP4 linears."""
-
-    return replace_linears(
-        model,
-        mxfp4_layer_factory(device, companion=companion),
-        filter_fn=filter_fn,
-        parent_name=parent_name,
-    )
 
 
 def _tokenizer_directory(

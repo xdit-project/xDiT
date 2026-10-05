@@ -1,4 +1,5 @@
 import os
+import asyncio
 import time
 import torch
 import ray
@@ -158,7 +159,7 @@ class Engine:
         ]
 
     async def generate(self, request: GenerateRequest):
-        results = ray.get([worker.generate.remote(request) for worker in self.workers])
+        results = await asyncio.gather(*[worker.generate.remote(request) for worker in self.workers])
 
         return next(path for path in results if path is not None)
 

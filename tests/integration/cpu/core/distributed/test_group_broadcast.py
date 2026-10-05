@@ -97,7 +97,9 @@ def test_subgroup_broadcasts_from_every_group_local_src(tmp_path, run_spawned, p
         partial(_broadcast_worker, parallel_mode=parallel_mode),
         f"file://{tmp_path / f'{parallel_mode}-broadcast-gloo-init'}",
         world_size=_WORLD_SIZE,
-        timeout=60,
+        # The shared deadline includes interpreter startup and imports for all
+        # four ranks; allow slow CI hosts while still bounding hangs.
+        timeout=600,
     )
 
     assert not survivors, f"workers survived SIGKILL: {survivors}"

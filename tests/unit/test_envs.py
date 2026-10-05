@@ -1,9 +1,27 @@
 import sys
 import types
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 from xfuser import envs
 from xfuser.compat import declared_floor
+
+try:
+    import tomllib
+except ImportError:  # Python 3.10, where pytest depends on tomli instead
+    import tomli as tomllib
+
+PYPROJECT = Path(__file__).resolve().parents[2] / "pyproject.toml"
+
+
+def _metadata_of_this_tree():
+    """The requirements installing this source tree would give xfuser's metadata."""
+    project = tomllib.loads(PYPROJECT.read_text())["project"]
+    requirements = list(project["dependencies"])
+    for extra, entries in project["optional-dependencies"].items():
+        requirements += [f'{entry}; extra == "{extra}"' for entry in entries]
+    return requirements
+
 
 # get_device checks torch.version.cuda and torch.version.hip. Patch those checks directly so each
 # test is independent of the PyTorch build used to run it.
@@ -47,14 +65,17 @@ class TestFlashAttnFloor(unittest.TestCase):
     ``window_size_left``/``window_size_right``, so ring attention raises a TypeError (#547)."""
 
     def _flash_attn_usable(self, version):
-        if declared_floor("flash-attn") is None:
-            self.skipTest("xfuser is not installed, so it declares no flash-attn floor")
         flash_attn = types.ModuleType("flash_attn")
         flash_attn.__version__ = version
         flash_attn.flash_attn_func = lambda *args, **kwargs: None
         checker = object.__new__(envs.PackagesEnvChecker)
+        # declared_floor caches what it read; read it again under the patch and after.
+        declared_floor.cache_clear()
+        self.addCleanup(declared_floor.cache_clear)
         with (
             patch.dict(sys.modules, {"flash_attn": flash_attn}),
+            # Read the floor this tree declares, whether or not xfuser is installed.
+            patch("importlib.metadata.requires", return_value=_metadata_of_this_tree()),
             patch("xfuser.envs._is_npu", return_value=False),
             patch("xfuser.envs._is_musa", return_value=False),
             patch("torch.cuda.is_available", return_value=True),

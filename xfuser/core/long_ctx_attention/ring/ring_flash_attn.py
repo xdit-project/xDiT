@@ -309,16 +309,28 @@ class xFuserRingFlashAttnFunc(RingFlashAttnFunc):
         #              attn_type, attn_processor, attn_layer, joint_tensor_key,
         #              joint_tensor_value, joint_strategy, q_descale, k_descale,
         #              v_descale)
-        # fmt: off
         return (
-            dq, dk, dv,        # Gradients for q, k, v
-            None, None, None, None,  # dropout_p, softmax_scale, causal, window_size
-            None, None, None, None,  # alibi_slopes, deterministic, return_softmax, group
-            None, None,              # attn_type, attn_processor
-            None, None, None, None, # attn_layer, joint_tensor_key, joint_tensor_value, joint_strategy
-            None, None, None,       # q_descale, k_descale, v_descale
+            dq,
+            dk,
+            dv,  # Gradients for q, k, v
+            None,
+            None,
+            None,
+            None,  # dropout_p, softmax_scale, causal, window_size
+            None,
+            None,
+            None,
+            None,  # alibi_slopes, deterministic, return_softmax, group
+            None,
+            None,  # attn_type, attn_processor
+            None,
+            None,
+            None,
+            None,  # attn_layer, joint_tensor_key, joint_tensor_value, joint_strategy
+            None,
+            None,
+            None,  # q_descale, k_descale, v_descale
         )
-        # fmt: on
 
 
 def xdit_ring_flash_attn_func(

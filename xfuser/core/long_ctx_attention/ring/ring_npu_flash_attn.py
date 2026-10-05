@@ -202,15 +202,23 @@ class xFuserRingNpuFlashAttnFunc(RingNpuFlashAttnFunc):
         #              return_softmax, group,
         #              attn_type, attn_processor, attn_layer,
         #              joint_tensor_key, joint_tensor_value, joint_strategy)
-        # fmt: off
         return (
-            dq, dk, dv,  # Gradients for q, k, v
-            None, None, None, None,  # head_num, layout, softmax_scale, causal
-            None, None,              # return_softmax, group
-            None, None, None,        # attn_type, attn_processor, attn_layer
-            None, None, None,        # joint_tensor_key, joint_tensor_value, joint_strategy
+            dq,
+            dk,
+            dv,  # Gradients for q, k, v
+            None,
+            None,
+            None,
+            None,  # head_num, layout, softmax_scale, causal
+            None,
+            None,  # return_softmax, group
+            None,
+            None,
+            None,  # attn_type, attn_processor, attn_layer
+            None,
+            None,
+            None,  # joint_tensor_key, joint_tensor_value, joint_strategy
         )
-        # fmt: on
 
 
 def xdit_ring_npu_flash_attn_func(

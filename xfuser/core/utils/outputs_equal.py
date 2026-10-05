@@ -86,7 +86,8 @@ def _ndarrays_equal(a: np.ndarray, b: np.ndarray, path: str) -> bool:
         return True
     if np.issubdtype(a.dtype, np.complexfloating):
         return _ndarrays_equal(a.real, b.real, path) and _ndarrays_equal(a.imag, b.imag, path)
-    return bool(np.array_equal(a, b, equal_nan=np.issubdtype(a.dtype, np.floating)))
+    equal_nan = np.issubdtype(a.dtype, np.number) or np.issubdtype(a.dtype, np.datetime64)
+    return bool(np.array_equal(a, b, equal_nan=equal_nan))
 
 
 def _pil_palette_data(image: Image):

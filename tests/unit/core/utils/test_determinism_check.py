@@ -168,6 +168,13 @@ def _record_determinism_checks(model):
 # --- NumPy -----------------------------------------------------------------
 
 
+@pytest.mark.parametrize("dtype", ["datetime64[D]", "timedelta64[D]"])
+def test_numpy_temporal_nat_comparison_is_preserved(dtype):
+    expected = np.array(["NaT"], dtype=dtype)
+    assert _eq(expected, expected.copy())
+    assert not _eq(expected, np.array([0], dtype=dtype))
+
+
 @pytest.mark.parametrize("dtype", ["U3", "S3"])
 def test_output_string_array_metadata_compares_without_nan_operations(dtype):
     expected = DiffusionOutput(pipe_args=[])

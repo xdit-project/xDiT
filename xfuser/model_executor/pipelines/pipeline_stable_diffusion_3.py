@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
-from typing import Any, Dict, List, Tuple, Callable, Optional, Union
+from typing import Any, Dict, List, Callable, Optional, Union
 
 import torch
 import torch.distributed
@@ -53,7 +53,6 @@ else:
 
 @xFuserPipelineWrapperRegister.register(StableDiffusion3Pipeline)
 class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
-
     @classmethod
     def from_pretrained(
         cls,
@@ -62,16 +61,12 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
         return_org_pipeline: bool = False,
         **kwargs,
     ):
-        pipeline = StableDiffusion3Pipeline.from_pretrained(
-            pretrained_model_name_or_path, **kwargs
-        )
+        pipeline = StableDiffusion3Pipeline.from_pretrained(pretrained_model_name_or_path, **kwargs)
         if return_org_pipeline:
             return pipeline
         return cls(pipeline, engine_config)
 
-    def prepare_run(
-        self, input_config: InputConfig, steps: int = 3, sync_steps: int = 1
-    ):
+    def prepare_run(self, input_config: InputConfig, steps: int = 3, sync_steps: int = 1):
         prompt = [""] * input_config.batch_size if input_config.batch_size > 1 else ""
         warmup_steps = get_runtime_state().runtime_config.warmup_steps
         get_runtime_state().runtime_config.warmup_steps = sync_steps
@@ -323,12 +318,8 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
         #! ---------------------------------------- MODIFIED ABOVE ----------------------------------------
 
         # 4. Prepare timesteps
-        timesteps, num_inference_steps = retrieve_timesteps(
-            self.scheduler, num_inference_steps, device, timesteps
-        )
-        num_warmup_steps = max(
-            len(timesteps) - num_inference_steps * self.scheduler.order, 0
-        )
+        timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
+        num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         self._num_timesteps = len(timesteps)
 
         # 5. Prepare latent variables
@@ -347,10 +338,7 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
         # 6. Denoising loop
         num_pipeline_warmup_steps = get_runtime_state().runtime_config.warmup_steps
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            if (
-                get_pipeline_parallel_world_size() > 1
-                and len(timesteps) > num_pipeline_warmup_steps
-            ):
+            if get_pipeline_parallel_world_size() > 1 and len(timesteps) > num_pipeline_warmup_steps:
                 # * warmup stage
                 latents = self._sync_pipeline(
                     latents=latents,
@@ -389,22 +377,21 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
         # * 8. Decode latents (only the last rank in a dp group)
 
         def vae_decode(latents):
-            latents = (
-                latents / self.vae.config.scaling_factor
-            ) + self.vae.config.shift_factor
+            latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
             image = self.vae.decode(latents, return_dict=False)[0]
             return image
 
         image = None
         if not output_type == "latent":
-            if get_runtime_state().runtime_config.use_parallel_vae and get_runtime_state().parallel_config.vae_parallel_size > 0: 
+            if (
+                get_runtime_state().runtime_config.use_parallel_vae
+                and get_runtime_state().parallel_config.vae_parallel_size > 0
+            ):
                 # VAE is loaded in another worker
                 latents = self.gather_latents_for_vae(latents)
                 if latents is not None:
-                    latents = (
-                        latents / self.vae.config.scaling_factor
-                    ) + self.vae.config.shift_factor
-                self.send_to_vae_decode(latents) 
+                    latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
+                self.send_to_vae_decode(latents)
             else:
                 if get_runtime_state().runtime_config.use_parallel_vae:
                     latents = self.gather_broadcast_latents(latents)
@@ -507,17 +494,11 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
             else:
                 latents = get_pp_group().pipeline_recv()
                 if not is_pipeline_first_stage():
-                    encoder_hidden_states = get_pp_group().pipeline_recv(
-                        0, "encoder_hidden_states"
-                    )
+                    encoder_hidden_states = get_pp_group().pipeline_recv(0, "encoder_hidden_states")
 
             latents, encoder_hidden_states = self._backbone_forward(
                 latents=latents,
-                encoder_hidden_states=(
-                    prompt_embeds
-                    if is_pipeline_first_stage()
-                    else encoder_hidden_states
-                ),
+                encoder_hidden_states=(prompt_embeds if is_pipeline_first_stage() else encoder_hidden_states),
                 pooled_prompt_embeds=pooled_prompt_embeds,
                 t=t,
             )
@@ -539,9 +520,7 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
 
                     latents = callback_outputs.pop("latents", latents)
                     prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
-            if i == len(timesteps) - 1 or (
-                (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
-            ):
+            if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                 progress_bar.update()
 
             if XLA_AVAILABLE:
@@ -552,15 +531,9 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
             elif get_pipeline_parallel_world_size() > 1:
                 get_pp_group().pipeline_send(latents)
                 if not is_pipeline_last_stage():
-                    get_pp_group().pipeline_send(
-                        encoder_hidden_states, name="encoder_hidden_states"
-                    )
+                    get_pp_group().pipeline_send(encoder_hidden_states, name="encoder_hidden_states")
 
-        if (
-            sync_only
-            and get_sequence_parallel_world_size() > 1
-            and is_pipeline_last_stage()
-        ):
+        if sync_only and get_sequence_parallel_world_size() > 1 and is_pipeline_last_stage():
             sp_degree = get_sequence_parallel_world_size()
             sp_latents_list = get_sp_group().all_gather(latents, separate_tensors=True)
             latents_list = []
@@ -569,9 +542,9 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
                     sp_latents_list[sp_patch_idx][
                         :,
                         :,
-                        get_runtime_state()
-                        .pp_patches_start_idx_local[pp_patch_idx] : get_runtime_state()
-                        .pp_patches_start_idx_local[pp_patch_idx + 1],
+                        get_runtime_state().pp_patches_start_idx_local[
+                            pp_patch_idx
+                        ] : get_runtime_state().pp_patches_start_idx_local[pp_patch_idx + 1],
                         :,
                     ]
                     for sp_patch_idx in range(sp_degree)
@@ -591,26 +564,14 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
         if is_pipeline_first_stage():
             # get latents computed in warmup stage
             # ignore latents after the last timestep
-            latents = (
-                get_pp_group().pipeline_recv()
-                if num_pipeline_warmup_steps > 0
-                else latents
-            )
-            patch_latents = list(
-                latents.split(get_runtime_state().pp_patches_height, dim=2)
-            )
+            latents = get_pp_group().pipeline_recv() if num_pipeline_warmup_steps > 0 else latents
+            patch_latents = list(latents.split(get_runtime_state().pp_patches_height, dim=2))
         elif is_pipeline_last_stage():
-            patch_latents = list(
-                latents.split(get_runtime_state().pp_patches_height, dim=2)
-            )
+            patch_latents = list(latents.split(get_runtime_state().pp_patches_height, dim=2))
         else:
-            patch_latents = [
-                None for _ in range(get_runtime_state().num_pipeline_patch)
-            ]
+            patch_latents = [None for _ in range(get_runtime_state().num_pipeline_patch)]
 
-        recv_timesteps = (
-            num_timesteps - 1 if is_pipeline_first_stage() else num_timesteps
-        )
+        recv_timesteps = num_timesteps - 1 if is_pipeline_first_stage() else num_timesteps
 
         if is_pipeline_first_stage():
             for _ in range(recv_timesteps):
@@ -645,11 +606,7 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
             latents=latents,
             num_pipeline_warmup_steps=num_pipeline_warmup_steps,
         )
-        last_patch_latents = (
-            [None for _ in range(num_pipeline_patch)]
-            if (is_pipeline_last_stage())
-            else None
-        )
+        last_patch_latents = [None for _ in range(num_pipeline_patch)] if (is_pipeline_last_stage()) else None
 
         first_async_recv = True
         for i, t in enumerate(timesteps):
@@ -669,26 +626,16 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
                         first_async_recv = False
 
                     if not is_pipeline_first_stage() and patch_idx == 0:
-                        last_encoder_hidden_states = (
-                            get_pp_group().get_pipeline_recv_data(
-                                idx=patch_idx, name="encoder_hidden_states"
-                            )
+                        last_encoder_hidden_states = get_pp_group().get_pipeline_recv_data(
+                            idx=patch_idx, name="encoder_hidden_states"
                         )
-                    patch_latents[patch_idx] = get_pp_group().get_pipeline_recv_data(
-                        idx=patch_idx
-                    )
+                    patch_latents[patch_idx] = get_pp_group().get_pipeline_recv_data(idx=patch_idx)
 
-                patch_latents[patch_idx], next_encoder_hidden_states = (
-                    self._backbone_forward(
-                        latents=patch_latents[patch_idx],
-                        encoder_hidden_states=(
-                            prompt_embeds
-                            if is_pipeline_first_stage()
-                            else last_encoder_hidden_states
-                        ),
-                        pooled_prompt_embeds=pooled_prompt_embeds,
-                        t=t,
-                    )
+                patch_latents[patch_idx], next_encoder_hidden_states = self._backbone_forward(
+                    latents=patch_latents[patch_idx],
+                    encoder_hidden_states=(prompt_embeds if is_pipeline_first_stage() else last_encoder_hidden_states),
+                    pooled_prompt_embeds=pooled_prompt_embeds,
+                    t=t,
                 )
                 if is_pipeline_last_stage():
                     latents_dtype = patch_latents[patch_idx].dtype
@@ -707,27 +654,17 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
                         callback_kwargs = {}
                         for k in callback_on_step_end_tensor_inputs:
                             callback_kwargs[k] = locals()[k]
-                        callback_outputs = callback_on_step_end(
-                            self, i, t, callback_kwargs
-                        )
+                        callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
 
                         latents = callback_outputs.pop("latents", latents)
-                        prompt_embeds = callback_outputs.pop(
-                            "prompt_embeds", prompt_embeds
-                        )
+                        prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
 
                     if i != len(timesteps) - 1:
-                        get_pp_group().pipeline_isend(
-                            patch_latents[patch_idx], segment_idx=patch_idx
-                        )
+                        get_pp_group().pipeline_isend(patch_latents[patch_idx], segment_idx=patch_idx)
                 else:
                     if patch_idx == 0:
-                        get_pp_group().pipeline_isend(
-                            next_encoder_hidden_states, name="encoder_hidden_states"
-                        )
-                    get_pp_group().pipeline_isend(
-                        patch_latents[patch_idx], segment_idx=patch_idx
-                    )
+                        get_pp_group().pipeline_isend(next_encoder_hidden_states, name="encoder_hidden_states")
+                    get_pp_group().pipeline_isend(patch_latents[patch_idx], segment_idx=patch_idx)
 
                 if is_pipeline_first_stage() and i == 0:
                     pass
@@ -759,19 +696,15 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
             latents = torch.cat(patch_latents, dim=2)
             if get_sequence_parallel_world_size() > 1:
                 sp_degree = get_sequence_parallel_world_size()
-                sp_latents_list = get_sp_group().all_gather(
-                    latents, separate_tensors=True
-                )
+                sp_latents_list = get_sp_group().all_gather(latents, separate_tensors=True)
                 latents_list = []
                 for pp_patch_idx in range(get_runtime_state().num_pipeline_patch):
                     latents_list += [
                         sp_latents_list[sp_patch_idx][
                             ...,
-                            get_runtime_state()
-                            .pp_patches_start_idx_local[
+                            get_runtime_state().pp_patches_start_idx_local[
                                 pp_patch_idx
-                            ] : get_runtime_state()
-                            .pp_patches_start_idx_local[pp_patch_idx + 1],
+                            ] : get_runtime_state().pp_patches_start_idx_local[pp_patch_idx + 1],
                             :,
                         ]
                         for sp_patch_idx in range(sp_degree)
@@ -787,9 +720,7 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
         t: Union[float, torch.Tensor],
     ):
         if is_pipeline_first_stage():
-            latents = torch.cat(
-                [latents] * (2 // get_classifier_free_guidance_world_size())
-            )
+            latents = torch.cat([latents] * (2 // get_classifier_free_guidance_world_size()))
 
         # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
         timestep = t.expand(latents.shape[0])
@@ -812,12 +743,8 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
             if get_classifier_free_guidance_world_size() == 1:
                 noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
             elif get_classifier_free_guidance_world_size() == 2:
-                noise_pred_uncond, noise_pred_text = get_cfg_group().all_gather(
-                    noise_pred, separate_tensors=True
-                )
-            latents = noise_pred_uncond + self.guidance_scale * (
-                noise_pred_text - noise_pred_uncond
-            )
+                noise_pred_uncond, noise_pred_text = get_cfg_group().all_gather(noise_pred, separate_tensors=True)
+            latents = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
         else:
             latents = noise_pred
 

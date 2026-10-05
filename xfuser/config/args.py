@@ -1209,6 +1209,13 @@ class xFuserArgs:
             "--spargeattn_reorder_sequence is set. Use --no-use_spargeattn_static_block_mask to disable.",
         )
         parser.add_argument(
+            "--use_spargeattn_head_balance",
+            action="store_true",
+            help="Balance per-rank attention work across Ulysses ranks by "
+            "permuting heads (block-sparse load balancing). Only has an "
+            "effect with ulysses_degree>1 and a Sparge attention backend.",
+        )
+        parser.add_argument(
             "--sol_attn_tau",
             type=float,
             default=0.2,
@@ -1239,13 +1246,6 @@ class xFuserArgs:
             type=int,
             default=None,
             help="First token of the exact KV sink. Omit to place the sink on the token suffix.",
-        )
-        parser.add_argument(
-            "--use_spargeattn_head_balance",
-            action="store_true",
-            help="Balance per-rank attention work across Ulysses ranks by "
-            "permuting heads (block-sparse load balancing). Only has an "
-            "effect with ulysses_degree>1 and a Sparge attention backend.",
         )
         parser.add_argument(
             "--vsa_block_size",

@@ -18,6 +18,8 @@ from xfuser import (
     xFuserHunyuanDiTPipeline,
     xFuserArgs,
 )
+
+
 # Define request model
 class GenerateRequest(BaseModel):
     prompt: str
@@ -37,11 +39,13 @@ class GenerateRequest(BaseModel):
                 "seed": 42,
                 "cfg": 7.5,
                 "height": 1024,
-                "width": 1024
+                "width": 1024,
             }
         }
 
+
 app = FastAPI()
+
 
 @ray.remote(num_gpus=1)
 class ImageGenerator:
@@ -51,7 +55,7 @@ class ImageGenerator:
         os.environ["WORLD_SIZE"] = str(world_size)
         os.environ["MASTER_ADDR"] = "127.0.0.1"
         os.environ["MASTER_PORT"] = "29500"
-        
+
         self.rank = rank
         self.setup_logger()
         self.initialize_model(xfuser_args)
@@ -62,16 +66,15 @@ class ImageGenerator:
         if not self.logger.handlers:
             console_handler = logging.StreamHandler()
             console_handler.setLevel(logging.INFO)
-            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
             console_handler.setFormatter(formatter)
             self.logger.addHandler(console_handler)
             self.logger.setLevel(logging.INFO)
 
-    def initialize_model(self, xfuser_args : xFuserArgs):
-
+    def initialize_model(self, xfuser_args: xFuserArgs):
         # init distributed environment in create_config
         self.engine_config, self.input_config = xfuser_args.create_config()
-        
+
         model_name = self.engine_config.model_config.model.split("/")[-1]
         pipeline_map = {
             "PixArt-XL-2-1024-MS": xFuserPixArtAlphaPipeline,
@@ -81,7 +84,7 @@ class ImageGenerator:
             "FLUX.1-schnell": xFuserFluxPipeline,
             "FLUX.1-dev": xFuserFluxPipeline,
         }
-        
+
         PipelineClass = pipeline_map.get(model_name)
         if PipelineClass is None:
             raise NotImplementedError(f"{model_name} is currently not supported!")
@@ -93,7 +96,7 @@ class ImageGenerator:
             engine_config=self.engine_config,
             torch_dtype=torch.float16,
         ).to("cuda")
-        
+
         self.pipe.prepare_run(self.input_config)
         self.logger.info("Model initialization completed")
 
@@ -108,7 +111,7 @@ class ImageGenerator:
                 output_type="pil",
                 generator=torch.Generator(device="cuda").manual_seed(request.seed),
                 guidance_scale=request.cfg,
-                max_sequence_length=self.input_config.max_sequence_length
+                max_sequence_length=self.input_config.max_sequence_length,
             )
             elapsed_time = time.time() - start_time
 
@@ -123,7 +126,7 @@ class ImageGenerator:
                         "message": "Image generated successfully",
                         "elapsed_time": f"{elapsed_time:.2f} sec",
                         "output": file_path,
-                        "save_to_disk": True
+                        "save_to_disk": True,
                     }
                 else:
                     # Convert to base64
@@ -134,7 +137,7 @@ class ImageGenerator:
                         "message": "Image generated successfully",
                         "elapsed_time": f"{elapsed_time:.2f} sec",
                         "output": img_str,
-                        "save_to_disk": False
+                        "save_to_disk": False,
                     }
             return None
 
@@ -142,25 +145,23 @@ class ImageGenerator:
             self.logger.error(f"Error generating image: {str(e)}")
             raise HTTPException(status_code=500, detail=str(e))
 
+
 class Engine:
     def __init__(self, world_size: int, xfuser_args: xFuserArgs):
         # Ensure Ray is initialized
         if not ray.is_initialized():
             ray.init()
-        
+
         num_workers = world_size
         self.workers = [
-            ImageGenerator.remote(xfuser_args, rank=rank, world_size=world_size)
-            for rank in range(num_workers)
+            ImageGenerator.remote(xfuser_args, rank=rank, world_size=world_size) for rank in range(num_workers)
         ]
-        
-    async def generate(self, request: GenerateRequest):
-        results = ray.get([
-            worker.generate.remote(request)
-            for worker in self.workers
-        ])
 
-        return next(path for path in results if path is not None) 
+    async def generate(self, request: GenerateRequest):
+        results = ray.get([worker.generate.remote(request) for worker in self.workers])
+
+        return next(path for path in results if path is not None)
+
 
 @app.post("/generate")
 async def generate_image(request: GenerateRequest):
@@ -172,7 +173,7 @@ async def generate_image(request: GenerateRequest):
             raise HTTPException(status_code=400, detail="Height and width must be positive")
         if request.num_inference_steps <= 0:
             raise HTTPException(status_code=400, detail="num_inference_steps must be positive")
-            
+
         result = await engine.generate(request)
         return result
     except Exception as e:
@@ -182,14 +183,16 @@ async def generate_image(request: GenerateRequest):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='xDiT HTTP Service')
-    parser.add_argument('--model_path', type=str, help='Path to the model', required=True)
-    parser.add_argument('--world_size', type=int, default=1, help='Number of parallel workers')
-    parser.add_argument('--pipefusion_parallel_degree', type=int, default=1, help='Degree of pipeline fusion parallelism')
-    parser.add_argument('--ulysses_parallel_degree', type=int, default=1, help='Degree of Ulysses parallelism')
-    parser.add_argument('--ring_degree', type=int, default=1, help='Degree of ring parallelism')
-    parser.add_argument('--save_disk_path', type=str, default='output', help='Path to save generated images')
-    parser.add_argument('--use_cfg_parallel', action='store_true', help='Whether to use CFG parallel')
+    parser = argparse.ArgumentParser(description="xDiT HTTP Service")
+    parser.add_argument("--model_path", type=str, help="Path to the model", required=True)
+    parser.add_argument("--world_size", type=int, default=1, help="Number of parallel workers")
+    parser.add_argument(
+        "--pipefusion_parallel_degree", type=int, default=1, help="Degree of pipeline fusion parallelism"
+    )
+    parser.add_argument("--ulysses_parallel_degree", type=int, default=1, help="Degree of Ulysses parallelism")
+    parser.add_argument("--ring_degree", type=int, default=1, help="Degree of ring parallelism")
+    parser.add_argument("--save_disk_path", type=str, default="output", help="Path to save generated images")
+    parser.add_argument("--use_cfg_parallel", action="store_true", help="Whether to use CFG parallel")
     args = parser.parse_args()
 
     xfuser_args = xFuserArgs(
@@ -203,12 +206,10 @@ if __name__ == "__main__":
         use_cfg_parallel=args.use_cfg_parallel,
         dit_parallel_size=0,
     )
-    
-    engine = Engine(
-        world_size=args.world_size,
-        xfuser_args=xfuser_args
-    )
-    
+
+    engine = Engine(world_size=args.world_size, xfuser_args=xfuser_args)
+
     # Start the server
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=6000)

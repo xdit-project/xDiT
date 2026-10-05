@@ -111,9 +111,7 @@ class xFuserKrea2Transformer2DWrapper(Krea2Transformer2DModel):
         if encoder_attention_mask is not None:
             text_attn_mask = encoder_attention_mask[:, None, None, :]
 
-        text_projected = self.txt_in(
-            self.text_fusion(encoder_hidden_states, text_attn_mask)
-        )
+        text_projected = self.txt_in(self.text_fusion(encoder_hidden_states, text_attn_mask))
         image_projected = self.img_in(hidden_states)
 
         full_seq = torch.cat([text_projected, image_projected], dim=1)
@@ -143,12 +141,8 @@ class xFuserKrea2Transformer2DWrapper(Krea2Transformer2DModel):
                 block_attn_mask = make_attn_mask_with_meta(combined)
                 self._attn_mask_cache = (ptr, shape, block_attn_mask)
 
-        local_seq = chunk_and_pad_sequence(
-            full_seq, sp_rank, sp_world_size, pad_len, dim=1
-        )
-        pos_ids_local = chunk_and_pad_sequence(
-            position_ids, sp_rank, sp_world_size, pad_len, dim=0
-        )
+        local_seq = chunk_and_pad_sequence(full_seq, sp_rank, sp_world_size, pad_len, dim=1)
+        pos_ids_local = chunk_and_pad_sequence(position_ids, sp_rank, sp_world_size, pad_len, dim=0)
 
         image_rotary_emb = self.rotary_emb(pos_ids_local)
 

@@ -22,9 +22,7 @@ class xFuserQwenImageEditPipeline(QwenImageEditPipeline):
         parent_call = super().__call__
         call_signature = inspect.signature(parent_call)
         call_args = call_signature.bind_partial(*args, **kwargs)
-        true_cfg_scale = call_args.arguments.get(
-            "true_cfg_scale", call_signature.parameters["true_cfg_scale"].default
-        )
+        true_cfg_scale = call_args.arguments.get("true_cfg_scale", call_signature.parameters["true_cfg_scale"].default)
         has_negative_prompt = (
             call_args.arguments.get("negative_prompt") is not None
             or call_args.arguments.get("negative_prompt_embeds") is not None
@@ -34,12 +32,8 @@ class xFuserQwenImageEditPipeline(QwenImageEditPipeline):
 
         if get_classifier_free_guidance_rank() == 0:
             call_args.arguments["prompt"] = call_args.arguments.get("negative_prompt")
-            call_args.arguments["prompt_embeds"] = call_args.arguments.get(
-                "negative_prompt_embeds"
-            )
-            call_args.arguments["prompt_embeds_mask"] = call_args.arguments.get(
-                "negative_prompt_embeds_mask"
-            )
+            call_args.arguments["prompt_embeds"] = call_args.arguments.get("negative_prompt_embeds")
+            call_args.arguments["prompt_embeds_mask"] = call_args.arguments.get("negative_prompt_embeds_mask")
 
         # The parent pipeline now executes one local branch. The hook below
         # combines both predictions before its scheduler step.
@@ -50,12 +44,8 @@ class xFuserQwenImageEditPipeline(QwenImageEditPipeline):
 
         def combine_cfg_predictions(_module, _inputs, output):
             prediction = output[0]
-            prediction_uncond, prediction_cond = get_cfg_group().all_gather(
-                prediction, separate_tensors=True
-            )
-            prediction_cfg = prediction_uncond + true_cfg_scale * (
-                prediction_cond - prediction_uncond
-            )
+            prediction_uncond, prediction_cond = get_cfg_group().all_gather(prediction, separate_tensors=True)
+            prediction_cfg = prediction_uncond + true_cfg_scale * (prediction_cond - prediction_uncond)
 
             # Preserve Qwen-Image-Edit's true-CFG normalization.
             cond_norm = torch.norm(prediction_cond, dim=-1, keepdim=True)

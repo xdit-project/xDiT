@@ -16,7 +16,6 @@ from xfuser.model_executor.models.runner_models.base_model import (
 )
 from xfuser.envs import PACKAGES_CHECKER
 from xfuser.core.utils.runner_utils import (
-    log,
     resize_and_crop_image,
 )
 from xfuser.core.distributed import get_runtime_state, get_pipeline_parallel_world_size
@@ -33,8 +32,8 @@ class xFuserFluxModel(xFuserModel):
     min_diffusers_version = "0.35.2"
 
     load_support = LoadSupport(
-        meta_transformers=('transformer',),
-        meta_text_encoders=('text_encoder_2',),
+        meta_transformers=("transformer",),
+        meta_text_encoders=("text_encoder_2",),
         replicated_meta=True,
         routes=STANDARD_LOAD_ROUTES,
     )
@@ -146,8 +145,8 @@ class xFuserFluxKontextModel(xFuserModel):
     min_diffusers_version = "0.35.2"
 
     load_support = LoadSupport(
-        meta_transformers=('transformer',),
-        meta_text_encoders=('text_encoder_2',),
+        meta_transformers=("transformer",),
+        meta_text_encoders=("text_encoder_2",),
         replicated_meta=True,
         routes=STANDARD_LOAD_ROUTES,
     )
@@ -197,7 +196,8 @@ class xFuserFluxKontextModel(xFuserModel):
                     blocks=(("transformer_blocks", "Pattern_1"), ("single_transformer_blocks", "Pattern_1")),
                 ),
                 preset=DBCachePreset(Fn_compute_blocks=2, residual_diff_threshold=0.12, scm_policy="ultra"),
-        )},
+            )
+        },
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -260,9 +260,7 @@ class xFuserFluxKontextModel(xFuserModel):
         super()._validate_args(input_args)
         images = input_args.get("input_images", [])
         if len(images) != 1:
-            raise ValueError(
-                "Exactly one input image is required for Flux.1-Kontext-dev model."
-            )
+            raise ValueError("Exactly one input image is required for Flux.1-Kontext-dev model.")
 
 
 @register_model("black-forest-labs/FLUX.2-dev")
@@ -274,8 +272,8 @@ class xFuserFlux2Model(xFuserModel):
     min_diffusers_version = "0.36.0"
 
     load_support = LoadSupport(
-        meta_transformers=('transformer',),
-        meta_text_encoders=('text_encoder',),
+        meta_transformers=("transformer",),
+        meta_text_encoders=("text_encoder",),
         replicated_meta=True,
         routes=STANDARD_LOAD_ROUTES,
     )
@@ -344,7 +342,7 @@ class xFuserFlux2Model(xFuserModel):
     def _get_compile_mode(self) -> str:
         # CUDA graphs incompatible with cross-step caching, and
         # cause pathological re-captures on RDNA4.
-        if (self.config.cache_method or PACKAGES_CHECKER._on_rdna4()):
+        if self.config.cache_method or PACKAGES_CHECKER._on_rdna4():
             return "default"
         return "reduce-overhead"
 
@@ -420,8 +418,8 @@ class xFuserFlux2Klein9BModel(xFuserModel):
     min_diffusers_version = "0.37.0"
 
     load_support = LoadSupport(
-        meta_transformers=('transformer',),
-        meta_text_encoders=('text_encoder',),
+        meta_transformers=("transformer",),
+        meta_text_encoders=("text_encoder",),
         replicated_meta=True,
         routes=STANDARD_LOAD_ROUTES,
     )
@@ -472,7 +470,7 @@ class xFuserFlux2Klein9BModel(xFuserModel):
     def _get_compile_mode(self) -> str:
         # CUDA graphs incompatible with cross-step caching, and
         # cause pathological re-captures on RDNA4.
-        if (self.config.cache_method or PACKAGES_CHECKER._on_rdna4()):
+        if self.config.cache_method or PACKAGES_CHECKER._on_rdna4():
             return "default"
         return "reduce-overhead"
 
@@ -544,8 +542,8 @@ class xFuserFlux2Klein9BModel(xFuserModel):
 @register_model("FLUX.2-klein-4B")
 class xFuserFlux2Klein4BModel(xFuserFlux2Klein9BModel):
     load_support = LoadSupport(
-        meta_transformers=('transformer',),
-        meta_text_encoders=('text_encoder',),
+        meta_transformers=("transformer",),
+        meta_text_encoders=("text_encoder",),
         replicated_meta=True,
         routes=STANDARD_LOAD_ROUTES,
     )

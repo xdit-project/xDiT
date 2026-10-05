@@ -3,10 +3,9 @@ import torch
 import copy
 import json
 import os
-from pathlib import Path
 from PIL.Image import Image
 from typing import Callable, List, Optional, Tuple, Generator
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from torch.profiler import profile, record_function, ProfilerActivity
 import diffusers
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
@@ -73,10 +72,12 @@ DIFFUSERS_FROM_SOURCE = "source"
 
 
 def register_model(name: str) -> Callable:
-    """ Decorator to register a model in the registry. """
+    """Decorator to register a model in the registry."""
+
     def decorator(cls):
         MODEL_REGISTRY[name] = cls
         return cls
+
     return decorator
 
 
@@ -84,9 +85,8 @@ def register_model(name: str) -> Callable:
 # its sparsity strategy, so adding one cannot miss these sets. SPARGE and VSA
 # are grouped because both need a separate, dense cross-attention backend.
 _SPARSE_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SSTA)
-_SPARGE_ATTENTION_BACKENDS = (
-    attention_registry.types_where(sparsity=Sparsity.SPARGE)
-    | attention_registry.types_where(sparsity=Sparsity.VSA)
+_SPARGE_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SPARGE) | attention_registry.types_where(
+    sparsity=Sparsity.VSA
 )
 
 
@@ -105,11 +105,11 @@ def _validate_cross_attention_for_sparge(config: xFuserArgs) -> None:
     via the hybrid schedule)."""
     if config.cross_attention_backend is None:
         raise ValueError(
-            "When Sparge Attention is used, --cross_attention_backend must be "
-            "set to a non-Sparge backend."
+            "When Sparge Attention is used, --cross_attention_backend must be set to a non-Sparge backend."
         )
     cross = _parse_attention_backend(
-        config.cross_attention_backend, "cross attention backend",
+        config.cross_attention_backend,
+        "cross attention backend",
     )
     if cross in _SPARGE_ATTENTION_BACKENDS:
         raise ValueError(
@@ -128,11 +128,7 @@ def _selected_attention_backends(config: xFuserArgs) -> list[AttentionBackendTyp
     else:
         specs = [(config.attention_backend, "attention backend")]
     specs.append((config.cross_attention_backend, "cross attention backend"))
-    return [
-        backend
-        for value, kind in specs
-        if (backend := _parse_attention_backend(value, kind)) is not None
-    ]
+    return [backend for value, kind in specs if (backend := _parse_attention_backend(value, kind)) is not None]
 
 
 def _validate_attention_head_dims(model: "xFuserModel", config: xFuserArgs) -> None:
@@ -158,8 +154,7 @@ def _validate_attention_head_dims(model: "xFuserModel", config: xFuserArgs) -> N
         # whole reason to refuse here: one wastes the selection, the other stops
         # the run at the first layer.
         outcome = (
-            f"every layer would fall through to {spec.fallback.name} and the "
-            "selection would have no effect"
+            f"every layer would fall through to {spec.fallback.name} and the selection would have no effect"
             if spec.fallback is not None
             else "every layer would be refused"
         )
@@ -173,7 +168,8 @@ def _validate_attention_head_dims(model: "xFuserModel", config: xFuserArgs) -> N
 
 @dataclass(frozen=True)
 class ModelCapabilities:
-    """ Class to define model capabilities """
+    """Class to define model capabilities"""
+
     # Parallelization
     ulysses_degree: bool = True  # All xDiT models support these
     ring_degree: bool = True
@@ -206,9 +202,11 @@ class ModelCapabilities:
     supports_distilled_weights: bool = False
     profile_capture_phase: bool = False
 
+
 @dataclass(frozen=True)
 class DefaultInputValues:
-    """ Class to define model specific default input values """
+    """Class to define model specific default input values"""
+
     height: Optional[int] = None
     width: Optional[int] = None
     num_frames: Optional[int] = None
@@ -222,9 +220,11 @@ class DefaultInputValues:
     num_hybrid_gemm_high_precision_steps: Optional[int] = None
     ssta_tile_thw: Optional[Tuple[int, int, int]] = None
 
+
 @dataclass
 class ModelSettings:
-    """ Class to define model options """
+    """Class to define model options"""
+
     model_name: Optional[str] = None
     output_name: Optional[str] = None
     model_output_type: Optional[str] = None
@@ -240,17 +240,21 @@ class ModelSettings:
     fbcache_thresh: float = 0.12
     step_cache_config: Optional[ModelCacheConfig] = None
     # FSDP strategy is just for the components to be sharded - other components will be moved to correct device automatically
-    fsdp_strategy: dict = field(default_factory=lambda: {
-        "": { # name, e.g. transformer
-            "shard_submodule_key": None, # submodule to shard, e.g encoder -> transformer.encoder will be sharded
-            "block_attr": None, # attribute name of blocks to shard, e.g. blocks
-            "dtype": None, # Target dtype to convert the model to before sharding
-            "children_to_device": [{ # Move other children to device
-                "submodule_key": None, # e.g "encoder" -> children of transformer.encoder
-                "exclude_keys": [] # exclude these children from being moved
-            }]
+    fsdp_strategy: dict = field(
+        default_factory=lambda: {
+            "": {  # name, e.g. transformer
+                "shard_submodule_key": None,  # submodule to shard, e.g encoder -> transformer.encoder will be sharded
+                "block_attr": None,  # attribute name of blocks to shard, e.g. blocks
+                "dtype": None,  # Target dtype to convert the model to before sharding
+                "children_to_device": [
+                    {  # Move other children to device
+                        "submodule_key": None,  # e.g "encoder" -> children of transformer.encoder
+                        "exclude_keys": [],  # exclude these children from being moved
+                    }
+                ],
+            }
         }
-    })
+    )
     valid_tasks: List[str] = field(default_factory=list)
     # Attention backend used when --attention_backend is omitted. Leave None to
     # keep the global default.
@@ -258,9 +262,16 @@ class ModelSettings:
     resolution_divisor: Optional[int] = None
     transformer_attr_names: List[str] = field(default_factory=lambda: ["transformer"])
 
+
 class DiffusionOutput:
-    """ Class to encapsulate diffusion model outputs """
-    def __init__(self, images: List[Image] = None, videos: List[np.ndarray]|np.ndarray = None, pipe_args: List[dict]|dict = []) -> None:
+    """Class to encapsulate diffusion model outputs"""
+
+    def __init__(
+        self,
+        images: List[Image] = None,
+        videos: List[np.ndarray] | np.ndarray = None,
+        pipe_args: List[dict] | dict = [],
+    ) -> None:
         self.images = images
         if isinstance(videos, np.ndarray) and videos.ndim == 5:
             videos = list(videos)
@@ -293,8 +304,8 @@ class DiffusionOutput:
         else:
             raise NotImplementedError(f"DiffusionOutput does not support output type: {output_type}")
 
-    def get_outputs(self) -> Generator[Tuple[Image|np.ndarray, dict], None, None]:
-        """ Returns a generator that yields output items along with their used input arguments """
+    def get_outputs(self) -> Generator[Tuple[Image | np.ndarray, dict], None, None]:
+        """Returns a generator that yields output items along with their used input arguments"""
         if self.images:
             for image, single_pipe_args in zip(self.images, self.pipe_args):
                 yield (image, single_pipe_args)
@@ -304,7 +315,7 @@ class DiffusionOutput:
 
 
 class xFuserModel(abc.ABC):
-    """ Base class for xFuser models """
+    """Base class for xFuser models"""
 
     # torch.compile modes that run the graph under CUDA Graphs, whose outputs live in a fixed
     # buffer pool and are therefore only valid until the next replay.
@@ -375,9 +386,11 @@ class xFuserModel(abc.ABC):
         if te_targets and config.use_fp8_gemms and not config.use_fp8_text_encoder:
             # Said out loud because text-encoder FP8 is opt-in: an encoder left bf16 is otherwise
             # indistinguishable from --use_fp8_gemms failing to take effect.
-            log(f"--use_fp8_gemms covers the transformer; {type(self).__name__}'s "
+            log(
+                f"--use_fp8_gemms covers the transformer; {type(self).__name__}'s "
                 f"{len(te_targets)} text-encoder target(s) stay bf16. Add --use_fp8_text_encoder "
-                f"to quantize them too, for less memory at some risk to text conditioning.")
+                f"to quantize them too, for less memory at some risk to text conditioning."
+            )
 
     def _load_model_checked(self) -> DiffusionPipeline:
         """Load the pipeline, reporting a missing diffusers symbol as a version problem.
@@ -403,12 +416,11 @@ class xFuserModel(abc.ABC):
             else:
                 remedy = "A newer diffusers is required."
             raise ImportError(
-                f"{self.settings.model_name} is unavailable with diffusers "
-                f"{diffusers.__version__}: {e}. {remedy}"
+                f"{self.settings.model_name} is unavailable with diffusers {diffusers.__version__}: {e}. {remedy}"
             ) from e
 
     def initialize(self, input_args: dict) -> None:
-        """ Load the model pipeline """
+        """Load the model pipeline"""
 
         if not torch.distributed.is_initialized():
             log("Initializing distributed environment...")
@@ -457,7 +469,7 @@ class xFuserModel(abc.ABC):
         return torch.device(f"cuda:{get_world_group().local_rank}")
 
     def _enable_options(self) -> None:
-        """ Enable model options based on config"""
+        """Enable model options based on config"""
         if getattr(self.config, "use_spargeattn_head_balance", False):
             log("Enabling Sparge block-sparse head balancing...")
 
@@ -470,6 +482,7 @@ class xFuserModel(abc.ABC):
             # model.language_model.layers) where block_level cannot reach, leaving the whole
             # component in one unmatched group and OOMing; they use leaf_level, which recurses.
             from diffusers.hooks import apply_group_offloading
+
             log("Enabling group CPU offload (transformer block-level, others leaf-level, streamed)...")
             onload_device = self._local_onload_device()
             block_level_names = set(self._get_compiled_pipe_components())
@@ -510,15 +523,13 @@ class xFuserModel(abc.ABC):
     def _apply_step_cache(self) -> None:
         from xfuser.core.distributed import get_tensor_model_parallel_world_size
         from xfuser.model_executor.cache.adapters import apply_cache
+
         cache_method = self.config.cache_method
         method_cfg = (self.settings.step_cache_config or {}).get(cache_method)
         # A configured FBCache entry uses cache-dit's DBCache engine with an
         # Fn=1 preset. None marks an in-tree FBCache adapter.
         engine_method = (
-            "dbcache"
-            if cache_method == "fbcache"
-            and isinstance(method_cfg, DBCacheSettings)
-            else cache_method
+            "dbcache" if cache_method == "fbcache" and isinstance(method_cfg, DBCacheSettings) else cache_method
         )
         pp_size = get_pipeline_parallel_world_size()
         if engine_method == "dbcache" and pp_size > 1:
@@ -536,8 +547,7 @@ class xFuserModel(abc.ABC):
             )
         if engine_method in ("teacache", "fbcache") and pp_size > 1:
             raise ValueError(
-                f"{engine_method} is incompatible with PipeFusion (PP={pp_size}). "
-                "Set --pipefusion_parallel_degree 1."
+                f"{engine_method} is incompatible with PipeFusion (PP={pp_size}). Set --pipefusion_parallel_degree 1."
             )
         if cache_method == "teacache" and get_tensor_model_parallel_world_size() > 1:
             raise RuntimeError("teacache requires TP=1")
@@ -550,14 +560,14 @@ class xFuserModel(abc.ABC):
             cache_config=self.config.cache_config,
             transformer_attr=self.settings.transformer_attr_names[0],
         )
-        log(f"Step cache applied: method={cache_method}"
-            + (f" (engine={engine_method})" if engine_method != cache_method else ""))
+        log(
+            f"Step cache applied: method={cache_method}"
+            + (f" (engine={engine_method})" if engine_method != cache_method else "")
+        )
 
     def _decoding_vaes(self) -> List:
         """Forward staged VAE discovery to the VAE manager."""
-        return self._vae_manager.decoding_vaes(
-            [self.pipe, getattr(self, "second_pipe", None)]
-        )
+        return self._vae_manager.decoding_vaes([self.pipe, getattr(self, "second_pipe", None)])
 
     def _apply_default_attention_backend(self, config: xFuserArgs) -> None:
         """Fill in the model's preferred attention backend when the CLI left it unset."""
@@ -579,21 +589,15 @@ class xFuserModel(abc.ABC):
             return
 
         if config.use_hybrid_attn_schedule and config.hybrid_attn_schedule:
-            candidates = list(
-                AttentionSchedule.from_comma_delimited_string(
-                    config.hybrid_attn_schedule
-                ).backends
-            )
+            candidates = list(AttentionSchedule.from_comma_delimited_string(config.hybrid_attn_schedule).backends)
         else:
             candidates = [
                 _parse_attention_backend(value, label)
                 for value, label in (
                     (config.attention_backend, "attention backend"),
                     (config.cross_attention_backend, "cross attention backend"),
-                    (config.hybrid_attn_low_precision_backend,
-                     "hybrid low-precision attention backend"),
-                    (config.hybrid_attn_high_precision_backend,
-                     "hybrid high-precision attention backend"),
+                    (config.hybrid_attn_low_precision_backend, "hybrid low-precision attention backend"),
+                    (config.hybrid_attn_high_precision_backend, "hybrid high-precision attention backend"),
                 )
             ]
 
@@ -601,22 +605,20 @@ class xFuserModel(abc.ABC):
             if backend is None or backend in allowed:
                 continue
             supported = ", ".join(sorted(b.name for b in allowed))
-            reason = (
-                f" {self.unsupported_attn_backend_reason}"
-                if self.unsupported_attn_backend_reason
-                else ""
-            )
+            reason = f" {self.unsupported_attn_backend_reason}" if self.unsupported_attn_backend_reason else ""
             raise ValueError(
                 f"{self.settings.model_name} does not support attention backend "
                 f"{backend.name}.{reason} Supported backends: {supported}."
             )
 
     def _validate_config(self, config: xFuserArgs) -> None:
-        """ Validate if the model supports requested config """
+        """Validate if the model supports requested config"""
         config._validate_gemm_quantization_flags()
         _validate_attention_head_dims(self, config)
         for key in ModelCapabilities.__annotations__.keys():
-            config_value = getattr(config, key, None)  # Some config options might not be set in the CLI, such as support for specific attention backends.
+            config_value = getattr(
+                config, key, None
+            )  # Some config options might not be set in the CLI, such as support for specific attention backends.
             if isinstance(config_value, int) and not isinstance(config_value, bool):
                 if not getattr(self.capabilities, key) and config_value > 1:
                     raise ValueError(f"Model {self.settings.model_name} does not support {key}.")
@@ -626,9 +628,7 @@ class xFuserModel(abc.ABC):
 
         if config.cache_method:
             if not self.capabilities.supports_step_caching:
-                raise ValueError(
-                    f"Model {self.settings.model_name} does not support step caching."
-                )
+                raise ValueError(f"Model {self.settings.model_name} does not support step caching.")
             supported_methods = self.settings.step_cache_config or {}
             if config.cache_method not in supported_methods:
                 raise ValueError(
@@ -660,14 +660,11 @@ class xFuserModel(abc.ABC):
                     config.hybrid_attn_high_precision_backend,
                     "hybrid high-precision attention backend",
                 )
-                if (low in _SPARGE_ATTENTION_BACKENDS
-                        or high in _SPARGE_ATTENTION_BACKENDS):
+                if low in _SPARGE_ATTENTION_BACKENDS or high in _SPARGE_ATTENTION_BACKENDS:
                     _validate_cross_attention_for_sparge(config)
         else:
             if backend in _SPARSE_ATTENTION_BACKENDS and not supports_sparse:
-                raise ValueError(
-                    f"Model {config.model} does not support sparse attention backends."
-                )
+                raise ValueError(f"Model {config.model} does not support sparse attention backends.")
             if supports_sparse and backend not in _SPARSE_ATTENTION_BACKENDS:
                 raise ValueError(
                     f"Model {config.model} supports sparse attention backends, but "
@@ -679,22 +676,28 @@ class xFuserModel(abc.ABC):
                 )
             if backend in _SPARGE_ATTENTION_BACKENDS:
                 if not supports_sparge:
-                    raise ValueError(
-                        f"Model {config.model} does not support Sparge attention backend."
-                    )
+                    raise ValueError(f"Model {config.model} does not support Sparge attention backend.")
                 if self.capabilities.cross_attention_backend:
                     _validate_cross_attention_for_sparge(config)
 
         possible_task = getattr(config, "task", None)
         if possible_task and self.settings.valid_tasks:
             if possible_task not in self.settings.valid_tasks:
-                raise ValueError(f"Model {self.settings.model_name} does not support task '{possible_task}'. Supported tasks: {self.settings.valid_tasks}")
+                raise ValueError(
+                    f"Model {self.settings.model_name} does not support task '{possible_task}'. Supported tasks: {self.settings.valid_tasks}"
+                )
         if possible_task and not self.settings.valid_tasks:
-            raise ValueError(f"Model {self.settings.model_name} does not support multiple tasks, but task '{possible_task}' was specified.")
+            raise ValueError(
+                f"Model {self.settings.model_name} does not support multiple tasks, but task '{possible_task}' was specified."
+            )
         if not possible_task and self.settings.valid_tasks:
-            raise ValueError(f"Model {self.settings.model_name} requires a task to be specified. Supported tasks: {self.settings.valid_tasks}")
+            raise ValueError(
+                f"Model {self.settings.model_name} requires a task to be specified. Supported tasks: {self.settings.valid_tasks}"
+            )
         if config.dataset_path and not config.batch_size:
-            raise ValueError("Dataset path specified without batch size. Please specify batch size for dataset inference.")
+            raise ValueError(
+                "Dataset path specified without batch size. Please specify batch size for dataset inference."
+            )
 
         validate_fp8_comms_config(config, self.capabilities, self.settings)
 
@@ -703,33 +706,17 @@ class xFuserModel(abc.ABC):
 
         if config.use_int8_gemms and _is_hip():
             raise ValueError("Int8 GEMMs on ROCm are not supported.")
-            
+
         if config.use_fp6_gemms and _is_cuda():
             raise ValueError(
-                "--use_fp6_gemms requires the AITER MXFP6 ASM backend on ROCm gfx950; "
-                "CUDA is not supported."
+                "--use_fp6_gemms requires the AITER MXFP6 ASM backend on ROCm gfx950; CUDA is not supported."
             )
-        if (
-            config.use_fp6_gemms
-            and _is_hip()
-            and not packages_info.get("has_aiter", False)
-        ):
-            raise ValueError(
-                "MXFP6 GEMMs on ROCm gfx950 require AITER with the A6W6 " "ASM backend."
-            )
+        if config.use_fp6_gemms and _is_hip() and not packages_info.get("has_aiter", False):
+            raise ValueError("MXFP6 GEMMs on ROCm gfx950 require AITER with the A6W6 ASM backend.")
         if config.use_a6w4_gemms and _is_cuda():
-            raise ValueError(
-                "A6W4 requires the AITER mixed-MXFP ASM backend on "
-                "ROCm gfx950; CUDA is not supported."
-            )
-        if (
-            config.use_a6w4_gemms
-            and _is_hip()
-            and not packages_info.get("has_aiter", False)
-        ):
-            raise ValueError(
-                "A6W4 on ROCm gfx950 requires AITER mixed-MXFP ASM."
-            )
+            raise ValueError("A6W4 requires the AITER mixed-MXFP ASM backend on ROCm gfx950; CUDA is not supported.")
+        if config.use_a6w4_gemms and _is_hip() and not packages_info.get("has_aiter", False):
+            raise ValueError("A6W4 on ROCm gfx950 requires AITER mixed-MXFP ASM.")
 
         if config.use_fp4_gemms:
             if _is_hip() and not packages_info.get("has_aiter", False):
@@ -742,10 +729,12 @@ class xFuserModel(abc.ABC):
                         f"Detected: {torch.cuda.get_device_capability()}"
                     )
         validate_vae_config(config, self.capabilities, self.settings)
-        
+
         if config.distilled_transformer_path or config.distilled_transformer_2_path:
             if not self.capabilities.supports_distilled_weights:
-                raise ValueError(f"Model {self.settings.model_name} does not support distilled_transformer_path or distilled_transformer_2_path params.")
+                raise ValueError(
+                    f"Model {self.settings.model_name} does not support distilled_transformer_path or distilled_transformer_2_path params."
+                )
 
     def _get_compile_mode(self) -> str:
         # Overrides should return "default" when PACKAGES_CHECKER._on_rdna4():
@@ -858,10 +847,10 @@ class xFuserModel(abc.ABC):
             return  # otherwise save_output() will throw or die
 
         orig_get_output_name = self.get_output_name
+
         def _get_output_name(*args, **kwargs):
             return (
-                orig_get_output_name(*args, **kwargs)
-                + f"_rank_{rank:02d}_iteration_{iteration:03d}"
+                orig_get_output_name(*args, **kwargs) + f"_rank_{rank:02d}_iteration_{iteration:03d}"
                 # WARNING: xfuser/core/utils/determinism_check_results.py depends on the
                 # specific format of the filename, keep it in sync.
             )
@@ -871,7 +860,6 @@ class xFuserModel(abc.ABC):
             self.save_output(output)
         finally:
             self.get_output_name = orig_get_output_name
-
 
     def _determinism_check(
         self,
@@ -903,7 +891,6 @@ class xFuserModel(abc.ABC):
             # else: do nothing, above is enough
 
         return determinism_failures, expected_output
-
 
     def run(self, input_args: dict) -> Tuple[DiffusionOutput, list]:
         """Run the model and optionally check repeated outputs for determinism.
@@ -941,10 +928,10 @@ class xFuserModel(abc.ABC):
         for iteration in range(self.config.num_iterations):
             log(f"Running iteration {iteration + 1}/{self.config.num_iterations}")
 
-            if self.config.batch_size: # Run in batched mode
+            if self.config.batch_size:  # Run in batched mode
                 output, batch_timings = self._run_pipe_batched(input_args)
                 timings += batch_timings
-            else: # Run all in one go
+            else:  # Run all in one go
                 output, timing = self._run_timed_pipe(input_args)
                 timings.append(timing)
                 log(f"Iteration {iteration + 1} completed in {timing:.2f}s")
@@ -963,14 +950,14 @@ class xFuserModel(abc.ABC):
         output = self._gather_dp_outputs(output)
 
         if len(timings) > 1:
-            timings.pop(0) # Remove first timing for more accurate average # TODO: fix
+            timings.pop(0)  # Remove first timing for more accurate average # TODO: fix
         log(f"Average time over {self.config.num_iterations} runs: {sum(timings) / len(timings):.2f}s")
         log(f"Total time spent: {inference_start.elapsed_time(inference_end) / 1000:.2f}s")
 
         return output, timings
 
     def _run_pipe_batched(self, input_args: dict) -> Tuple[List[DiffusionOutput], list]:
-        """ Run the pipeline in batches """
+        """Run the pipeline in batches"""
         batch_size = self.config.batch_size
         all_prompts = input_args["prompt"]
         timings = []
@@ -979,10 +966,12 @@ class xFuserModel(abc.ABC):
 
         for batch_index in range(0, batch_count):
             batch_args = copy.deepcopy(input_args)
-            prompts = batch_args["prompt"][batch_index*batch_size:(batch_index+1)*batch_size]
+            prompts = batch_args["prompt"][batch_index * batch_size : (batch_index + 1) * batch_size]
             batch_args["prompt"] = prompts
 
-            log(f"Processing batch {batch_index} with prompts {batch_index*batch_size} to {(batch_index+1)*batch_size}")
+            log(
+                f"Processing batch {batch_index} with prompts {batch_index * batch_size} to {(batch_index + 1) * batch_size}"
+            )
             output, timing = self._run_timed_pipe(batch_args)
             timings.append(timing)
             all_outputs.append(output)
@@ -991,7 +980,7 @@ class xFuserModel(abc.ABC):
         return DiffusionOutput.from_outputs(all_outputs, self.settings.model_output_type), timings
 
     def _run_warmup_calls(self, input_args: dict) -> None:
-        """ Run initial warmup calls if specified """
+        """Run initial warmup calls if specified"""
         if self.config.warmup_calls:
             log(f"Warming up model with {self.config.warmup_calls} calls...")
             for iteration in range(self.config.warmup_calls):
@@ -1000,7 +989,7 @@ class xFuserModel(abc.ABC):
             log("Warmup complete.")
 
     def profile(self, input_args: dict) -> Tuple[DiffusionOutput, list, torch.profiler.profiler.profile]:
-        """ Profile the model execution """
+        """Profile the model execution"""
         self._validate_args(input_args)
         input_args = self._split_prompts_for_dp(input_args)
 
@@ -1025,10 +1014,10 @@ class xFuserModel(abc.ABC):
             for iteration in range(num_repetitions):
                 log(f"Profiling iteration {iteration + 1}/{num_repetitions}")
                 with record_function(annotation):
-                    if self.config.batch_size: # Run in batched mode
+                    if self.config.batch_size:  # Run in batched mode
                         output, batch_timings = self._run_pipe_batched(input_args)
                         timing = sum(batch_timings)
-                    else: # Run all in one go
+                    else:  # Run all in one go
                         output, timing = self._run_timed_pipe(input_args)
                 profile_object.step()
                 log(f"Profiling iteration {iteration + 1} completed in {timing:.2f}s")
@@ -1038,7 +1027,7 @@ class xFuserModel(abc.ABC):
         return output, [], profile_object
 
     def preprocess_args(self, input_args: dict) -> dict:
-        """ Preprocess input arguments before passing them to the model """
+        """Preprocess input arguments before passing them to the model"""
         args = copy.deepcopy(input_args)
 
         # Apply model specific default input values
@@ -1061,14 +1050,14 @@ class xFuserModel(abc.ABC):
         return args
 
     def _preprocess_args_images(self, input_args: dict) -> dict:
-        """ Preprocess image inputs if necessary """
+        """Preprocess image inputs if necessary"""
         self._validate_args(input_args)
         images = [load_image(path) for path in input_args.get("input_images", [])]
         input_args["input_images"] = images
         return input_args
 
     def save_output(self, output: DiffusionOutput) -> None:
-        """ Saves the output based on its type """
+        """Saves the output based on its type"""
         # Assumes output only has images or videos, not both
         if output.images:
             for image_index, (image, pipe_args) in enumerate(output.get_outputs()):
@@ -1101,9 +1090,9 @@ class xFuserModel(abc.ABC):
         self._vae_manager.prepare_run(self._decoding_vaes(), input_args)
 
     def _run_timed_pipe(self, input_args: dict) -> Tuple[DiffusionOutput, float]:
-        """ Run the pipeline and time its latency from the synchronized across all ranks beginning
+        """Run the pipeline and time its latency from the synchronized across all ranks beginning
         of the model execution, till the moment the current rank finishes.
-        
+
         Later, we typically discard timings of all ranks except the last one, which is assumed to
         be the rank providing model's output.
         """
@@ -1115,12 +1104,12 @@ class xFuserModel(abc.ABC):
         end = torch.cuda.Event(enable_timing=True)
 
         torch.cuda.synchronize()
-        replica.barrier()     # aligns all ranks in the replica as closely as possible
+        replica.barrier()  # aligns all ranks in the replica as closely as possible
 
         start.record()
         out = self._run_pipe(input_args)
         end.record()
-        end.synchronize()   # we don't care about other streams if there are any
+        end.synchronize()  # we don't care about other streams if there are any
 
         elapsed_time = start.elapsed_time(end) / 1000  # Convert to seconds
         return out, elapsed_time
@@ -1151,12 +1140,12 @@ class xFuserModel(abc.ABC):
             record_shapes=True,
             with_stack=True,
             on_trace_ready=lambda prof: prof.export_chrome_trace(capture_path),
-        ) as capture_prof:
+        ):
             self._run_timed_pipe(compile_args)
         log(f"Capture trace saved to {capture_path}")
 
     def get_output_name(self, input_args) -> str:
-        """ Generate a unique output name based on model and config """
+        """Generate a unique output name based on model and config"""
         use_compile = self.config.use_torch_compile
         ulysses_degree = self.config.ulysses_degree or 1
         ring_degree = self.config.ring_degree or 1
@@ -1167,8 +1156,8 @@ class xFuserModel(abc.ABC):
             name += f"_{self.config.task}"
         return name
 
-    def _post_load_and_state_initialization(self, input_args: dict) -> None: ##TODO: should this be renamed?
-        """ Hook for any post model-load and state initialization """
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:  ##TODO: should this be renamed?
+        """Hook for any post model-load and state initialization"""
 
         self.loader.materialize_pipeline()
 
@@ -1181,8 +1170,6 @@ class xFuserModel(abc.ABC):
         if self.config.use_vae_channels_last_format:
             self._convert_vae_to_channels_last()
 
-
-
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
         return 1
 
@@ -1192,13 +1179,20 @@ class xFuserModel(abc.ABC):
         or a custom schedule provided by the user.
         """
         if input_args["num_hybrid_attn_high_precision_steps"] is None:
-            raise ValueError("You must provide 'num_hybrid_attn_high_precision_steps' to use the hybrid attention schedule.")
+            raise ValueError(
+                "You must provide 'num_hybrid_attn_high_precision_steps' to use the hybrid attention schedule."
+            )
         multiplier = self._calculate_hybrid_attention_step_multiplier(input_args)
         total_steps = input_args["num_inference_steps"] * multiplier
-        if self.config.hybrid_attn_low_precision_backend is None or self.config.hybrid_attn_high_precision_backend is None:
+        if (
+            self.config.hybrid_attn_low_precision_backend is None
+            or self.config.hybrid_attn_high_precision_backend is None
+        ):
             attention_schedule = AttentionSchedule.from_comma_delimited_string(self.config.hybrid_attn_schedule)
             if attention_schedule.total_steps != total_steps:
-                raise ValueError(f"Hybrid attention schedule total steps {attention_schedule.total_steps} does not match input steps {total_steps} (input_args['num_inference_steps']={input_args['num_inference_steps']}, multiplier={multiplier}).")
+                raise ValueError(
+                    f"Hybrid attention schedule total steps {attention_schedule.total_steps} does not match input steps {total_steps} (input_args['num_inference_steps']={input_args['num_inference_steps']}, multiplier={multiplier})."
+                )
         else:
             num_high_precision_steps = input_args["num_hybrid_attn_high_precision_steps"] * multiplier
             low_precision_backend = AttentionBackendType[self.config.hybrid_attn_low_precision_backend.upper()]
@@ -1234,19 +1228,12 @@ class xFuserModel(abc.ABC):
                     f"expected {input_args['num_inference_steps']} denoising steps."
                 )
             gemm_schedule = GemmPrecisionSchedule(
-                [
-                    precision
-                    for precision in denoising_schedule.use_high_precision_schedule
-                    for _ in range(multiplier)
-                ]
+                [precision for precision in denoising_schedule.use_high_precision_schedule for _ in range(multiplier)]
             )
         else:
             count = input_args["num_hybrid_gemm_high_precision_steps"]
             if count is None:
-                raise ValueError(
-                    "Hybrid GEMM scheduling requires "
-                    "num_hybrid_gemm_high_precision_steps."
-                )
+                raise ValueError("Hybrid GEMM scheduling requires num_hybrid_gemm_high_precision_steps.")
             gemm_schedule = create_hybrid_gemm_schedule(
                 num_high_precision_steps=count * multiplier,
                 total_steps=total_steps,
@@ -1270,12 +1257,12 @@ class xFuserModel(abc.ABC):
 
     @abc.abstractmethod
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
-        """ Execute the pipeline. Must be implemented by subclasses. """
+        """Execute the pipeline. Must be implemented by subclasses."""
         pass
 
     @abc.abstractmethod
     def _load_model(self) -> DiffusionPipeline:
-        """ Load the model. Must be implemented by subclasses. """
+        """Load the model. Must be implemented by subclasses."""
         pass
 
     def _split_prompts_for_dp(self, input_args: dict) -> dict:
@@ -1337,10 +1324,15 @@ class xFuserModel(abc.ABC):
         return None
 
     def _validate_args(self, input_args: dict) -> None:
-        """ Validate input arguments. Can be overridden by subclasses. """
+        """Validate input arguments. Can be overridden by subclasses."""
         if input_args["prompt"] is None and input_args["dataset_path"] is None:
             raise ValueError("Either 'prompt' or 'dataset_path' must be provided in input arguments.")
 
         if self.settings.resolution_divisor:
-            if (input_args["height"] % self.settings.resolution_divisor != 0 or input_args["width"] % self.settings.resolution_divisor != 0):
-                raise ValueError(f"Model {self.settings.model_name} requires height and width to be divisible by {self.settings.resolution_divisor}.")
+            if (
+                input_args["height"] % self.settings.resolution_divisor != 0
+                or input_args["width"] % self.settings.resolution_divisor != 0
+            ):
+                raise ValueError(
+                    f"Model {self.settings.model_name} requires height and width to be divisible by {self.settings.resolution_divisor}."
+                )

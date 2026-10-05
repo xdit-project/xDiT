@@ -112,9 +112,11 @@ class Flux2FBCachedTransformerBlocks(utils.FBCachedTransformerBlocks):
         subsequent calls — the graph reads from the same pointer, getting updated
         data because we .copy_() into it before each replay.
         """
-        if (self._persistent_modulated_inputs is None
-                or self._persistent_modulated_inputs.shape != tensor.shape
-                or self._persistent_modulated_inputs.device != tensor.device):
+        if (
+            self._persistent_modulated_inputs is None
+            or self._persistent_modulated_inputs.shape != tensor.shape
+            or self._persistent_modulated_inputs.device != tensor.device
+        ):
             self._persistent_modulated_inputs = torch.empty_like(tensor)
         self._persistent_modulated_inputs.copy_(tensor)
         self.cache_context.modulated_inputs = self._persistent_modulated_inputs
@@ -126,16 +128,20 @@ class Flux2FBCachedTransformerBlocks(utils.FBCachedTransformerBlocks):
         encoder_residual: torch.Tensor,
     ) -> None:
         """Copy block residuals into persistent buffers outside any CUDA graph."""
-        if (self._persistent_hidden_residual is None
-                or self._persistent_hidden_residual.shape != hidden_residual.shape
-                or self._persistent_hidden_residual.device != hidden_residual.device):
+        if (
+            self._persistent_hidden_residual is None
+            or self._persistent_hidden_residual.shape != hidden_residual.shape
+            or self._persistent_hidden_residual.device != hidden_residual.device
+        ):
             self._persistent_hidden_residual = torch.empty_like(hidden_residual)
         self._persistent_hidden_residual.copy_(hidden_residual)
         self.cache_context.hidden_states_residual = self._persistent_hidden_residual
 
-        if (self._persistent_encoder_residual is None
-                or self._persistent_encoder_residual.shape != encoder_residual.shape
-                or self._persistent_encoder_residual.device != encoder_residual.device):
+        if (
+            self._persistent_encoder_residual is None
+            or self._persistent_encoder_residual.shape != encoder_residual.shape
+            or self._persistent_encoder_residual.device != encoder_residual.device
+        ):
             self._persistent_encoder_residual = torch.empty_like(encoder_residual)
         self._persistent_encoder_residual.copy_(encoder_residual)
         self.cache_context.encoder_hidden_states_residual = self._persistent_encoder_residual
@@ -327,11 +333,10 @@ def apply_fbcache(
     # Registering it as a pre-hook ensures it fires eagerly (pre-hooks run
     # by nn.Module._call_impl BEFORE entering the compiled forward_call).
     if hasattr(torch.compiler, "cudagraph_mark_step_begin"):
+
         def _mark_cudagraph_step_begin(module, args, kwargs):
             torch.compiler.cudagraph_mark_step_begin()
 
-        transformer.register_forward_pre_hook(
-            _mark_cudagraph_step_begin, with_kwargs=True, prepend=True
-        )
+        transformer.register_forward_pre_hook(_mark_cudagraph_step_begin, with_kwargs=True, prepend=True)
 
     return transformer

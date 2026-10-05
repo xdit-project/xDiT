@@ -42,7 +42,7 @@ class xFuserCausalWanModel(xFuserModel):
         routes=LoadRoute.NONE,
     )
     capabilities = ModelCapabilities(
-        ulysses_degree=False,   # SP incompatible with KV cache initially
+        ulysses_degree=False,  # SP incompatible with KV cache initially
         ring_degree=False,
         fully_shard_degree=True,
         use_fp8_gemms=False,
@@ -55,7 +55,7 @@ class xFuserCausalWanModel(xFuserModel):
     default_input_values = DefaultInputValues(
         height=512,
         width=512,
-        num_inference_steps=8, # DMD used, doesn't matter
+        num_inference_steps=8,  # DMD used, doesn't matter
         num_frames=81,
         negative_prompt="bright colors, overexposed, static, blurred details, subtitles, style, artwork, painting, picture, still, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, malformed limbs, fused fingers, still picture, cluttered background, three legs, many people in the background, walking backwards",
         guidance_scale=0.0,
@@ -84,12 +84,20 @@ class xFuserCausalWanModel(xFuserModel):
         step_cache_config={
             "dbcache": DBCacheSettings(
                 adapter=[
-                    CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=False, transformer_attr="transformer"),
-                    CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=False, transformer_attr="transformer_2"),
+                    CacheDitAdapterConfig(
+                        blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=False, transformer_attr="transformer"
+                    ),
+                    CacheDitAdapterConfig(
+                        blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=False, transformer_attr="transformer_2"
+                    ),
                 ],
                 preset=[
-                    DBCachePreset(Fn_compute_blocks=4, residual_diff_threshold=0.12, scm_policy="ultra", max_warmup_steps=4),
-                    DBCachePreset(Fn_compute_blocks=4, residual_diff_threshold=0.12, scm_policy="ultra", max_warmup_steps=2),
+                    DBCachePreset(
+                        Fn_compute_blocks=4, residual_diff_threshold=0.12, scm_policy="ultra", max_warmup_steps=4
+                    ),
+                    DBCachePreset(
+                        Fn_compute_blocks=4, residual_diff_threshold=0.12, scm_policy="ultra", max_warmup_steps=2
+                    ),
                 ],
             ),
         },
@@ -104,12 +112,12 @@ class xFuserCausalWanModel(xFuserModel):
     _DMD_DENOISING_STEPS = [1000, 850, 700, 550, 350, 275, 200, 125]
     _FLOW_SHIFT = 3
 
-
     def _load_transformer(self, subfolder: str) -> "xFuserCausalWanTransformer3DWrapper":
         """Load transformer, falling back to manual loading if weight index is mismatched."""
         from xfuser.model_executor.models.transformers.transformer_causal_wan import (
             xFuserCausalWanTransformer3DWrapper,
         )
+
         try:
             return xFuserCausalWanTransformer3DWrapper.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
@@ -118,16 +126,14 @@ class xFuserCausalWanModel(xFuserModel):
             )
         except (OSError, ValueError, RuntimeError):
             from safetensors.torch import load_file
-            config = xFuserCausalWanTransformer3DWrapper.load_config(
-                self.settings.model_name, subfolder=subfolder
-            )
+
+            config = xFuserCausalWanTransformer3DWrapper.load_config(self.settings.model_name, subfolder=subfolder)
             model = xFuserCausalWanTransformer3DWrapper.from_config(config)
             if os.path.isdir(self.settings.model_name):
-                weight_path = os.path.join(
-                    self.settings.model_name, subfolder, "diffusion_pytorch_model.safetensors"
-                )
+                weight_path = os.path.join(self.settings.model_name, subfolder, "diffusion_pytorch_model.safetensors")
             else:
                 from huggingface_hub import hf_hub_download
+
                 weight_path = hf_hub_download(
                     self.settings.model_name,
                     filename=f"{subfolder}/diffusion_pytorch_model.safetensors",
@@ -140,15 +146,18 @@ class xFuserCausalWanModel(xFuserModel):
         transformer = self._load_transformer("transformer")
         transformer_2 = self._load_transformer("transformer_2")
         scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
-            self.settings.model_name, subfolder="scheduler",
+            self.settings.model_name,
+            subfolder="scheduler",
         )
         # Register aliases for non-standard class names in model_index.json
         # so diffusers' from_pretrained doesn't fail during class resolution.
         import diffusers
+
         if not hasattr(diffusers, "SelfForcingFlowMatchScheduler"):
             diffusers.SelfForcingFlowMatchScheduler = FlowMatchEulerDiscreteScheduler
         if not hasattr(diffusers, "CausalWanTransformer3DModel"):
             from diffusers import WanTransformer3DModel
+
             diffusers.CausalWanTransformer3DModel = WanTransformer3DModel
         pipe = xFuserCausalWanPipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
@@ -170,12 +179,12 @@ class xFuserCausalWanModel(xFuserModel):
             num_frames=input_args["num_frames"],
             guidance_scale=input_args["guidance_scale"],
             generator=self._make_generator(input_args["seed"]),
-            num_frames_per_block=self._NUM_FRAMES_PER_BLOCK, # Processes X frames at a time
-            sliding_window_num_frames=self._SLIDING_WINDOW_NUM_FRAMES, # Sliding window size
-            context_noise=self._CONTEXT_NOISE, # Noise to add to the context as a regularization
-            local_attn_size=self._LOCAL_ATTN_SIZE, # Local attention size, -1 means no local attention
-            sink_size=self._SINK_SIZE, # Sink size, 0 means no sink, i.e, no context in kept
-            max_attention_size=self._MAX_ATTENTION_SIZE, # Max KV size for attention
+            num_frames_per_block=self._NUM_FRAMES_PER_BLOCK,  # Processes X frames at a time
+            sliding_window_num_frames=self._SLIDING_WINDOW_NUM_FRAMES,  # Sliding window size
+            context_noise=self._CONTEXT_NOISE,  # Noise to add to the context as a regularization
+            local_attn_size=self._LOCAL_ATTN_SIZE,  # Local attention size, -1 means no local attention
+            sink_size=self._SINK_SIZE,  # Sink size, 0 means no sink, i.e, no context in kept
+            max_attention_size=self._MAX_ATTENTION_SIZE,  # Max KV size for attention
             dmd_denoising_steps=self._DMD_DENOISING_STEPS,
             flow_shift=self._FLOW_SHIFT,
         )

@@ -28,7 +28,13 @@ def get_nproc_from_args(args: List[str]) -> int:
     """
     Infer the number of processes from the command line arguments.
     """
-    degree_args = ["--ulysses_degree", "--tensor_parallel_degree", "--ring_degree", "--pipefusion_parallel_degree", "--data_parallel_degree"]
+    degree_args = [
+        "--ulysses_degree",
+        "--tensor_parallel_degree",
+        "--ring_degree",
+        "--pipefusion_parallel_degree",
+        "--data_parallel_degree",
+    ]
     degree_args = degree_args + [arg.replace("_", "-") for arg in degree_args]
     degrees = []
     i = 0
@@ -115,13 +121,16 @@ def main(args: Optional[List[str]] = None) -> None:
 
     # Build the torchrun command
     cmd = [
-        sys.executable, "-m", "torch.distributed.run",
+        sys.executable,
+        "-m",
+        "torch.distributed.run",
         f"--nproc_per_node={torchrun_values['--nproc_per_node']}",
         f"--nnodes={torchrun_values['--nnodes']}",
         f"--node_rank={torchrun_values['--node_rank']}",
         f"--master_addr={torchrun_values['--master_addr']}",
         f"--master_port={torchrun_values['--master_port']}",
-        "-m", runner_module,
+        "-m",
+        runner_module,
     ] + runner_args
 
     # Start the subprocess with a new process group so we can kill all children

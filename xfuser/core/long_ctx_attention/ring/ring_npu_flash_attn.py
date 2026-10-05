@@ -1,14 +1,11 @@
-from typing import List
 import math
 import torch
-import torch.nn.functional as F
 
-from xfuser.core.long_ctx_attention import xFuserLongContextAttention
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
 import xfuser.envs as envs
 
 if torch.cuda.is_available() or envs._is_npu():
-    from yunchang.ring.utils import RingComm, update_out_and_lse, update_npu_out
+    from yunchang.ring.utils import RingComm, update_npu_out
     from yunchang.ring.ring_npu_flash_attn import RingNpuFlashAttnFunc
     from yunchang.kernels import select_flash_attn_impl, AttnType
 else:
@@ -26,24 +23,23 @@ except ImportError:
 
 
 def xdit_ring_npu_flash_attn_forward(
-        process_group,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        head_num=None,
-        layout=None,
-        softmax_scale=None,
-        causal=True,
-        attn_type=AttnType.NPU,
-        attn_processor=None,
-        attn_layer=None,
-        joint_tensor_key=None,
-        joint_tensor_value=None,
-        joint_strategy="none",
+    process_group,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    head_num=None,
+    layout=None,
+    softmax_scale=None,
+    causal=True,
+    attn_type=AttnType.NPU,
+    attn_processor=None,
+    attn_layer=None,
+    joint_tensor_key=None,
+    joint_tensor_value=None,
+    joint_strategy="none",
 ):
     is_joint = False
-    if (joint_tensor_key is not None and
-            joint_tensor_value is not None):
+    if joint_tensor_key is not None and joint_tensor_value is not None:
         supported_joint_strategy = ["front", "rear"]
         if joint_strategy not in supported_joint_strategy:
             raise ValueError(
@@ -51,13 +47,10 @@ def xdit_ring_npu_flash_attn_forward(
             )
         else:
             is_joint = True
-    elif (joint_tensor_key is None and
-          joint_tensor_value is None):
+    elif joint_tensor_key is None and joint_tensor_value is None:
         pass
     else:
-        raise ValueError(
-            f"joint_tensor_key and joint_tensor_value should be None or not None simultaneously."
-        )
+        raise ValueError("joint_tensor_key and joint_tensor_value should be None or not None simultaneously.")
 
     comm = RingComm(process_group)
 
@@ -98,15 +91,10 @@ def xdit_ring_npu_flash_attn_forward(
 
         if not causal or step <= comm.rank:
             fn = select_flash_attn_impl(attn_type, stage="fwd-only", attn_processor=attn_processor)
-            block_out, block_softmax_max, block_softmax_sum = fn(
-                q,
-                key,
-                value,
-                head_num,
-                layout,
-                softmax_scale
+            block_out, block_softmax_max, block_softmax_sum = fn(q, key, value, head_num, layout, softmax_scale)
+            out, softmax_max, softmax_sum = update_npu_out(
+                block_out, block_softmax_max, block_softmax_sum, out, softmax_max, softmax_sum
             )
-            out, softmax_max, softmax_sum = update_npu_out(block_out, block_softmax_max, block_softmax_sum, out, softmax_max, softmax_sum)
 
         if step + 1 != comm.world_size:
             comm.wait()
@@ -175,7 +163,9 @@ class xFuserRingNpuFlashAttnFunc(RingNpuFlashAttnFunc):
         q, k, v, out, softmax_max, softmax_sum = ctx.saved_tensors
         dq, dk, dv = ring_npu_flash_attn_backward(
             ctx.group,
-            q, k, v,
+            q,
+            k,
+            v,
             dout,
             ctx.head_num,
             ctx.layout,
@@ -184,7 +174,7 @@ class xFuserRingNpuFlashAttnFunc(RingNpuFlashAttnFunc):
             out,
             ctx.softmax_scale,
             causal=ctx.causal,
-            attn_type=ctx.attn_type
+            attn_type=ctx.attn_type,
         )
 
         # Return gradients: 3 tensor gradients + 12 None values for non-tensor params
@@ -194,35 +184,45 @@ class xFuserRingNpuFlashAttnFunc(RingNpuFlashAttnFunc):
         #              attn_type, attn_processor, attn_layer,
         #              joint_tensor_key, joint_tensor_value, joint_strategy)
         return (
-            dq, dk, dv,  # Gradients for q, k, v
-            None, None, None, None,  # head_num, layout, softmax_scale, causal
-            None, None,              # return_softmax, group
-            None, None, None,        # attn_type, attn_processor, attn_layer
-            None, None, None,        # joint_tensor_key, joint_tensor_value, joint_strategy
+            dq,
+            dk,
+            dv,  # Gradients for q, k, v
+            None,
+            None,
+            None,
+            None,  # head_num, layout, softmax_scale, causal
+            None,
+            None,  # return_softmax, group
+            None,
+            None,
+            None,  # attn_type, attn_processor, attn_layer
+            None,
+            None,
+            None,  # joint_tensor_key, joint_tensor_value, joint_strategy
         )
 
 
 def xdit_ring_npu_flash_attn_func(
-        q,
-        k,
-        v,
-        dropout_p=0.0,
-        softmax_scale=None,
-        causal=False,
-        window_size=(-1, -1),
-        alibi_slopes=None,
-        deterministic=False,
-        return_attn_probs=False,
-        group=None,
-        attn_type=AttnType.NPU,
-        attn_processor=None,
-        attn_layer=None,
-        joint_tensor_key=None,
-        joint_tensor_value=None,
-        joint_strategy="none",
-        q_descale=None,
-        k_descale=None,
-        v_descale=None,
+    q,
+    k,
+    v,
+    dropout_p=0.0,
+    softmax_scale=None,
+    causal=False,
+    window_size=(-1, -1),
+    alibi_slopes=None,
+    deterministic=False,
+    return_attn_probs=False,
+    group=None,
+    attn_type=AttnType.NPU,
+    attn_processor=None,
+    attn_layer=None,
+    joint_tensor_key=None,
+    joint_tensor_value=None,
+    joint_strategy="none",
+    q_descale=None,
+    k_descale=None,
+    v_descale=None,
 ):
     head_num = q.shape[-2]
     layout = "BSND"

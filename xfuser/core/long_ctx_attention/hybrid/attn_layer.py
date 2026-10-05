@@ -1,5 +1,4 @@
 import torch
-import torch.nn.functional as F
 from torch import Tensor
 
 import torch.distributed
@@ -8,6 +7,7 @@ import xfuser.envs as envs
 
 if torch.cuda.is_available() or envs._is_npu():
     from yunchang import LongContextAttention
+
     try:
         from yunchang.kernels import AttnType
     except ImportError:
@@ -25,7 +25,7 @@ from xfuser.logger import init_logger
 
 from xfuser.core.distributed import (
     get_ring_parallel_world_size,
-    )
+)
 
 logger = init_logger(__name__)
 
@@ -69,31 +69,32 @@ class xFuserLongContextAttention(LongContextAttention):
             ring_impl_type=ring_impl_type,
             use_pack_qkv=use_pack_qkv,
             use_sync=use_sync,
-            attn_type = attn_type,
+            attn_type=attn_type,
         )
         self.use_kv_cache = use_kv_cache
         self.q_descale = q_descale
         self.k_descale = k_descale
         self.v_descale = v_descale
-        if (
-            use_kv_cache
-            and ring_impl_type not in self.ring_impl_type_supported_kv_cache
-        ):
-            raise RuntimeError(
-                f"ring_impl_type: {ring_impl_type} do not support SP kv cache."
-            )
+        if use_kv_cache and ring_impl_type not in self.ring_impl_type_supported_kv_cache:
+            raise RuntimeError(f"ring_impl_type: {ring_impl_type} do not support SP kv cache.")
 
         if HAS_SPARSE_SAGE_ATTENTION:
             from spas_sage_attn.autotune import SparseAttentionMeansim
-            if isinstance(attn_processor, SparseAttentionMeansim) and torch.distributed.get_world_size(self.ring_pg) > 1:
+
+            if (
+                isinstance(attn_processor, SparseAttentionMeansim)
+                and torch.distributed.get_world_size(self.ring_pg) > 1
+            ):
                 raise RuntimeError("Sparse Sage attention does not support ring degree > 1.")
 
         self.attn_processor = attn_processor
         if attn_type == AttnType.NPU:
             from xfuser.core.long_ctx_attention.ring import xdit_ring_npu_flash_attn_func
+
             self.ring_attn_fn = xdit_ring_npu_flash_attn_func
         else:
             from xfuser.core.long_ctx_attention.ring import xdit_ring_flash_attn_func
+
             self.ring_attn_fn = xdit_ring_flash_attn_func
 
     @torch.compiler.disable
@@ -124,7 +125,7 @@ class xFuserLongContextAttention(LongContextAttention):
             key (Tensor): key input to the layer
             value (Tensor): value input to the layer
             args: other args,
-            joint_tensor_query: Tensor = None, a replicated tensor among processes appended to the front or rear of query, depends the joint_strategy  
+            joint_tensor_query: Tensor = None, a replicated tensor among processes appended to the front or rear of query, depends the joint_strategy
             joint_tensor_key: Tensor = None, a replicated tensor among processes appended to the front or rear of key, depends the joint_strategy
             joint_tensor_value: Tensor = None, a replicated tensor among processes appended to the front or rear of value, depends the joint_strategy,
             *args: the args same as flash_attn_interface
@@ -134,9 +135,7 @@ class xFuserLongContextAttention(LongContextAttention):
             * output (Tensor): context output
         """
         is_joint = False
-        if (joint_tensor_query is not None and 
-            joint_tensor_key is not None and 
-            joint_tensor_value is not None):
+        if joint_tensor_query is not None and joint_tensor_key is not None and joint_tensor_value is not None:
             supported_joint_strategy = ["front", "rear"]
             if joint_strategy not in supported_joint_strategy:
                 raise ValueError(
@@ -148,33 +147,25 @@ class xFuserLongContextAttention(LongContextAttention):
             else:
                 query = torch.cat([joint_tensor_query, query], dim=1)
                 is_joint = True
-        elif (joint_tensor_query is None and 
-            joint_tensor_key is None and 
-            joint_tensor_value is None):
+        elif joint_tensor_query is None and joint_tensor_key is None and joint_tensor_value is None:
             pass
         else:
             raise ValueError(
-                f"joint_tensor_query, joint_tensor_key, and joint_tensor_value should be None or not None simultaneously."
+                "joint_tensor_query, joint_tensor_key, and joint_tensor_value should be None or not None simultaneously."
             )
 
         if is_joint:
             ulysses_world_size = torch.distributed.get_world_size(self.ulysses_pg)
             ulysses_rank = torch.distributed.get_rank(self.ulysses_pg)
-            attn_heads_per_ulysses_rank = (
-                joint_tensor_key.shape[-2] // ulysses_world_size
-            )
+            attn_heads_per_ulysses_rank = joint_tensor_key.shape[-2] // ulysses_world_size
             joint_tensor_key = joint_tensor_key[
                 ...,
-                attn_heads_per_ulysses_rank
-                * ulysses_rank : attn_heads_per_ulysses_rank
-                * (ulysses_rank + 1),
+                attn_heads_per_ulysses_rank * ulysses_rank : attn_heads_per_ulysses_rank * (ulysses_rank + 1),
                 :,
             ]
             joint_tensor_value = joint_tensor_value[
                 ...,
-                attn_heads_per_ulysses_rank
-                * ulysses_rank : attn_heads_per_ulysses_rank
-                * (ulysses_rank + 1),
+                attn_heads_per_ulysses_rank * ulysses_rank : attn_heads_per_ulysses_rank * (ulysses_rank + 1),
                 :,
             ]
 
@@ -184,22 +175,14 @@ class xFuserLongContextAttention(LongContextAttention):
             # (3*bs, seq_len/N, head_cnt, head_size)
             qkv = torch.cat([query, key, value]).contiguous()
             # (3*bs, seq_len, head_cnt/N, head_size)
-            qkv = SeqAllToAll4D.apply(
-                self.ulysses_pg, qkv, self.scatter_idx, self.gather_idx
-            )
+            qkv = SeqAllToAll4D.apply(self.ulysses_pg, qkv, self.scatter_idx, self.gather_idx)
             qkv = torch.chunk(qkv, 3, dim=0)
             query_layer, key_layer, value_layer = qkv
 
         else:
-            query_layer = SeqAllToAll4D.apply(
-                self.ulysses_pg, query, self.scatter_idx, self.gather_idx
-            )
-            key_layer = SeqAllToAll4D.apply(
-                self.ulysses_pg, key, self.scatter_idx, self.gather_idx
-            )
-            value_layer = SeqAllToAll4D.apply(
-                self.ulysses_pg, value, self.scatter_idx, self.gather_idx
-            )
+            query_layer = SeqAllToAll4D.apply(self.ulysses_pg, query, self.scatter_idx, self.gather_idx)
+            key_layer = SeqAllToAll4D.apply(self.ulysses_pg, key, self.scatter_idx, self.gather_idx)
+            value_layer = SeqAllToAll4D.apply(self.ulysses_pg, value, self.scatter_idx, self.gather_idx)
 
         out = self.ring_attn_fn(
             query_layer,
@@ -224,32 +207,34 @@ class xFuserLongContextAttention(LongContextAttention):
             v_descale=self.v_descale,
         )
 
-        if type(out) == tuple:
+        if isinstance(out, tuple):
             context_layer, _, _ = out
         else:
             context_layer = out
 
         # (bs, seq_len, head_cnt/N, head_size) -> (bs, seq_len/N, head_cnt, head_size)
         # scatter 1, gather 2
-        output = SeqAllToAll4D.apply(
-            self.ulysses_pg, context_layer, self.gather_idx, self.scatter_idx
-        )
+        output = SeqAllToAll4D.apply(self.ulysses_pg, context_layer, self.gather_idx, self.scatter_idx)
 
         # out e.g., [s/p::h]
         return output
 
+
 class xFuserSanaLinearLongContextAttention(xFuserLongContextAttention):
-    def __init__(self,
-                 scatter_idx: int = 2,
-                 gather_idx: int = 1,
-                 ring_impl_type: str = "basic",
-                 use_pack_qkv: bool = False,
-                 use_kv_cache: bool = False,
-                 attn_type: AttnType = None,
-                 attn_processor: torch.nn.Module = None):
+    def __init__(
+        self,
+        scatter_idx: int = 2,
+        gather_idx: int = 1,
+        ring_impl_type: str = "basic",
+        use_pack_qkv: bool = False,
+        use_kv_cache: bool = False,
+        attn_type: AttnType = None,
+        attn_processor: torch.nn.Module = None,
+    ):
         super().__init__(scatter_idx, gather_idx, ring_impl_type, use_pack_qkv, use_kv_cache, attn_type, attn_processor)
         # TODO need to check the attn_type
         from xfuser.core.long_ctx_attention.ring import xdit_sana_ring_flash_attn_func
+
         self.ring_attn_fn = xdit_sana_ring_flash_attn_func
         # self.ring_attn_fn = xdit_sana_linear_ring_flash_attn_func
         self.ring_world_size = get_ring_parallel_world_size()
@@ -270,7 +255,6 @@ class xFuserSanaLinearLongContextAttention(xFuserLongContextAttention):
         deterministic=False,
         return_attn_probs=False,
     ) -> Tensor:
-
         """forward
 
         Arguments:
@@ -279,7 +263,7 @@ class xFuserSanaLinearLongContextAttention(xFuserLongContextAttention):
             key (Tensor): key input to the layer
             value (Tensor): value input to the layer
             args: other args,
-            joint_tensor_query: Tensor = None, a replicated tensor among processes appended to the front or rear of query, depends the joint_strategy  
+            joint_tensor_query: Tensor = None, a replicated tensor among processes appended to the front or rear of query, depends the joint_strategy
             joint_tensor_key: Tensor = None, a replicated tensor among processes appended to the front or rear of key, depends the joint_strategy
             joint_tensor_value: Tensor = None, a replicated tensor among processes appended to the front or rear of value, depends the joint_strategy,
             *args: the args same as flash_attn_interface
@@ -296,23 +280,15 @@ class xFuserSanaLinearLongContextAttention(xFuserLongContextAttention):
             # (3*bs, seq_len/N, head_cnt, head_size)
             qkv = torch.cat([query, key, value]).contiguous()
             # (3*bs, seq_len, head_cnt/N, head_size)
-            qkv = SeqAllToAll4D.apply(
-                self.ulysses_pg, qkv, self.scatter_idx, self.gather_idx
-            )
+            qkv = SeqAllToAll4D.apply(self.ulysses_pg, qkv, self.scatter_idx, self.gather_idx)
             qkv = torch.chunk(qkv, 3, dim=0)
             query_layer, key_layer, value_layer = qkv
 
         else:
-            query_layer = SeqAllToAll4D.apply(
-                self.ulysses_pg, query, self.scatter_idx, self.gather_idx
-            )
-            key_layer = SeqAllToAll4D.apply(
-                self.ulysses_pg, key, self.scatter_idx, self.gather_idx
-            )
-            value_layer = SeqAllToAll4D.apply(
-                self.ulysses_pg, value, self.scatter_idx, self.gather_idx
-            )
-        
+            query_layer = SeqAllToAll4D.apply(self.ulysses_pg, query, self.scatter_idx, self.gather_idx)
+            key_layer = SeqAllToAll4D.apply(self.ulysses_pg, key, self.scatter_idx, self.gather_idx)
+            value_layer = SeqAllToAll4D.apply(self.ulysses_pg, value, self.scatter_idx, self.gather_idx)
+
         out = self.ring_attn_fn(
             query_layer,
             key_layer,
@@ -321,17 +297,15 @@ class xFuserSanaLinearLongContextAttention(xFuserLongContextAttention):
             attn_layer=attn if self.use_kv_cache else None,
         )
         out = out.transpose(1, 2)
-        
+
         if isinstance(out, tuple):
             context_layer, _, _ = out
         else:
             context_layer = out
 
         # scatter 1, gather 2
-        output: Tensor = SeqAllToAll4D.apply(
-            self.ulysses_pg, context_layer, self.gather_idx, self.scatter_idx
-        )
-        
+        output: Tensor = SeqAllToAll4D.apply(self.ulysses_pg, context_layer, self.gather_idx, self.scatter_idx)
+
         output = output.flatten(2, 3)
 
         return output

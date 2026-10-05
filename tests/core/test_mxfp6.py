@@ -109,13 +109,10 @@ def test_wan22_mixed_mode_routes_primary_to_fp4_and_second_transformer_to_fp6(
 
     calls = []
     monkeypatch.setattr(placement, "log", lambda *args, **kwargs: None)
-    monkeypatch.setattr(placement, "_is_cuda", lambda: False)
     monkeypatch.setattr(
         placement,
-        "prepare_native_load",
-        lambda *a, **k: SimpleNamespace(
-            descriptor=SimpleNamespace(log_message=lambda: "")
-        ),
+        "descriptor_for",
+        lambda *a, **k: SimpleNamespace(log_message=lambda: ""),
     )
     fp4_blocks, fp6_blocks = object(), object()
     model = SimpleNamespace(

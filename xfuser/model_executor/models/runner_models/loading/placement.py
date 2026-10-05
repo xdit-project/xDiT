@@ -12,8 +12,7 @@ device, so it converts after.
 
 from xfuser.core.distributed import get_world_group
 from xfuser.core.utils.runner_utils import log, rgetattr
-from xfuser.envs import _is_cuda
-from .quant_adapter import module_path_is_covered, prepare_native_load
+from .quant_adapter import descriptor_for, module_path_is_covered
 
 
 def place_pipeline_components(loader) -> None:
@@ -120,15 +119,19 @@ Each walk starts where ``walk_roots`` says -- the subtrees that format owns,
             # in play still gets a line of its own.
             component_name = module_name.partition(".")[0]
             if ledger.claim_description(component_name, format_name=format_name):
-                descriptor = prepare_native_load(
+                # This walk *is* the post-load conversion, so the descriptor
+                # says so outright. It used to be derived by asking
+                # `prepare_native_load` what a streamed load would have done,
+                # with `stream_quant` keyed off `_is_cuda()` -- a hardware test
+                # in the one walk that has none, and one that let the line
+                # claim `materialization=streaming` for a conversion happening
+                # right here.
+                descriptor = descriptor_for(
                     adapter,
-                    component_name=component_name,
-                    targets=plan.relative_to(
-                        component_name, plan.roots(format_name)
-                    ),
-                    stream_quant=not _is_cuda(),
-                    hybrid=model.config.use_hybrid_gemm_schedule,
-                ).descriptor
+                    component_name,
+                    "post_load",
+                    "converted after the load rather than on the way in",
+                )
                 log(descriptor.log_message())
             companion = loader.backends.hybrid_companion(
                 format_name, device=convert_kwargs["device"]

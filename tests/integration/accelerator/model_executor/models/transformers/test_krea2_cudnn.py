@@ -83,7 +83,10 @@ def _worker(rank, world_size, init_method):
         with torch.no_grad():
             expected = reference(**inputs)[0]
             actual = parallel(**inputs)[0]
-        torch.testing.assert_close(actual, expected, rtol=3e-2, atol=3e-2)
+        # On B200 the two match bit for bit, single device and Ulysses 2. Attending to
+        # sample 0's padded text keys would move its output by up to ~2e-2, so the
+        # tolerance stays an order of magnitude below that.
+        torch.testing.assert_close(actual, expected, rtol=1e-3, atol=1e-3)
     finally:
         destroy_model_parallel()
         destroy_distributed_environment()

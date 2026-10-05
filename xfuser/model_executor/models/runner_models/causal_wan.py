@@ -32,6 +32,9 @@ if TYPE_CHECKING:
 
 @register_model("CausalWan")
 class xFuserCausalWanModel(xFuserModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 40
+
     min_diffusers_version = "0.35.2"
 
     # Its manual single-file fallback has no collective-safe key discovery.

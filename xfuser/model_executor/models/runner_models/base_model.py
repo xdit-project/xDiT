@@ -3,6 +3,7 @@ import torch
 import copy
 import json
 import os
+from math import gcd
 from PIL.Image import Image
 from typing import Callable, List, Optional, Tuple, Generator
 from dataclasses import dataclass, field
@@ -352,6 +353,10 @@ class xFuserModel(abc.ABC):
     # whose registered names differ in head count sets it per instance in
     # _customize_settings.
     attention_heads: Optional[int] = None
+    # Set only when GQA keeps KV heads compact through the Ulysses exchange.
+    attention_kv_heads: Optional[int] = None
+    # Z-Image pads Q/K/V heads, so divisibility of its real heads is not required.
+    supports_ulysses_head_padding: bool = False
 
     # Lowest diffusers release this model is expected to run on, used only to name an
     # upgrade target when a load fails. It never gates a load, so a value above the
@@ -621,13 +626,22 @@ class xFuserModel(abc.ABC):
         config._validate_gemm_quantization_flags()
         _validate_attention_head_dims(self, config)
         heads = self.attention_heads
+        kv_heads = self.attention_kv_heads
         ulysses_degree = config.ulysses_degree or 1
-        if heads and heads % ulysses_degree != 0:
-            divisors = ", ".join(str(d) for d in range(1, heads + 1) if heads % d == 0)
+        head_divisor = gcd(heads, kv_heads) if heads and kv_heads else heads
+        if (
+            self.capabilities.ulysses_degree
+            and not self.supports_ulysses_head_padding
+            and head_divisor
+            and head_divisor % ulysses_degree != 0
+        ):
+            divisors = ", ".join(str(d) for d in range(1, head_divisor + 1) if head_divisor % d == 0)
+            layout = f"{heads} attention heads" + (f" and {kv_heads} KV heads" if kv_heads else "")
+            required = "both head counts" if kv_heads else str(heads)
+            hint = " Use --ring_degree to scale sequence parallelism further." if self.capabilities.ring_degree else ""
             raise ValueError(
-                f"{self.settings.model_name} has {heads} attention heads, so "
-                f"--ulysses_degree must divide {heads} ({divisors}); got {ulysses_degree}. "
-                f"Use --ring_degree to scale sequence parallelism further."
+                f"{self.settings.model_name} has {layout}, so "
+                f"--ulysses_degree must divide {required} ({divisors}); got {ulysses_degree}.{hint}"
             )
         for key in ModelCapabilities.__annotations__.keys():
             config_value = getattr(

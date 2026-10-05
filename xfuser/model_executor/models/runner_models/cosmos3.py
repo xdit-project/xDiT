@@ -47,6 +47,11 @@ COSMOS3_FSDP_STRATEGY = {
 @register_model("nvidia/Cosmos3-Super")
 @register_model("Cosmos3-Super")
 class xFuserCosmos3SuperModel(xFuserModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 64
+    # KV heads remain compact through the Ulysses exchange.
+    attention_kv_heads = 8
+
     # No released diffusers ships pipeline_cosmos3_omni yet.
     min_diffusers_version = DIFFUSERS_FROM_SOURCE
 
@@ -176,6 +181,11 @@ class xFuserCosmos3SuperModel(xFuserModel):
 @register_model("nvidia/Cosmos3-Nano")
 @register_model("Cosmos3-Nano")
 class xFuserCosmos3NanoModel(xFuserCosmos3SuperModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 32
+    # KV heads remain compact through the Ulysses exchange.
+    attention_kv_heads = 8
+
     load_support = LoadSupport(
         meta_transformers=("transformer",),
         meta_text_encoders=(),

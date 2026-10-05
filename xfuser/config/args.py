@@ -1,5 +1,6 @@
 import argparse
 import dataclasses
+import math
 import os
 import sys
 import warnings
@@ -164,6 +165,9 @@ class xFuserArgs:
     model: str = ""
     download_dir: Optional[str] = None
     trust_remote_code: bool = False
+    lora_path: Optional[str] = None
+    lora_weight_name: Optional[str] = None
+    lora_scale: float = 1.0
     # Runtime arguments
     warmup_steps: int = 1
     # use_cuda_graph: bool = True
@@ -307,6 +311,10 @@ class xFuserArgs:
     distilled_transformer_2_path: Optional[str] = None
 
     def __post_init__(self):
+        if not math.isfinite(self.lora_scale):
+            raise ValueError("lora_scale must be finite")
+        if not self.lora_path and (self.lora_weight_name or self.lora_scale != 1.0):
+            raise ValueError("lora_weight_name and lora_scale require lora_path")
         self.determinism_check_report_ranks = _normalize_determinism_check_report_ranks(
             self.determinism_check_report_ranks
         )
@@ -450,7 +458,6 @@ class xFuserArgs:
             action="store_true",
             help="Trust remote code from huggingface.",
         )
-
         # Runtime arguments
         runtime_group = parser.add_argument_group("Runtime Options")
         runtime_group.add_argument("--warmup_steps", type=int, default=1, help="Warmup steps in generation.")
@@ -782,6 +789,14 @@ class xFuserArgs:
             help="Name or path of the huggingface model to use.",
             required=True,
         )
+        parser.add_argument(
+            "--lora_path",
+            type=nullable_str,
+            default=None,
+            help="LoRA repository or local path to fuse at startup (supported runners only).",
+        )
+        parser.add_argument("--lora_weight_name", type=nullable_str, default=None)
+        parser.add_argument("--lora_scale", type=float, default=1.0)
         parser.add_argument("--use_parallel_vae", help="Enable parallel VAE.", action="store_true")
         parser.add_argument(
             "--use_torch_compile",

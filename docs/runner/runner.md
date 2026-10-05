@@ -128,6 +128,8 @@ Individual model classes that inherit from `xFuserModel`:
 
 ### Model Selection
 
+For startup adapter fusion on FLUX.1-dev, see [LoRA support and limitations](lora.md).
+
 | Argument | Description |
 |----------|-------------|
 | `--model` | Model name or HuggingFace path (required) |

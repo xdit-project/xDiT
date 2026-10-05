@@ -532,23 +532,26 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
             diff_decoder.set_attn_processor(LTX2VideoVaeNeighborhoodNattenProcessor())
             log("Diffusion decoder: using NATTEN attention processor.")
         except (ImportError, RuntimeError, FileNotFoundError):
-            # NATTEN unavailable — try Triton flash-NA3D (AMD MFMA / NVIDIA TC).
+            # NATTEN unavailable — try AITER's Triton flash-NA3D kernel (ROCm gfx942/gfx950).
             try:
-                import triton  # noqa: F401 — availability gate only
                 from xfuser.model_executor.layers.ltx2.na3d_mfma_flash import (
                     LTX2VideoVaeMfmaAttnProcessor,
                 )
 
-                diff_decoder.set_attn_processor(LTX2VideoVaeMfmaAttnProcessor())
-                log("Diffusion decoder: using Triton flash-NA3D attention processor.")
-            except (ImportError, Exception):
-                # Triton unavailable — tiled PyTorch SDPA (works on CUDA, ROCm, CPU).
+                processor = LTX2VideoVaeMfmaAttnProcessor()
+                log("Diffusion decoder: using AITER Triton flash-NA3D attention processor.")
+            except (ImportError, RuntimeError) as e:
+                # Tiled PyTorch SDPA (works on CUDA, ROCm, CPU).
                 from xfuser.model_executor.layers.ltx2.na3d_eager_attn import (
                     LTX2VideoVaeEagerSdpaAttnProcessor,
                 )
 
-                diff_decoder.set_attn_processor(LTX2VideoVaeEagerSdpaAttnProcessor())
-                log("Diffusion decoder: NATTEN and Triton unavailable; using tiled PyTorch SDPA fallback.")
+                processor = LTX2VideoVaeEagerSdpaAttnProcessor()
+                log(
+                    f"Diffusion decoder: NATTEN and AITER flash-NA3D unavailable ({e}); "
+                    "using tiled PyTorch SDPA fallback."
+                )
+            diff_decoder.set_attn_processor(processor)
         self.decode_pipe = LTX2VideoDiffusionDecodePipeline(
             diffusion_decoder=diff_decoder,
             scheduler=pipe.scheduler,

@@ -402,6 +402,11 @@ def replace_linears(
     for name, child in list(module.named_children()):
         full_name = f"{parent_name}.{name}" if parent_name else name
         if isinstance(child, torch.nn.Linear):
+            if _weight_is_torchao_quantized(child):
+                # Already converted -- a streamed load, or the other half of a
+                # tiered run. Its weight is a subclass tensor, so packing it
+                # again would quantize something already quantized.
+                continue
             if filter_fn is not None and not filter_fn(child, full_name):
                 continue
             spec = LinearSpec.of(child)

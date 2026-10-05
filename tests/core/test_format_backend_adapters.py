@@ -10,16 +10,13 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 BACKENDS_PATH = (
-    ROOT / "xfuser/model_executor/models/runner_models/loading/format_backends.py"
+    ROOT / "xfuser/model_executor/models/runner_models/loading/backends.py"
 )
 CONTRACTS_PATH = (
     ROOT / "xfuser/model_executor/models/runner_models/loading/contracts.py"
 )
 ADAPTER_PATH = (
     ROOT / "xfuser/model_executor/models/runner_models/loading/quant_adapter.py"
-)
-FP8_PATH = (
-    ROOT / "xfuser/model_executor/models/runner_models/loading/fp8_backends.py"
 )
 
 
@@ -54,11 +51,9 @@ def modules():
     contracts = _load_module(CONTRACTS_PATH, "contracts")
     adapter = _load_module(ADAPTER_PATH, "quant_adapter")
     backends = _load_module(BACKENDS_PATH, "format_adapter_backends")
-    # Both halves of the registry, so a test can ask about any declared pair
-    # rather than only the ones this module happens to define.
-    fp8 = _load_module(FP8_PATH, "format_adapter_fp8")
+    # One module registers every pair, so `backends` answers for all of them.
     return SimpleNamespace(
-        contracts=contracts, backends=backends, adapter=adapter, fp8=fp8
+        contracts=contracts, backends=backends, adapter=adapter, fp8=backends
     )
 
 
@@ -98,7 +93,8 @@ def test_hardware_routing_matrix_is_injectable(
     adapter_name,
 ):
     b = modules.backends
-    capabilities = b.probe_format_backend_capabilities(
+    capabilities = b.probe_backend_capabilities(
+        wanted={"fp4", "int8"},
         cuda_probe=lambda: cuda,
         hip_probe=lambda: hip,
         cuda_capability_probe=lambda: capability,
@@ -119,7 +115,8 @@ def test_hardware_routing_matrix_is_injectable(
 
 def test_nvfp4_requires_blackwell_before_adapter_selection(modules):
     b = modules.backends
-    capabilities = b.probe_format_backend_capabilities(
+    capabilities = b.probe_backend_capabilities(
+        wanted={"fp4", "int8"},
         cuda_probe=lambda: True,
         hip_probe=lambda: False,
         cuda_capability_probe=lambda: (9, 0),
@@ -141,7 +138,8 @@ def test_nvfp4_requires_blackwell_before_adapter_selection(modules):
 
 def test_rocm_aiter_mxfp4_hybrid_remains_supported(modules):
     b = modules.backends
-    capabilities = b.probe_format_backend_capabilities(
+    capabilities = b.probe_backend_capabilities(
+        wanted={"fp4", "int8"},
         cuda_probe=lambda: False,
         hip_probe=lambda: True,
         cuda_capability_probe=lambda: None,
@@ -274,7 +272,8 @@ def test_aiter_fp4_kernel_probe_accepts_only_archs_with_fp4_kernels(
 def test_aiter_mxfp4_capability_preserves_symbol_probe_reason(modules):
     b = modules.backends
     calls = []
-    capabilities = b.probe_format_backend_capabilities(
+    capabilities = b.probe_backend_capabilities(
+        wanted={"fp4", "int8"},
         cuda_probe=lambda: False,
         hip_probe=lambda: True,
         cuda_capability_probe=lambda: None,
@@ -344,7 +343,7 @@ def test_module_path_overlap_is_ancestor_aware_and_boundary_safe(
     right,
     expected,
 ):
-    assert modules.backends.module_paths_overlap(left, right) is expected
+    assert modules.adapter.module_paths_overlap(left, right) is expected
 
 
 def test_component_root_target_preserves_int8_minimum_size_exclusions(modules):

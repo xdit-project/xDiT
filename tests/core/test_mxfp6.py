@@ -211,25 +211,25 @@ def test_wan_mxfp6_declaration_keeps_existing_load_modes():
 
 
 def test_aiter_mxfp6_probe_requires_gfx950(monkeypatch):
-    from xfuser.model_executor.models.runner_models.loading import format_backends
+    from xfuser.model_executor.models.runner_models.loading import backends
 
     api = SimpleNamespace(
         quant_mxfp6_gemm=lambda value: value,
         gemm_a6w6=lambda *args: None,
         mxfp6_gemm_pack_size=lambda rows, features: (rows, features),
     )
-    real_import = format_backends.import_module
+    real_import = backends.import_module
     monkeypatch.setattr(
-        format_backends,
+        backends,
         "import_module",
         lambda name: api if name == "aiter" else real_import(name),
     )
 
-    assert format_backends._probe_aiter_mxfp6_apis(lambda: "gfx950") == (
+    assert backends._probe_aiter_mxfp6_apis(lambda: "gfx950") == (
         True,
         None,
     )
-    available, reason = format_backends._probe_aiter_mxfp6_apis(lambda: "gfx942")
+    available, reason = backends._probe_aiter_mxfp6_apis(lambda: "gfx942")
     assert not available
     assert "gfx950" in reason
 

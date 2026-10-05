@@ -10,7 +10,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 BACKENDS_PATH = (
-    ROOT / "xfuser/model_executor/models/runner_models/loading/fp8_backends.py"
+    ROOT / "xfuser/model_executor/models/runner_models/loading/backends.py"
 )
 CONTRACTS_PATH = (
     ROOT / "xfuser/model_executor/models/runner_models/loading/contracts.py"
@@ -96,17 +96,18 @@ def test_hardware_and_package_probes_are_injectable(modules):
     b = modules.backends
     calls = []
 
-    capabilities = b.probe_fp8_backend_capabilities(
-        aiter_probe=lambda: calls.append("aiter") or False,
-        torchao_accelerator_probe=lambda: calls.append("accelerator") or True,
-        torchao_probe=lambda: calls.append("torchao") or True,
-        torchao_diffusers_probe=lambda: calls.append("diffusers") or False,
+    capabilities = b.probe_backend_capabilities(
+        wanted={"fp8"},
+        aiter_fp8_probe=lambda: calls.append("aiter") or False,
+        torchao_fp8_accelerator_probe=lambda: calls.append("accelerator") or True,
+        torchao_fp8_probe=lambda: calls.append("torchao") or True,
+        diffusers_probe=lambda kind: calls.append("diffusers") or False,
         torchao_text_encoder_probe=lambda: calls.append("text_encoder")
         or (
             False,
             "Transformers TorchAO unavailable",
         ),
-        torchao_fsdp_probe=lambda: calls.append("fsdp") or True,
+        fsdp_probe=lambda kind: calls.append("fsdp") or True,
     )
 
     assert calls == [
@@ -132,8 +133,8 @@ def test_text_encoder_probe_does_not_require_diffusers_transformer_quantizer(
     b = modules.backends
     monkeypatch.setattr(
         b,
-        "_probe_torchao_diffusers_streaming",
-        lambda: pytest.fail(
+        "_probe_diffusers_config",
+        lambda kind: pytest.fail(
             "text-encoder routing must probe PipelineQuantizationConfig directly"
         ),
     )
@@ -179,12 +180,13 @@ def test_supported_rocm_runs_torchao_api_preflight(modules):
     b = modules.backends
     calls = []
 
-    capabilities = b.probe_fp8_backend_capabilities(
-        aiter_probe=lambda: False,
-        torchao_accelerator_probe=lambda: True,
-        torchao_probe=lambda: calls.append("torchao") or True,
-        torchao_diffusers_probe=lambda: False,
-        torchao_fsdp_probe=lambda: True,
+    capabilities = b.probe_backend_capabilities(
+        wanted={"fp8"},
+        aiter_fp8_probe=lambda: False,
+        torchao_fp8_accelerator_probe=lambda: True,
+        torchao_fp8_probe=lambda: calls.append("torchao") or True,
+        diffusers_probe=lambda kind: False,
+        fsdp_probe=lambda kind: True,
     )
 
     assert calls == ["torchao"]
@@ -221,12 +223,13 @@ def test_rocm_fp8_eligibility_does_not_query_cuda_capability(modules):
 def test_unsupported_accelerator_skips_torchao_import_probe(modules):
     b = modules.backends
 
-    capabilities = b.probe_fp8_backend_capabilities(
-        aiter_probe=lambda: False,
-        torchao_accelerator_probe=lambda: False,
-        torchao_probe=lambda: pytest.fail("must not import TorchAO"),
-        torchao_diffusers_probe=lambda: pytest.fail("must not probe Diffusers"),
-        torchao_fsdp_probe=lambda: pytest.fail("must not inspect patches"),
+    capabilities = b.probe_backend_capabilities(
+        wanted={"fp8"},
+        aiter_fp8_probe=lambda: False,
+        torchao_fp8_accelerator_probe=lambda: False,
+        torchao_fp8_probe=lambda: pytest.fail("must not import TorchAO"),
+        diffusers_probe=lambda kind: pytest.fail("must not probe Diffusers"),
+        fsdp_probe=lambda kind: pytest.fail("must not inspect patches"),
     )
 
     torchao = capabilities.of("fp8", "torchao")
@@ -237,18 +240,19 @@ def test_unsupported_accelerator_skips_torchao_import_probe(modules):
 def test_torchao_preflight_preserves_exact_unavailability_reason(modules):
     b = modules.backends
 
-    capabilities = b.probe_fp8_backend_capabilities(
-        aiter_probe=lambda: False,
-        torchao_accelerator_probe=lambda: True,
-        torchao_probe=lambda: (
+    capabilities = b.probe_backend_capabilities(
+        wanted={"fp8"},
+        aiter_fp8_probe=lambda: False,
+        torchao_fp8_accelerator_probe=lambda: True,
+        torchao_fp8_probe=lambda: (
             False,
             "torchao 0.14.0 is older than required 0.15.0",
         ),
-        torchao_diffusers_probe=lambda: (
+        diffusers_probe=lambda kind: (
             False,
             "Diffusers TorchAoConfig unavailable",
         ),
-        torchao_fsdp_probe=lambda: pytest.fail(
+        fsdp_probe=lambda kind: pytest.fail(
             "FSDP probe must not run when TorchAO is unavailable"
         ),
     )

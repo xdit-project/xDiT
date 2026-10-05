@@ -18,7 +18,7 @@ from xfuser.core.utils.runner_utils import (
     log,
     rgetattr,
 )
-from .format_backends import module_paths_overlap
+from .quant_adapter import module_paths_overlap
 
 
 def shard_pipeline_components(loader) -> None:

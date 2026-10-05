@@ -34,7 +34,7 @@ _CARVED = GemmTargets(
 )
 from xfuser.model_executor.models.runner_models.loading import (
     quant_adapter,
-    fp8_backends,
+    backends,
     meta_load,
     text_encoder_plan,
     transformer_load,
@@ -885,7 +885,7 @@ def test_build_transformer_routes_torchao_fp8_to_native_diffusers_config(
 def test_blockwise_transformer_marks_only_wrapped_target_as_streamed(
     monkeypatch,
 ):
-    from xfuser.model_executor.models.runner_models.loading import fp8_backends
+    from xfuser.model_executor.models.runner_models.loading import backends
 
     adapter = SimpleNamespace(format=SimpleNamespace(value="fp8"))
     descriptor = SimpleNamespace(
@@ -920,7 +920,6 @@ def test_blockwise_transformer_marks_only_wrapped_target_as_streamed(
 def test_blockwise_fp4_marks_only_wrapped_fp8_remainder_as_streamed(
     monkeypatch,
 ):
-    from xfuser.model_executor.models.runner_models.loading import format_backends
 
     adapter = SimpleNamespace(format=SimpleNamespace(value="fp4"))
     descriptor = SimpleNamespace(
@@ -1049,13 +1048,12 @@ def test_build_transformer_mapping_failure_falls_back_without_streaming_claim(
 
 
 def test_eager_post_load_fallback_builds_meta_for_local_block_fill(monkeypatch):
-    from xfuser.model_executor.models.runner_models.loading import format_backends
     from xfuser.model_executor.models.runner_models.loading.contracts import (
         QuantizationBackend,
         QuantizationFormat,
     )
 
-    adapter = format_backends.AiterMxfp4BackendAdapter(
+    adapter = backends.AiterMxfp4BackendAdapter(
         backend=QuantizationBackend.AITER,
         format_=QuantizationFormat.FP4,
         native_unavailable_reason="requires full-precision block",
@@ -1156,10 +1154,10 @@ def test_build_transformer_streams_native_fp4_and_int8_configs(
         QuantizationFormat,
     )
     from xfuser.model_executor.models.runner_models.loading import (
-        format_backends,
+        backends,
     )
 
-    adapter = getattr(format_backends, adapter_name)(
+    adapter = getattr(backends, adapter_name)(
         backend=QuantizationBackend.TORCHAO,
         format_=getattr(QuantizationFormat, format_name),
         native_transformer_streaming=True,
@@ -1214,13 +1212,12 @@ def test_build_transformer_streams_native_fp4_and_int8_configs(
 
 
 def test_build_transformer_records_only_streamed_nvfp4_leaves(monkeypatch):
-    from xfuser.model_executor.models.runner_models.loading import format_backends
     from xfuser.model_executor.models.runner_models.loading.contracts import (
         QuantizationBackend,
         QuantizationFormat,
     )
 
-    adapter = format_backends.TorchaoNvfp4BackendAdapter(
+    adapter = backends.TorchaoNvfp4BackendAdapter(
         backend=QuantizationBackend.TORCHAO,
         format_=QuantizationFormat.FP4,
         native_transformer_streaming=True,
@@ -1371,7 +1368,7 @@ def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
         return prepared[component_name]
 
     monkeypatch.setattr(
-        "xfuser.model_executor.models.runner_models.loading.fp8_backends.prepare_text_encoder_fp8_load",
+        "xfuser.model_executor.models.runner_models.loading.backends.prepare_text_encoder_fp8_load",
         prepare,
     )
     monkeypatch.setattr(
@@ -1442,7 +1439,7 @@ def test_a_non_fp8_run_says_the_encoder_is_still_stored_at_fp8(monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        "xfuser.model_executor.models.runner_models.loading.fp8_backends."
+        "xfuser.model_executor.models.runner_models.loading.backends."
         "prepare_text_encoder_fp8_load",
         lambda adapter, **kwargs: SimpleNamespace(
             descriptor=SimpleNamespace(
@@ -1505,7 +1502,7 @@ def test_hybrid_meta_te_uses_the_fp8_adapter(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "xfuser.model_executor.models.runner_models.loading.fp8_backends."
+        "xfuser.model_executor.models.runner_models.loading.backends."
         "prepare_text_encoder_fp8_load",
         prepare,
     )
@@ -1552,7 +1549,7 @@ def test_meta_te_placement_disables_torchao_native_pipeline_streaming(
         )
 
     monkeypatch.setattr(
-        "xfuser.model_executor.models.runner_models.loading.fp8_backends.prepare_text_encoder_fp8_load",
+        "xfuser.model_executor.models.runner_models.loading.backends.prepare_text_encoder_fp8_load",
         prepare,
     )
     monkeypatch.setattr(text_encoder_plan, "log", lambda message: None)
@@ -1604,7 +1601,7 @@ def test_a_blockwise_filled_text_encoder_needs_no_post_load_fallback(monkeypatch
     )
 
     monkeypatch.setattr(
-        "xfuser.model_executor.models.runner_models.loading.fp8_backends."
+        "xfuser.model_executor.models.runner_models.loading.backends."
         "prepare_text_encoder_fp8_load",
         lambda *a, **k: pytest.fail(
             "a blockwise-filled encoder was routed to the whole-encoder rank0 load"
@@ -1646,7 +1643,7 @@ def test_meta_fsdp_rejects_text_encoder_post_load_fallback(monkeypatch):
         pytest.fail("memory-efficient FSDP incorrectly allowed post-load")
 
     monkeypatch.setattr(
-        "xfuser.model_executor.models.runner_models.loading.fp8_backends.prepare_text_encoder_fp8_load",
+        "xfuser.model_executor.models.runner_models.loading.backends.prepare_text_encoder_fp8_load",
         prepare,
     )
 

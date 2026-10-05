@@ -1,6 +1,6 @@
 """Lazy Diffusers/Transformers boundary for text-encoder loading.
 
-Backend selection and fallback policy live in ``fp8_backends``.  This module
+Backend selection and fallback policy live in ``backends``.  This module
 only translates an already-selected backend and exact component targets into
 framework configuration objects.
 """

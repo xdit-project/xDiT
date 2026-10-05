@@ -13,7 +13,7 @@ ADAPTER_PATH = (
     ROOT / "xfuser/model_executor/models/runner_models/loading/text_encoder_adapter.py"
 )
 BACKENDS_PATH = (
-    ROOT / "xfuser/model_executor/models/runner_models/loading/fp8_backends.py"
+    ROOT / "xfuser/model_executor/models/runner_models/loading/backends.py"
 )
 CONTRACTS_PATH = (
     ROOT / "xfuser/model_executor/models/runner_models/loading/contracts.py"

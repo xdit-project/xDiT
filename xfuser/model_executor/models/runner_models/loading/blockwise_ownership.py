@@ -14,7 +14,7 @@ shortest paths that cover it.
 from dataclasses import replace
 
 from xfuser.core.utils.runner_utils import log
-from .format_backends import module_path_is_covered
+from .quant_adapter import module_path_is_covered
 
 
 def blockwise_owned_targets(targets, wrap_attrs):

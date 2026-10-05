@@ -66,7 +66,7 @@ def plan_text_encoders(loader, existing_quantization_config=None):
 
     component_configs = {}
     if adapter is not None:
-        from .fp8_backends import prepare_text_encoder_fp8_load
+        from .backends import prepare_text_encoder_fp8_load
 
         for component_name in _declared_components(model):
             # The declared encoder targets, not the targets of whatever format

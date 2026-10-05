@@ -19,7 +19,7 @@ from xfuser.model_executor.models.runner_models.loading import (
 from xfuser.model_executor.models.runner_models.loading.quantization_ledger import (
     QuantizationLedger,
 )
-from xfuser.model_executor.models.runner_models.loading import fp8_backends
+from xfuser.model_executor.models.runner_models.loading import backends
 from xfuser.model_executor.models.runner_models.loading import quant_adapter
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     MaterializationMode,
@@ -312,7 +312,7 @@ def test_the_hybrid_schedule_only_blocks_streaming_where_it_must(monkeypatch):
     def prepare(_adapter, **kwargs):
         observed.update(kwargs)
 
-    from xfuser.model_executor.models.runner_models.loading import format_backends
+    from xfuser.model_executor.models.runner_models.loading import backends
 
     monkeypatch.setattr(
         quant_adapter,
@@ -337,7 +337,7 @@ def test_the_hybrid_schedule_only_blocks_streaming_where_it_must(monkeypatch):
     # hybrid schedule is a property of the run and is passed to every adapter;
     # whether it prevents streaming is the adapter's own declaration, and only
     # NVFP4 declares that it does.
-    from xfuser.model_executor.models.runner_models.loading.format_backends import (
+    from xfuser.model_executor.models.runner_models.loading.backends import (
         TorchaoInt8BackendAdapter,
         TorchaoNvfp4BackendAdapter,
     )

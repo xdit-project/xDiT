@@ -75,12 +75,9 @@ class QuantizationBackends:
         targets still gets a truthful answer about what it asked for.
         """
 
-        from .fp8_backends import probe_fp8_backend_capabilities
-        from .format_backends import probe_format_backend_capabilities
+        from .backends import probe_backend_capabilities
 
-        return probe_fp8_backend_capabilities().merged(
-            probe_format_backend_capabilities(wanted=self._formats_requested())
-        )
+        return probe_backend_capabilities(wanted=self._formats_requested())
 
     def impl_for(self, format_name: str) -> str | None:
         """Which implementation stores this format on this machine.
@@ -104,9 +101,9 @@ class QuantizationBackends:
         arrived as the run's low tier or its high one.
         """
 
-        # Imported for their registrations: each adapter class registers the
+        # Imported for its registrations: each adapter class registers the
         # one pair it stores as it is defined.
-        from . import format_backends, fp8_backends  # noqa: F401
+        from . import backends  # noqa: F401
         from .contracts import UnsupportedLoadContract
         from .quant_adapter import build_adapter, validate_fsdp_placement
 

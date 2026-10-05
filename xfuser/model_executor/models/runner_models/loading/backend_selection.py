@@ -19,7 +19,7 @@ the run and no longer.
 
 import functools
 
-from .contracts import IMPL_PREFERENCE as _IMPL_PREFERENCE
+from .contracts import IMPL_PREFERENCE as _IMPL_PREFERENCE, TEXT_ENCODER_FORMAT
 from .quant_adapter import module_paths_overlap
 
 
@@ -202,11 +202,21 @@ class QuantizationBackends:
             )
 
     def _formats_requested(self) -> frozenset:
-        """Every format this run named, before the plan resolves any targets."""
+        """Every format this run will place, before the plan resolves targets.
+
+        The spec names what the transformer takes. The text encoder is a second
+        answer: that route stores one fixed format whatever the run asked the
+        transformer for, so a run that enables it needs that format probed too
+        -- otherwise the narrowing reports it "not requested" to the one caller
+        that does request it.
+        """
         spec = getattr(self.model.config, "gemm_quantization_spec", None)
         if spec is None:
             return frozenset()
-        return frozenset(spec.formats) - {"none"}
+        requested = frozenset(spec.formats) - {"none"}
+        if requested and getattr(self.model.config, "quantize_text_encoder", False):
+            requested |= {TEXT_ENCODER_FORMAT}
+        return requested
 
     def _formats_in_play(self) -> tuple:
         """The formats this run will place, low and high."""

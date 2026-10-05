@@ -307,6 +307,68 @@ def test_disk_fill_preserves_nonpersistent_buffers_and_reports_source_errors():
     assert quantize_line < _call_line(_is_block_shard)
 
 
+def _text_encoder_format():
+    """`TEXT_ENCODER_FORMAT` read out of the source, without importing it."""
+    path = ROOT / "xfuser/model_executor/models/runner_models/loading/contracts.py"
+    for node in ast.parse(path.read_text()).body:
+        if (
+            isinstance(node, ast.Assign)
+            and getattr(node.targets[0], "id", "") == "TEXT_ENCODER_FORMAT"
+        ):
+            return node.value.value
+    raise AssertionError("contracts.py no longer declares TEXT_ENCODER_FORMAT")
+
+
+def test_the_text_encoder_format_is_resolved_only_when_an_encoder_needs_it():
+    """Asking for it up front asks this machine to store a format the run may
+    never have named.
+
+    It used to be resolved before the loop, which was harmless only while
+    capability probing answered for every format on every run. Once probing was
+    narrowed to the formats a run actually names, that lookup had no truthful
+    answer and refused the load -- on a plain bf16 run of any model that merely
+    declares encoder targets.
+
+    So the lookup must sit inside the loop, after the guard that skips an
+    encoder with no targets.
+    """
+    path = (
+        ROOT
+        / "xfuser/model_executor/models/runner_models/loading/text_encoder_plan.py"
+    )
+    source = path.read_text()
+    plan = next(
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef) and node.name == "plan_text_encoders"
+    )
+
+    loop = next(node for node in plan.body if isinstance(node, ast.For))
+    lookups = [
+        node
+        for node in ast.walk(plan)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "adapter_for"
+    ]
+    assert lookups, "nothing resolves the text encoder's adapter any more"
+
+    guard = min(
+        node.lineno
+        for node in ast.walk(loop)
+        if isinstance(node, ast.Continue)
+    )
+    for call in lookups:
+        assert loop.lineno < call.lineno, (
+            "the text encoder's adapter is resolved before the loop, so a run "
+            "that quantizes nothing still has to be able to store its format"
+        )
+        assert call.lineno > guard, (
+            "the adapter is resolved before the no-targets guard, so an "
+            "encoder with nothing to place still forces the lookup"
+        )
+
+
 def test_the_meta_text_encoder_layout_matches_the_declared_format():
     """`TEXT_ENCODER_FORMAT` is a statement about this route, not a setting.
 
@@ -316,9 +378,9 @@ def test_the_meta_text_encoder_layout_matches_the_declared_format():
     alone would leave the meta layout behind while everything else moved, so
     this fails until the swap moves with it.
     """
-    from xfuser.model_executor.models.runner_models.loading.text_encoder_plan import (
-        TEXT_ENCODER_FORMAT,
-    )
+    # From `contracts`, which imports nothing heavy, so this stays a
+    # structural check rather than one that needs the whole app importable.
+    TEXT_ENCODER_FORMAT = _text_encoder_format()
 
     path = ROOT / "xfuser/model_executor/models/runner_models/loading/meta_load.py"
     source = path.read_text()

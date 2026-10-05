@@ -18,6 +18,10 @@ CONTRACTS_PATH = (
 ADAPTER_PATH = (
     ROOT / "xfuser/model_executor/models/runner_models/loading/quant_adapter.py"
 )
+SELECTION_PATH = (
+    ROOT / "xfuser/model_executor/models/runner_models/loading/backend_selection.py"
+)
+GEMM_PATH = ROOT / "xfuser/config/gemm.py"
 
 
 #: A synthetic package over the loading directory. These modules are meant to
@@ -51,9 +55,18 @@ def modules():
     contracts = _load_module(CONTRACTS_PATH, "contracts")
     adapter = _load_module(ADAPTER_PATH, "quant_adapter")
     backends = _load_module(BACKENDS_PATH, "format_adapter_backends")
+    selection = _load_module(SELECTION_PATH, "backend_selection")
+    # By path like the rest: importing xfuser.config.gemm would execute the
+    # package root, which imports torch.
+    gemm = _load_module(GEMM_PATH, "gemm_config")
     # One module registers every pair, so `backends` answers for all of them.
     return SimpleNamespace(
-        contracts=contracts, backends=backends, adapter=adapter, fp8=backends
+        contracts=contracts,
+        backends=backends,
+        adapter=adapter,
+        fp8=backends,
+        selection=selection,
+        gemm=gemm,
     )
 
 
@@ -743,3 +756,41 @@ def test_the_loader_reads_these_as_attributes_not_as_a_backend_name(
     )
 
     assert getattr(adapter, attribute) is expected
+
+
+@pytest.mark.parametrize(
+    ("profile", "quantize_text_encoder", "expected"),
+    [
+        # Nothing quantized: nothing probed, and in particular nothing is
+        # asked about FP8 on a model that merely declares encoder targets.
+        ("none", False, []),
+        ("none", True, []),
+        ("fp8", False, ["fp8"]),
+        ("int8", False, ["int8"]),
+        # The encoder route stores one fixed format whatever the transformer
+        # was asked for, so enabling it puts that format in play too.
+        ("int8", True, ["fp8", "int8"]),
+        ("low=fp4,high=fp6", True, ["fp4", "fp6", "fp8"]),
+    ],
+)
+def test_probing_is_narrowed_to_what_the_run_will_actually_place(
+    modules, profile, quantize_text_encoder, expected
+):
+    """The narrowing has to cover every route that places a format.
+
+    It once covered only the transformer's spec. The text-encoder route then
+    asked for its own format, was told "fp8 was not requested", and refused the
+    load -- on every run of a model with declared encoder targets, quantized or
+    not.
+    """
+    backends = modules.selection.QuantizationBackends.__new__(
+        modules.selection.QuantizationBackends
+    )
+    backends.model = SimpleNamespace(
+        config=SimpleNamespace(
+            gemm_quantization_spec=modules.gemm.GemmQuantizationSpec.parse(profile),
+            quantize_text_encoder=quantize_text_encoder,
+        )
+    )
+
+    assert sorted(backends._formats_requested()) == expected

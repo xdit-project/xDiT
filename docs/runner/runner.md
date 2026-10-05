@@ -170,10 +170,10 @@ Individual model classes that inherit from `xFuserModel`:
 |----------|-------------|---------|
 | `--use_torch_compile` | Enable torch.compile acceleration | False |
 | `--gemm_quantization` | Transformer GEMM profile: `fp8`, `fp4`, `fp6`, `int8`, `low=fp4,high=fp8`, or `low=fp4,high=fp6` | none |
-| `--gemm_config` | Optional YAML file for advanced high-precision targets or an explicit FP8/FP4 schedule | None |
-| `--use_fp8_gemms`, `--use_fp4_gemms`, `--use_int8_gemms` | Deprecated format selectors retained for compatibility | False |
-| `--quantize_text_encoder` | Extend FP8 quantization to the text encoder as well; requires a profile containing FP8 | False |
-| `--use_hybrid_gemm_schedule` | Use the profile's FP8 or FP6 high format at the endpoints and FP4 in the middle | False |
+| `--gemm_config` | Optional YAML file for advanced high-precision targets or an explicit per-step schedule | None |
+| `--use_fp8_gemms`, `--use_fp4_gemms`, `--use_int8_gemms`, `--use_fp8_text_encoder`, `--fp8_precision_override_*` | Removed. Still parsed so the error can name the replacement; use `--gemm_quantization` and `--gemm_config` | - |
+| `--quantize_text_encoder` | Quantize the text encoder as well as the transformer; needs a `--gemm_quantization` profile, but names no format of its own | False |
+| `--use_hybrid_gemm_schedule` | Hold both of the profile's formats at every target and pick one per denoising step; requires a `low=...,high=...` profile | False |
 | `--enable_tiling` | Enable VAE tiling | False |
 | `--enable_slicing` | Enable VAE slicing | False |
 | `--enable_model_cpu_offload` | Enable model CPU offload | False |
@@ -195,7 +195,7 @@ placement all permit it, and converted after load where they do not. INT8 is
 rejected on ROCm throughout. Model capability checks and target declarations
 apply on top of whatever a row allows.
 
-| Hardware / available backend | FP8 (`--use_fp8_gemms`) | FP4 (`--use_fp4_gemms`) | INT8 (`--use_int8_gemms`) |
+| Hardware / available backend | FP8 (`--gemm_quantization fp8`) | FP4 (`--gemm_quantization fp4`) | INT8 (`--gemm_quantization int8`) |
 |------------------------------|--------------------------|--------------------------|-----------------------------|
 | ROCm RDNA4 (`gfx1200`/`gfx1201`) + AITER | AITER block-scale W8A8 FP8, block size 128; streams where the runner is wired for it, otherwise converts layer by layer after load | Excluded: AITER ships no FP4 kernels for RDNA4, refused in preflight | Excluded |
 | ROCm RDNA4 without AITER | torchao FP8 | Excluded: ROCm FP4 requires AITER, which has no RDNA4 kernels either way | Excluded |
@@ -311,18 +311,20 @@ quality: Wan 2.1 I2V and T2V keep blocks 0-9 and 30-39, Wan 2.2 TI2V keeps
 blocks 0, 1, 28, and 29 plus the `.net.0.proj` and `.net.2` leaves, Cosmos3-Super
 keeps layers 0-9 and 54-63, and both MiniMax-H3 runners keep the `attn.to_out.0`,
 `ff.net.2`, and `adaln_proj.linear` leaves. Wan 2.2 I2V and T2V declare no block
-overrides at all. `--fp8_precision_override_prefix_patterns` and
-`--fp8_precision_override_suffix_patterns` replace the declared prefix or suffix
-list rather than adding to it.
+overrides at all. A model declares these as `keep_high`, which is inert under a
+single-format profile and names the better half under a tiered one. The
+`gemm_high_precision_*` keys in a `--gemm_config` file replace the declared
+module, prefix or suffix list rather than adding to it.
 
 #### Flag Combinations and Exclusions
 
-- `--use_fp8_gemms` quantizes transformer targets only. Text-encoder FP8 is opt-in everywhere: add `--quantize_text_encoder` when you want it.
-- `--quantize_text_encoder` requires `--use_fp8_gemms` and a runner that explicitly declares text-encoder FP8 capability and targets. Other runners reject the text-encoder flag during capability validation. Quantizing a supported text encoder may reduce text-conditioning quality.
+- `--gemm_quantization` quantizes transformer targets only. The text encoder is opt-in everywhere: add `--quantize_text_encoder` when you want it.
+- `--quantize_text_encoder` requires a `--gemm_quantization` profile and a runner that declares the `quantize_text_encoder` capability and encoder targets. Other runners reject the flag during capability validation. Quantizing a supported text encoder may reduce text-conditioning quality.
 - RDNA4+AITER streaming FP8 for a text encoder requires `transformers>=5.0` with `transformers.core_model_loading`. On Transformers 4.x, xDiT logs the reason and uses AITER post-load conversion where placement permits it; memory-efficient FSDP rejects the fallback before allocation because its sharded meta layout cannot be changed safely. The general `transformers>=4.39.1` package floor remains valid.
 - Native torchao text-encoder loading requires `torchao>=0.15.0`, Diffusers `PipelineQuantizationConfig`, and Transformers `TorchAoConfig` quantize-on-load APIs. Native torchao transformer loading separately requires Diffusers `TorchAoConfig` accepting the exact `AOBaseConfig`; this includes NVFP4 and INT8 when installed APIs support them. These APIs are feature-probed lazily and unavailable paths fall back explicitly where placement permits it.
-- `--use_int8_gemms` cannot be combined with `--use_fp8_gemms` or `--use_fp4_gemms`, and that exclusion includes explicit hybrid FP8/FP4 mode.
-- Setting `--use_fp8_gemms` and `--use_fp4_gemms` together requires `--use_hybrid_gemm_schedule`; the generic combination is rejected. The hybrid FP4 path owns its FP8 high-precision conversion, so the generic FP8 traversal does not run afterward. Model-selected quality overrides and FP8-only components remain FP8. Use the FP8 precision-override flags only with FP4.
+- There is no list of permitted format pairs. `--gemm_quantization low=X,high=Y` accepts any two distinct formats the model declares; whether this machine can store each is one registry lookup at load time, and the refusal names the probe that failed.
+- A run is refused if it names a format the model does not declare in `gemm_formats`, whichever tier it appears in.
+- `--use_hybrid_gemm_schedule` requires a tiered profile. Under it no format streams from disk, whatever its backend would otherwise support: the per-step pair needs each leaf in bf16 so both precisions can be built from it, so targets are always converted after the load.
 - `--memory_efficient_sharding` requires `--fully_shard_degree > 1`. It is a sharded load: rank 0 reads one block at a time and broadcasts it within the FSDP group before each rank receives its shard.
 - `--fully_shard_degree` is orthogonal to the parallel degree and does not contribute to it. A multi-rank run must still declare a parallel degree whose product (`data × cfg × sequence × tensor × pipefusion`) equals the DiT parallel size, so pair `--fully_shard_degree N` with, for example, `--ulysses_degree N`. Setting only `--fully_shard_degree` fails config validation before the model is built.
 - `--memory_efficient_replicated_load` is opt-in, requires multiple ranks, and applies only when weights are replicated. It is ignored with FSDP, PipeFusion, or tensor parallelism, and for runners marked “No” above. Pure Ulysses, ring, CFG, and data parallelism remain eligible.
@@ -339,7 +341,7 @@ RDNA4 transformer-only streaming FP8:
 ```bash
 xdit --model FLUX.2-dev \
     --prompt "A lighthouse in a winter storm" \
-    --use_fp8_gemms
+    --gemm_quantization fp8
 ```
 
 RDNA4 transformer and text-encoder streaming FP8 (Transformers 5 required):
@@ -347,7 +349,7 @@ RDNA4 transformer and text-encoder streaming FP8 (Transformers 5 required):
 ```bash
 xdit --model FLUX.2-dev \
     --prompt "A lighthouse in a winter storm" \
-    --use_fp8_gemms \
+    --gemm_quantization fp8 \
     --quantize_text_encoder
 ```
 
@@ -360,7 +362,7 @@ torchrun --nproc_per_node=4 -m xfuser.runner \
     --ulysses_degree 4 \
     --fully_shard_degree 4 \
     --memory_efficient_sharding \
-    --use_fp8_gemms
+    --gemm_quantization fp8
 ```
 
 Replicated load with sequence parallelism:
@@ -371,7 +373,7 @@ torchrun --nproc_per_node=4 -m xfuser.runner \
     --prompt "An isometric botanical library" \
     --ulysses_degree 4 \
     --memory_efficient_replicated_load \
-    --use_fp8_gemms
+    --gemm_quantization fp8
 ```
 
 CUDA Blackwell NVFP4:
@@ -379,7 +381,7 @@ CUDA Blackwell NVFP4:
 ```bash
 xdit --model FLUX.2-dev \
     --prompt "A studio photograph of a glass sculpture" \
-    --use_fp4_gemms
+    --gemm_quantization fp4
 ```
 
 These examples show how the flags are wired, not tuned recommendations: output quality, peak memory, and kernel availability depend on the checkpoint, the GPU, the torch/torchao/AITER versions, and the parallel layout.

@@ -8,8 +8,6 @@ from unittest.mock import patch
 
 import pytest
 
-from _spawn_startup import import_then_run, wait_until_started
-
 pytestmark = pytest.mark.gloo
 
 _WORLD_SIZE = 4
@@ -96,26 +94,23 @@ def _nccl_model_replica_group_worker(rank, world_size, init_method, result_queue
     )
 
 
-# Imported by each rank before the hang budget (``timeout``) starts.
-_WORKER_IMPORTS = ("torch.distributed", "xfuser.core.distributed.parallel_state")
+def _run_spawned(torch, worker, init_method, *, world_size, timeout=600):
+    """Run ranks within one budget, including interpreter startup and imports.
 
-
-def _run_spawned(torch, worker, init_method, *, world_size, timeout):
+    Cold worker imports took 388 s on a slow filesystem (#817).
+    """
     context = torch.multiprocessing.get_context("spawn")
     result_queue = context.Queue()
-    ready_queue = context.Queue()
     processes = [
         context.Process(
-            target=import_then_run,
-            args=(ready_queue, _WORKER_IMPORTS, worker, rank, world_size, init_method, result_queue),
+            target=worker,
+            args=(rank, world_size, init_method, result_queue),
         )
         for rank in range(world_size)
     ]
+    deadline = time.monotonic() + timeout
     for process in processes:
         process.start()
-
-    wait_until_started(processes, ready_queue)
-    deadline = time.monotonic() + timeout
     for process in processes:
         process.join(max(0.0, deadline - time.monotonic()))
 
@@ -191,7 +186,6 @@ def test_model_replica_group_on_real_gpus_without_hanging(tmp_path):
         _nccl_model_replica_group_worker,
         f"file://{tmp_path / 'model-replica-nccl-init'}",
         world_size=_WORLD_SIZE,
-        timeout=60,
     )
 
     _assert_replica_group_results(processes, hung, survivors, results)
@@ -210,7 +204,6 @@ def test_model_replica_group_on_cpu_without_hanging(tmp_path):
         _gloo_model_replica_group_worker,
         f"file://{tmp_path / 'model-replica-gloo-init'}",
         world_size=_WORLD_SIZE,
-        timeout=30,
     )
 
     _assert_replica_group_results(processes, hung, survivors, results)

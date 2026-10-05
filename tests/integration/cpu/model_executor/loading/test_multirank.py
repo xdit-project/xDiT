@@ -7,8 +7,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from _spawn_startup import import_then_run, wait_until_started
-
 pytestmark = pytest.mark.gloo
 
 
@@ -541,30 +539,17 @@ def _pinned_fp32_sharding_worker(rank, world_size, init_method, result_queue):
             dist.destroy_process_group()
 
 
-# Imported by each rank before the hang budget (``timeout``) starts.
-_WORKER_IMPORTS = (
-    "torch.distributed",
-    "xfuser.core.distributed.sharding",
-    "xfuser.model_executor.layers.mxfp4_linear",
-    "xfuser.model_executor.models.runner_models.loading.meta_load",
-)
+def _run_spawned(torch, worker, init_method, *, timeout=600):
+    """Run ranks within one budget, including interpreter startup and imports.
 
-
-def _run_spawned(torch, worker, init_method, *, timeout):
+    Cold worker imports took 388 s on a slow filesystem (#817).
+    """
     context = torch.multiprocessing.get_context("spawn")
     result_queue = context.Queue()
-    ready_queue = context.Queue()
-    processes = [
-        context.Process(
-            target=import_then_run, args=(ready_queue, _WORKER_IMPORTS, worker, rank, 2, init_method, result_queue)
-        )
-        for rank in range(2)
-    ]
+    processes = [context.Process(target=worker, args=(rank, 2, init_method, result_queue)) for rank in range(2)]
+    deadline = time.monotonic() + timeout
     for process in processes:
         process.start()
-
-    wait_until_started(processes, ready_queue)
-    deadline = time.monotonic() + timeout
     for process in processes:
         process.join(max(0.0, deadline - time.monotonic()))
 
@@ -617,7 +602,6 @@ def test_two_rank_load_failure_raises_on_every_rank_without_hanging(tmp_path, wo
         torch,
         worker,
         f"file://{tmp_path / init_name}",
-        timeout=20,
     )
 
     assert not hung, f"hung worker pids: {hung}"
@@ -636,7 +620,6 @@ def test_two_rank_replicated_te_reconciles_specs_without_hanging(tmp_path):
         torch,
         _replicated_te_reconcile_worker,
         f"file://{tmp_path / 'te-reconcile-init'}",
-        timeout=20,
     )
 
     assert not hung, f"text-encoder reconciliation hung worker pids: {hung}"
@@ -672,7 +655,6 @@ def test_two_rank_replicated_te_matches_source_aliases_without_hanging(
         torch,
         worker,
         f"file://{tmp_path / init_name}",
-        timeout=20,
     )
 
     assert not hung, f"text-encoder alias reconciliation hung worker pids: {hung}"
@@ -701,7 +683,6 @@ def test_sharding_keeps_the_models_fp32_modules_out_of_the_shards(tmp_path):
         torch,
         _pinned_fp32_sharding_worker,
         f"file://{tmp_path / 'nccl-init'}",
-        timeout=180,
     )
 
     assert not hung, f"sharding hung worker pids: {hung}"
@@ -751,7 +732,6 @@ def test_mxfp4_packed_weight_is_sharded_by_fsdp2(tmp_path):
         torch,
         _mxfp4_fsdp2_worker,
         f"file://{tmp_path / 'nccl-init'}",
-        timeout=60,
     )
 
     assert not hung, f"FSDP2 sharding hung worker pids: {hung}"

@@ -15,7 +15,6 @@ import torch.nn as nn
 import torch.distributed as dist
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
-from _spawn_startup import wait_until_started
 from xfuser.core.distributed.sharding import shard_component
 
 
@@ -84,9 +83,7 @@ def _check_parameter_count():
     )
 
 
-def _guard(init_method, check, result_queue, ready_queue):
-    # Unpickling this target imported the module (torch and xfuser), so the rank is ready.
-    ready_queue.put(None)
+def _guard(init_method, check, result_queue):
     torch.cuda.set_device(0)
     try:
         dist.init_process_group(
@@ -118,15 +115,13 @@ def _run_isolated(check, tmp_path):
 
     context = torch.multiprocessing.get_context("spawn")
     result_queue = context.Queue()
-    ready_queue = context.Queue()
     process = context.Process(
         target=_guard,
-        args=(f"file://{tmp_path / 'nccl-init'}", check, result_queue, ready_queue),
+        args=(f"file://{tmp_path / 'nccl-init'}", check, result_queue),
     )
     process.start()
-    # The 60 s hang budget starts once the rank has started and imported torch and xfuser.
-    wait_until_started([process], ready_queue)
-    process.join(60)
+    # Include interpreter startup and cold imports on slow filesystems (#817).
+    process.join(600)
     if process.is_alive():
         process.terminate()
         process.join(5)

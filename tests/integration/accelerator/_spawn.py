@@ -2,6 +2,8 @@
 
 Each rank is a spawned interpreter so CUDA and HIP can initialize. The parent
 surfaces the child traceback; a non-zero exit alone hides the failure.
+The total timeout includes interpreter startup, imports, and the worker body.
+Allow ten minutes by default: cold imports on a slow filesystem took 388 s (#817).
 """
 
 import os
@@ -11,13 +13,8 @@ import traceback
 
 import pytest
 
-from _spawn_startup import import_and_signal_ready, wait_until_started
 
-# Imported by each rank before the hang budget (``timeout``) starts.
-_WORKER_IMPORTS = ("torch.distributed", "xfuser.core.distributed")
-
-
-def spawn_accelerator_ranks(worker, tmp_path, *, world_size, timeout=180, init_filename="dist-init", args=()):
+def spawn_accelerator_ranks(worker, tmp_path, *, world_size, timeout=600, init_filename="dist-init", args=()):
     torch = pytest.importorskip("torch")
     if not torch.cuda.is_available() or torch.cuda.device_count() < world_size:
         pytest.skip(f"requires {world_size} accelerator devices")
@@ -26,20 +23,17 @@ def spawn_accelerator_ranks(worker, tmp_path, *, world_size, timeout=180, init_f
 
     context = torch.multiprocessing.get_context("spawn")
     result_queue = context.Queue()
-    ready_queue = context.Queue()
     init_method = f"file://{tmp_path / init_filename}"
     processes = [
         context.Process(
             target=_guard,
-            args=(rank, world_size, init_method, worker, result_queue, ready_queue, args),
+            args=(rank, world_size, init_method, worker, result_queue, args),
         )
         for rank in range(world_size)
     ]
+    deadline = time.monotonic() + timeout
     for process in processes:
         process.start()
-
-    wait_until_started(processes, ready_queue)
-    deadline = time.monotonic() + timeout
     for process in processes:
         process.join(max(0.0, deadline - time.monotonic()))
 
@@ -73,12 +67,11 @@ def spawn_accelerator_ranks(worker, tmp_path, *, world_size, timeout=180, init_f
         pytest.fail("\n".join(details))
 
 
-def _guard(rank, world_size, init_method, worker, result_queue, ready_queue, args):
+def _guard(rank, world_size, init_method, worker, result_queue, args):
     os.environ["RANK"] = str(rank)
     os.environ["LOCAL_RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(world_size)
     os.environ["MASTER_ADDR"] = "127.0.0.1"
-    import_and_signal_ready(ready_queue, _WORKER_IMPORTS)
     try:
         worker(rank, world_size, init_method, *args)
     except Exception:

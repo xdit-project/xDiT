@@ -242,6 +242,7 @@ class xFuserArgs:
     removed_use_int8_gemms: bool = False
     removed_use_fp8_gemms: bool = False
     quantize_text_encoder: bool = False
+    removed_use_fp8_text_encoder: bool = False
     removed_use_fp4_gemms: bool = False
     # Internal compatibility bridge derived from gemm_quantization.
     removed_fp8_precision_override_prefix_patterns: Optional[str] = None
@@ -345,6 +346,7 @@ class xFuserArgs:
         "use_fp8_gemms": "--gemm_quantization fp8",
         "use_fp4_gemms": "--gemm_quantization fp4",
         "use_int8_gemms": "--gemm_quantization int8",
+        "use_fp8_text_encoder": "--quantize_text_encoder",
         "fp8_precision_override_prefix_patterns":
             "--gemm_config with gemm_high_precision_prefix_patterns",
         "fp8_precision_override_suffix_patterns":
@@ -998,6 +1000,12 @@ class xFuserArgs:
                  "higher. Frees several GB for large bf16 text encoders, at whatever "
                  "output-quality cost that format carries for the encoder; off by default "
                  "because that is a quality trade-off, not a free win.",
+        )
+        parser.add_argument(
+            "--use_fp8_text_encoder",
+            dest="removed_use_fp8_text_encoder",
+            action="store_true",
+            help="Removed; use --quantize_text_encoder.",
         )
         parser.add_argument(
             "--use_fp4_gemms",

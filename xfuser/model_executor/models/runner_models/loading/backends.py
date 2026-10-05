@@ -823,10 +823,19 @@ class TorchaoFp8BackendAdapter(QuantAdapter):
         device,
         offload_to_cpu=False,
         filter_fn=None,
+        companion=None,
     ):
         if offload_to_cpu:
             raise ValueError(
                 "torchao FP8 conversion does not support immediate CPU offload"
+            )
+        if companion is not None:
+            from xfuser.core.utils.runner_utils import replace_linears
+
+            return replace_linears(
+                module,
+                self.layer_factory(device=device, companion=companion),
+                filter_fn=filter_fn,
             )
         from xfuser.core.utils.runner_utils import quantize_linear_layers_to_fp8
 

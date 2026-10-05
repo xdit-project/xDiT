@@ -123,11 +123,11 @@ def build_adapter(format_name: str, impl: str, *, capability, hybrid: bool = Fal
         raise UnsupportedLoadContract(
             f"{impl} {format_name} is unavailable on this machine: {reason}"
         )
-    if hybrid and not cls.builds_one_layer():
+    if hybrid and not cls.leads_a_pair():
         raise UnsupportedLoadContract(
-            f"{impl} {format_name} cannot install one layer at a time, so it "
-            "cannot drive a low/high GEMM schedule; drop "
-            "--use_hybrid_gemm_schedule or name a format that can"
+            f"{impl} {format_name} cannot install a pair at a leaf, so it "
+            "cannot be the low half of a per-step GEMM schedule; drop "
+            "--use_hybrid_gemm_schedule or name a low format that can"
         )
     return cls(
         backend=QuantizationBackend(impl),
@@ -413,9 +413,36 @@ class QuantAdapter:
 
     @classmethod
     def builds_one_layer(cls) -> bool:
-        """Whether this implementation has a single-leaf seam at all."""
+        """Whether this implementation can be the *high* half of a pair.
+
+        It needs a single-leaf seam, because the companion is built one leaf
+        at a time inside the low half's walk.
+        """
 
         return cls._single_layer_factory is not QuantAdapter._single_layer_factory
+
+    @classmethod
+    def leads_a_pair(cls) -> bool:
+        """Whether this implementation can be the *low* half of a pair.
+
+        It has to hand a companion to ``layer_factory`` as it converts, which
+        means taking one. Read off the converter's own signature rather than
+        declared, so it cannot drift from what the code does -- an
+        implementation that does not take one raises TypeError at the first
+        converted leaf, long past the point this is asked.
+
+        ``builds_one_layer`` used to stand in for this, which refused nothing:
+        every implementation has a single-leaf seam, and that is the other
+        half's requirement.
+        """
+
+        import inspect
+
+        try:
+            parameters = inspect.signature(cls.convert_module).parameters
+        except (TypeError, ValueError):
+            return False
+        return "companion" in parameters
 
     def convert_module(self, module, *, device, filter_fn=None, offload_to_cpu=False):
         raise NotImplementedError

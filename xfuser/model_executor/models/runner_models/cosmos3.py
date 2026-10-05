@@ -4,7 +4,6 @@ from diffusers import UniPCMultistepScheduler
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
 from xfuser.model_executor.models.runner_models.base_model import (
-    DIFFUSERS_FROM_SOURCE,
     ModelSettings,
     xFuserModel,
     register_model,
@@ -47,8 +46,8 @@ COSMOS3_FSDP_STRATEGY = {
 @register_model("nvidia/Cosmos3-Super")
 @register_model("Cosmos3-Super")
 class xFuserCosmos3SuperModel(xFuserModel):
-    # No released diffusers ships pipeline_cosmos3_omni yet.
-    min_diffusers_version = DIFFUSERS_FROM_SOURCE
+    # diffusers 0.39.0 is the first release with pipeline_cosmos3_omni.
+    min_diffusers_version = "0.39.0"
 
     load_support = LoadSupport(
         meta_transformers=("transformer",),

@@ -14,9 +14,14 @@ from xfuser.core.attention.spec import AttentionBackendType, AttnCall, VarlenPac
 from xfuser.model_executor.layers.attention_mask import make_attn_mask_with_meta
 from xfuser.model_executor.layers.usp import attention
 
-pytestmark = pytest.mark.nvidia
-
-BACKENDS = pytest.mark.parametrize("backend", [AttentionBackendType.CUDNN, AttentionBackendType.SDPA_EFFICIENT])
+# cuDNN attention exists only on NVIDIA; the aten memory-efficient kernel runs on any accelerator.
+BACKENDS = pytest.mark.parametrize(
+    "backend",
+    [
+        pytest.param(AttentionBackendType.CUDNN, marks=pytest.mark.nvidia),
+        AttentionBackendType.SDPA_EFFICIENT,
+    ],
+)
 
 
 def _qkv(batch, heads, q_len, kv_len, head_dim=64):

@@ -836,9 +836,6 @@ class TorchaoFp8BackendAdapter(QuantAdapter):
 @stores("fp4", "torchao")
 class TorchaoNvfp4BackendAdapter(QuantAdapter):
     default_unavailable_reason = "Diffusers TorchAoConfig API is unavailable"
-    # Streaming would own every targeted leaf, leaving the hybrid
-    # wrapper nothing to build its second precision from.
-    streams_under_hybrid = False
     storage_semantics = "torchao_nvfp4_dynamic_per_tensor"
     parameter_semantics = "torchao_nvfp4_tensor_subclass"
     supports_precision_overrides = True

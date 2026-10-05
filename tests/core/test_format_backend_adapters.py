@@ -517,11 +517,29 @@ def test_nvfp4_native_streaming_excludes_only_precision_overrides(modules, monke
     )
 
 
-def test_nvfp4_native_streaming_rejects_hybrid_ownership(modules):
+@pytest.mark.parametrize(
+    ("adapter_name", "backend_name", "format_name"),
+    [
+        ("TorchaoNvfp4BackendAdapter", "TORCHAO", "FP4"),
+        ("TorchaoFp8BackendAdapter", "TORCHAO", "FP8"),
+        ("AiterFp8BackendAdapter", "AITER", "FP8"),
+        ("TorchaoInt8BackendAdapter", "TORCHAO", "INT8"),
+    ],
+)
+def test_native_streaming_rejects_hybrid_ownership(
+    modules, adapter_name, backend_name, format_name
+):
+    """Every implementation, not just the one that happened to be low first.
+
+    A streamed load quantizes each targeted leaf on the way in; the per-step
+    pair needs them in bf16 to build both precisions from. Nothing about that
+    is format-specific, and while it was a per-adapter declaration the other
+    low formats streamed and built no pair at all.
+    """
     b = modules.backends
-    adapter = b.TorchaoNvfp4BackendAdapter(
-        backend=modules.contracts.QuantizationBackend.TORCHAO,
-        format_=modules.contracts.QuantizationFormat.FP4,
+    adapter = getattr(b, adapter_name)(
+        backend=getattr(modules.contracts.QuantizationBackend, backend_name),
+        format_=getattr(modules.contracts.QuantizationFormat, format_name),
         native_transformer_streaming=True,
     )
 
@@ -535,7 +553,7 @@ def test_nvfp4_native_streaming_rejects_hybrid_ownership(modules):
     )
 
     assert prepared.descriptor.materialization_mode == "post_load"
-    assert "hybrid" in prepared.descriptor.fallback_reason
+    assert "streamed load" in prepared.descriptor.fallback_reason
 
 
 def test_mxfp4_never_claims_per_weight_streaming(modules):

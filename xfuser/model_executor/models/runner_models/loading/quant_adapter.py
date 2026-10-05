@@ -288,10 +288,6 @@ class QuantAdapter:
     #: Whether this converter can hold selected leaves at another format while
     #: it converts the rest of a block.
     supports_precision_overrides = False
-    #: Whether a native streaming config can still express the run when the
-    #: hybrid schedule is on -- it cannot if streaming would take ownership of
-    #: leaves the hybrid wrapper needs to keep in two precisions.
-    streams_under_hybrid = True
     #: AITER rewrites a module on the host; torchao swaps in subclasses that
     #: want their final device. Decides which side of ``pipe.to`` a walk runs.
     converts_before_device_move = False
@@ -465,10 +461,16 @@ def prepare_native_load(
         fallback = "streaming disabled by the runner"
     elif not targets:
         fallback = f"{component_name} has no {adapter.format.value.upper()} targets"
-    elif hybrid and not adapter.streams_under_hybrid:
+    elif hybrid:
+        # Not a property of any one implementation: a streamed load quantizes
+        # every targeted leaf on the way in, and the per-step pair needs those
+        # leaves still in bf16 so both precisions can be built from them. This
+        # was an attribute, set on the one format that happened to be the low
+        # half when the schedule was written, so every other low format
+        # streamed and the schedule it asked for was never built.
         fallback = (
-            f"native {adapter.format.value.upper()} streaming cannot preserve "
-            "hybrid ownership"
+            "a per-step pair needs both precisions built from each leaf, and "
+            "a streamed load has already quantized them"
         )
     else:
         try:

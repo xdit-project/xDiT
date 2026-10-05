@@ -334,19 +334,59 @@ def test_the_hybrid_schedule_only_blocks_streaming_where_it_must(monkeypatch):
     )
 
     # Carve-out patterns are not a native-load argument at all any more. The
-    # hybrid schedule is a property of the run and is passed to every adapter;
-    # whether it prevents streaming is the adapter's own declaration, and only
-    # NVFP4 declares that it does.
-    from xfuser.model_executor.models.runner_models.loading.backends import (
-        TorchaoInt8BackendAdapter,
-        TorchaoNvfp4BackendAdapter,
-    )
-
+    # hybrid schedule is a property of the run and is passed to every adapter.
     assert "precision_prefixes" not in observed
     assert "precision_suffixes" not in observed
     assert observed["hybrid"] is True
-    assert TorchaoInt8BackendAdapter.streams_under_hybrid is True
-    assert TorchaoNvfp4BackendAdapter.streams_under_hybrid is False
+
+
+class _StreamingAdapterStub:
+    """An adapter that streams whenever it is allowed to, for the test above."""
+
+    uses_native_transformer_streaming = True
+    supports_precision_overrides = False
+    streams_by_exclusion = False
+
+    def __init__(self, format_name, impl):
+        self.format = SimpleNamespace(value=format_name)
+        self.backend = SimpleNamespace(value=impl)
+        self.format_name = format_name
+        self.impl = impl
+
+    def transformer_stream_plan(self, targets, **kwargs):
+        raise AssertionError("streaming must not be attempted under hybrid")
+
+
+def test_no_adapter_streams_under_the_hybrid_schedule():
+    """A streamed load quantizes every targeted leaf on the way in, and the
+    per-step pair needs those leaves in bf16 to build both precisions from.
+    That holds for every implementation, so none of them may stream here.
+
+    It used to be a per-adapter declaration, set on the one format that
+    happened to be the low half when the schedule was written. Every other low
+    format streamed instead, and the schedule the run asked for was silently
+    never built."""
+    from xfuser.model_executor.models.runner_models.loading import quant_adapter
+    from xfuser.model_executor.models.runner_models.loading.quant_adapter import (
+        REGISTRY,
+    )
+
+    assert REGISTRY, "no adapters registered"
+    for (format_name, impl), cls in REGISTRY.items():
+        adapter = _StreamingAdapterStub(format_name, impl)
+        prepared = quant_adapter.prepare_native_load(
+            adapter,
+            component_name="transformer",
+            targets=("blocks",),
+            stream_quant=True,
+            model_factory=lambda: object(),
+            hybrid=True,
+        )
+        assert prepared.descriptor.materialization_mode == "post_load", (
+            f"{impl} {format_name} streamed under the hybrid schedule, so the "
+            "pair was never built"
+        )
+        assert prepared.quantization_config is None
 
 
 def test_precision_overrides_are_owned_by_the_high_format(monkeypatch):

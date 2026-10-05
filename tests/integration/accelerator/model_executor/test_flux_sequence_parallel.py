@@ -1,4 +1,4 @@
-"""FLUX.1 under sequence parallelism matches the single-device transformer for any token count."""
+"""FLUX.1 under sequence parallelism matches the single-device transformer for supported token counts/configurations."""
 
 import pytest
 import torch

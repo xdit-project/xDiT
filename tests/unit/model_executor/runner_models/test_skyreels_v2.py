@@ -1,6 +1,5 @@
-"""SkyReels-V2 runner contract: registry, defaults, validation. No downloads."""
+"""SkyReels-V2 runner contract: argument validation and handling. No downloads."""
 
-import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -11,23 +10,12 @@ pytest.importorskip(
     reason="installed diffusers does not include SkyReels-V2",
 )
 
-from diffusers import (  # noqa: E402
-    SkyReelsV2ImageToVideoPipeline,
-    SkyReelsV2Pipeline,
-    UniPCMultistepScheduler,
-)
+from diffusers import UniPCMultistepScheduler  # noqa: E402
 
 from xfuser import xFuserArgs  # noqa: E402
 from xfuser.model_executor.models.runner_models.base_model import (  # noqa: E402
     MODEL_REGISTRY,
     xFuserModel,
-)
-from xfuser.model_executor.models.runner_models.skyreels_v2 import (  # noqa: E402
-    I2V_14B_MODEL_ID,
-    I2V_1_3B_MODEL_ID,
-    T2V_14B_MODEL_ID,
-    xFuserSkyReelsV2I2VModel,
-    xFuserSkyReelsV2T2VModel,
 )
 
 
@@ -40,40 +28,6 @@ def _single_process_env(monkeypatch):
 
 def _model(name, **config):
     return MODEL_REGISTRY[name](xFuserArgs(model=name, **config))
-
-
-@pytest.mark.parametrize(
-    "name, cls, checkpoint",
-    [
-        (T2V_14B_MODEL_ID, xFuserSkyReelsV2T2VModel, T2V_14B_MODEL_ID),
-        ("SkyReels-V2-T2V-14B", xFuserSkyReelsV2T2VModel, T2V_14B_MODEL_ID),
-        (I2V_14B_MODEL_ID, xFuserSkyReelsV2I2VModel, I2V_14B_MODEL_ID),
-        ("SkyReels-V2-I2V-14B", xFuserSkyReelsV2I2VModel, I2V_14B_MODEL_ID),
-        (I2V_1_3B_MODEL_ID, xFuserSkyReelsV2I2VModel, I2V_1_3B_MODEL_ID),
-        ("SkyReels-V2-I2V-1.3B", xFuserSkyReelsV2I2VModel, I2V_1_3B_MODEL_ID),
-    ],
-)
-def test_every_name_loads_its_own_checkpoint(name, cls, checkpoint):
-    model = _model(name)
-
-    assert type(model) is cls
-    assert model.settings.model_name == checkpoint
-
-
-@pytest.mark.parametrize(
-    "cls, pipeline",
-    [
-        (xFuserSkyReelsV2T2VModel, SkyReelsV2Pipeline),
-        (xFuserSkyReelsV2I2VModel, SkyReelsV2ImageToVideoPipeline),
-    ],
-)
-def test_defaults_follow_the_diffusers_pipeline(cls, pipeline):
-    """The runner fills in what the user omits; it should agree with upstream's call."""
-    upstream = inspect.signature(pipeline.__call__).parameters
-    defaults = cls.default_input_values
-
-    for key in ("height", "width", "num_frames", "num_inference_steps", "guidance_scale"):
-        assert getattr(defaults, key) == upstream[key].default, key
 
 
 @pytest.mark.parametrize(

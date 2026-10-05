@@ -138,17 +138,18 @@ class LoadDeclaration:
             modes.add(MaterializationMode.REPLICATED_META)
         formats = frozenset(quantization_formats or {QuantizationFormat.NONE})
         backends = frozenset(quantization_backends or {QuantizationBackend.NONE})
+        # From the one table, like `for_runner`: this was the same rows written
+        # out again, with a hand-written carve-out saying FP6 is AITER-only --
+        # which IMPL_PREFERENCE already says, and says for every other format
+        # too, so the restated version was both a duplicate and incomplete.
         contracts = {
             (format_, backend)
             for format_ in formats
             for backend in backends
-            if (format_ is QuantizationFormat.NONE)
-            == (backend is QuantizationBackend.NONE)
-            and (
-                format_ is not QuantizationFormat.FP6
-                or backend is QuantizationBackend.AITER
-            )
+            if backend.value in IMPL_PREFERENCE.get(format_.value, ())
         }
+        if QuantizationFormat.NONE in formats and QuantizationBackend.NONE in backends:
+            contracts.add((QuantizationFormat.NONE, QuantizationBackend.NONE))
         return cls(
             fsdp_meta_transformers=tuple(transformers),
             replicated_meta_transformers=(tuple(transformers) if replicated else ()),

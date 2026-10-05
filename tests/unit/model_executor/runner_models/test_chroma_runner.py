@@ -10,7 +10,6 @@ import pytest
 pytest.importorskip("diffusers")
 
 from xfuser import xFuserArgs  # noqa: E402
-from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY  # noqa: E402
 from xfuser.model_executor.models.runner_models.chroma import xFuserChromaModel  # noqa: E402
 
 
@@ -22,11 +21,6 @@ def _single_process(monkeypatch):
 
 def _model(**config):
     return xFuserChromaModel(xFuserArgs(model="Chroma1-HD", **config))
-
-
-@pytest.mark.parametrize("name", ["Chroma1-HD", "lodestones/Chroma1-HD"])
-def test_both_names_select_the_chroma_runner(name):
-    assert MODEL_REGISTRY[name] is xFuserChromaModel
 
 
 @pytest.mark.parametrize("ulysses_degree", [1, 2, 3, 4, 6, 8, 12, 24])

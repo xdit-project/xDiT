@@ -634,6 +634,21 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
 
         return latents
 
+    def _get_dp_last_group(self, dp_rank_list: List[int]):
+        """Return the process group of the DP-last ranks, creating it once.
+
+        ``new_group`` is collective and every call adds a communicator, so it
+        must not run per request. Every caller derives ``dp_rank_list`` from
+        the same all-gather, so all ranks hit or miss the cache together and
+        keep the same group-creation order.
+        """
+        # Bypass the wrapper's __getattr__, which forwards misses to the module.
+        groups = self.__dict__.setdefault("_dp_last_groups", {})
+        key = tuple(dp_rank_list)
+        if key not in groups:
+            groups[key] = torch.distributed.new_group(list(key))
+        return groups[key]
+
     def gather_broadcast_latents(self, latents: torch.Tensor):
         """gather latents from dp last group and broacast final latents"""
 
@@ -650,7 +665,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         torch.distributed.all_gather(dp_rank_list, torch.tensor([gather_rank], dtype=int, device=device))
 
         dp_rank_list = [int(dp_rank[0]) for dp_rank in dp_rank_list if int(dp_rank[0]) != -1]
-        dp_last_group = torch.distributed.new_group(dp_rank_list)
+        dp_last_group = self._get_dp_last_group(dp_rank_list)
 
         # gather latents from dp last group
         if rank == dp_rank_list[-1]:

@@ -509,8 +509,6 @@ class DiTRuntimeState(RuntimeState):
         self.max_condition_sequence_length = max_condition_sequence_length
         self.split_text_embed_in_sp = split_text_embed_in_sp
         self.text_embed_sp_pad = 0
-        if self.runtime_config.warmup_steps > self.input_config.num_inference_steps:
-            self.runtime_config.warmup_steps = self.input_config.num_inference_steps
         if seed is not None and seed != self.input_config.seed:
             self.input_config.seed = seed
             set_random_seed(seed)
@@ -523,6 +521,8 @@ class DiTRuntimeState(RuntimeState):
         ):
             self.split_latents_by_rows = split_latents_by_rows
             self._input_size_change(height, width, batch_size)
+        else:
+            self._reset_recv_buffer()
 
         self.ready = True
 
@@ -537,8 +537,6 @@ class DiTRuntimeState(RuntimeState):
         split_text_embed_in_sp: bool = True,
     ):
         self.input_config.num_inference_steps = num_inference_steps or self.input_config.num_inference_steps
-        if self.runtime_config.warmup_steps > self.input_config.num_inference_steps:
-            self.runtime_config.warmup_steps = self.input_config.num_inference_steps
         self.split_text_embed_in_sp = split_text_embed_in_sp
         if seed is not None and seed != self.input_config.seed:
             self.input_config.seed = seed
@@ -551,6 +549,8 @@ class DiTRuntimeState(RuntimeState):
             or (batch_size and self.input_config.batch_size != batch_size)
         ):
             self._video_input_size_change(height, width, num_frames, batch_size)
+        else:
+            self._reset_recv_buffer()
 
         self.ready = True
 
@@ -903,6 +903,7 @@ class DiTRuntimeState(RuntimeState):
         self.pp_patches_token_num = pp_patches_token_num
 
     def _reset_recv_buffer(self):
+        # Called on every request so stages renegotiate shapes that changed.
         get_pp_group().reset_buffer()
         get_pp_group().set_config(dtype=self.runtime_config.dtype)
 

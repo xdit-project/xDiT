@@ -1,3 +1,4 @@
+import inspect
 import torch
 from typing import Optional, Tuple
 from diffusers.models.transformers.transformer_flux2 import (
@@ -385,6 +386,16 @@ class xFuserFlux2ParallelSelfAttention(xFuserAttentionBaseWrapper):
         return self.processor(self, hidden_states, attention_mask, image_rotary_emb, **kwargs)
 
 
+def _accepts_guidance_embeds() -> bool:
+    """Whether the installed Flux2Transformer2DModel takes ``guidance_embeds``.
+
+    diffusers added it in 0.37, together with FLUX.2-klein, whose transformers have no
+    guidance embedder. Earlier releases always build one, as FLUX.2-dev needs, and
+    reject the argument.
+    """
+    return "guidance_embeds" in inspect.signature(Flux2Transformer2DModel.__init__).parameters
+
+
 class xFuserFlux2Transformer2DWrapper(Flux2Transformer2DModel):
     def __init__(
         self,
@@ -403,6 +414,12 @@ class xFuserFlux2Transformer2DWrapper(Flux2Transformer2DModel):
         eps: float = 1e-6,
         guidance_embeds: bool = True,
     ):
+        # Where the argument is not accepted the embedder is always built, so leave it
+        # out. A request to drop it is still passed on, and fails there, rather than
+        # silently building the wrong model.
+        guidance_kwargs = {"guidance_embeds": guidance_embeds}
+        if guidance_embeds and not _accepts_guidance_embeds():
+            guidance_kwargs = {}
         super().__init__(
             patch_size=patch_size,
             in_channels=in_channels,
@@ -417,7 +434,7 @@ class xFuserFlux2Transformer2DWrapper(Flux2Transformer2DModel):
             axes_dims_rope=axes_dims_rope,
             rope_theta=rope_theta,
             eps=eps,
-            guidance_embeds=guidance_embeds,
+            **guidance_kwargs,
         )
 
         for block in self.transformer_blocks:

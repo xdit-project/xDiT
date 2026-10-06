@@ -1043,7 +1043,7 @@ def test_only_varlen_capable_backends_accept_packed_keys():
 # (Krea-2, LTX-2) derive the packing from a dense key mask and pass both, so a
 # kernel that applies the mask serves the call without the packing. Maintained
 # by hand for the reason above.
-MASK_APPLYING = {"SDPA", "SDPA_MATH"}
+MASK_APPLYING = {"SDPA", "SDPA_MATH", "SDPA_EFFICIENT", "CUDNN"}
 
 
 def _masked_pack(batch=1, kv_len=8):

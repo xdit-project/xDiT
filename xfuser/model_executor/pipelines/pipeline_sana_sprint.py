@@ -747,10 +747,11 @@ class xFuserSanaSprintPipeline(xFuserPipelineBaseWrapper):
         timesteps = timesteps[:-1]
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         self._num_timesteps = len(timesteps)
-        num_pipeline_warmup_steps = get_runtime_state().runtime_config.warmup_steps
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            if get_pipeline_parallel_world_size() > 1 and self._num_timesteps > num_pipeline_warmup_steps:
+            # The sync loop below never passes a stage's output on, so even a request
+            # that fits in the warmup steps would wait forever on the next stage.
+            if get_pipeline_parallel_world_size() > 1:
                 raise NotImplementedError(
                     f"Pipeline parallelism is not supported with {self.__class__.__name__} pipeline."
                 )

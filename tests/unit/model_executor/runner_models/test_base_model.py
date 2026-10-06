@@ -91,3 +91,32 @@ def test_ulysses_degree_that_does_not_divide_heads_is_refused_at_config_time():
     model_class(xFuserArgs(model="six-heads", ulysses_degree=3))
     with pytest.raises(ValueError, match=r"six-heads has 6 attention heads.*\(1, 2, 3, 6\); got 4\..*--ring_degree"):
         model_class(xFuserArgs(model="six-heads", ulysses_degree=4))
+
+
+@pytest.mark.parametrize(
+    ("heads", "widths", "padding", "degree", "error"),
+    [
+        (6, frozenset(), False, 4, "--ulysses_degree must divide"),
+        (6, frozenset({128}), False, 4, "--ulysses_degree must divide"),
+        (6, frozenset({64}), False, 3, "runs head dimension 64"),
+        (6, frozenset({64}), True, 4, "runs head dimension 64"),
+        (None, frozenset({64}), False, 1, "runs head dimension 64"),
+        (6, frozenset({128}), False, 3, None),
+        (6, frozenset({64, 128}), False, 3, None),
+        (6, frozenset({128}), True, 4, None),
+    ],
+)
+def test_head_width_and_ulysses_constraints_are_both_validated(heads, widths, padding, degree, error):
+    # AITER_BF16 declares 128-wide heads in its spec; no kernel is loaded here.
+    model_class = _model_class(
+        settings=base_model.ModelSettings(model_name="head-layout"),
+        attention_heads=heads,
+        attention_head_dims=widths,
+        supports_ulysses_head_padding=padding,
+    )
+    config = xFuserArgs(model="head-layout", attention_backend="AITER_BF16", ulysses_degree=degree)
+    if error:
+        with pytest.raises(ValueError, match=error):
+            model_class(config)
+    else:
+        assert model_class(config).pipe is None

@@ -133,7 +133,10 @@ def _selected_attention_backends(config: xFuserArgs) -> list[AttentionBackendTyp
 
 
 def _validate_attention_head_dims(model: "xFuserModel", config: xFuserArgs) -> None:
-    """Refuse a backend that cannot serve any head dimension the model runs.
+    """Validate backend head widths and the Ulysses Q/KV head layout.
+
+    Ulysses must divide the declared head counts unless the model pads heads.
+    Refuse a backend that cannot serve any head dimension the model runs.
 
     Disjoint rather than subset on purpose: LTX-2 pairs 128-wide video blocks with 64-wide
     audio ones and the odd size falls back per call, so a model keeps a backend as long as
@@ -144,26 +147,44 @@ def _validate_attention_head_dims(model: "xFuserModel", config: xFuserArgs) -> N
     unrestricted, and guessing would trade a silent bypass for a wrong refusal.
     """
     required = getattr(model, "attention_head_dims", None)
-    if not required:
-        return
-    for backend in _selected_attention_backends(config):
-        spec = attention_registry.find(backend)
-        supported = spec.accepts.head_dims() if spec is not None else None
-        if supported is None or not set(supported).isdisjoint(required):
-            continue
-        # What a rejected call does differs by backend, and the difference is the
-        # whole reason to refuse here: one wastes the selection, the other stops
-        # the run at the first layer.
-        outcome = (
-            f"every layer would fall through to {spec.fallback.name} and the selection would have no effect"
-            if spec.fallback is not None
-            else "every layer would be refused"
-        )
+    if required:
+        for backend in _selected_attention_backends(config):
+            spec = attention_registry.find(backend)
+            supported = spec.accepts.head_dims() if spec is not None else None
+            if supported is None or not set(supported).isdisjoint(required):
+                continue
+            # What a rejected call does differs by backend, and the difference is the
+            # whole reason to refuse here: one wastes the selection, the other stops
+            # the run at the first layer.
+            outcome = (
+                f"every layer would fall through to {spec.fallback.name} and the selection would have no effect"
+                if spec.fallback is not None
+                else "every layer would be refused"
+            )
+            raise ValueError(
+                f"{model.settings.model_name} does not support --attention_backend "
+                f"{backend.name}: it runs head dimension "
+                f"{', '.join(str(d) for d in sorted(required))} and that backend serves only "
+                f"{', '.join(str(d) for d in sorted(supported))}, so {outcome}."
+            )
+
+    heads = model.attention_heads
+    kv_heads = model.attention_kv_heads
+    ulysses_degree = config.ulysses_degree or 1
+    head_divisor = gcd(heads, kv_heads) if heads and kv_heads else heads
+    if (
+        model.capabilities.ulysses_degree
+        and not model.supports_ulysses_head_padding
+        and head_divisor
+        and head_divisor % ulysses_degree != 0
+    ):
+        divisors = ", ".join(str(d) for d in range(1, head_divisor + 1) if head_divisor % d == 0)
+        layout = f"{heads} attention heads" + (f" and {kv_heads} KV heads" if kv_heads else "")
+        required = "both head counts" if kv_heads else str(heads)
+        hint = " Use --ring_degree to scale sequence parallelism further." if model.capabilities.ring_degree else ""
         raise ValueError(
-            f"{model.settings.model_name} does not support --attention_backend "
-            f"{backend.name}: it runs head dimension "
-            f"{', '.join(str(d) for d in sorted(required))} and that backend serves only "
-            f"{', '.join(str(d) for d in sorted(supported))}, so {outcome}."
+            f"{model.settings.model_name} has {layout}, so "
+            f"--ulysses_degree must divide {required} ({divisors}); got {ulysses_degree}.{hint}"
         )
 
 
@@ -628,24 +649,6 @@ class xFuserModel(abc.ABC):
         """Validate if the model supports requested config"""
         config._validate_gemm_quantization_flags()
         _validate_attention_head_dims(self, config)
-        heads = self.attention_heads
-        kv_heads = self.attention_kv_heads
-        ulysses_degree = config.ulysses_degree or 1
-        head_divisor = gcd(heads, kv_heads) if heads and kv_heads else heads
-        if (
-            self.capabilities.ulysses_degree
-            and not self.supports_ulysses_head_padding
-            and head_divisor
-            and head_divisor % ulysses_degree != 0
-        ):
-            divisors = ", ".join(str(d) for d in range(1, head_divisor + 1) if head_divisor % d == 0)
-            layout = f"{heads} attention heads" + (f" and {kv_heads} KV heads" if kv_heads else "")
-            required = "both head counts" if kv_heads else str(heads)
-            hint = " Use --ring_degree to scale sequence parallelism further." if self.capabilities.ring_degree else ""
-            raise ValueError(
-                f"{self.settings.model_name} has {layout}, so "
-                f"--ulysses_degree must divide {required} ({divisors}); got {ulysses_degree}.{hint}"
-            )
         for key in ModelCapabilities.__annotations__.keys():
             config_value = getattr(
                 config, key, None

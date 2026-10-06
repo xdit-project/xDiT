@@ -770,18 +770,6 @@ class xFuserWan21T2V1_3BModel(xFuserWan21T2VModel):
         # 30 blocks of this checkpoint.
         self.settings.fp8_precision_overrides = tuple(f"{i}." for i in (*range(10), *range(20, 30)))
 
-    def _validate_config(self, config: xFuserArgs) -> None:
-        super()._validate_config(config)
-        heads = self.attention_heads
-        ulysses_degree = config.ulysses_degree or 1
-        if heads % ulysses_degree != 0:
-            divisors = ", ".join(str(d) for d in range(1, heads + 1) if heads % d == 0)
-            raise ValueError(
-                f"Wan2.1-T2V-1.3B has {heads} attention heads, so --ulysses_degree must "
-                f"divide {heads} ({divisors}); got {ulysses_degree}. Use --ring_degree "
-                f"to scale sequence parallelism further."
-            )
-
 
 @register_model("Wan-AI/Wan2.2-T2V-A14B-Diffusers")
 @register_model("Wan2.2-T2V")

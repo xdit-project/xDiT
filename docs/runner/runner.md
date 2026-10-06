@@ -27,6 +27,8 @@ xdit --model FLUX.1-dev \
 
 This will generate an image with Flux.1-dev and uses the model-specific values for any parameters that were not provided.
 
+`xdit` starts one process per rank, the product of the parallel degrees (doubled by `--use_cfg_parallel`). To span several nodes, run the same command on every node with torchrun's `--nnodes`, `--node_rank`, `--master_addr` and `--master_port`; each node then starts that product divided by `--nnodes`, or `--nproc_per_node` if given.
+
 
 ## Architecture
 

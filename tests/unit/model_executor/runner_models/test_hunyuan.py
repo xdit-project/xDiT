@@ -13,8 +13,8 @@ def build(monkeypatch):
     monkeypatch.setenv("RANK", "0")
     monkeypatch.setenv("WORLD_SIZE", "1")
 
-    def _build(name, task):
-        return MODEL_REGISTRY[name](xFuserArgs(model=name, task=task))
+    def _build(name, task, **kwargs):
+        return MODEL_REGISTRY[name](xFuserArgs(model=name, task=task, **kwargs))
 
     return _build
 
@@ -37,6 +37,25 @@ def test_hunyuanvideo15_name_selects_its_checkpoint(build, name, task, checkpoin
 
     assert model.loader.checkpoint_request().model_name_or_path == checkpoint
     assert (model.default_input_values.height, model.default_input_values.width) == default_size
+
+
+@pytest.mark.parametrize(
+    ("name", "height", "width", "checkpoint"),
+    [
+        (f"{COMMUNITY}-480p_t2v", 720, 1280, f"{COMMUNITY}-480p_t2v"),
+        (f"{COMMUNITY}-720p_t2v", 480, 848, f"{COMMUNITY}-720p_t2v"),
+        ("Hunyuanvideo-1.5", 480, 848, f"{COMMUNITY}-720p_t2v"),
+        ("tencent/HunyuanVideo-1.5", 480, 848, f"{COMMUNITY}-720p_t2v"),
+    ],
+)
+def test_hunyuanvideo15_output_size_does_not_change_checkpoint(build, name, height, width, checkpoint):
+    model = build(name, "t2v", height=height, width=width)
+    input_args = model.preprocess_args(
+        {"prompt": "A dog runs through a meadow", "dataset_path": None, "height": height, "width": width}
+    )
+
+    assert model.loader.checkpoint_request().model_name_or_path == checkpoint
+    assert (input_args["height"], input_args["width"]) == (height, width)
 
 
 @pytest.mark.parametrize(

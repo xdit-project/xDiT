@@ -171,14 +171,6 @@ class xFuserHunyuanvideoModel(xFuserModel):
         self._run_timed_pipe(compile_args)
 
 
-# The task each Diffusers HunyuanVideo-1.5 checkpoint was trained for.
-HUNYUANVIDEO_15_CHECKPOINTS = {
-    f"hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-{size}_{task}": task
-    for size in ("480p", "720p")
-    for task in ("i2v", "t2v")
-}
-
-
 @register_model("tencent/HunyuanVideo-1.5")
 @register_model("Hunyuanvideo-1.5")
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v")
@@ -233,8 +225,9 @@ class xFuserHunyuanvideo15Model(xFuserModel):
 
     def _customize_settings(self, config: xFuserArgs) -> None:
         super()._customize_settings(config)
-        checkpoint_task = HUNYUANVIDEO_15_CHECKPOINTS.get(config.model)
-        if checkpoint_task is None:
+        # Registered checkpoint IDs encode their task; output dimensions do not select weights.
+        checkpoint_task = config.model.rsplit("_", 1)[-1]
+        if checkpoint_task not in ("i2v", "t2v"):
             task = "i2v" if config.task == "i2v" else "t2v"
             self.settings.model_name = f"hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_{task}"
             return

@@ -20,16 +20,12 @@ class CacheEntry:
                 None,
             ] * num_cache_tensors
         elif isinstance(tensors, torch.Tensor):
-            assert (
-                num_cache_tensors == 1
-            ), "num_cache_tensors must be 1 if you pass a single tensor to tensors argument"
+            assert num_cache_tensors == 1, "num_cache_tensors must be 1 if you pass a single tensor to tensors argument"
             self.tensors = [
                 tensors,
             ]
         elif isinstance(tensors, List):
-            assert num_cache_tensors == len(
-                tensors
-            ), "num_cache_tensors must be equal to num of tensors"
+            assert num_cache_tensors == len(tensors), "num_cache_tensors must be equal to num of tensors"
             self.tensors = [
                 tensors,
             ]
@@ -44,13 +40,9 @@ class CacheManager:
     ):
         self.cache: Dict[Tuple[str, Any], CacheEntry] = {}
 
-    def register_cache_entry(
-        self, layer, layer_type: str, cache_type: str = "naive_cache"
-    ):
+    def register_cache_entry(self, layer, layer_type: str, cache_type: str = "naive_cache"):
         if layer_type not in self.supported_layer:
-            raise ValueError(
-                f"Layer type: {layer_type} is not supported. Supported layer type: {self.supported_layer}"
-            )
+            raise ValueError(f"Layer type: {layer_type} is not supported. Supported layer type: {self.supported_layer}")
         if cache_type not in self.supported_cache_type:
             raise ValueError(
                 f"Cache type: {cache_type} is not supported. Supported cache type: {self.supported_cache_type}"
@@ -78,10 +70,7 @@ class CacheManager:
         """Release cached activations while preserving layer registrations."""
         for (_, layer), entry in self.cache.items():
             entry.tensors = [None] * len(entry.tensors)
-            if (
-                isinstance(layer, torch.nn.Module)
-                and "_xdit_kv_cache" in layer._buffers
-            ):
+            if isinstance(layer, torch.nn.Module) and "_xdit_kv_cache" in layer._buffers:
                 layer._xdit_kv_cache = None
 
     def update_and_get_kv_cache(
@@ -101,10 +90,7 @@ class CacheManager:
         if custom_get_kv is not None:
             return custom_get_kv(self, new_kv, layer, slice_dim, layer_type, **kwargs)
 
-        module_cache = (
-            isinstance(layer, torch.nn.Module)
-            and "_xdit_kv_cache" in layer._buffers
-        )
+        module_cache = isinstance(layer, torch.nn.Module) and "_xdit_kv_cache" in layer._buffers
         if module_cache:
             cache_type = layer._xdit_kv_cache_type
             kv_cache = layer._xdit_kv_cache
@@ -189,10 +175,7 @@ class CacheManager:
         )
 
         ulysses_world_size = get_ulysses_parallel_world_size()
-        if (
-            not runtime_state_is_initialized()
-            or get_runtime_state().num_pipeline_patch == 1
-        ):
+        if not runtime_state_is_initialized() or get_runtime_state().num_pipeline_patch == 1:
             return new_kv
         elif not get_runtime_state().patch_mode:
             pp_patches_token_num = get_runtime_state().pp_patches_token_num
@@ -209,16 +192,10 @@ class CacheManager:
                 dim=slice_dim,
             )
         else:
-            pp_patches_token_start_idx_local = (
-                get_runtime_state().pp_patches_token_start_idx_local
-            )
+            pp_patches_token_start_idx_local = get_runtime_state().pp_patches_token_start_idx_local
             pp_patch_idx = get_runtime_state().pipeline_patch_idx
-            start_token_idx = (
-                ulysses_world_size * pp_patches_token_start_idx_local[pp_patch_idx]
-            )
-            end_token_idx = (
-                ulysses_world_size * pp_patches_token_start_idx_local[pp_patch_idx + 1]
-            )
+            start_token_idx = ulysses_world_size * pp_patches_token_start_idx_local[pp_patch_idx]
+            end_token_idx = ulysses_world_size * pp_patches_token_start_idx_local[pp_patch_idx + 1]
             # pp_patches_token_num = get_runtime_state().pp_patches_token_num
             # start_token_idx = ulysses_world_size * sum(pp_patches_token_num[:get_runtime_state().pipeline_patch_idx])
             # end_token_idx = ulysses_world_size * sum(pp_patches_token_num[:get_runtime_state().pipeline_patch_idx + 1])
@@ -243,9 +220,7 @@ class CacheManager:
         if dim < 0:
             dim += kv_cache.dim()
         if dim > kv_cache.dim():
-            raise ValueError(
-                f"'dim' argument {dim} can not bigger or equal than kv cache dimemsions: {kv_cache.dim()}"
-            )
+            raise ValueError(f"'dim' argument {dim} can not bigger or equal than kv cache dimemsions: {kv_cache.dim()}")
 
         if dim == 0:
             kv_cache[start_idx:end_idx, ...] = new_kv

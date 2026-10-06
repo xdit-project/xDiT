@@ -292,6 +292,12 @@ class xFuserArgs:
     spargeattn_simthreshold: float = 0.3
     spargeattn_cdfthreshold: float = 0.92
     use_spargeattn_head_balance: bool = False
+    # Sol-Attn
+    sol_attn_tau: float = 0.2
+    sol_attn_thresh_type: str = "exact"
+    sol_attn_kv_splits: str = "auto"
+    sol_attn_sink_tokens: int = 0
+    sol_attn_sink_start: Optional[int] = None
     # AITER CK-Tile VSA attention
     vsa_block_size: int = 128
     vsa_top_k: int = 1
@@ -1210,6 +1216,38 @@ class xFuserArgs:
             "effect with ulysses_degree>1 and a Sparge attention backend.",
         )
         parser.add_argument(
+            "--sol_attn_tau",
+            type=float,
+            default=0.2,
+            help="Sol-Attn routing temperature. Higher values keep fewer KV blocks exact.",
+        )
+        parser.add_argument(
+            "--sol_attn_thresh_type",
+            type=str,
+            default="exact",
+            choices=["diag", "exact"],
+            help="Sol-Attn routing threshold. 'diag' uses the diagonal covariance; 'exact' uses the full covariance.",
+        )
+        parser.add_argument(
+            "--sol_attn_kv_splits",
+            type=str,
+            default="auto",
+            choices=["auto", "1", "2", "4"],
+            help="KV splits for the SM90 Sol-Attn kernel. 'auto' uses 4 on SM90 CuTe when the sequence is at least 65536 tokens.",
+        )
+        parser.add_argument(
+            "--sol_attn_sink_tokens",
+            type=int,
+            default=0,
+            help="Number of tokens whose KV blocks stay exact for every query. 0 disables the sink.",
+        )
+        parser.add_argument(
+            "--sol_attn_sink_start",
+            type=int,
+            default=None,
+            help="First token of the exact KV sink. Omit to place the sink on the token suffix.",
+        )
+        parser.add_argument(
             "--vsa_block_size",
             type=int,
             default=128,
@@ -1443,6 +1481,11 @@ class xFuserArgs:
             spargeattn_simthreshold=self.spargeattn_simthreshold,
             spargeattn_cdfthreshold=self.spargeattn_cdfthreshold,
             use_spargeattn_head_balance=self.use_spargeattn_head_balance,
+            sol_attn_tau=self.sol_attn_tau,
+            sol_attn_thresh_type=self.sol_attn_thresh_type,
+            sol_attn_kv_splits=self.sol_attn_kv_splits,
+            sol_attn_sink_tokens=self.sol_attn_sink_tokens,
+            sol_attn_sink_start=self.sol_attn_sink_start,
             vsa_block_size=self.vsa_block_size,
             vsa_top_k=self.vsa_top_k,
             vsa_top_k_ratio=self.vsa_top_k_ratio,

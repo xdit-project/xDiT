@@ -120,11 +120,17 @@ class xFuserFluxModel(xFuserModel):
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         batch_size = self.config.batch_size if self.config.batch_size else 1
+        # Only the PipeFusion pipeline splits the latents by row; the diffusers
+        # pipeline's transformer pads the token sequence for sequence parallelism.
+        uses_pipefusion = get_pipeline_parallel_world_size() > 1
         get_runtime_state().set_input_parameters(
+            height=input_args["height"],
+            width=input_args["width"],
             batch_size=batch_size,
             num_inference_steps=input_args["num_inference_steps"],
             max_condition_sequence_length=input_args["max_sequence_length"],
-            split_text_embed_in_sp=get_pipeline_parallel_world_size() == 1,
+            split_text_embed_in_sp=not uses_pipefusion,
+            split_latents_by_rows=uses_pipefusion,
         )
         output = self.pipe(
             height=input_args["height"],
@@ -220,10 +226,13 @@ class xFuserFluxKontextModel(xFuserModel):
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         batch_size = self.config.batch_size if self.config.batch_size else 1
         get_runtime_state().set_input_parameters(
+            height=input_args["height"],
+            width=input_args["width"],
             batch_size=batch_size,
             num_inference_steps=input_args["num_inference_steps"],
             max_condition_sequence_length=input_args["max_sequence_length"],
             split_text_embed_in_sp=get_pipeline_parallel_world_size() == 1,
+            split_latents_by_rows=False,
         )
         output = self.pipe(
             height=input_args["height"],

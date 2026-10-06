@@ -335,6 +335,7 @@ class DiTRuntimeState(RuntimeState):
         self._vsa_denoising_step = -1
         self._vsa_last_timestep: Optional[float] = None
         self._vsa_num_steps: Optional[int] = None
+        self.split_latents_by_rows = True
         super().__init__(config)
         self.patch_mode = False
         self.pipeline_patch_idx = 0
@@ -493,7 +494,17 @@ class DiTRuntimeState(RuntimeState):
         seed: Optional[int] = None,
         max_condition_sequence_length: Optional[int] = None,
         split_text_embed_in_sp: bool = True,
+        split_latents_by_rows: bool = True,
     ):
+        """Record the request's input parameters.
+
+        ``split_latents_by_rows`` says whether the caller splits the latents
+        across sequence-parallel ranks (and PipeFusion patches) by latent row,
+        using the patch metadata computed here, as the xFuser pipelines do.
+        That needs the latent row count to be divisible by the sequence
+        parallel degree. Callers whose transformer shards (and pads) the token
+        sequence itself pass ``False``, so any height is accepted.
+        """
         self.input_config.num_inference_steps = num_inference_steps or self.input_config.num_inference_steps
         self.max_condition_sequence_length = max_condition_sequence_length
         self.split_text_embed_in_sp = split_text_embed_in_sp
@@ -508,7 +519,9 @@ class DiTRuntimeState(RuntimeState):
             or (height and self.input_config.height != height)
             or (width and self.input_config.width != width)
             or (batch_size and self.input_config.batch_size != batch_size)
+            or split_latents_by_rows != self.split_latents_by_rows
         ):
+            self.split_latents_by_rows = split_latents_by_rows
             self._input_size_change(height, width, batch_size)
 
         self.ready = True
@@ -615,7 +628,7 @@ class DiTRuntimeState(RuntimeState):
         self.input_config.height = height or self.input_config.height
         self.input_config.width = width or self.input_config.width
         self.input_config.batch_size = batch_size or self.input_config.batch_size
-        self._calc_patches_metadata()
+        self._calc_patches_metadata(self.split_latents_by_rows)
         self._reset_recv_buffer()
 
     def _video_input_size_change(
@@ -640,7 +653,7 @@ class DiTRuntimeState(RuntimeState):
             self._calc_patches_metadata()
         self._reset_recv_buffer()
 
-    def _calc_patches_metadata(self):
+    def _calc_patches_metadata(self, split_latents_by_rows: bool = True):
         num_sp_patches = get_sequence_parallel_world_size()
         sp_patch_idx = get_sequence_parallel_rank()
         patch_size = self.backbone_patch_size
@@ -649,7 +662,19 @@ class DiTRuntimeState(RuntimeState):
         latents_width = self.input_config.width // vae_scale_factor
 
         if latents_height % num_sp_patches != 0:
-            raise ValueError("The height of the input is not divisible by the number of sequence parallel devices")
+            if split_latents_by_rows:
+                raise ValueError("The height of the input is not divisible by the number of sequence parallel devices")
+            # The transformer shards the token sequence itself, so the row
+            # patches below are never read; leave them unset rather than
+            # describe a split that cannot exist.
+            self.num_pipeline_patch = self.parallel_config.pp_config.num_pipeline_patch
+            self.pp_patches_height = None
+            self.pp_patches_start_idx_local = None
+            self.pp_patches_start_end_idx_global = None
+            self.pp_patches_token_start_idx_local = None
+            self.pp_patches_token_start_end_idx_global = None
+            self.pp_patches_token_num = None
+            return
 
         self.num_pipeline_patch = self.parallel_config.pp_config.num_pipeline_patch
         # Pipeline patches

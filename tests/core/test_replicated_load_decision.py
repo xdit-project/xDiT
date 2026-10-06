@@ -11,6 +11,7 @@ Run with:
     pytest tests/core/test_replicated_load_decision.py -v
 """
 
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
@@ -97,7 +98,7 @@ def loader_for(runner):
         runner.config.use_hybrid_gemm_schedule = False
     if not hasattr(runner.settings, "gemm_targets"):
         runner.settings.gemm_targets = None
-    plan = getattr(runner, "fp8", SimpleNamespace(targets_for=lambda name: ()))
+    plan = getattr(runner, "fp8", SimpleNamespace(component_targets=lambda name: ()))
     if not hasattr(plan, "gemm_plan"):
         # The routes ask the plan before they ask anything else. A fixture that
         # declares targets gets a resolved one, with every declared component
@@ -112,13 +113,20 @@ def loader_for(runner):
             if declared is not None
             else None
         )
+    if not hasattr(plan, "component_format"):
+        # Borrowed from the real QuantizationPlan rather than written out
+        # again: the encoder route asks it which format a component takes, and
+        # a copy here could answer differently from the one under test.
+        plan.component_format = partial(
+            QuantizationPlan.component_format, plan
+        )
     backends = getattr(runner, "backends", SimpleNamespace())
     transformer_adapter = getattr(
         runner,
         "_transformer_quantization_adapter",
         lambda component_name: (
             getattr(runner, "fp8_backend", None),
-            plan.targets_for(component_name),
+            plan.component_targets(component_name),
         ),
     )
     loader = SimpleNamespace(
@@ -705,7 +713,7 @@ def test_build_transformer_preserves_request_subfolder_without_override():
     runner = SimpleNamespace(
         _memory_efficient_fsdp_load=lambda: False,
         _replicated_broadcast_load=lambda: False,
-        fp8=SimpleNamespace(targets_for=lambda name: []),
+        fp8=SimpleNamespace(component_targets=lambda name: []),
         fp8_backend=None,
         settings=SimpleNamespace(fsdp_strategy={}),
     )
@@ -869,7 +877,7 @@ def test_build_transformer_routes_torchao_fp8_to_native_diffusers_config(
     runner = SimpleNamespace(
         _memory_efficient_fsdp_load=lambda: False,
         _replicated_broadcast_load=lambda: False,
-        fp8=SimpleNamespace(targets_for=lambda name: ["blocks"]),
+        fp8=SimpleNamespace(component_targets=lambda name: ["blocks"]),
         fp8_backend=adapter,
         settings=SimpleNamespace(fsdp_strategy={}),
         _checkpoint_request=lambda name: CheckpointRequest("org/repo", subfolder=name),
@@ -900,12 +908,11 @@ def test_blockwise_transformer_marks_only_wrapped_target_as_streamed(
     runner = SimpleNamespace(
         _memory_efficient_fsdp_load=lambda: True,
         _replicated_broadcast_load=lambda: False,
-        fp8=SimpleNamespace(targets_for=lambda name: ["blocks", "encoder"]),
+        fp8=SimpleNamespace(component_targets=lambda name: ["blocks", "encoder"]),
         fp8_backend=adapter,
         settings=SimpleNamespace(
             fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}}
         ),
-        config=SimpleNamespace(use_fp4_gemms=False),
         _loader=SimpleNamespace(build_meta_transformer=lambda *args, **kwargs: "meta"),
         _checkpoint_request=lambda name: CheckpointRequest("org/repo", subfolder=name),
     )
@@ -939,7 +946,7 @@ def test_blockwise_fp4_marks_only_wrapped_fp8_remainder_as_streamed(
             ("blocks",),
         ),
         fp8=SimpleNamespace(
-            targets_for=lambda name: ["blocks", "encoder"],
+            component_targets=lambda name: ["blocks", "encoder"],
             # A tiered run, so the FP4 block fill has an FP8 remainder to be
             # told about; only the wrapped target is recorded as streamed.
             gemm_plan=resolve(
@@ -950,7 +957,6 @@ def test_blockwise_fp4_marks_only_wrapped_fp8_remainder_as_streamed(
             fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}},
             gemm_targets=_REMAINDER,
         ),
-        config=SimpleNamespace(use_fp4_gemms=True),
         _loader=SimpleNamespace(build_meta_transformer=lambda *args, **kwargs: "meta"),
         _checkpoint_request=lambda name: CheckpointRequest("org/repo", subfolder=name),
     )
@@ -981,7 +987,7 @@ def test_build_transformer_logs_explicit_torchao_post_load_fallback(monkeypatch)
     runner = SimpleNamespace(
         _memory_efficient_fsdp_load=lambda: False,
         _replicated_broadcast_load=lambda: False,
-        fp8=SimpleNamespace(targets_for=lambda name: ["blocks"]),
+        fp8=SimpleNamespace(component_targets=lambda name: ["blocks"]),
         fp8_backend=adapter,
         settings=SimpleNamespace(fsdp_strategy={}),
         _checkpoint_request=lambda name: CheckpointRequest("org/repo", subfolder=name),
@@ -1021,7 +1027,7 @@ def test_build_transformer_mapping_failure_falls_back_without_streaming_claim(
     runner = SimpleNamespace(
         _memory_efficient_fsdp_load=lambda: False,
         _replicated_broadcast_load=lambda: False,
-        fp8=SimpleNamespace(targets_for=lambda name: ["blocks"]),
+        fp8=SimpleNamespace(component_targets=lambda name: ["blocks"]),
         fp8_backend=adapter,
         settings=SimpleNamespace(fsdp_strategy={}),
         _checkpoint_request=lambda name: CheckpointRequest("org/repo", subfolder=name),
@@ -1081,11 +1087,9 @@ def test_eager_post_load_fallback_builds_meta_for_local_block_fill(monkeypatch):
             ("blocks",),
         ),
         _loader=loader,
-        fp8=SimpleNamespace(targets_for=lambda component: ()),
+        fp8=SimpleNamespace(component_targets=lambda component: ()),
         settings=SimpleNamespace(
             fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}},
-            fp8_precision_overrides=None,
-            fp8_precision_override_suffixes=None,
         ),
         config=SimpleNamespace(
             gemm_formats=frozenset({"fp4"}),
@@ -1125,7 +1129,7 @@ def test_build_transformer_preserves_aiter_native_streaming(monkeypatch):
     runner = SimpleNamespace(
         _memory_efficient_fsdp_load=lambda: False,
         _replicated_broadcast_load=lambda: False,
-        fp8=SimpleNamespace(targets_for=lambda name: ["blocks"]),
+        fp8=SimpleNamespace(component_targets=lambda name: ["blocks"]),
         fp8_backend=adapter,
         settings=SimpleNamespace(fsdp_strategy={}),
         _checkpoint_request=lambda name: CheckpointRequest("org/repo", subfolder=name),
@@ -1196,8 +1200,6 @@ def test_build_transformer_streams_native_fp4_and_int8_configs(
         ),
         settings=SimpleNamespace(
             fsdp_strategy={},
-            fp8_precision_overrides=None,
-            fp8_precision_override_suffixes=None,
         ),
         config=SimpleNamespace(use_hybrid_gemm_schedule=False),
         _checkpoint_request=lambda name: CheckpointRequest("org/repo", subfolder=name),
@@ -1260,7 +1262,7 @@ def test_build_transformer_records_only_streamed_nvfp4_leaves(monkeypatch):
     # The stream plan asks the resolved plan which leaves the high format keeps,
     # so the fixture has to carry one rather than a pattern on settings.
     runner.fp8 = SimpleNamespace(
-        targets_for=lambda name: ("blocks",),
+        component_targets=lambda name: ("blocks",),
         gemm_plan=resolve(
             _CARVED, GemmQuantizationSpec.parse("low=fp4,high=fp8")
         ),
@@ -1316,7 +1318,7 @@ def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
         _memory_efficient_fsdp_load=lambda: False,
         fp8_backend=SimpleNamespace(),
         fp8=SimpleNamespace(
-            targets_for=lambda name: {
+            component_targets=lambda name: {
                 "text_encoder": ["encoder.block"],
                 "text_encoder_2": ["model.layers"],
             }[name]
@@ -1477,7 +1479,7 @@ def test_hybrid_meta_te_uses_the_fp8_adapter(monkeypatch):
         blockwise_fp8_backend=sentinel,
         _replicated_broadcast_load=lambda: False,
         _memory_efficient_fsdp_load=lambda: True,
-        fp8=SimpleNamespace(targets_for=lambda name: ["encoder.block"]),
+        fp8=SimpleNamespace(component_targets=lambda name: ["encoder.block"]),
         settings=SimpleNamespace(
             gemm_targets=GemmTargets(
                 text_encoder=Select(modules=("text_encoder.encoder.block",))
@@ -1524,7 +1526,7 @@ def test_meta_te_placement_disables_torchao_native_pipeline_streaming(
         _replicated_broadcast_load=lambda: False,
         _memory_efficient_fsdp_load=lambda: True,
         fp8_backend=_fp8_adapter("torchao"),
-        fp8=SimpleNamespace(targets_for=lambda name: ["encoder.block"]),
+        fp8=SimpleNamespace(component_targets=lambda name: ["encoder.block"]),
         settings=SimpleNamespace(
             gemm_targets=GemmTargets(
                 text_encoder=Select(modules=("text_encoder.encoder.block",))
@@ -1585,8 +1587,7 @@ def test_a_blockwise_filled_text_encoder_needs_no_post_load_fallback(monkeypatch
         _replicated_broadcast_load=lambda: False,
         _memory_efficient_fsdp_load=lambda: True,
         fp8_backend=adapter,
-        config=SimpleNamespace(use_fp4_gemms=False),
-        fp8=SimpleNamespace(targets_for=lambda name: ["encoder.block"]),
+        fp8=SimpleNamespace(component_targets=lambda name: ["encoder.block"]),
         settings=SimpleNamespace(
             gemm_targets=GemmTargets(
                 text_encoder=Select(modules=("text_encoder.encoder.block",))
@@ -1625,7 +1626,7 @@ def test_meta_fsdp_rejects_text_encoder_post_load_fallback(monkeypatch):
         _replicated_broadcast_load=lambda: False,
         _memory_efficient_fsdp_load=lambda: True,
         fp8_backend=_fp8_adapter("aiter"),
-        fp8=SimpleNamespace(targets_for=lambda name: ["encoder.block"]),
+        fp8=SimpleNamespace(component_targets=lambda name: ["encoder.block"]),
         settings=SimpleNamespace(
             gemm_targets=GemmTargets(
                 text_encoder=Select(modules=("text_encoder.encoder.block",))

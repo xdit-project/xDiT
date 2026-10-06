@@ -996,10 +996,11 @@ class xFuserArgs:
             "--quantize_text_encoder",
             action="store_true",
             help="Also quantize the text encoder's linear layers (selected models only). "
-                 "It takes the same format as the rest of the run, unless the model holds it "
-                 "higher. Frees several GB for large bf16 text encoders, at whatever "
-                 "output-quality cost that format carries for the encoder; off by default "
-                 "because that is a quality trade-off, not a free win.",
+                 "The encoder takes the run's format where its loaders can place it and FP8 "
+                 "otherwise, and the resolved GEMM plan logs which. Frees several GB for "
+                 "large bf16 text encoders, at whatever output-quality cost that format "
+                 "carries for the encoder; off by default because that is a quality "
+                 "trade-off, not a free win.",
         )
         parser.add_argument(
             "--use_fp8_text_encoder",

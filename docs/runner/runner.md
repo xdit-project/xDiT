@@ -172,7 +172,7 @@ Individual model classes that inherit from `xFuserModel`:
 | `--gemm_quantization` | Transformer GEMM profile: `fp8`, `fp4`, `fp6`, `int8`, `low=fp4,high=fp8`, or `low=fp4,high=fp6` | none |
 | `--gemm_config` | Optional YAML file for advanced high-precision targets or an explicit per-step schedule | None |
 | `--use_fp8_gemms`, `--use_fp4_gemms`, `--use_int8_gemms`, `--use_fp8_text_encoder`, `--fp8_precision_override_*` | Removed. Still parsed so the error can name the replacement; use `--gemm_quantization` and `--gemm_config` | - |
-| `--quantize_text_encoder` | Quantize the text encoder as well as the transformer; needs a `--gemm_quantization` profile, but names no format of its own | False |
+| `--quantize_text_encoder` | Quantize the text encoder as well as the transformer. Needs a `--gemm_quantization` profile but names no format of its own: the encoder takes the run's format where its loaders can place it, and FP8 otherwise | False |
 | `--use_hybrid_gemm_schedule` | Hold both of the profile's formats at every target and pick one per denoising step; requires a `low=...,high=...` profile | False |
 | `--enable_tiling` | Enable VAE tiling | False |
 | `--enable_slicing` | Enable VAE slicing | False |

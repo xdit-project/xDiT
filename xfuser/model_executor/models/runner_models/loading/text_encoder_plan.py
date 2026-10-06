@@ -13,7 +13,6 @@ its own route.
 """
 
 from xfuser.core.utils.runner_utils import log
-from .contracts import TEXT_ENCODER_FORMAT
 from .blockwise_ownership import (
     blockwise_transformer_descriptor,
     record_blockwise_ownership,
@@ -39,9 +38,9 @@ def _declared_components(model):
 def plan_text_encoders(loader, existing_quantization_config=None):
     """Plan every declared text encoder, returning pipeline kwargs and a quantization config.
 
-    Every encoder is stored at ``TEXT_ENCODER_FORMAT`` regardless of what the
-    run asked the transformer for, and says so in its log line when the two
-    differ. The framework-level config is assembled last and only if some
+    Each encoder takes the format the plan gives its targets, which for a
+    run whose format the encoder's loaders cannot follow is a pinned one.
+    The framework-level config is assembled last and only if some
     encoder needs one, because constructing it registers the Transformers
     quantizer process-globally and the meta paths have no use for that.
     """
@@ -51,12 +50,10 @@ def plan_text_encoders(loader, existing_quantization_config=None):
     fsdp_meta = False if replicated_meta else loader.fsdp_meta_load()
 
     component_configs = {}
-    # Resolved on first use rather than up front. Asking for it up front
-    # asked this machine to store a format the run may never have named --
-    # and once capability probing was narrowed to the formats a run does
-    # name, that question had no truthful answer, so every run of a model
-    # with declared encoder targets died here, quantized or not.
+    # Resolved on first use rather than up front: asking up front asks this
+    # machine to store a format a run that quantizes nothing never named.
     adapter = None
+    encoder_format = None
 
     for component_name in _declared_components(model):
         # The declared encoder targets, not the targets of whatever format
@@ -75,7 +72,14 @@ def plan_text_encoders(loader, existing_quantization_config=None):
         if adapter is None:
             from .backends import prepare_text_encoder_fp8_load
 
-            adapter = loader.backends.adapter_for(TEXT_ENCODER_FORMAT)
+            # The plan's answer, not this route's own. The plan already knows
+            # the encoder's loaders carry one format and has pinned it, so
+            # asking is enough -- and every other walk asks the same way, which
+            # is what stops them from disagreeing.
+            encoder_format = loader.quantization_plan.component_format(
+                component_name
+            )
+            adapter = loader.backends.adapter_for(encoder_format)
             if adapter is None:
                 break
         # A blockwise-filled encoder is quantized per block on the way in from disk, before
@@ -119,23 +123,17 @@ def plan_text_encoders(loader, existing_quantization_config=None):
                 loader.build_meta_component(name, fp8=False)
             ),
         )
-        message = prepared.descriptor.log_message()
-        asked = plan.format_for(f"{component_name}.{targets[0]}".rstrip("."))
-        if asked not in (None, TEXT_ENCODER_FORMAT):
-            # Said out loud rather than substituted quietly: the run named
-            # one format and this component is getting another.
-            message += (
-                f" (text encoders are stored at {TEXT_ENCODER_FORMAT}; "
-                f"--gemm_quantization asked for {asked} here)"
-            )
-        log(message)
+        # No "but the run asked for something else" note any more: nothing
+        # is substituted here, because the plan decided it and said so on its
+        # own line.
+        log(prepared.descriptor.log_message())
         # A declared encoder is part of the plan the format-agnostic walks
-        # iterate, so it is recorded under the format this route actually
-        # placed and they leave it where this route put it.
-        ledger.describe(component_name, format_name=TEXT_ENCODER_FORMAT)
+        # iterate, so it is recorded under the format the plan gave it and
+        # they leave it where this route put it.
+        ledger.describe(component_name, format_name=encoder_format)
         if prepared.descriptor.materialization_mode == "streaming":
             ledger.record_streamed(
-                component_name, targets, format_name=TEXT_ENCODER_FORMAT
+                component_name, targets, format_name=encoder_format
             )
         if prepared.quantization_config is not None:
             component_configs[component_name] = prepared.quantization_config

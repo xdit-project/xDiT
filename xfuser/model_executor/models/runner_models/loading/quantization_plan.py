@@ -1,6 +1,7 @@
 """Backend-neutral quantization target planning for one model run."""
 
 from dataclasses import replace
+from typing import Optional
 
 from xfuser.config.gemm import GemmQuantizationSpec
 from xfuser.core.utils.runner_utils import log
@@ -86,6 +87,23 @@ class QuantizationPlan:
             # load route ran.
             component_formats={"text_encoder": text_encoder_formats()},
         )
+
+    def component_format(self, component_name: str) -> Optional[str]:
+        """The format this run gives one pipeline component's declared targets.
+
+        Pipeline components are named per model -- "text_encoder_2" on FLUX.1,
+        "text_encoder" on Wan -- while a declaration groups them by kind, so
+        this asks through a path rather than by looking a component up.
+        """
+        plan = self.gemm_plan
+        if plan is None:
+            return None
+        mine = [
+            root
+            for root in plan.declared_roots()
+            if root == component_name or root.startswith(f"{component_name}.")
+        ]
+        return plan.format_for(mine[0]) if mine else None
 
     def _log_resolved_plan(self, plan) -> None:
         """Say what each declared target becomes, straight from the plan.

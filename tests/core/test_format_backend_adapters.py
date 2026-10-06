@@ -759,41 +759,54 @@ def test_the_loader_reads_these_as_attributes_not_as_a_backend_name(
 
 
 @pytest.mark.parametrize(
-    ("profile", "quantize_text_encoder", "expected"),
-    [
-        # Nothing quantized: nothing probed, and in particular nothing is
-        # asked about FP8 on a model that merely declares encoder targets.
-        ("none", False, []),
-        ("none", True, []),
-        ("fp8", False, ["fp8"]),
-        ("int8", False, ["int8"]),
-        # The encoder route stores one fixed format whatever the transformer
-        # was asked for, so enabling it puts that format in play too.
-        ("int8", True, ["fp8", "int8"]),
-        ("low=fp4,high=fp6", True, ["fp4", "fp6", "fp8"]),
-    ],
+    ("in_play", "expected"),
+    [((), []), (("fp8",), ["fp8"]), (("fp4", "fp8"), ["fp4", "fp8"])],
 )
-def test_probing_is_narrowed_to_what_the_run_will_actually_place(
-    modules, profile, quantize_text_encoder, expected
-):
-    """The narrowing has to cover every route that places a format.
+def test_probing_is_narrowed_to_what_the_plan_will_place(modules, in_play, expected):
+    """Narrowed to the plan's formats, not the spec's.
 
-    It once covered only the transformer's spec. The text-encoder route then
-    asked for its own format, was told "fp8 was not requested", and refused the
-    load -- on every run of a model with declared encoder targets, quantized or
-    not.
+    A pinned component places a format the spec never names -- the text
+    encoder, whose loaders carry one of their own. While this read the spec,
+    the probe told that one caller its format "was not requested" and the load
+    was refused, on every run of a model with declared encoder targets.
+
+    That a pin reaches `formats_in_play` at all is pinned next door, in
+    tests/quant/test_gemm_targets.py.
     """
     backends = modules.selection.QuantizationBackends.__new__(
         modules.selection.QuantizationBackends
     )
     backends.model = SimpleNamespace(
         config=SimpleNamespace(
-            gemm_quantization_spec=modules.gemm.GemmQuantizationSpec.parse(profile),
-            quantize_text_encoder=quantize_text_encoder,
+            gemm_quantization_spec=modules.gemm.GemmQuantizationSpec.parse("fp4")
+        )
+    )
+    backends.loader = SimpleNamespace(
+        quantization_plan=SimpleNamespace(
+            gemm_plan=SimpleNamespace(formats_in_play=in_play)
         )
     )
 
     assert sorted(backends._formats_requested()) == expected
+
+
+def test_an_unmigrated_model_still_narrows_by_what_it_asked_for(modules):
+    """No declared targets means no plan, and then the spec is all there is."""
+    backends = modules.selection.QuantizationBackends.__new__(
+        modules.selection.QuantizationBackends
+    )
+    backends.model = SimpleNamespace(
+        config=SimpleNamespace(
+            gemm_quantization_spec=modules.gemm.GemmQuantizationSpec.parse(
+                "low=fp4,high=fp6"
+            )
+        )
+    )
+    backends.loader = SimpleNamespace(
+        quantization_plan=SimpleNamespace(gemm_plan=None)
+    )
+
+    assert sorted(backends._formats_requested()) == ["fp4", "fp6"]
 
 
 def test_the_encoder_formats_are_read_off_the_registry(modules):

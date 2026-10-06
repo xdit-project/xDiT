@@ -56,7 +56,6 @@ from xfuser.core.utils.dtype_policy import cast_preserving_fp32_modules
 from xfuser.core.utils.runner_utils import log, rgetattr
 from .checkpoint import CheckpointManifest, CheckpointRequest
 from .contracts import (
-    TEXT_ENCODER_FORMAT,
     LoadDeclaration,
     LoadRoute,
     MaterializationMode,
@@ -747,8 +746,13 @@ class ModelLoader:
         return component
 
     def _meta_te_fp8_targets(self, component_name: str) -> tuple:
-        """This component's streamed target paths for the encoder's format."""
-        streamed_targets = self.quantization_ledger.streamed_at(TEXT_ENCODER_FORMAT)
+        """This component's streamed target paths, at the format it was given."""
+        encoder_format = self.quantization_plan.component_format(component_name)
+        streamed_targets = (
+            self.quantization_ledger.streamed_at(encoder_format)
+            if encoder_format
+            else set()
+        )
         prefix = f"{component_name}."
         return tuple(
             "" if target == component_name else target[len(prefix) :]

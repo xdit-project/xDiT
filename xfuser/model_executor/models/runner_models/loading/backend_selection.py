@@ -19,7 +19,7 @@ the run and no longer.
 
 import functools
 
-from .contracts import IMPL_PREFERENCE as _IMPL_PREFERENCE, TEXT_ENCODER_FORMAT
+from .contracts import IMPL_PREFERENCE as _IMPL_PREFERENCE
 from .quant_adapter import module_paths_overlap
 
 
@@ -202,21 +202,25 @@ class QuantizationBackends:
             )
 
     def _formats_requested(self) -> frozenset:
-        """Every format this run will place, before the plan resolves targets.
+        """Every format this run will place.
 
-        The spec names what the transformer takes. The text encoder is a second
-        answer: that route stores one fixed format whatever the run asked the
-        transformer for, so a run that enables it needs that format probed too
-        -- otherwise the narrowing reports it "not requested" to the one caller
-        that does request it.
+        The plan's answer, not the spec's: a component the plan pins -- the
+        text encoder, whose loaders carry one format -- places a format the
+        spec never names, and it still has to be storable here. Reading the
+        spec meant the narrowing told that one caller its format "was not
+        requested" and refused the load.
+
+        An unmigrated model has no plan, so the spec is all there is.
         """
         spec = getattr(self.model.config, "gemm_quantization_spec", None)
         if spec is None:
             return frozenset()
-        requested = frozenset(spec.formats) - {"none"}
-        if requested and getattr(self.model.config, "quantize_text_encoder", False):
-            requested |= {TEXT_ENCODER_FORMAT}
-        return requested
+        plan = self.loader.quantization_plan.gemm_plan
+        if plan is not None:
+            # Every format the plan places, pins included: a component held at
+            # a format of its own still has to be storable here.
+            return frozenset(plan.formats_in_play)
+        return frozenset(spec.formats) - {"none"}
 
     def _formats_in_play(self) -> tuple:
         """The formats this run will place, low and high."""

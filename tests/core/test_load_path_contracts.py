@@ -307,16 +307,31 @@ def test_disk_fill_preserves_nonpersistent_buffers_and_reports_source_errors():
     assert quantize_line < _call_line(_is_block_shard)
 
 
-def _text_encoder_format():
-    """`TEXT_ENCODER_FORMAT` read out of the source, without importing it."""
-    path = ROOT / "xfuser/model_executor/models/runner_models/loading/contracts.py"
+def _text_encoder_formats():
+    """The formats whose adapters declare `places_text_encoder`, read out of
+    the source so this stays a structural check."""
+    path = ROOT / "xfuser/model_executor/models/runner_models/loading/backends.py"
+    found = set()
     for node in ast.parse(path.read_text()).body:
-        if (
-            isinstance(node, ast.Assign)
-            and getattr(node.targets[0], "id", "") == "TEXT_ENCODER_FORMAT"
-        ):
-            return node.value.value
-    raise AssertionError("contracts.py no longer declares TEXT_ENCODER_FORMAT")
+        if not isinstance(node, ast.ClassDef):
+            continue
+        declares = any(
+            isinstance(stmt, ast.Assign)
+            and getattr(stmt.targets[0], "id", "") == "places_text_encoder"
+            and getattr(stmt.value, "value", False) is True
+            for stmt in node.body
+        )
+        if not declares:
+            continue
+        for decorator in node.decorator_list:
+            if (
+                isinstance(decorator, ast.Call)
+                and getattr(decorator.func, "id", "") == "stores"
+                and isinstance(decorator.args[0], ast.Constant)
+            ):
+                found.add(decorator.args[0].value)
+    assert found, "no adapter declares places_text_encoder any more"
+    return found
 
 
 def test_the_text_encoder_format_is_resolved_only_when_an_encoder_needs_it():
@@ -370,17 +385,14 @@ def test_the_text_encoder_format_is_resolved_only_when_an_encoder_needs_it():
 
 
 def test_the_meta_text_encoder_layout_matches_the_declared_format():
-    """`TEXT_ENCODER_FORMAT` is a statement about this route, not a setting.
+    """`places_text_encoder` claims this pair can be placed in an encoder.
 
-    Seven places read it -- the adapter lookup, the ledger, the log line that
-    tells a non-FP8 run its encoder is FP8 anyway. `_swap_meta_te_to_fp8` is
-    not one of them: it builds one specific layer class. Changing the constant
-    alone would leave the meta layout behind while everything else moved, so
-    this fails until the swap moves with it.
+    The meta and broadcast paths get there through `_swap_meta_te_to_fp8`,
+    which builds one specific layer class rather than consulting anything. So
+    declaring a second format would leave that swap behind while the plan, the
+    adapter lookup and the ledger all moved; this fails until it moves too.
     """
-    # From `contracts`, which imports nothing heavy, so this stays a
-    # structural check rather than one that needs the whole app importable.
-    TEXT_ENCODER_FORMAT = _text_encoder_format()
+    declared = _text_encoder_formats()
 
     path = ROOT / "xfuser/model_executor/models/runner_models/loading/meta_load.py"
     source = path.read_text()
@@ -392,8 +404,10 @@ def test_the_meta_text_encoder_layout_matches_the_declared_format():
     body = ast.get_source_segment(source, swap)
 
     layer_for = {"fp8": "xFuserFP8BlockScaleLinear"}
-    assert TEXT_ENCODER_FORMAT in layer_for, (
-        f"the meta swap builds {sorted(layer_for)}; TEXT_ENCODER_FORMAT is "
-        f"{TEXT_ENCODER_FORMAT}, so the two have diverged"
+    assert declared <= set(layer_for), (
+        f"the meta swap builds {sorted(layer_for)}, but {sorted(declared)} "
+        "declare they can be placed in an encoder; the swap has to learn the "
+        "new layout before the declaration is true"
     )
-    assert layer_for[TEXT_ENCODER_FORMAT] in body
+    for format_name in declared:
+        assert layer_for[format_name] in body

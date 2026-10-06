@@ -26,25 +26,6 @@ IMPL_PREFERENCE = {
 }
 
 
-#: The one format a text encoder is ever stored at, whatever the run names.
-#: A statement, not a knob: ``_swap_meta_te_to_fp8`` builds one specific layer
-#: class without consulting this, so changing it here alone would move the
-#: adapter, the ledger and the log while leaving the meta layout FP8. See
-#: ``test_the_meta_text_encoder_layout_matches_the_declared_format``.
-#:
-#: Everything below the resolver is format-agnostic except this route. A
-#: declared encoder is in the plan like any other target and `format_for` gives
-#: it the run's format, but the meta and broadcast load paths this route goes
-#: through have only ever carried FP8, so that is what it places. Generalising
-#: it would run encoder formats nothing has measured, so it is stated here and
-#: said out loud at load time rather than looking format-agnostic and quietly
-#: substituting. See ``text_encoder_plan.plan_text_encoders``.
-#:
-#: Kept in this dependency-light module because capability probing has to know
-#: it before any text encoder is planned, and must not import the planner to
-#: find out.
-TEXT_ENCODER_FORMAT = "fp8"
-
 
 class QuantizationBackend(str, Enum):
     NONE = "none"

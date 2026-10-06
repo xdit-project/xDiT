@@ -63,9 +63,7 @@ def test_nonzero_churn_honors_sigma_bounds(monkeypatch):
     model_output = torch.full_like(sample, 0.25)
 
     def step_with_bounds(s_tmin: float) -> torch.Tensor:
-        wrapped = xFuserFlowMatchEulerDiscreteSchedulerWrapper(
-            FlowMatchEulerDiscreteScheduler()
-        )
+        wrapped = xFuserFlowMatchEulerDiscreteSchedulerWrapper(FlowMatchEulerDiscreteScheduler())
         wrapped.set_timesteps(4)
         return wrapped.step.__wrapped__(
             wrapped,

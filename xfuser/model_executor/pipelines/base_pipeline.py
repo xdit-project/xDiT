@@ -53,7 +53,7 @@ from distvae.vae import parallelize_decoder
 PACKAGES_CHECKER.check_diffusers_version()
 
 # These imports follow the diffusers version check on purpose.
-from xfuser.model_executor.schedulers import xFuserSchedulerWrappersRegister  # noqa: E402
+from xfuser.model_executor.schedulers import xFuserSchedulerBaseWrapper, xFuserSchedulerWrappersRegister  # noqa: E402
 from xfuser.model_executor.models.transformers import xFuserTransformerWrappersRegister  # noqa: E402
 from xfuser.model_executor.layers.attention_processor import xFuserAttentionBaseWrapper  # noqa: E402
 from xfuser.model_executor.cache.adapters import apply_cache  # noqa: E402
@@ -272,12 +272,30 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             and get_runtime_state().parallel_config.vae_parallel_size == 0
         )
 
+    def _naive_forward(self, *args, **kwargs):
+        """Run the wrapped diffusers pipeline with the scheduler it was built with.
+
+        The xDiT scheduler wrapper is not an instance of the scheduler class it
+        wraps, so diffusers pipelines that branch on ``isinstance(self.scheduler,
+        ...)`` (CogVideoX and ConsisID with CogVideoXDPMScheduler, for example)
+        would take the wrong branch. Diffusers gets the plain scheduler back for
+        the call; both share the same state.
+        """
+        scheduler = getattr(self.module, "scheduler", None)
+        if not isinstance(scheduler, xFuserSchedulerBaseWrapper):
+            return self.module(*args, **kwargs)
+        self.module.scheduler = scheduler.module
+        try:
+            return self.module(*args, **kwargs)
+        finally:
+            self.module.scheduler = scheduler
+
     @staticmethod
     def check_to_use_naive_forward(func):
         @wraps(func)
         def check_naive_forward_fn(self, *args, **kwargs):
             if self.use_naive_forward():
-                return self.module(*args, **kwargs)
+                return self._naive_forward(*args, **kwargs)
             else:
                 return func(self, *args, **kwargs)
 
@@ -616,6 +634,21 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
 
         return latents
 
+    def _get_dp_last_group(self, dp_rank_list: List[int]):
+        """Return the process group of the DP-last ranks, creating it once.
+
+        ``new_group`` is collective and every call adds a communicator, so it
+        must not run per request. Every caller derives ``dp_rank_list`` from
+        the same all-gather, so all ranks hit or miss the cache together and
+        keep the same group-creation order.
+        """
+        # Bypass the wrapper's __getattr__, which forwards misses to the module.
+        groups = self.__dict__.setdefault("_dp_last_groups", {})
+        key = tuple(dp_rank_list)
+        if key not in groups:
+            groups[key] = torch.distributed.new_group(list(key))
+        return groups[key]
+
     def gather_broadcast_latents(self, latents: torch.Tensor):
         """gather latents from dp last group and broacast final latents"""
 
@@ -632,7 +665,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         torch.distributed.all_gather(dp_rank_list, torch.tensor([gather_rank], dtype=int, device=device))
 
         dp_rank_list = [int(dp_rank[0]) for dp_rank in dp_rank_list if int(dp_rank[0]) != -1]
-        dp_last_group = torch.distributed.new_group(dp_rank_list)
+        dp_last_group = self._get_dp_last_group(dp_rank_list)
 
         # gather latents from dp last group
         if rank == dp_rank_list[-1]:

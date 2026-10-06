@@ -12,6 +12,8 @@ suite choosing which shapes to exercise.
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
+import torch
+
 
 class CallConstraint:
     """``unmet()`` returns a reason, or None when the call is acceptable."""
@@ -139,9 +141,31 @@ class _NoDropout(CallConstraint):
         return None
 
 
+@dataclass(frozen=True)
+class _BFloat16(CallConstraint):
+    def unmet(self, query, key, value, call) -> Optional[str]:
+        for name, tensor in (("query", query), ("key", key), ("value", value)):
+            if tensor.dtype != torch.bfloat16:
+                return f"supports bfloat16 only, got {name} dtype {tensor.dtype}"
+        return None
+
+
+@dataclass(frozen=True)
+class _SameQKV(CallConstraint):
+    def unmet(self, query, key, value, call) -> Optional[str]:
+        if query.shape == key.shape == value.shape:
+            return None
+        return (
+            "supports equal query, key, and value shapes only, "
+            f"got {tuple(query.shape)}, {tuple(key.shape)}, {tuple(value.shape)}"
+        )
+
+
 NON_CAUSAL = _NonCausal()
 MHA_ONLY = _MhaOnly()
 SELF_ATTENTION = _SelfAttention()
 NO_VARLEN = _NoVarlen()
 PACKED_KEYS = _PackedKeys()
 NO_DROPOUT = _NoDropout()
+BF16 = _BFloat16()
+SAME_QKV = _SameQKV()

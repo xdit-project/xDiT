@@ -374,6 +374,9 @@ class xFuserModel(abc.ABC):
         self._validate_config(config)
         self._update_model_settings(config)
         self.config = config
+        # Every saver below writes into this directory; create it now rather
+        # than lose the outputs to a missing directory after the whole run.
+        os.makedirs(config.output_directory, exist_ok=True)
         self.pipe = None
         from .loading.meta_load import ModelLoader
 
@@ -826,8 +829,8 @@ class xFuserModel(abc.ABC):
     def _compile_model(self, input_args: dict) -> None:
         """Compile pipe components with torch.compile.
 
-        When FSDP is active (fully_shard_degree > 1), compiles each component's
-        FSDP-wrapped block lists individually (read from fsdp_strategy wrap_attrs)
+        When FSDP is active, compiles each FSDP-wrapped component's block lists
+        individually (read from fsdp_strategy wrap_attrs)
         to avoid dynamo tracing through FSDP2 forward_pre_hooks and fragmenting
         the graph at every block boundary.
         """
@@ -839,7 +842,17 @@ class xFuserModel(abc.ABC):
             component = getattr(self.pipe, component_name, None)
             if component is None:
                 continue
-            if self.config.fully_shard_degree > 1 or self.config.cache_method:
+            requested_shards = getattr(
+                self.config,
+                "fully_shard_components",
+                None,
+            )
+            component_is_sharded = (
+                self.config.fully_shard_degree > 1
+                and component_name in self.settings.fsdp_strategy
+                and (requested_shards is None or component_name in requested_shards)
+            )
+            if component_is_sharded or self.config.cache_method:
                 # Per-block compile: leaves transformer as original object so cache-dit's
                 # transformer.forward patch remains visible during compiled execution.
                 wrap_attrs = self.settings.fsdp_strategy.get(component_name, {}).get("wrap_attrs", [])
@@ -977,9 +990,10 @@ class xFuserModel(abc.ABC):
 
         output = self._gather_dp_outputs(output)
 
-        if len(timings) > 1:
-            timings.pop(0)  # Remove first timing for more accurate average # TODO: fix
-        log(f"Average time over {self.config.num_iterations} runs: {sum(timings) / len(timings):.2f}s")
+        if not self.config.warmup_calls and len(timings) > 1:
+            # Without warmup calls, the first timed run absorbs one-time costs such as compilation.
+            timings.pop(0)
+        log(f"Average time over {len(timings)} runs: {sum(timings) / len(timings):.2f}s")
         log(f"Total time spent: {inference_start.elapsed_time(inference_end) / 1000:.2f}s")
 
         return output, timings
@@ -1303,7 +1317,9 @@ class xFuserModel(abc.ABC):
         prompts = input_args.get("prompt")
         negative_prompts = input_args.get("negative_prompt")
 
-        if isinstance(prompts, str):
+        # --prompt takes nargs="*", so one prompt on the command line arrives
+        # as a one-element list.
+        if isinstance(prompts, str) or len(prompts) == 1:
             log(f"Single prompt with dp_world_size={dp_world_size}: all DP groups will process the same prompt.")
             return input_args
 

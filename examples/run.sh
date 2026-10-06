@@ -1,3 +1,6 @@
+#!/bin/bash
+# The *_ARGS variables each hold several flags and are word-split on purpose.
+# shellcheck disable=SC2086
 set -x
 
 export PYTHONPATH=$PWD:$PYTHONPATH
@@ -6,11 +9,14 @@ export PYTHONPATH=$PWD:$PYTHONPATH
 export MODEL_TYPE="Flux"
 # Configuration for different model types
 # script, model_id, inference_step
+# "runner" runs the unified runner (docs/runner/runner.md), which takes a
+# registered model name such as FLUX.1-dev instead of a local path.
+# Stable Diffusion 3 medium no longer has an example script; the unified
+# runner supports Stable Diffusion 3.5 with --model SD3.5.
 declare -A MODEL_CONFIGS=(
     ["Pixart-alpha"]="pixartalpha_example.py /cfs/dit/PixArt-XL-2-1024-MS 20"
     ["Pixart-sigma"]="pixartsigma_example.py /cfs/dit/PixArt-Sigma-XL-2-2K-MS 20"
-    ["Sd3"]="sd3_example.py /cfs/dit/stable-diffusion-3-medium-diffusers 20"
-    ["Flux"]="flux_example.py /cfs/dit/FLUX.1-dev/ 28"
+    ["Flux"]="runner FLUX.1-dev 28"
     ["FluxControl"]="flux_control_example.py /cfs/dit/FLUX.1-Depth-dev/ 28"
     ["HunyuanDiT"]="hunyuandit_example.py /cfs/dit/HunyuanDiT-v1.2-Diffusers 50"
     ["SDXL"]="sdxl_example.py /cfs/dit/stable-diffusion-xl-base-1.0 30"
@@ -56,6 +62,23 @@ PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 2
 
 # export CUDA_VISIBLE_DEVICES=4,5,6,7
 
+PROMPT="brown dog laying on the ground with a metal bowl in front of him."
+
+if [ "$SCRIPT" = "runner" ]; then
+# The runner does not take --no_use_resolution_binning, --warmup_steps,
+# PIPEFUSION_ARGS, OUTPUT_ARGS or QUANTIZE_FLAG; see docs/runner/runner.md.
+torchrun --nproc_per_node=$N_GPUS -m xfuser.runner \
+--model $MODEL_ID \
+$PARALLEL_ARGS \
+--height 1024 --width 1024 --guidance_scale 3.5 \
+--num_inference_steps $INFERENCE_STEP \
+--prompt "$PROMPT" \
+--output_directory ./results \
+$CFG_ARGS \
+$PARALLLEL_VAE \
+$COMPILE_FLAG \
+$CACHE_ARGS
+else
 torchrun --nproc_per_node=$N_GPUS ./examples/$SCRIPT \
 --model $MODEL_ID \
 $PARALLEL_ARGS \
@@ -64,9 +87,10 @@ $PIPEFUSION_ARGS \
 $OUTPUT_ARGS \
 --num_inference_steps $INFERENCE_STEP \
 --warmup_steps 1 \
---prompt "brown dog laying on the ground with a metal bowl in front of him." \
+--prompt "$PROMPT" \
 $CFG_ARGS \
 $PARALLLEL_VAE \
 $COMPILE_FLAG \
 $QUANTIZE_FLAG \
-$CACHE_ARGS \
+$CACHE_ARGS
+fi

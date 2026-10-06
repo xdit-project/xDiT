@@ -291,7 +291,12 @@ class xFuserWan21I2VModel(xFuserWanModel):
         image = input_args["input_images"][0]
         width, height = input_args["width"], input_args["height"]
         if input_args.get("resize_input_images", False):
-            image = resize_and_crop_image(image, width, height, self.settings.mod_value)
+            image = resize_and_crop_image(
+                image,
+                target_height=height,
+                target_width=width,
+                mod_value=self.settings.mod_value,
+            )
         else:
             image = resize_image_to_max_area(image, height, width, self.settings.mod_value)
         input_args["height"] = image.height
@@ -734,6 +739,50 @@ class xFuserWan21T2VModel(xFuserWanModel):
         return None
 
 
+@register_model("Wan-AI/Wan2.1-T2V-1.3B-Diffusers")
+@register_model("Wan2.1-T2V-1.3B")
+class xFuserWan21T2V1_3BModel(xFuserWan21T2VModel):
+    """Wan2.1 text-to-video, 1.3B checkpoint.
+
+    Same diffusers WanTransformer3DModel as the 14B checkpoint, but with 12
+    attention heads and 30 blocks, trained for 480P.
+    """
+
+    attention_heads = 12
+
+    # Model card settings: 480x832, 81 frames, guidance 5.0, and the checkpoint
+    # scheduler's flow_shift of 3.0, which the Wan authors recommend for 480P.
+    default_input_values = replace(
+        xFuserWan21T2VModel.default_input_values,
+        height=480,
+        width=832,
+        num_inference_steps=50,
+        guidance_scale=5.0,
+        flow_shift=3.0,
+    )
+
+    def _customize_settings(self, config: xFuserArgs) -> None:
+        super()._customize_settings(config)
+        self.settings.model_name = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
+        self.settings.output_name = "wan2.1_t2v_1.3b"
+        # The 14B list keeps its first and last ten blocks in FP8 under --use_fp4_gemms
+        # and names blocks 30-39, which do not exist here. Apply the same rule to the
+        # 30 blocks of this checkpoint.
+        self.settings.fp8_precision_overrides = tuple(f"{i}." for i in (*range(10), *range(20, 30)))
+
+    def _validate_config(self, config: xFuserArgs) -> None:
+        super()._validate_config(config)
+        heads = self.attention_heads
+        ulysses_degree = config.ulysses_degree or 1
+        if heads % ulysses_degree != 0:
+            divisors = ", ".join(str(d) for d in range(1, heads + 1) if heads % d == 0)
+            raise ValueError(
+                f"Wan2.1-T2V-1.3B has {heads} attention heads, so --ulysses_degree must "
+                f"divide {heads} ({divisors}); got {ulysses_degree}. Use --ring_degree "
+                f"to scale sequence parallelism further."
+            )
+
+
 @register_model("Wan-AI/Wan2.2-T2V-A14B-Diffusers")
 @register_model("Wan2.2-T2V")
 class xFuserWan22T2VModel(xFuserWan21T2VModel):
@@ -974,7 +1023,12 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         image = input_args["input_images"][0]
         width, height = input_args["width"], input_args["height"]
         if input_args.get("resize_input_images", False):
-            image = resize_and_crop_image(image, width, height, self.settings.mod_value)
+            image = resize_and_crop_image(
+                image,
+                target_height=height,
+                target_width=width,
+                mod_value=self.settings.mod_value,
+            )
         else:
             image = resize_image_to_max_area(image, height, width, self.settings.mod_value)
         input_args["height"] = image.height
@@ -1113,6 +1167,13 @@ class xFuserWan21VACEModel(xFuserWanModel):
         input_args["mask"] = mask
         return input_args
 
+    def preprocess_args(self, input_args: dict) -> dict:
+        args = super().preprocess_args(input_args)
+        # --prompt arrives as a list; WanVACEPipeline only accepts a single string.
+        if isinstance(args.get("prompt"), list) and len(args["prompt"]) == 1:
+            args["prompt"] = args["prompt"][0]
+        return args
+
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         output = self.pipe(
             height=input_args["height"],
@@ -1131,6 +1192,9 @@ class xFuserWan21VACEModel(xFuserWanModel):
     def _validate_args(self, input_args: dict) -> None:
         """Validate input arguments"""
         super()._validate_args(input_args)
+        prompt = input_args["prompt"]
+        if isinstance(prompt, list) and len(prompt) != 1:
+            raise ValueError("Wan VACE supports one prompt per run; diffusers' WanVACEPipeline cannot batch prompts.")
         images = input_args.get("input_images", [])
         if len(images) != 2:
             raise ValueError("Exactly two input images are required for Wan VACE model (first frame and last frame).")

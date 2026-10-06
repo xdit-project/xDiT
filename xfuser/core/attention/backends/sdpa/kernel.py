@@ -59,7 +59,8 @@ def sdpa_efficient(query, key, value, call: AttnCall):
         dropout_p=call.dropout_p,
         is_causal=call.is_causal,
     )
-    return output, softmax_lse
+    # The kernel pads the log-sum-exp to a multiple of 32; ring merges need one per query.
+    return output, softmax_lse[..., : query.shape[2]]
 
 
 def cudnn(query, key, value, call: AttnCall):

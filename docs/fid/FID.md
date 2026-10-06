@@ -1,4 +1,6 @@
 
+The commands below use the scripts in the `scripts/` directory of the [`legacy` branch](https://github.com/xdit-project/xDiT/tree/legacy/scripts), which produced the PipeFusion FID results; run them from a checkout of that branch. To measure FID with the current code, see [benchmark/fid/README.md](../../benchmark/fid/README.md).
+
 ### Procedure
 #### Prerequisite
 Firstly, Install the following additional dependencies before testing:

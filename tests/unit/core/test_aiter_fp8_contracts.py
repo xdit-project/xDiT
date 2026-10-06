@@ -86,6 +86,98 @@ def test_varlen_call_packs_keys_and_keeps_every_query(fp8_kernel, monkeypatch):
     assert torch.equal(calls["query"], rotated)
 
 
+def _trailing_pad_call(valid, total, batch=1, **kwargs):
+    """The packing MiniMax-H3 publishes for its alignment pad, plus valid_kv_len."""
+    indices = torch.cat([
+        torch.arange(valid, device="cuda") + row * total for row in range(batch)
+    ])
+    return AttnCall(
+        varlen=VarlenPacking(
+            indices_k=indices,
+            cu_seqlens_k=torch.arange(batch + 1, dtype=torch.int32, device="cuda") * valid,
+            max_seqlen_k=valid,
+        ),
+        attention_kwargs={"valid_kv_len": valid, **kwargs},
+    )
+
+
+def test_a_declared_trailing_pad_is_sliced_onto_mha_v4(fp8_kernel, monkeypatch):
+    """Packing the pad would take the varlen kernel; slicing it is the same
+    attention on the much faster dense MHA v4 one."""
+    calls = {}
+
+    def mha_v4(query, key, value, *formats):
+        calls.update(query=query, key=key, value=value)
+        return query
+
+    def varlen_op(*args):
+        raise AssertionError("a declared trailing pad must not be gathered")
+
+    monkeypatch.setattr(fp8_kernel, "_USE_MHA_V4", True)
+    monkeypatch.setattr(fp8_kernel, "mha_v4", mha_v4)
+    monkeypatch.setattr(fp8_kernel, "native_fp8_format", lambda: 4)
+    monkeypatch.setattr(fp8_kernel, "_varlen_op", varlen_op)
+
+    query = torch.randn(1, 2, 8, 128, device="cuda")
+    key = torch.randn_like(query)
+    value = torch.randn_like(query)
+    output, _ = fp8_kernel.aiter_fp8(query, key, value, _trailing_pad_call(5, 8))
+
+    assert output.shape == query.shape
+    assert torch.equal(calls["query"], query.permute(0, 2, 1, 3).contiguous())
+    assert torch.equal(calls["key"], key[:, :, :5].permute(0, 2, 1, 3).contiguous())
+    assert torch.equal(calls["value"], value[:, :, :5].permute(0, 2, 1, 3).contiguous())
+
+
+def test_a_declared_trailing_pad_is_sliced_for_fp8_comms(fp8_kernel, monkeypatch):
+    """fp8 comms hands over the pad rows already quantised; they are sliced
+    rather than refused as packed keys."""
+    calls = {}
+
+    def mha_v4_packed(query, key, value, *args, **kwargs):
+        calls.update(key=key, value=value)
+        return query
+
+    monkeypatch.setattr(fp8_kernel, "_USE_MHA_V4", True)
+    monkeypatch.setattr(fp8_kernel, "mha_v4_packed", mha_v4_packed)
+    monkeypatch.setattr(fp8_kernel, "native_fp8_format", lambda: 4)
+    monkeypatch.setattr(
+        fp8_kernel, "AttentionScaleMode",
+        type("AttentionScaleMode", (), {"F32_PER_TENSOR": 1}), raising=False,
+    )
+
+    query = torch.randn(1, 2, 8, 128, device="cuda")
+    key = torch.randn_like(query)
+    value = torch.randn_like(query)
+    descale = torch.ones(1, device="cuda")
+    fp8_kernel.aiter_fp8(query, key, value, _trailing_pad_call(
+        5, 8, pre_quantized=True, q_descale=descale, k_descale=descale, v_descale=descale,
+    ))
+
+    assert calls["key"].shape == (1, 5, 2, 128)
+    assert calls["value"].shape == (1, 5, 2, 128)
+
+
+def test_a_batch_of_padded_sequences_is_still_gathered(fp8_kernel, monkeypatch):
+    """One valid_kv_len cannot describe several rows, so slicing would leave
+    the shorter ones attending over their own pad."""
+    calls = {}
+
+    def varlen_op(query, key, value, *args):
+        calls.update(key_shape=key.shape)
+        return query
+
+    monkeypatch.setattr(fp8_kernel, "_USE_MHA_V4", True)
+    monkeypatch.setattr(fp8_kernel, "_varlen_op", varlen_op)
+
+    query = torch.randn(2, 2, 8, 128, device="cuda")
+    key = torch.randn_like(query)
+    value = torch.randn_like(query)
+    fp8_kernel.aiter_fp8(query, key, value, _trailing_pad_call(5, 8, batch=2))
+
+    assert calls["key_shape"] == (10, 2, 128)
+
+
 def test_mha_v4_path_hands_over_unrotated_qk(fp8_kernel, monkeypatch):
     """MHA v4 rotates and quantises internally, so passing it pre-rotated Q/K
     would apply the rotation twice."""

@@ -117,7 +117,7 @@ class xFuserFlux2PipelineBase(xFuserPipelineBaseWrapper):
         callback_on_step_end: Optional[Callable] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         max_sequence_length: int = 512,
-        text_encoder_out_layers: tuple = (10, 20, 30),
+        text_encoder_out_layers: Optional[tuple] = None,
         caption_upsample_temperature: float = None,
         **kwargs,
     ):
@@ -181,13 +181,18 @@ class xFuserFlux2PipelineBase(xFuserPipelineBaseWrapper):
                 temperature=caption_upsample_temperature,
                 device=device,
             )
+        # dev and klein read different text-encoder layers, so unless the caller picks
+        # them, keep the default of the diffusers pipeline this wrapper binds.
+        encode_kwargs = {}
+        if text_encoder_out_layers is not None:
+            encode_kwargs["text_encoder_out_layers"] = text_encoder_out_layers
         prompt_embeds, text_ids = self.encode_prompt(
             prompt=prompt,
             prompt_embeds=prompt_embeds,
             device=device,
             num_images_per_prompt=num_images_per_prompt,
             max_sequence_length=max_sequence_length,
-            text_encoder_out_layers=text_encoder_out_layers,
+            **encode_kwargs,
         )
 
         # 4. prepare latents

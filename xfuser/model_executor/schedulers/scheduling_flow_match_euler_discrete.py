@@ -57,11 +57,7 @@ class xFuserFlowMatchEulerDiscreteSchedulerWrapper(xFuserSchedulerBaseWrapper):
                 returned, otherwise a tuple is returned where the first element is the sample tensor.
         """
 
-        if (
-            isinstance(timestep, int)
-            or isinstance(timestep, torch.IntTensor)
-            or isinstance(timestep, torch.LongTensor)
-        ):
+        if isinstance(timestep, int) or isinstance(timestep, torch.IntTensor) or isinstance(timestep, torch.LongTensor):
             raise ValueError(
                 (
                     "Passing integer indices (e.g. from `enumerate(timesteps)`) as timesteps to"
@@ -78,11 +74,13 @@ class xFuserFlowMatchEulerDiscreteSchedulerWrapper(xFuserSchedulerBaseWrapper):
 
         sigma = self.sigmas[self.step_index]
 
-        gamma = (
-            min(s_churn / (len(self.sigmas) - 1), 2**0.5 - 1)
-            if s_tmin <= sigma <= s_tmax
-            else 0.0
-        )
+        # The default deterministic path never adds churn. Avoid converting the
+        # device scalar comparison below into a Python bool, which synchronizes
+        # the GPU with the host.
+        if s_churn == 0.0:
+            gamma = 0.0
+        else:
+            gamma = min(s_churn / (len(self.sigmas) - 1), 2**0.5 - 1) if s_tmin <= sigma <= s_tmax else 0.0
 
         noise = randn_tensor(
             model_output.shape,
@@ -116,8 +114,7 @@ class xFuserFlowMatchEulerDiscreteSchedulerWrapper(xFuserSchedulerBaseWrapper):
         # upon completion increase step index by one
         if (
             not get_runtime_state().patch_mode
-            or get_runtime_state().pipeline_patch_idx
-            == get_runtime_state().num_pipeline_patch - 1
+            or get_runtime_state().pipeline_patch_idx == get_runtime_state().num_pipeline_patch - 1
         ):
             self._step_index += 1
 

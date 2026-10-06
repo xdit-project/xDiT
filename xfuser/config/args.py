@@ -320,18 +320,11 @@ class xFuserArgs:
         if self.profile_with_stack and not self.profile:
             logger.warning("--profile_with_stack has no effect without --profile; no profiles will be outputted.")
         if self.fully_shard_components is not None:
-            self.fully_shard_components = list(
-                dict.fromkeys(self.fully_shard_components)
-            )
+            self.fully_shard_components = list(dict.fromkeys(self.fully_shard_components))
             if not self.fully_shard_components:
-                raise ValueError(
-                    "--fully_shard_components requires at least one component"
-                )
+                raise ValueError("--fully_shard_components requires at least one component")
             if self.fully_shard_degree <= 1:
-                raise ValueError(
-                    "--fully_shard_components requires "
-                    "--fully_shard_degree greater than 1"
-                )
+                raise ValueError("--fully_shard_components requires --fully_shard_degree greater than 1")
         self._resolve_gemm_quantization()
         if self.cache_method is None:
             if self.use_fbcache:

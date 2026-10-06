@@ -822,10 +822,7 @@ class xFuserModel(abc.ABC):
             component_is_sharded = (
                 self.config.fully_shard_degree > 1
                 and component_name in self.settings.fsdp_strategy
-                and (
-                    requested_shards is None
-                    or component_name in requested_shards
-                )
+                and (requested_shards is None or component_name in requested_shards)
             )
             if component_is_sharded or self.config.cache_method:
                 # Per-block compile: leaves transformer as original object so cache-dit's

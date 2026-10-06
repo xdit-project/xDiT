@@ -1,4 +1,5 @@
 from .args import FlexibleArgumentParser, xFuserArgs
+from .attention_a2a import AttentionA2AConfig
 from .gemm import GemmQuantizationSpec
 from .config import (
     EngineConfig,
@@ -9,12 +10,13 @@ from .config import (
     DataParallelConfig,
     ModelConfig,
     InputConfig,
-    RuntimeConfig
+    RuntimeConfig,
 )
 
 __all__ = [
     "FlexibleArgumentParser",
     "xFuserArgs",
+    "AttentionA2AConfig",
     "GemmQuantizationSpec",
     "EngineConfig",
     "ParallelConfig",
@@ -24,5 +26,5 @@ __all__ = [
     "DataParallelConfig",
     "ModelConfig",
     "InputConfig",
-    "RuntimeConfig"
+    "RuntimeConfig",
 ]

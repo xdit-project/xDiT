@@ -1,10 +1,11 @@
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from typing import List, Optional, Union
 
 import torch
 from packaging import version
 
 from xfuser.compat import declared_floor, version_at_least
+from xfuser.config.attention_a2a import AttentionA2AConfig
 from xfuser.envs import CUDA_VERSION, PACKAGES_CHECKER, TORCH_VERSION
 from xfuser.logger import init_logger
 
@@ -85,6 +86,9 @@ class RuntimeConfig:
     use_fp8_comms: bool = False
     fp8_comms_scale: Optional[float] = None
     fp8_comms_safety_factor: float = DEFAULT_FP8_COMMS_SAFETY_FACTOR
+    attention_a2a: AttentionA2AConfig = field(
+        default_factory=AttentionA2AConfig
+    )
 
     def __post_init__(self):
         check_packages()

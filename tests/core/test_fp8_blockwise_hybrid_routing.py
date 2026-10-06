@@ -1,5 +1,6 @@
 """Routing tests for FP8-only blocks inside FP4/hybrid materialization."""
 
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
@@ -18,6 +19,9 @@ from xfuser.model_executor.models.runner_models.loading import (
 )
 from xfuser.model_executor.models.runner_models.loading.quantization_ledger import (
     QuantizationLedger,
+)
+from xfuser.model_executor.models.runner_models.loading.backend_selection import (
+    QuantizationBackends,
 )
 from xfuser.model_executor.models.runner_models.loading import backends
 from xfuser.model_executor.models.runner_models.loading import quant_adapter
@@ -171,7 +175,7 @@ def runtime(model):
         if format_name == "fp8"
         else backends.format
     )
-    return SimpleNamespace(
+    loader = SimpleNamespace(
         model=model,
         load_contract=getattr(model, "load_contract", None),
         quantization_plan=plan,
@@ -183,6 +187,16 @@ def runtime(model):
         ),
         broadcast_fill_replicated=lambda offload: None,
     )
+    # Borrowed from the real QuantizationBackends rather than written out
+    # again: the walks ask it to compose the per-step pair, and a stub here
+    # could pair differently from the one under test.
+    backends.model = model
+    backends.loader = loader
+    backends.hybrid_companion = partial(
+        QuantizationBackends.hybrid_companion, backends
+    )
+    return loader
+
 
 class RecordingAdapter:
     def __init__(self):
@@ -340,46 +354,40 @@ def test_the_hybrid_schedule_only_blocks_streaming_where_it_must(monkeypatch):
     assert observed["hybrid"] is True
 
 
-class _StreamingAdapterStub:
-    """An adapter that streams whenever it is allowed to, for the test above."""
-
-    uses_native_transformer_streaming = True
-    supports_precision_overrides = False
-    streams_by_exclusion = False
-
-    def __init__(self, format_name, impl):
-        self.format = SimpleNamespace(value=format_name)
-        self.backend = SimpleNamespace(value=impl)
-        self.format_name = format_name
-        self.impl = impl
-
-    def transformer_stream_plan(self, targets, **kwargs):
-        raise AssertionError("streaming must not be attempted under hybrid")
-
-
 def test_no_adapter_streams_under_the_hybrid_schedule():
     """A streamed load quantizes every targeted leaf on the way in, and the
-    per-step pair needs those leaves in bf16 to build both precisions from.
-    That holds for every implementation, so none of them may stream here.
+    per-step pair needs them in bf16 to build both precisions from. That holds
+    for every implementation, so none of them may stream here.
 
     It used to be a per-adapter declaration, set on the one format that
     happened to be the low half when the schedule was written. Every other low
     format streamed instead, and the schedule the run asked for was silently
     never built."""
     from xfuser.model_executor.models.runner_models.loading import quant_adapter
+    from xfuser.model_executor.models.runner_models.loading import backends  # noqa: F401
+    from xfuser.model_executor.models.runner_models.loading.contracts import (
+        QuantizationBackend,
+        QuantizationFormat,
+    )
     from xfuser.model_executor.models.runner_models.loading.quant_adapter import (
         REGISTRY,
     )
 
     assert REGISTRY, "no adapters registered"
     for (format_name, impl), cls in REGISTRY.items():
-        adapter = _StreamingAdapterStub(format_name, impl)
+        # The real class, told it *can* stream, so the refusal is what is
+        # measured rather than the absence of a streaming path.
+        adapter = cls(
+            backend=QuantizationBackend(impl),
+            format_=QuantizationFormat(format_name),
+            native_transformer_streaming=True,
+        )
         prepared = quant_adapter.prepare_native_load(
             adapter,
             component_name="transformer",
             targets=("blocks",),
             stream_quant=True,
-            model_factory=lambda: object(),
+            model_factory=lambda: pytest.fail("must not inspect structure"),
             hybrid=True,
         )
         assert prepared.descriptor.materialization_mode == "post_load", (

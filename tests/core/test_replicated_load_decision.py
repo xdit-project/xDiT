@@ -542,7 +542,6 @@ def test_runner_fsdp_meta_support_matches_capabilities_and_strategy():
 def test_base_runner_selects_the_production_contract_before_loading(monkeypatch):
     from xfuser.model_executor.models.runner_models import base_model
 
-    monkeypatch.setattr(meta_load, "_is_cuda", lambda: False)
     model_capabilities = base_model.ModelCapabilities(
         fully_shard_degree=True,
         gemm_formats=frozenset({"fp8"}),
@@ -583,7 +582,6 @@ def test_base_runner_selects_the_production_contract_before_loading(monkeypatch)
 def test_base_runner_rejects_unsupported_meta_mode_before_loading(monkeypatch):
     from xfuser.model_executor.models.runner_models import base_model
 
-    monkeypatch.setattr(meta_load, "_is_cuda", lambda: True)
     runner = SimpleNamespace(
         config=SimpleNamespace(
             fully_shard_degree=1,
@@ -610,7 +608,6 @@ def test_base_runner_rejects_unsupported_meta_mode_before_loading(monkeypatch):
 def test_base_runner_uses_effective_single_rank_mode(monkeypatch):
     from xfuser.model_executor.models.runner_models import base_model
 
-    monkeypatch.setattr(meta_load, "_is_cuda", lambda: True)
     runner = SimpleNamespace(
         config=SimpleNamespace(
             fully_shard_degree=1,
@@ -654,7 +651,6 @@ def test_wan22_spec_resolves_after_dynamic_instance_settings(monkeypatch):
     )
     runner._customize_settings(SimpleNamespace())
     runner.fp8_impl = "aiter"
-    monkeypatch.setattr(meta_load, "_is_cuda", lambda: False)
 
     loader = ModelLoader(runner)
     loader.backends = SimpleNamespace(

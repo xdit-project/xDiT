@@ -4,12 +4,16 @@ Drives `setup_gemm_quantization` with recording adapters, so the assertions are
 about which converter saw which module, and on which side of the device move.
 """
 
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
 
 from xfuser.config.gemm import GemmQuantizationSpec
 from xfuser.model_executor.models.runner_models.loading import placement
+from xfuser.model_executor.models.runner_models.loading.backend_selection import (
+    QuantizationBackends,
+)
 from xfuser.model_executor.models.runner_models.loading.quantization_ledger import (
     QuantizationLedger,
 )
@@ -133,24 +137,30 @@ def _loader(raw, *, text_encoder=True, fp8_before_move=True, targets=TARGETS):
             else backends.format
         )
     )
-    return SimpleNamespace(
+    loader = SimpleNamespace(
         model=model,
         backends=backends,
         quantization_plan=QuantizationPlan(model),
         quantization_ledger=QuantizationLedger(),
     )
+    # Borrowed from the real QuantizationBackends rather than written out
+    # again: the walk asks it to compose the per-step pair, and a stub here
+    # could pair differently from the one under test.
+    backends.model = model
+    backends.loader = loader
+    backends.hybrid_companion = partial(
+        QuantizationBackends.hybrid_companion, backends
+    )
+    return loader
 
 
 @pytest.fixture(autouse=True)
 def _no_real_descriptor(monkeypatch):
     monkeypatch.setattr(
         placement,
-        "prepare_native_load",
-        lambda *a, **k: SimpleNamespace(
-            descriptor=SimpleNamespace(log_message=lambda: "")
-        ),
+        "descriptor_for",
+        lambda *a, **k: SimpleNamespace(log_message=lambda: ""),
     )
-    monkeypatch.setattr(placement, "_is_cuda", lambda: False)
     # log() asks is_last_process(), which needs a distributed env
     monkeypatch.setattr(placement, "log", lambda *a, **k: None)
 

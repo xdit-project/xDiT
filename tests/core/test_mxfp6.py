@@ -1,5 +1,10 @@
 import copy
+from functools import partial
 from types import SimpleNamespace
+
+from xfuser.model_executor.models.runner_models.loading.backend_selection import (
+    QuantizationBackends,
+)
 
 import pytest
 import torch
@@ -154,6 +159,14 @@ def test_wan22_mixed_mode_routes_primary_to_fp4_and_second_transformer_to_fp6(
         backends=backends,
         quantization_plan=QuantizationPlan(model),
         quantization_ledger=QuantizationLedger(),
+    )
+    # Borrowed from the real QuantizationBackends rather than written out
+    # again: the walks ask it to compose the per-step pair, and a stub here
+    # could pair differently from the one under test.
+    backends.model = model
+    backends.loader = loader
+    backends.hybrid_companion = partial(
+        QuantizationBackends.hybrid_companion, backends
     )
 
     for before in (True, False):

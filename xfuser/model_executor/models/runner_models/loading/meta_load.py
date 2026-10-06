@@ -598,12 +598,14 @@ class ModelLoader:
 
             place_pipeline_components(self)
 
-    def fill_eager_transformers(self) -> None:
+    def fill_eager_transformers(self, component_names=None) -> None:
         """Fill all component-level eager blockwise plans before device placement."""
 
         local_rank = get_world_group().local_rank
         device = f"cuda:{local_rank}"
         for name, component in self.model.pipe.components.items():
+            if component_names is not None and name not in component_names:
+                continue
             if component not in self._local_blockwise_transformers:
                 continue
             strategy = self.model.settings.fsdp_strategy[name]

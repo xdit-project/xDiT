@@ -22,13 +22,31 @@ from .format_backends import module_path_is_covered, module_paths_overlap
 
 
 def shard_pipeline_components(loader) -> None:
-    """Shard every component the run's fsdp_strategy names, and move the rest to the local device."""
+    """Shard selected strategy components and place the rest locally."""
     model = loader.model
     local_rank = get_world_group().local_rank
     fs_local_rank = get_fs_group().local_rank
     device_group = get_fs_group().device_group
+    requested = getattr(model.config, "fully_shard_components", None)
+    strategy_components = set(model.settings.fsdp_strategy)
+    sharded_components = (
+        strategy_components if requested is None else set(requested)
+    )
+    unknown = sharded_components - strategy_components
+    if unknown:
+        raise ValueError(
+            "--fully_shard_components contains components without an FSDP "
+            f"strategy: {sorted(unknown)}. Available components: "
+            f"{sorted(strategy_components)}"
+        )
+    if requested is None:
+        loader.fill_eager_transformers()
+    else:
+        loader.fill_eager_transformers(
+            component_names=set(model.pipe.components) - sharded_components
+        )
     for component_name, component in model.pipe.components.items():
-        if component_name in model.settings.fsdp_strategy:
+        if component_name in sharded_components:
             log(
                 f"Sharding {component_name} with FSDP... "
                 f"(host cur/anon/file: {host_mem_gb()} GB, "
@@ -114,10 +132,14 @@ def shard_pipeline_components(loader) -> None:
                     f"Component {component_name} has no .to() method, skipping device move."
                 )
 
-    _give_cpu_offloaded_components_an_exec_device_hook(model, local_rank)
+    _give_cpu_offloaded_components_an_exec_device_hook(
+        model, local_rank, sharded_components
+    )
 
 
-def _give_cpu_offloaded_components_an_exec_device_hook(model, local_rank: int) -> None:
+def _give_cpu_offloaded_components_an_exec_device_hook(
+    model, local_rank: int, sharded_components=None
+) -> None:
     """Keep diffusers' _execution_device from resolving to cpu on a cpu-offloaded pipeline.
 
     _execution_device short-circuits on the first nn.Module component that lacks _hf_hook, returning
@@ -129,6 +151,7 @@ def _give_cpu_offloaded_components_an_exec_device_hook(model, local_rank: int) -
         name
         for name, s in model.settings.fsdp_strategy.items()
         if s.get("offload_policy") == "cpu"
+        and (sharded_components is None or name in sharded_components)
     }
     if not cpu_offloaded:
         return

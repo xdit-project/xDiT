@@ -270,6 +270,7 @@ class xFuserArgs:
     dataset_path: Optional[str] = None
     use_fsdp: bool = False
     fully_shard_degree: int = 1
+    fully_shard_components: Optional[List[str]] = None
     reshard_after_forward: bool = True
     memory_efficient_sharding: bool = False
     memory_efficient_replicated_load: bool = False
@@ -318,6 +319,19 @@ class xFuserArgs:
         )
         if self.profile_with_stack and not self.profile:
             logger.warning("--profile_with_stack has no effect without --profile; no profiles will be outputted.")
+        if self.fully_shard_components is not None:
+            self.fully_shard_components = list(
+                dict.fromkeys(self.fully_shard_components)
+            )
+            if not self.fully_shard_components:
+                raise ValueError(
+                    "--fully_shard_components requires at least one component"
+                )
+            if self.fully_shard_degree <= 1:
+                raise ValueError(
+                    "--fully_shard_components requires "
+                    "--fully_shard_degree greater than 1"
+                )
         self._resolve_gemm_quantization()
         if self.cache_method is None:
             if self.use_fbcache:
@@ -843,6 +857,16 @@ class xFuserArgs:
             help="Tensor parallel degree for supported text encoders, reusing the existing model ranks.",
         )
         parser.add_argument("--fully_shard_degree", type=int, default=1, help="Fully sharding (sharding) degree.")
+        parser.add_argument(
+            "--fully_shard_components",
+            nargs="+",
+            default=None,
+            help=(
+                "Only FSDP-wrap these pipeline components (for example "
+                "'text_encoder'). By default every component named by the "
+                "model's FSDP strategy is sharded."
+            ),
+        )
         parser.add_argument(
             "--no_reshard_after_forward",
             dest="reshard_after_forward",

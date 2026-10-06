@@ -191,7 +191,13 @@ def load_transformer(
     wrap_attrs = tuple(strategy.get("wrap_attrs", ()))
     build_kwargs = {"weight_source": weight_source} if weight_source is not None else {}
 
-    fsdp_meta = loader.fsdp_meta_load()
+    requested_fsdp_components = getattr(
+        getattr(model, "config", None), "fully_shard_components", None
+    )
+    fsdp_meta = loader.fsdp_meta_load() and (
+        requested_fsdp_components is None
+        or component_name in requested_fsdp_components
+    )
     replicated_meta = False if fsdp_meta else loader.replicated_broadcast_load()
     if fsdp_meta or replicated_meta:
         if adapter is not None:

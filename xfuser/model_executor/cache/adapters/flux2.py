@@ -13,6 +13,8 @@ Key differences from FLUX.1:
     Input hidden_states is already [txt || img] concatenated.
     Returns: hidden_states (no split)
 
+  - These are the diffusers 0.37+ names; see _BLOCKS_SPLIT_MODULATION for 0.36.
+
   - Modulation tensors are pre-computed ONCE before all block loops:
         double_stream_mod_img  -> passed to every dual-stream block
         double_stream_mod_txt  -> passed to every dual-stream block
@@ -34,9 +36,16 @@ Implementation note:
 """
 
 import torch
+from diffusers.models.transformers.transformer_flux2 import Flux2Modulation
 from torch import nn
 
 from xfuser.model_executor.cache import utils
+
+# diffusers 0.37 added Flux2Modulation.split and moved the split into the blocks. Before
+# that (0.36) the modulation layers returned split parameter sets, and blocks took them
+# as temb_mod_params*. Dual-stream blocks get whatever the model's own forward passes,
+# so only the single-stream call below depends on this.
+_BLOCKS_SPLIT_MODULATION = hasattr(Flux2Modulation, "split")
 
 
 class Flux2FBCachedTransformerBlocks(utils.FBCachedTransformerBlocks):
@@ -197,14 +206,18 @@ class Flux2FBCachedTransformerBlocks(utils.FBCachedTransformerBlocks):
             encoder_seq_len = encoder.shape[1]
 
             image_rotary_emb = kwargs.get("image_rotary_emb", None)
-            single_mod = self._single_stream_mod
+            if _BLOCKS_SPLIT_MODULATION:
+                single_mod_kwargs = {"temb_mod": self._single_stream_mod}
+            else:
+                # 0.36's single-stream layer returns one parameter set
+                single_mod_kwargs = {"temb_mod_params": self._single_stream_mod[0]}
             single_jkw = self._single_joint_attn_kwargs
 
             for block in self.single_transformer_blocks:
                 combined = block(
                     hidden_states=combined,
                     encoder_hidden_states=None,
-                    temb_mod=single_mod,
+                    **single_mod_kwargs,
                     image_rotary_emb=image_rotary_emb,
                     joint_attention_kwargs=single_jkw,
                 )

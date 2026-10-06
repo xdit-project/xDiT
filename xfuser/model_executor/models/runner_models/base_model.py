@@ -801,8 +801,8 @@ class xFuserModel(abc.ABC):
     def _compile_model(self, input_args: dict) -> None:
         """Compile pipe components with torch.compile.
 
-        When FSDP is active (fully_shard_degree > 1), compiles each component's
-        FSDP-wrapped block lists individually (read from fsdp_strategy wrap_attrs)
+        When FSDP is active, compiles each FSDP-wrapped component's block lists
+        individually (read from fsdp_strategy wrap_attrs)
         to avoid dynamo tracing through FSDP2 forward_pre_hooks and fragmenting
         the graph at every block boundary.
         """
@@ -814,7 +814,17 @@ class xFuserModel(abc.ABC):
             component = getattr(self.pipe, component_name, None)
             if component is None:
                 continue
-            if self.config.fully_shard_degree > 1 or self.config.cache_method:
+            requested_shards = getattr(
+                self.config,
+                "fully_shard_components",
+                None,
+            )
+            component_is_sharded = (
+                self.config.fully_shard_degree > 1
+                and component_name in self.settings.fsdp_strategy
+                and (requested_shards is None or component_name in requested_shards)
+            )
+            if component_is_sharded or self.config.cache_method:
                 # Per-block compile: leaves transformer as original object so cache-dit's
                 # transformer.forward patch remains visible during compiled execution.
                 wrap_attrs = self.settings.fsdp_strategy.get(component_name, {}).get("wrap_attrs", [])

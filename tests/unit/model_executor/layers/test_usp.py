@@ -3,7 +3,9 @@ from unittest import mock
 import pytest
 import torch
 
+from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.model_executor.layers import usp
+from xfuser.model_executor.layers.attention_mask import make_attn_mask_with_meta
 
 
 @mock.patch("xfuser.model_executor.layers.usp.get_cache_manager")
@@ -86,3 +88,45 @@ def test_ulysses_extra_inputs_are_named_by_the_caller():
     attention_kwargs["some_backend_tensor"] = torch.randn(1, 2, 8, 5)
     with pytest.raises(ValueError, match="some_backend_tensor"):
         usp._ulysses_extra_inputs(attention_kwargs, query)
+
+
+@pytest.mark.parametrize("backend", [AttentionBackendType.SDPA, AttentionBackendType.SDPA_MATH])
+def test_sdpa_serves_a_key_padding_mask_that_carries_varlen_packing(backend):
+    """Krea-2 and LTX-2 pass a key-padding mask together with the packing
+    derived from it. SDPA applies the mask and attends over exactly the valid
+    keys of each sequence, as if the padded keys were never there."""
+    torch.manual_seed(0)
+    batch, heads, q_len, kv_len, head_dim = 2, 2, 5, 7, 8
+    query = torch.randn(batch, heads, q_len, head_dim)
+    key = torch.randn(batch, heads, kv_len, head_dim)
+    value = torch.randn(batch, heads, kv_len, head_dim)
+    valid = torch.tensor([[1, 1, 1, 0, 1, 0, 0], [1, 1, 1, 1, 1, 1, 0]])
+    meta = make_attn_mask_with_meta(valid)
+    attention_kwargs = {
+        "attn_mask": meta.attn_mask,
+        "indices_k": meta.indices_k,
+        "cu_seqlens_k": meta.cu_seqlens_k,
+        "max_seqlen_k": meta.max_seqlen_k,
+    }
+
+    out = usp.attention(query, key, value, backend=backend, attention_kwargs=attention_kwargs)
+
+    for b in range(batch):
+        keep = valid[b].bool()
+        expected = torch.nn.functional.scaled_dot_product_attention(
+            query[b : b + 1], key[b : b + 1, :, keep], value[b : b + 1, :, keep]
+        )
+        torch.testing.assert_close(out[b : b + 1], expected)
+
+
+def test_sdpa_still_refuses_packing_with_no_mask_to_apply():
+    query = torch.randn(1, 2, 4, 8)
+    packing = make_attn_mask_with_meta(torch.tensor([[1, 1, 0, 0]]))
+    attention_kwargs = {
+        "indices_k": packing.indices_k,
+        "cu_seqlens_k": packing.cu_seqlens_k,
+        "max_seqlen_k": packing.max_seqlen_k,
+    }
+
+    with pytest.raises(NotImplementedError, match="varlen packed keys"):
+        usp.attention(query, query, query, backend=AttentionBackendType.SDPA, attention_kwargs=attention_kwargs)

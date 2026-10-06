@@ -39,11 +39,17 @@ def sdpa_flash(query, key, value, call: AttnCall):
 
 
 def sdpa_math(query, key, value, call: AttnCall):
+    attn_mask = call.attention_kwargs.get("attn_mask")
+    if attn_mask is not None and attn_mask.dtype == torch.bool:
+        # The aten op adds whatever mask it is given to the scores, so a
+        # boolean one would add 0/1 rather than exclude keys. The public
+        # F.scaled_dot_product_attention converts it first; do the same.
+        attn_mask = torch.zeros_like(attn_mask, dtype=query.dtype).masked_fill_(~attn_mask, float("-inf"))
     output, attn_weights = aten._scaled_dot_product_attention_math(
         query,
         key,
         value,
-        attn_mask=call.attention_kwargs.get("attn_mask"),
+        attn_mask=attn_mask,
         dropout_p=call.dropout_p,
         is_causal=call.is_causal,
     )

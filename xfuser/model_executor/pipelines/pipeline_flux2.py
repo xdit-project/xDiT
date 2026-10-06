@@ -88,6 +88,7 @@ class xFuserFlux2PipelineBase(xFuserPipelineBaseWrapper):
             width=input_config.width,
             prompt=prompt,
             num_inference_steps=steps,
+            guidance_scale=input_config.guidance_scale,
             max_sequence_length=input_config.max_sequence_length,
             generator=torch.Generator(device="cuda").manual_seed(42),
             output_type=input_config.output_type,
@@ -135,6 +136,15 @@ class xFuserFlux2PipelineBase(xFuserPipelineBaseWrapper):
         if "guidance_scale" in inspect.signature(self.check_inputs).parameters:
             _check_inputs_kwargs["guidance_scale"] = guidance_scale
         self.check_inputs(**_check_inputs_kwargs)
+        # Undistilled klein (base) checkpoints apply classifier-free guidance in
+        # diffusers; this loop has no unconditional branch, so refuse rather than
+        # silently return an unguided image.
+        if guidance_scale > 1 and not getattr(self.config, "is_distilled", True):
+            raise NotImplementedError(
+                "This FLUX.2 klein checkpoint is not step-distilled and needs classifier-free guidance "
+                f"(guidance_scale={guidance_scale}), which xDiT's parallel FLUX.2 loop does not implement. "
+                "Pass guidance_scale<=1, or run without parallelism."
+            )
 
         self._guidance_scale = guidance_scale
         self._attention_kwargs = attention_kwargs

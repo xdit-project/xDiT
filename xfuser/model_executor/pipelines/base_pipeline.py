@@ -53,7 +53,7 @@ from distvae.vae import parallelize_decoder
 PACKAGES_CHECKER.check_diffusers_version()
 
 # These imports follow the diffusers version check on purpose.
-from xfuser.model_executor.schedulers import xFuserSchedulerWrappersRegister  # noqa: E402
+from xfuser.model_executor.schedulers import xFuserSchedulerBaseWrapper, xFuserSchedulerWrappersRegister  # noqa: E402
 from xfuser.model_executor.models.transformers import xFuserTransformerWrappersRegister  # noqa: E402
 from xfuser.model_executor.layers.attention_processor import xFuserAttentionBaseWrapper  # noqa: E402
 from xfuser.model_executor.cache.adapters import apply_cache  # noqa: E402
@@ -272,12 +272,30 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             and get_runtime_state().parallel_config.vae_parallel_size == 0
         )
 
+    def _naive_forward(self, *args, **kwargs):
+        """Run the wrapped diffusers pipeline with the scheduler it was built with.
+
+        The xDiT scheduler wrapper is not an instance of the scheduler class it
+        wraps, so diffusers pipelines that branch on ``isinstance(self.scheduler,
+        ...)`` (CogVideoX and ConsisID with CogVideoXDPMScheduler, for example)
+        would take the wrong branch. Diffusers gets the plain scheduler back for
+        the call; both share the same state.
+        """
+        scheduler = getattr(self.module, "scheduler", None)
+        if not isinstance(scheduler, xFuserSchedulerBaseWrapper):
+            return self.module(*args, **kwargs)
+        self.module.scheduler = scheduler.module
+        try:
+            return self.module(*args, **kwargs)
+        finally:
+            self.module.scheduler = scheduler
+
     @staticmethod
     def check_to_use_naive_forward(func):
         @wraps(func)
         def check_naive_forward_fn(self, *args, **kwargs):
             if self.use_naive_forward():
-                return self.module(*args, **kwargs)
+                return self._naive_forward(*args, **kwargs)
             else:
                 return func(self, *args, **kwargs)
 

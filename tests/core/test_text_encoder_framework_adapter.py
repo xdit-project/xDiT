@@ -209,7 +209,7 @@ def test_torchao_te_native_plan_derives_safe_negative_mapping(modules, monkeypat
         ),
     )
 
-    prepared = b.prepare_text_encoder_fp8_load(
+    prepared = b.prepare_text_encoder_load(
         adapter,
         component_name="text_encoder",
         targets=("encoder.block",),
@@ -239,7 +239,7 @@ def test_transformers_4_aiter_falls_back_to_post_load(modules):
         te_streams_reason="transformers>=5.0 streaming loader is unavailable",
     )
 
-    prepared = b.prepare_text_encoder_fp8_load(
+    prepared = b.prepare_text_encoder_load(
         adapter,
         component_name="text_encoder",
         targets=("encoder.block",),
@@ -261,7 +261,7 @@ def test_transformers_4_raises_before_allocation_without_post_load(modules):
         te_streams_reason="transformers>=5.0 is required",
     )
     with pytest.raises(RuntimeError, match="before allocation"):
-        b.prepare_text_encoder_fp8_load(
+        b.prepare_text_encoder_load(
             adapter,
             component_name="text_encoder",
             targets=("encoder.block",),
@@ -282,7 +282,7 @@ def test_missing_te_target_never_quantizes_all_linears(modules, monkeypatch):
         raise b.TargetMappingUnavailable("target mapping unavailable: missing")
 
     monkeypatch.setattr(b, "derive_linear_ownership", unavailable)
-    prepared = b.prepare_text_encoder_fp8_load(
+    prepared = b.prepare_text_encoder_load(
         adapter,
         component_name="text_encoder",
         targets=("missing",),

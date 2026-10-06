@@ -1,14 +1,14 @@
 """Deciding how each text encoder is quantized and materialized.
 
-``plan_text_encoders`` answers one question per encoder the runner declares FP8 targets for: is
-it quantized on the way in from disk, streamed by the framework's own quantizer, or converted
+``plan_text_encoders`` answers one question per encoder the runner declares targets for: is it
+quantized on the way in from disk, streamed by the framework's own quantizer, or converted
 after it lands. The answer follows from the materialization the run asked for, which is why the
 decision sits beside the loader that made it.
 
 It returns ``(pipe_component_kwargs, te_quant_config)``. On a meta path the kwargs carry meta
 modules for the pipeline's ``from_pretrained`` to adopt instead of loading those components, and
-the config is None: the meta module, FP8 where targeted and bf16 otherwise, is filled by the
-sharded or broadcast load and then wrapped. The transformer is unaffected either way and keeps
+the config is None: the meta module, quantized where targeted and bf16 otherwise, is filled by
+the sharded or broadcast load and then wrapped. The transformer is unaffected either way and keeps
 its own route.
 """
 
@@ -28,11 +28,10 @@ def _declared_components(model):
 
     targets = model.settings.gemm_targets
     entries = targets.text_encoder.roots() if targets is not None else ()
-    return tuple(
-        dict.fromkeys(entry.partition(".")[0] for entry in entries if "." in entry)
-    )
-
-
+    # No "only dotted paths" filter: a declaration naming a whole component is
+    # legal -- `relative_to` turns it into "", which every consumer reads as
+    # all of it -- and filtering those out dropped the encoder silently.
+    return tuple(dict.fromkeys(entry.partition(".")[0] for entry in entries))
 
 
 def plan_text_encoders(loader, existing_quantization_config=None):
@@ -50,10 +49,6 @@ def plan_text_encoders(loader, existing_quantization_config=None):
     fsdp_meta = False if replicated_meta else loader.fsdp_meta_load()
 
     component_configs = {}
-    # Resolved on first use rather than up front: asking up front asks this
-    # machine to store a format a run that quantizes nothing never named.
-    adapter = None
-    encoder_format = None
 
     for component_name in _declared_components(model):
         # The declared encoder targets, not the targets of whatever format
@@ -69,19 +64,22 @@ def plan_text_encoders(loader, existing_quantization_config=None):
         )
         if not targets:
             continue
-        if adapter is None:
-            from .backends import prepare_text_encoder_fp8_load
+        from .backends import prepare_text_encoder_load
 
-            # The plan's answer, not this route's own. The plan already knows
-            # the encoder's loaders carry one format and has pinned it, so
-            # asking is enough -- and every other walk asks the same way, which
-            # is what stops them from disagreeing.
-            encoder_format = loader.quantization_plan.component_format(
-                component_name
-            )
-            adapter = loader.backends.adapter_for(encoder_format)
-            if adapter is None:
-                break
+        # The plan's answer, not this route's own. The plan already knows the
+        # encoder's loaders carry one format and has pinned it, so asking is
+        # enough -- and every other walk asks the same way, which is what stops
+        # them from disagreeing.
+        #
+        # Asked here rather than before the loop on two counts: up front it
+        # asks this machine to store a format a run that quantizes nothing
+        # never named, and once per encoder it cannot hand one encoder the
+        # answer that belonged to another. `adapter_for` caches, so the second
+        # costs nothing.
+        encoder_format = loader.quantization_plan.component_format(component_name)
+        adapter = loader.backends.adapter_for(encoder_format)
+        if adapter is None:
+            continue
         # A blockwise-filled encoder is quantized per block on the way in from disk, before
         # FSDP wraps that block, so it needs neither a streaming config nor a post-load walk.
         # That is what lets TorchAO quantize a text encoder on the FSDP meta path at all: the
@@ -113,7 +111,7 @@ def plan_text_encoders(loader, existing_quantization_config=None):
             not (replicated_meta or fsdp_meta)
             or adapter.meta_layout_matches_storage
         )
-        prepared = prepare_text_encoder_fp8_load(
+        prepared = prepare_text_encoder_load(
             adapter,
             component_name=component_name,
             targets=targets,

@@ -1368,7 +1368,7 @@ def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
         return prepared[component_name]
 
     monkeypatch.setattr(
-        "xfuser.model_executor.models.runner_models.loading.backends.prepare_text_encoder_fp8_load",
+        "xfuser.model_executor.models.runner_models.loading.backends.prepare_text_encoder_load",
         prepare,
     )
     monkeypatch.setattr(
@@ -1440,7 +1440,7 @@ def test_a_non_fp8_run_says_the_encoder_is_still_stored_at_fp8(monkeypatch):
     )
     monkeypatch.setattr(
         "xfuser.model_executor.models.runner_models.loading.backends."
-        "prepare_text_encoder_fp8_load",
+        "prepare_text_encoder_load",
         lambda adapter, **kwargs: SimpleNamespace(
             descriptor=SimpleNamespace(
                 materialization_mode="post_load",
@@ -1503,7 +1503,7 @@ def test_hybrid_meta_te_uses_the_fp8_adapter(monkeypatch):
 
     monkeypatch.setattr(
         "xfuser.model_executor.models.runner_models.loading.backends."
-        "prepare_text_encoder_fp8_load",
+        "prepare_text_encoder_load",
         prepare,
     )
     monkeypatch.setattr(text_encoder_plan, "log", lambda message: None)
@@ -1549,7 +1549,7 @@ def test_meta_te_placement_disables_torchao_native_pipeline_streaming(
         )
 
     monkeypatch.setattr(
-        "xfuser.model_executor.models.runner_models.loading.backends.prepare_text_encoder_fp8_load",
+        "xfuser.model_executor.models.runner_models.loading.backends.prepare_text_encoder_load",
         prepare,
     )
     monkeypatch.setattr(text_encoder_plan, "log", lambda message: None)
@@ -1567,7 +1567,7 @@ def test_a_blockwise_filled_text_encoder_needs_no_post_load_fallback(monkeypatch
 
     A blockwise-filled encoder is quantized per block on the way in from disk, before wrapping, so
     the objection does not apply and TorchAO can quantize a text encoder on the FSDP meta path. This
-    is the case the blockwise fill exists for, so reaching prepare_text_encoder_fp8_load here would
+    is the case the blockwise fill exists for, so reaching prepare_text_encoder_load here would
     mean the encoder had been routed back to the whole-encoder rank0 load.
     """
 
@@ -1602,7 +1602,7 @@ def test_a_blockwise_filled_text_encoder_needs_no_post_load_fallback(monkeypatch
 
     monkeypatch.setattr(
         "xfuser.model_executor.models.runner_models.loading.backends."
-        "prepare_text_encoder_fp8_load",
+        "prepare_text_encoder_load",
         lambda *a, **k: pytest.fail(
             "a blockwise-filled encoder was routed to the whole-encoder rank0 load"
         ),
@@ -1643,7 +1643,7 @@ def test_meta_fsdp_rejects_text_encoder_post_load_fallback(monkeypatch):
         pytest.fail("memory-efficient FSDP incorrectly allowed post-load")
 
     monkeypatch.setattr(
-        "xfuser.model_executor.models.runner_models.loading.backends.prepare_text_encoder_fp8_load",
+        "xfuser.model_executor.models.runner_models.loading.backends.prepare_text_encoder_load",
         prepare,
     )
 

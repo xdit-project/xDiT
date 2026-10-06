@@ -1113,7 +1113,7 @@ def plan_eager_blockwise_fallback(
     return EagerBlockwisePlan(True)
 
 
-def prepare_text_encoder_fp8_load(
+def prepare_text_encoder_load(
     adapter,
     *,
     component_name: str,

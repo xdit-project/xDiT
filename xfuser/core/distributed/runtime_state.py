@@ -341,6 +341,9 @@ class DiTRuntimeState(RuntimeState):
     max_condition_sequence_length: int
     split_text_embed_in_sp: bool
     text_embed_sp_pad: int
+    # Class-level default so states built without __init__ (as some tests do) can still
+    # call set_input_parameters.
+    split_latents_by_rows: bool = True
 
     def __init__(self, pipeline: DiffusionPipeline, config: EngineConfig):
         self.attention_schedule: Optional[AttentionSchedule] = None
@@ -352,7 +355,6 @@ class DiTRuntimeState(RuntimeState):
         self._vsa_denoising_step = -1
         self._vsa_last_timestep: Optional[float] = None
         self._vsa_num_steps: Optional[int] = None
-        self.split_latents_by_rows = True
         super().__init__(config)
         self.patch_mode = False
         self.pipeline_patch_idx = 0

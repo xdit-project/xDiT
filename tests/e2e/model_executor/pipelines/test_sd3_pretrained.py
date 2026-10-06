@@ -13,6 +13,10 @@ can be supplied with ``SD3_E2E_QUALITY_STEPS`` and
 ``SD3_E2E_GUIDANCE_SCALE`` (defaults: 20 and 5). Small checkpoints require
 ``SD3_E2E_ALLOW_TINY=1``; their small runs are labelled tiny_preflight and cannot
 be reported as full-model E2E validation.
+
+Numerical regression defaults to float32 with TF32 disabled. Set
+``SD3_E2E_DTYPE=bfloat16`` to investigate production-precision drift; the
+retained metrics and images still use the same strict comparison assertions.
 """
 
 import contextlib
@@ -29,7 +33,7 @@ pytestmark = [pytest.mark.e2e, pytest.mark.accelerator, pytest.mark.multi_gpu, p
 _MODES = {"stock": 1, "naive": 1, "ulysses": 2, "cfg": 2, "pipefusion_sync": 2}
 _PROMPT = "A red fox sitting beside a clear mountain lake, pine trees, warm morning sunlight, detailed photograph"
 _NEGATIVE_PROMPT = "blurry, distorted, low quality, text, watermark"
-_PARALLEL_LIMITS = {"relative_l2": 0.05, "cosine_min": 0.995, "image_mae": 0.03}
+_PARALLEL_LIMITS = {"relative_l2": 1e-4, "cosine_min": 0.99999999, "image_mae": 1e-4}
 _NAIVE_LIMITS = {"relative_l2": 1e-5, "cosine_min": 0.999999, "image_mae": 1e-5}
 
 
@@ -94,6 +98,8 @@ def _run_pipeline(rank, world_size, init_method, mode, settings, report, report_
     torch.set_num_threads(1)
     torch.cuda.set_device(rank)
     device = torch.device("cuda", rank)
+    dtype_name = settings.get("dtype", "float32")
+    dtype = getattr(torch, dtype_name)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     report.update(
@@ -102,14 +108,14 @@ def _run_pipeline(rank, world_size, init_method, mode, settings, report, report_
         cuda=torch.version.cuda,
         hip=torch.version.hip,
         device=torch.cuda.get_device_name(rank),
-        dtype="bfloat16",
+        dtype=dtype_name,
         offload="model_cpu_offload",
         world_size=world_size,
     )
     load_start = time.perf_counter()
     pipeline = StableDiffusion3Pipeline.from_pretrained(
         settings["model_path"],
-        torch_dtype=torch.bfloat16,
+        torch_dtype=dtype,
         local_files_only=True,
     )
     required_components = (
@@ -167,7 +173,7 @@ def _run_pipeline(rank, world_size, init_method, mode, settings, report, report_
                 warmup_steps=max(settings["quality_steps"], 5),
             )
         engine_config, _ = xFuserArgs(**config_args).create_config()
-        engine_config.runtime_config.dtype = torch.bfloat16
+        engine_config.runtime_config.dtype = dtype
         wrapped = xFuserStableDiffusion3Pipeline(pipeline, engine_config)
     callable_pipeline = wrapped if wrapped is not None else pipeline
     pipeline.set_progress_bar_config(disable=True)
@@ -310,10 +316,10 @@ def _run_pipeline(rank, world_size, init_method, mode, settings, report, report_
     finally:
         observation.remove()
         pipeline.maybe_free_model_hooks()
-    assert not failures, "\n".join(failures)
     if mode != "stock":
         parallel_state.destroy_model_parallel()
         parallel_state.destroy_distributed_environment()
+    assert not failures, "\n".join(failures)
 
 
 def _worker(rank, world_size, init_method, mode, settings):
@@ -456,9 +462,11 @@ def test_pretrained_sd3_matches_diffusers(tmp_path):
         "allow_tiny": os.environ.get("SD3_E2E_ALLOW_TINY") == "1",
         "quality_steps": int(os.environ.get("SD3_E2E_QUALITY_STEPS", "20")),
         "guidance_scale": float(os.environ.get("SD3_E2E_GUIDANCE_SCALE", "5")),
+        "dtype": os.environ.get("SD3_E2E_DTYPE", "float32"),
         "timeout_seconds": int(os.environ.get("SD3_E2E_TIMEOUT_SECONDS", "3600")),
     }
     assert settings["quality_steps"] > 0 and settings["timeout_seconds"] > 0
+    assert settings["dtype"] in {"float32", "bfloat16"}, settings["dtype"]
     assert settings["guidance_scale"] > 1, "CFG coverage requires guidance scale > 1"
     assert settings["classification"] in {"full_pretrained", "full_pretrained_derivative"}
     summary = {

@@ -3,7 +3,7 @@
 Distinct from requirements: a requirement is about the machine and resolves
 once at startup; these are about the call and can only be checked when it
 arrives. They cover tensor geometry (HEAD_DIM, MHA_ONLY, SELF_ATTENTION) and
-call parameters (NON_CAUSAL, NO_DROPOUT, NO_VARLEN) alike.
+call parameters (NON_CAUSAL, NO_DROPOUT, NO_VARLEN, MASKED_VARLEN) alike.
 
 One declaration serves two readers: the pre-call check, and the conformance
 suite choosing which shapes to exercise.
@@ -11,6 +11,8 @@ suite choosing which shapes to exercise.
 
 from dataclasses import dataclass
 from typing import Optional, Tuple
+
+import torch
 
 
 class CallConstraint:
@@ -101,6 +103,18 @@ class _NoVarlen(CallConstraint):
         return "does not support varlen packed keys" if call.varlen else None
 
 
+@dataclass(frozen=True)
+class _MaskedVarlen(CallConstraint):
+    """Packed keys are acceptable when the ``attn_mask`` they were derived from comes
+    with them: a kernel that applies the mask excludes the same keys and can ignore the
+    packing. Without a mask the call is refused, as NO_VARLEN does."""
+
+    def unmet(self, query, key, value, call) -> Optional[str]:
+        if call.varlen is None or call.attention_kwargs.get("attn_mask") is not None:
+            return None
+        return "does not support varlen packed keys without an attn_mask"
+
+
 class _PackedKeys(CallConstraint):
     """Packed keys are acceptable, however the kernel chooses to serve them.
 
@@ -139,9 +153,32 @@ class _NoDropout(CallConstraint):
         return None
 
 
+@dataclass(frozen=True)
+class _BFloat16(CallConstraint):
+    def unmet(self, query, key, value, call) -> Optional[str]:
+        for name, tensor in (("query", query), ("key", key), ("value", value)):
+            if tensor.dtype != torch.bfloat16:
+                return f"supports bfloat16 only, got {name} dtype {tensor.dtype}"
+        return None
+
+
+@dataclass(frozen=True)
+class _SameQKV(CallConstraint):
+    def unmet(self, query, key, value, call) -> Optional[str]:
+        if query.shape == key.shape == value.shape:
+            return None
+        return (
+            "supports equal query, key, and value shapes only, "
+            f"got {tuple(query.shape)}, {tuple(key.shape)}, {tuple(value.shape)}"
+        )
+
+
 NON_CAUSAL = _NonCausal()
 MHA_ONLY = _MhaOnly()
 SELF_ATTENTION = _SelfAttention()
 NO_VARLEN = _NoVarlen()
+MASKED_VARLEN = _MaskedVarlen()
 PACKED_KEYS = _PackedKeys()
 NO_DROPOUT = _NoDropout()
+BF16 = _BFloat16()
+SAME_QKV = _SameQKV()

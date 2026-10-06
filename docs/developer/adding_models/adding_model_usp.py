@@ -1,11 +1,11 @@
 # Example for parallelize new models with USP
 # run with
-#     torchrun --nproc_per_node=<ulysses_degree x ring-degree> \
-#          adding_cogvideox.py <cogvideox-checkpoint-path> \
-#          <ulysses_degree> <ring-degree>
+#     torchrun --nproc_per_node=<ring_degree x ulysses_degree> \
+#          adding_model_usp.py <cogvideox-checkpoint-path> \
+#          <ring_degree> <ulysses_degree>
 # E.g.,
 #     torchrun --nproc_per_node=2 \
-#          adding_cogvideox.py <cogvideox-checkpoint-path> \
+#          adding_model_usp.py <cogvideox-checkpoint-path> \
 #          2 1
 import sys
 import functools

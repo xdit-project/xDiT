@@ -30,16 +30,13 @@ def build_transformer_structure(wrapper_cls, request: CheckpointRequest, init_kw
 
     from accelerate import init_empty_weights
 
-    config = wrapper_cls.load_config(
-        request.model_name_or_path, **request.config_kwargs()
-    )
+    config = wrapper_cls.load_config(request.model_name_or_path, **request.config_kwargs())
     with ExitStack() as stack:
         try:
             stack.enter_context(init_empty_weights(include_buffers=True))
         except TypeError as exc:
             raise RuntimeError(
-                "accelerate.init_empty_weights(include_buffers=True) is "
-                "required for bounded structure inspection"
+                "accelerate.init_empty_weights(include_buffers=True) is required for bounded structure inspection"
             ) from exc
         return wrapper_cls.from_config(config, **(init_kwargs or {}))
 
@@ -62,19 +59,13 @@ def native_quantization_device_map(model, adapter):
             "enable_group_cpu_offload",
         )
     )
-    if (
-        adapter.format.value == "fp8"
-        and adapter.backend.value == "aiter"
-        and cpu_offload
-    ):
+    if adapter.format.value == "fp8" and adapter.backend.value == "aiter" and cpu_offload:
         return {"": "cpu"}
     return {"": get_world_group().local_rank}
 
 
 def _resolve_request(loader, subfolder, checkpoint_request):
-    request = checkpoint_request or loader.checkpoint_request(
-        subfolder or "transformer"
-    )
+    request = checkpoint_request or loader.checkpoint_request(subfolder or "transformer")
     if subfolder is not None and request.subfolder != subfolder:
         return request.with_subfolder(subfolder)
     if request.subfolder is None:
@@ -82,9 +73,7 @@ def _resolve_request(loader, subfolder, checkpoint_request):
     return request
 
 
-def _prepare_native_load(
-    model, adapter, component_name, targets, stream_quant, model_factory
-):
+def _prepare_native_load(model, adapter, component_name, targets, stream_quant, model_factory):
     """The quantization config an ordinary ``from_pretrained`` should carry, if any."""
 
     if adapter.format.value == "fp8":
@@ -97,32 +86,24 @@ def _prepare_native_load(
             # Native FP8 configs quantize every linear under each target. A suffix-restricted
             # policy must remain a post-load/blockwise conversion so the ledger does not claim
             # broader coverage than was requested.
-            stream_quant=(
-                stream_quant
-                and not getattr(
-                    model.settings, "fp8_gemm_include_suffixes", None
-                )
-            ),
+            stream_quant=(stream_quant and not getattr(model.settings, "fp8_gemm_include_suffixes", None)),
             model_factory=model_factory,
         )
     from .format_backends import prepare_native_transformer_format_load
 
     is_fp4 = adapter.format.value in {
-        "fp4", "fp8_fp4", "fp4_fp6", "fp4_a6w4",
+        "fp4",
+        "fp8_fp4",
+        "fp4_fp6",
+        "fp4_a6w4",
     }
     return prepare_native_transformer_format_load(
         adapter,
         component_name=component_name,
         targets=targets,
         stream_quant=stream_quant,
-        precision_prefixes=(
-            (model.settings.fp8_precision_overrides or ()) if is_fp4 else ()
-        ),
-        precision_suffixes=(
-            (model.settings.fp8_precision_override_suffixes or ())
-            if is_fp4
-            else ()
-        ),
+        precision_prefixes=((model.settings.fp8_precision_overrides or ()) if is_fp4 else ()),
+        precision_suffixes=((model.settings.fp8_precision_override_suffixes or ()) if is_fp4 else ()),
         hybrid=(model.config.use_hybrid_gemm_schedule if is_fp4 else False),
         model_factory=model_factory,
     )
@@ -191,7 +172,10 @@ def load_transformer(
     wrap_attrs = tuple(strategy.get("wrap_attrs", ()))
     build_kwargs = {"weight_source": weight_source} if weight_source is not None else {}
 
-    fsdp_meta = loader.fsdp_meta_load()
+    requested_fsdp_components = getattr(getattr(model, "config", None), "fully_shard_components", None)
+    fsdp_meta = loader.fsdp_meta_load() and (
+        requested_fsdp_components is None or component_name in requested_fsdp_components
+    )
     replicated_meta = False if fsdp_meta else loader.replicated_broadcast_load()
     if fsdp_meta or replicated_meta:
         if adapter is not None:
@@ -201,14 +185,10 @@ def load_transformer(
                 component_name,
                 targets,
                 wrap_attrs,
-                blockwise_transformer_descriptor(
-                    adapter, component_name, targets, wrap_attrs
-                ),
+                blockwise_transformer_descriptor(adapter, component_name, targets, wrap_attrs),
                 **_fp4_remainder(loader, component_name),
             )
-        return loader.build_meta_transformer(
-            wrapper_cls, request, init_kwargs, **build_kwargs
-        )
+        return loader.build_meta_transformer(wrapper_cls, request, init_kwargs, **build_kwargs)
 
     quantization_config = None
     if adapter is not None:
@@ -228,36 +208,23 @@ def load_transformer(
                 component_name,
                 targets,
                 wrap_attrs,
-                blockwise_transformer_descriptor(
-                    adapter, component_name, targets, wrap_attrs, local=True
-                ),
+                blockwise_transformer_descriptor(adapter, component_name, targets, wrap_attrs, local=True),
                 **_fp4_remainder(loader, component_name),
             )
-            component = loader.build_meta_transformer(
-                wrapper_cls, request, init_kwargs, **build_kwargs
-            )
+            component = loader.build_meta_transformer(wrapper_cls, request, init_kwargs, **build_kwargs)
             loader.mark_local_blockwise(component)
             return component
         if weight_source is not None:
-            reason = (
-                local_plan.reason
-                if local_plan is not None
-                else "local blockwise loading is unavailable"
-            )
+            reason = local_plan.reason if local_plan is not None else "local blockwise loading is unavailable"
             raise UnsupportedLoadContract(
-                f"{component_name} uses a mapped checkpoint source but "
-                f"cannot enter local blockwise loading: {reason}"
+                f"{component_name} uses a mapped checkpoint source but cannot enter local blockwise loading: {reason}"
             )
-        _record_native_quantization(
-            ledger, adapter, component_name, prepared, targets
-        )
+        _record_native_quantization(ledger, adapter, component_name, prepared, targets)
         quantization_config = prepared.quantization_config
 
     load_kwargs = request.from_pretrained_kwargs()
     if quantization_config is not None:
-        load_kwargs.setdefault(
-            "device_map", native_quantization_device_map(model, adapter)
-        )
+        load_kwargs.setdefault("device_map", native_quantization_device_map(model, adapter))
     return wrapper_cls.from_pretrained(
         request.model_name_or_path,
         torch_dtype=torch.bfloat16,

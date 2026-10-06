@@ -4,7 +4,6 @@ from diffusers import UniPCMultistepScheduler
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
 from xfuser.model_executor.models.runner_models.base_model import (
-    DIFFUSERS_FROM_SOURCE,
     ModelSettings,
     xFuserModel,
     register_model,
@@ -47,8 +46,8 @@ COSMOS3_FSDP_STRATEGY = {
 @register_model("nvidia/Cosmos3-Super")
 @register_model("Cosmos3-Super")
 class xFuserCosmos3SuperModel(xFuserModel):
-    # No released diffusers ships pipeline_cosmos3_omni yet.
-    min_diffusers_version = DIFFUSERS_FROM_SOURCE
+    # diffusers 0.39.0 is the first release with pipeline_cosmos3_omni.
+    min_diffusers_version = "0.39.0"
 
     load_support = LoadSupport(
         meta_transformers=("transformer",),
@@ -159,7 +158,12 @@ class xFuserCosmos3SuperModel(xFuserModel):
             image = images[0]
             width, height = input_args["width"], input_args["height"]
             if input_args.get("resize_input_images", False):
-                image = resize_and_crop_image(image, width, height, self.settings.mod_value)
+                image = resize_and_crop_image(
+                    image,
+                    target_height=height,
+                    target_width=width,
+                    mod_value=self.settings.mod_value,
+                )
             input_args["image"] = image
         return input_args
 

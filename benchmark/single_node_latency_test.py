@@ -34,7 +34,7 @@ def main():
         "--script",
         type=str,
         required=True,
-        help="Script to run (e.g., tests/test_pixartalpha.py)",
+        help="Script to run (e.g., examples/pixartalpha_example.py)",
     )
     parser.add_argument("--n_gpus", type=int, default=8, help="Number of GPUs to use")
     parser.add_argument(
@@ -103,7 +103,6 @@ def main():
                                     warmup_step,
                                 )
                             )
-                            # if num_pipeline_patches != last_num_patch:
                             if cfg_degree == 2:
                                 print(
                                     f"Running test for size {size}, split batch, warmup_step {warmup_step}, pp_degree {pp_degree}, ulysses_degree {ulysses_degree}, ring_degree {ring_degree}, num_pipeline_patches {num_pipeline_patches}",

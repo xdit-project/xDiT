@@ -1,7 +1,7 @@
-# Example for parallelize new models with USP
+# Example for parallelize new models with CFG parallel
 # run with
 #     torchrun --nproc_per_node=2 \
-#          adding_cogvideox.py <cogvideox-checkpoint-path>
+#          adding_model_cfg.py <cogvideox-checkpoint-path>
 import sys
 import functools
 from typing import Optional, Tuple, Union

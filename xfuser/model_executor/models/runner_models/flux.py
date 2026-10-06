@@ -120,11 +120,17 @@ class xFuserFluxModel(xFuserModel):
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         batch_size = self.config.batch_size if self.config.batch_size else 1
+        # Only the PipeFusion pipeline splits the latents by row; the diffusers
+        # pipeline's transformer pads the token sequence for sequence parallelism.
+        uses_pipefusion = get_pipeline_parallel_world_size() > 1
         get_runtime_state().set_input_parameters(
+            height=input_args["height"],
+            width=input_args["width"],
             batch_size=batch_size,
             num_inference_steps=input_args["num_inference_steps"],
             max_condition_sequence_length=input_args["max_sequence_length"],
-            split_text_embed_in_sp=get_pipeline_parallel_world_size() == 1,
+            split_text_embed_in_sp=not uses_pipefusion,
+            split_latents_by_rows=uses_pipefusion,
         )
         output = self.pipe(
             height=input_args["height"],
@@ -220,10 +226,13 @@ class xFuserFluxKontextModel(xFuserModel):
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         batch_size = self.config.batch_size if self.config.batch_size else 1
         get_runtime_state().set_input_parameters(
+            height=input_args["height"],
+            width=input_args["width"],
             batch_size=batch_size,
             num_inference_steps=input_args["num_inference_steps"],
             max_condition_sequence_length=input_args["max_sequence_length"],
             split_text_embed_in_sp=get_pipeline_parallel_world_size() == 1,
+            split_latents_by_rows=False,
         )
         output = self.pipe(
             height=input_args["height"],
@@ -246,9 +255,9 @@ class xFuserFluxKontextModel(xFuserModel):
         if input_args.get("resize_input_images", False):
             image = resize_and_crop_image(
                 image,
-                input_args["width"],
-                input_args["height"],
-                self.settings.mod_value,
+                target_height=input_args["height"],
+                target_width=input_args["width"],
+                mod_value=self.settings.mod_value,
             )
             input_args["height"], input_args["width"] = image.height, image.width
         input_args["image"] = image
@@ -266,9 +275,8 @@ class xFuserFluxKontextModel(xFuserModel):
 @register_model("black-forest-labs/FLUX.2-dev")
 @register_model("FLUX.2-dev")
 class xFuserFlux2Model(xFuserModel):
-    # Flux2Pipeline and the transformer symbols the wrapper needs all landed in 0.36.
-    # PipeFusion additionally needs 0.37, because xfuser's FLUX.2 pipeline module also
-    # binds Flux2KleinPipeline.
+    # Flux2Pipeline and the transformer symbols the wrapper needs, including the
+    # PipeFusion pipeline, all landed in 0.36.
     min_diffusers_version = "0.36.0"
 
     load_support = LoadSupport(
@@ -385,11 +393,11 @@ class xFuserFlux2Model(xFuserModel):
             images = None
         elif input_args.get("resize_input_images", False):
             images = [
-                self._resize_and_crop_image(
+                resize_and_crop_image(
                     image,
-                    input_args["width"],
-                    input_args["height"],
-                    self.settings.mod_value,
+                    target_height=input_args["height"],
+                    target_width=input_args["width"],
+                    mod_value=self.settings.mod_value,
                 )
                 for image in images
             ]
@@ -449,6 +457,7 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         model_name="black-forest-labs/FLUX.2-klein-9B",
         output_name="flux_2_klein_9b",
         model_output_type="image",
+        mod_value=16,
         fp8_gemm_module_list=[
             "transformer.transformer_blocks",
             "transformer.single_transformer_blocks",
@@ -479,7 +488,7 @@ class xFuserFlux2Klein9BModel(xFuserModel):
 
     def _load_model(self) -> DiffusionPipeline:
         if self.config.pipefusion_parallel_degree > 1:
-            from xfuser.model_executor.pipelines.pipeline_flux2 import (
+            from xfuser.model_executor.pipelines.pipeline_flux2_klein import (
                 xFuserFlux2KleinPipeline,
             )
 
@@ -526,11 +535,11 @@ class xFuserFlux2Klein9BModel(xFuserModel):
             images = None
         elif input_args.get("resize_input_images", False):
             images = [
-                self._resize_and_crop_image(
+                resize_and_crop_image(
                     image,
-                    input_args["width"],
-                    input_args["height"],
-                    self.settings.mod_value,
+                    target_height=input_args["height"],
+                    target_width=input_args["width"],
+                    mod_value=self.settings.mod_value,
                 )
                 for image in images
             ]
@@ -552,6 +561,7 @@ class xFuserFlux2Klein4BModel(xFuserFlux2Klein9BModel):
         model_name="black-forest-labs/FLUX.2-klein-4B",
         output_name="flux_2_klein_4b",
         model_output_type="image",
+        mod_value=16,
         fp8_gemm_module_list=[
             "transformer.transformer_blocks",
             "transformer.single_transformer_blocks",

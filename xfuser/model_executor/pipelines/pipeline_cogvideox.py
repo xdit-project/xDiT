@@ -209,7 +209,8 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
             max_sequence_length=max_sequence_length,
             device=device,
         )
-        prompt_embeds = self._process_cfg_split_batch(negative_prompt_embeds, prompt_embeds)
+        if do_classifier_free_guidance:
+            prompt_embeds = self._process_cfg_split_batch(negative_prompt_embeds, prompt_embeds)
 
         # 4. Prepare timesteps
         timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
@@ -264,6 +265,8 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
 
                 if do_classifier_free_guidance:
                     latent_model_input = torch.cat([latents] * (2 // get_classifier_free_guidance_world_size()))
+                else:
+                    latent_model_input = latents
 
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 

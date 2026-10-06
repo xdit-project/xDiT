@@ -1,8 +1,10 @@
+import inspect
 import torch
 from typing import Optional, Tuple
 from diffusers.models.transformers.transformer_flux2 import (
     Flux2Attention,
     Flux2AttnProcessor,
+    Flux2Modulation,
     Flux2Transformer2DModel,
     Flux2ParallelSelfAttention,
     Flux2ParallelSelfAttnProcessor,
@@ -68,6 +70,13 @@ from xfuser.model_executor.models.transformers.base_transformer import (
 
 env_info = PACKAGES_CHECKER.get_packages_info()
 HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
+
+# diffusers 0.37 moved the modulation split into the blocks: the modulation layers
+# return one tensor, which blocks take as temb_mod_img / temb_mod_txt / temb_mod. In
+# 0.36 the layers returned the split parameter sets and blocks took them as
+# temb_mod_params_img / temb_mod_params_txt / temb_mod_params. The PipeFusion wrapper
+# calls the blocks itself, so it has to follow whichever API is installed.
+_BLOCKS_SPLIT_MODULATION = hasattr(Flux2Modulation, "split")
 
 
 @xFuserAttentionProcessorRegister.register(Flux2AttnProcessor)
@@ -189,6 +198,10 @@ class xFuserFlux2AttnProcessor(Flux2AttnProcessor):
                 joint_strategy="front",
                 attn_layer=attn,
             )
+        elif distri_cache_updated:
+            # The stale-KV cache was updated above. Passing the module as attn_layer
+            # would make USP update it again with the joint text+image KV.
+            hidden_states = USP(query, key, value, head_balance_layer=attn)
         else:
             hidden_states = USP(query, key, value, attn_layer=attn)
 
@@ -312,6 +325,9 @@ class xFuserFlux2ParallelSelfAttnProcessor(Flux2ParallelSelfAttnProcessor):
                 attn_layer=attn,
                 combine_qkv_a2a=True,
             )
+        elif distri_cache_updated:
+            # The stale-KV cache was updated above; see xFuserFlux2AttnProcessor.
+            hidden_states = USP(query, key, value, combine_qkv_a2a=True, head_balance_layer=attn)
         else:
             hidden_states = USP(query, key, value, combine_qkv_a2a=True, attn_layer=attn)
 
@@ -385,6 +401,16 @@ class xFuserFlux2ParallelSelfAttention(xFuserAttentionBaseWrapper):
         return self.processor(self, hidden_states, attention_mask, image_rotary_emb, **kwargs)
 
 
+def _accepts_guidance_embeds() -> bool:
+    """Whether the installed Flux2Transformer2DModel takes ``guidance_embeds``.
+
+    diffusers added it in 0.37, together with FLUX.2-klein, whose transformers have no
+    guidance embedder. Earlier releases always build one, as FLUX.2-dev needs, and
+    reject the argument.
+    """
+    return "guidance_embeds" in inspect.signature(Flux2Transformer2DModel.__init__).parameters
+
+
 class xFuserFlux2Transformer2DWrapper(Flux2Transformer2DModel):
     def __init__(
         self,
@@ -403,6 +429,12 @@ class xFuserFlux2Transformer2DWrapper(Flux2Transformer2DModel):
         eps: float = 1e-6,
         guidance_embeds: bool = True,
     ):
+        # Where the argument is not accepted the embedder is always built, so leave it
+        # out. A request to drop it is still passed on, and fails there, rather than
+        # silently building the wrong model.
+        guidance_kwargs = {"guidance_embeds": guidance_embeds}
+        if guidance_embeds and not _accepts_guidance_embeds():
+            guidance_kwargs = {}
         super().__init__(
             patch_size=patch_size,
             in_channels=in_channels,
@@ -417,7 +449,7 @@ class xFuserFlux2Transformer2DWrapper(Flux2Transformer2DModel):
             axes_dims_rope=axes_dims_rope,
             rope_theta=rope_theta,
             eps=eps,
-            guidance_embeds=guidance_embeds,
+            **guidance_kwargs,
         )
 
         for block in self.transformer_blocks:
@@ -533,6 +565,19 @@ class xFuserFlux2Transformer2DModelWrapper(xFuserTransformerBaseWrapper):
         double_stream_mod_img = self.double_stream_modulation_img(temb)
         double_stream_mod_txt = self.double_stream_modulation_txt(temb)
         single_stream_mod = self.single_stream_modulation(temb)
+        if _BLOCKS_SPLIT_MODULATION:
+            double_mod_kwargs = {
+                "temb_mod_img": double_stream_mod_img,
+                "temb_mod_txt": double_stream_mod_txt,
+            }
+            single_mod_kwargs = {"temb_mod": single_stream_mod}
+        else:
+            double_mod_kwargs = {
+                "temb_mod_params_img": double_stream_mod_img,
+                "temb_mod_params_txt": double_stream_mod_txt,
+            }
+            # the single-stream layer has one parameter set
+            single_mod_kwargs = {"temb_mod_params": single_stream_mod[0]}
 
         # 2. input projection (first stage only); other stages receive already
         #    embedded streams from the previous stage via P2P.
@@ -563,8 +608,7 @@ class xFuserFlux2Transformer2DModelWrapper(xFuserTransformerBaseWrapper):
             encoder_hidden_states, hidden_states = block(
                 hidden_states=hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
-                temb_mod_img=double_stream_mod_img,
-                temb_mod_txt=double_stream_mod_txt,
+                **double_mod_kwargs,
                 image_rotary_emb=concat_rotary_emb,
                 joint_attention_kwargs=joint_attention_kwargs,
             )
@@ -579,7 +623,7 @@ class xFuserFlux2Transformer2DModelWrapper(xFuserTransformerBaseWrapper):
                 hidden_states = block(
                     hidden_states=hidden_states,
                     encoder_hidden_states=None,
-                    temb_mod=single_stream_mod,
+                    **single_mod_kwargs,
                     image_rotary_emb=concat_rotary_emb,
                     joint_attention_kwargs=single_kwargs,
                 )

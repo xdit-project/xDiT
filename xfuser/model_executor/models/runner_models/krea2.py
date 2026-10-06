@@ -10,7 +10,6 @@ from xfuser.envs import _is_hip
 from xfuser.core.attention.backends.aiter_mha_v4.spec import DENSE_BACKENDS
 from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.model_executor.models.runner_models.base_model import (
-    DIFFUSERS_FROM_SOURCE,
     DefaultInputValues,
     DiffusionOutput,
     ModelCapabilities,
@@ -76,8 +75,8 @@ def _patch_text_encoder_linear_for_rocm(text_encoder: "torch.nn.Module") -> None
 class _Krea2BaseModel(xFuserModel):
     """Shared base for the Krea-2-Raw and Krea-2-Turbo runner models."""
 
-    # No released diffusers ships Krea2Transformer2DModel yet.
-    min_diffusers_version = DIFFUSERS_FROM_SOURCE
+    # diffusers 0.39.0 is the first release with Krea2Transformer2DModel.
+    min_diffusers_version = "0.39.0"
 
     load_support = LoadSupport(
         meta_transformers=("transformer",),
@@ -150,6 +149,7 @@ class _Krea2BaseModel(xFuserModel):
             num_inference_steps=input_args["num_inference_steps"],
             max_condition_sequence_length=max_seq,
             split_text_embed_in_sp=False,
+            split_latents_by_rows=False,
         )
 
         output = self.pipe(

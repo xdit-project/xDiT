@@ -9,6 +9,7 @@ Three paths, picked by what the call carries:
 
 """
 
+from dataclasses import replace
 from typing import Optional
 
 import aiter
@@ -236,7 +237,19 @@ def _rotate_and_quantize(query, key, value, call: AttnCall):
     return from_bshd(out), None
 
 
+def _fold_trailing_pad(key, value, call: AttnCall):
+    """Slice a declared trailing key pad so one sequence stays on the dense kernels.
+
+    A batch is still gathered: one ``valid_kv_len`` cannot describe several rows.
+    """
+    valid = call.attention_kwargs.get("valid_kv_len")
+    if call.varlen is None or valid is None or key.shape[0] != 1:
+        return key, value, call
+    return key[:, :, :valid], value[:, :, :valid], replace(call, varlen=None)
+
+
 def aiter_fp8(query, key, value, call: AttnCall):
+    key, value, call = _fold_trailing_pad(key, value, call)
     if call.attention_kwargs.get("pre_quantized", False):
         return _pre_quantized(query, key, value, call)
     if _mha_v4_eligible(query, call):

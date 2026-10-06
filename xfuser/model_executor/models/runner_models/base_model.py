@@ -364,6 +364,9 @@ class xFuserModel(abc.ABC):
         self._validate_config(config)
         self._update_model_settings(config)
         self.config = config
+        # Every saver below writes into this directory; create it now rather
+        # than lose the outputs to a missing directory after the whole run.
+        os.makedirs(config.output_directory, exist_ok=True)
         self.pipe = None
         from .loading.meta_load import ModelLoader
 
@@ -1275,7 +1278,9 @@ class xFuserModel(abc.ABC):
         prompts = input_args.get("prompt")
         negative_prompts = input_args.get("negative_prompt")
 
-        if isinstance(prompts, str):
+        # --prompt takes nargs="*", so one prompt on the command line arrives
+        # as a one-element list.
+        if isinstance(prompts, str) or len(prompts) == 1:
             log(f"Single prompt with dp_world_size={dp_world_size}: all DP groups will process the same prompt.")
             return input_args
 

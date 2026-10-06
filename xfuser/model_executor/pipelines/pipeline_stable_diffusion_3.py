@@ -64,7 +64,7 @@ def _naive_forward_unless_timesteps(func):
     def wrapper(self, *args, **kwargs):
         if self.use_naive_forward() and kwargs.get("timesteps") is None:
             kwargs.pop("timesteps", None)
-            return self.module(*args, **kwargs)
+            return self._naive_forward(*args, **kwargs)
         return func(self, *args, **kwargs)
 
     return wrapper

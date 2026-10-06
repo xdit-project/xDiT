@@ -7,6 +7,9 @@ any keyword through ``**kwargs`` and dropped it, so ``sigmas``, ``mu`` and
 off. Its own ``timesteps`` argument, which diffusers does not take, raised once
 the call reached diffusers. One CPU rank compares the wrapper with the diffusers
 pipeline it wraps.
+
+Naive calls must also expose the original scheduler to diffusers and user
+callbacks, then restore xDiT's scheduler for subsequent parallel calls.
 """
 
 import queue
@@ -84,6 +87,11 @@ MATCHES_DIFFUSERS = {
     "guidance_off": (False, {"guidance_scale": 1.0}),
 }
 
+NAIVE_CALLS = {
+    "naive_forward": {},
+    "naive_forward_explicit_no_timesteps": {"timesteps": None},
+}
+
 # name -> (call overrides, exception the parallel path must raise)
 REJECTED = {
     "max_sequence_length_over_512": ({"max_sequence_length": 600}, "ValueError"),
@@ -121,6 +129,44 @@ def _worker(rank, world_size, init_method, result_queue):
 
             def wrap(dynamic_shifting=False):
                 return xFuserStableDiffusion3Pipeline(_tiny_sd3(dynamic_shifting), engine_config)
+
+            for name, overrides in NAIVE_CALLS.items():
+                pipeline = _tiny_sd3()
+                original_scheduler = pipeline.scheduler
+                wrapped = xFuserStableDiffusion3Pipeline(pipeline, engine_config)
+                wrapped_scheduler = pipeline.scheduler
+                callback_steps = []
+
+                def check_scheduler(callback_pipeline, step, timestep, callback_kwargs):
+                    assert callback_pipeline.scheduler is original_scheduler, "callback received xDiT's scheduler"
+                    callback_steps.append(step)
+                    return callback_kwargs
+
+                try:
+                    expected = _tiny_sd3()(**_call_kwargs(torch)).images
+                    actual = wrapped(**_call_kwargs(torch, callback_on_step_end=check_scheduler, **overrides)).images
+                    assert callback_steps, "the scheduler check never ran"
+                    assert pipeline.scheduler is wrapped_scheduler, "xDiT's scheduler was not restored"
+                    results[name] = (actual - expected).abs().max().item()
+                except Exception as error:  # noqa: BLE001
+                    results[name] = f"{type(error).__name__}: {error}"
+
+            pipeline = _tiny_sd3()
+            original_scheduler = pipeline.scheduler
+            wrapped = xFuserStableDiffusion3Pipeline(pipeline, engine_config)
+            wrapped_scheduler = pipeline.scheduler
+
+            def fail_callback(callback_pipeline, step, timestep, callback_kwargs):
+                assert callback_pipeline.scheduler is original_scheduler, "callback received xDiT's scheduler"
+                raise RuntimeError("callback failed")
+
+            try:
+                with pytest.raises(RuntimeError, match="^callback failed$"):
+                    wrapped(**_call_kwargs(torch, callback_on_step_end=fail_callback))
+                assert pipeline.scheduler is wrapped_scheduler, "xDiT's scheduler was not restored after an error"
+                results["naive_callback_error"] = "raised"
+            except Exception as error:  # noqa: BLE001
+                results["naive_callback_error"] = f"{type(error).__name__}: {error}"
 
             # One rank has no parallelism, so the wrapper hands calls to diffusers
             # unless they need its own loop; ``timesteps`` is such a call. Diffusers
@@ -190,13 +236,13 @@ def test_sd3_wrapper_honours_diffusers_call_arguments(tmp_path):
     status, _, results = result
     assert status == "returned", results
     failures = {}
-    for name in ["timesteps_without_parallelism", *MATCHES_DIFFUSERS]:
+    for name in [*NAIVE_CALLS, "timesteps_without_parallelism", *MATCHES_DIFFUSERS]:
         if not isinstance(results[name], float) or results[name] > 1e-4:
             failures[name] = results[name]
         overrides = MATCHES_DIFFUSERS.get(name, (None, {}))[1]
         if "sigmas" in overrides and results[f"{name}_runtime_steps"] != len(overrides["sigmas"]):
             failures[f"{name}_runtime_steps"] = results[f"{name}_runtime_steps"]
-    for name in REJECTED:
+    for name in ["naive_callback_error", *REJECTED]:
         if results[name] != "raised":
             failures[name] = results[name]
     assert not failures, failures

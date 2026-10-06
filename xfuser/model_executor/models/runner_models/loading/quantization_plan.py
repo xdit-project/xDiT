@@ -5,6 +5,7 @@ from dataclasses import replace
 from xfuser.config.gemm import GemmQuantizationSpec
 from xfuser.core.utils.runner_utils import log
 from xfuser.model_executor.quant.targets import Select, resolve
+from .quant_adapter import text_encoder_formats
 
 
 def _csv(raw) -> tuple:
@@ -56,8 +57,9 @@ class QuantizationPlan:
     def gemm_plan(self):
         """This run's resolved GEMM plan, or None for an unmigrated model.
 
-        The formats come from the run, the modules from the model, and the
-        components from whichever switch enables them.
+        The formats come from the run, the modules from the model, the
+        components from whichever switch enables them, and the per-component
+        format restrictions from which loading code exists.
         """
         targets = getattr(self.model.settings, "gemm_targets", None)
         if targets is None:
@@ -78,6 +80,11 @@ class QuantizationPlan:
             spec,
             enable=tuple(enable),
             sp_world_size=sp_world_size,
+            # The encoder's loaders carry one format, and which one is a fact
+            # about this build, so the plan is told rather than overridden
+            # afterwards -- that is what stops the answer depending on which
+            # load route ran.
+            component_formats={"text_encoder": text_encoder_formats()},
         )
 
     def _log_resolved_plan(self, plan) -> None:
@@ -113,6 +120,18 @@ class QuantizationPlan:
             log(f"GEMM quantization: {root} -> {detail}")
         for root in high_roots:
             log(f"GEMM quantization: {root} -> {plan.high.upper()}")
+
+        # A pinned component belongs to neither tier, so the two loops above
+        # pass over it. Said separately, and with the reason: a run that named
+        # one format and finds another in its encoder should be able to read
+        # why out of the log rather than the source.
+        for name, format_name in plan.pinned.items():
+            for root in plan.roots(format_name, component=name):
+                log(
+                    f"GEMM quantization: {root} -> {format_name.upper()} "
+                    f"(pinned: {name} is loaded by a route that places "
+                    f"{format_name}, not {plan.low})"
+                )
 
     def log_gemm_plan(self) -> None:
         """Log the resolved target-to-format mapping."""

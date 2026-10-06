@@ -10,6 +10,7 @@ whether this machine is running fp8, mxfp6 or mxfp4.
 """
 
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Iterable, Mapping, Optional, Tuple
 
 from xfuser.config.gemm import MIN_M_FORMATS, GemmQuantizationSpec
@@ -150,6 +151,14 @@ class GemmPlan:
     keep_high: Select
     low: Optional[str]
     high: Optional[str]
+    #: Components whose format the plan fixes outright, whatever tier their
+    #: leaves would otherwise take. A component is pinned when the route that
+    #: loads it cannot place the format the run named -- the text encoder,
+    #: whose streaming and broadcast paths carry one format. Pinning it in the
+    #: plan rather than overriding afterwards is what makes every walk agree:
+    #: the per-block fill and the post-load walk read `format_for` like
+    #: everything else, so the answer cannot depend on which route ran.
+    pinned: Mapping[str, str] = MappingProxyType({})
 
     @property
     def quantizes(self) -> bool:
@@ -201,7 +210,9 @@ class GemmPlan:
         visible below the resolver -- and three identical expressions to edit
         if a run ever names more than two.
         """
-        return tuple(dict.fromkeys(n for n in (self.low, self.high) if n))
+        found = [n for n in (self.low, self.high) if n]
+        found += [self.pinned[name] for name in self.targeted if name in self.pinned]
+        return tuple(dict.fromkeys(found))
 
     def walk_roots(self, format_name: str, *, paired: bool = False) -> Tuple[str, ...]:
         """Where a converter for `format_name` should start walking.
@@ -245,15 +256,21 @@ class GemmPlan:
         """The format this module is quantized to, or None to leave it alone.
 
         One rule, whichever component the module belongs to: the low format,
-        unless the model carved it into keep_high and the run named a high one.
+        unless the model carved it into keep_high and the run named a high one
+        -- or unless the component is pinned, which outranks both.
         """
         if self.low is None:
             return None
-        if not any(select.matches(path) for select in self.targeted.values()):
-            return None
-        if self.high is not None and self.keep_high.matches(path):
-            return self.high
-        return self.low
+        for name, select in self.targeted.items():
+            if not select.matches(path):
+                continue
+            pin = self.pinned.get(name)
+            if pin is not None:
+                return pin
+            if self.high is not None and self.keep_high.matches(path):
+                return self.high
+            return self.low
+        return None
 
     def roots(
         self, format_name: str, *, component: Optional[str] = None
@@ -265,27 +282,36 @@ class GemmPlan:
         A root whose descendants are split across formats appears under both
         formats; the per-module decision stays format_for's.
         """
-        if self.low is None or format_name not in (self.low, self.high):
+        if self.low is None:
             return ()
 
-        if component is None:
-            selects = list(self.targeted.values())
-        else:
-            selects = [self.targeted[component]] if component in self.targeted else []
-        declared = [root for select in selects for root in select.roots()]
-
+        names = [component] if component is not None else list(self.targeted)
         found = []
-        for root in declared:
-            whole = self.high is not None and self.keep_high.matches(root)
-            if (format_name == self.high) == whole:
-                found.append(root)
-        if format_name == self.high:
-            # carve-outs named below a target root rather than at it
-            found += [
-                root
-                for root in self.keep_high.roots()
-                if root not in found and any(_is_under(root, d) for d in declared)
-            ]
+        for name in names:
+            select = self.targeted.get(name)
+            if select is None:
+                continue
+            pin = self.pinned.get(name)
+            if pin is not None:
+                # A pinned component takes one format whole, so it belongs to
+                # that format's walk and to no other -- keep_high included.
+                if pin == format_name:
+                    found.extend(select.roots())
+                continue
+            if format_name not in (self.low, self.high):
+                continue
+            declared = list(select.roots())
+            for root in declared:
+                whole = self.high is not None and self.keep_high.matches(root)
+                if (format_name == self.high) == whole:
+                    found.append(root)
+            if format_name == self.high:
+                # carve-outs named below a target root rather than at it
+                found += [
+                    root
+                    for root in self.keep_high.roots()
+                    if root not in found and any(_is_under(root, d) for d in declared)
+                ]
         return tuple(dict.fromkeys(found))
 
 
@@ -309,12 +335,62 @@ def _without(select: Select, dropped: Tuple[str, ...]) -> Select:
     )
 
 
+def _component_format(
+    select: Select, keep_high: Select, low: Optional[str], high: Optional[str]
+) -> Optional[str]:
+    """The format a whole component takes before any pin.
+
+    The high tier when the declaration carves the entire component out, the low
+    one otherwise. Whole-component, because a pin is whole-component: a
+    declaration that holds only part of a component high is left to
+    ``format_for``, which decides per leaf.
+    """
+    roots = select.roots()
+    if high is not None and roots and all(keep_high.matches(root) for root in roots):
+        return high
+    return low
+
+
+def _pins(
+    targeted: Mapping[str, Select],
+    keep_high: Select,
+    low: Optional[str],
+    high: Optional[str],
+    component_formats: Mapping[str, Iterable[str]],
+) -> dict:
+    """Which components this run has to hold at a format of their route's own.
+
+    Only where it changes something: a component whose ordinary format its
+    route can already place is left alone, so a run whose formats are all
+    placeable carries no pins at all and reads exactly as it did before.
+
+    Where it does change something, the format is the first of the run's own
+    formats the route can place, and failing that the route's first -- which is
+    how an encoder ends up at FP8 in a run that named FP4.
+    """
+    if low is None:
+        return {}
+    pinned = {}
+    for name, allowed in component_formats.items():
+        select = targeted.get(name)
+        allowed = tuple(allowed)
+        if select is None or not allowed:
+            continue
+        if _component_format(select, keep_high, low, high) in allowed:
+            continue
+        pinned[name] = next(
+            (fmt for fmt in (low, high) if fmt in allowed), allowed[0]
+        )
+    return pinned
+
+
 def resolve(
     targets: GemmTargets,
     spec: GemmQuantizationSpec,
     *,
     enable: Iterable[str] = ("transformer",),
     sp_world_size: int = 1,
+    component_formats: Optional[Mapping[str, Iterable[str]]] = None,
 ) -> GemmPlan:
     """Bind a model's targets to the formats and components this run asked for.
 
@@ -324,6 +400,11 @@ def resolve(
 
     A pure spec quantizes every enabled target to one format, so `keep_high`
     has nothing to carve and is inert. A tiered spec splits them.
+
+    `component_formats` names, per component, the formats whose loaders can
+    place that component -- the caller knows, because it is a fact about which
+    loading code exists. A component whose run format is not among them is
+    pinned to one that is, in the plan, so every walk gets the same answer.
     """
     enable = tuple(enable)
     unknown = [name for name in enable if name not in COMPONENTS]
@@ -361,4 +442,7 @@ def resolve(
         keep_high=targets.keep_high,
         low=low,
         high=high,
+        pinned=MappingProxyType(
+            _pins(targeted, targets.keep_high, low, high, component_formats or {})
+        ),
     )

@@ -449,3 +449,171 @@ def test_the_log_names_a_suffix_carve_out():
     assert (
         "GEMM quantization: transformer.blocks -> FP4; selected layers -> FP8" in lines
     )
+
+
+# ---------------------------------------------------------------------------
+# pinned components
+# ---------------------------------------------------------------------------
+
+#: What the text encoder's loaders can place, as `text_encoder_formats()`
+#: reports it. Spelled out here so the resolver's behaviour is pinned without
+#: importing the registry.
+ENCODER = ("fp8",)
+ENCODER_LEAF = "text_encoder.encoder.block.0.layer.0.SelfAttention.q"
+BOTH = ("transformer", "text_encoder")
+
+
+def _plan(profile, **kwargs):
+    return resolve(
+        TARGETS,
+        GemmQuantizationSpec.parse(profile),
+        enable=BOTH,
+        component_formats={"text_encoder": ENCODER},
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize("profile", ["fp8", "fp4", "fp6", "int8", "low=fp4,high=fp6"])
+def test_a_pinned_component_takes_its_own_format_whatever_the_run_named(profile):
+    """The encoder's loaders carry one format. The run names another and the
+    encoder still gets that one -- in the plan, so every walk agrees rather
+    than each route deciding for itself."""
+    assert _plan(profile).format_for(ENCODER_LEAF) == "fp8"
+
+
+@pytest.mark.parametrize("profile", ["fp8", "fp4", "low=fp4,high=fp6"])
+def test_a_pin_leaves_the_rest_of_the_plan_alone(profile):
+    """Only the component that needed it moves."""
+    pinned = _plan(profile)
+    plain = resolve(TARGETS, GemmQuantizationSpec.parse(profile), enable=BOTH)
+
+    for path in (f"{BLOCKS}.20.attn.to_q", f"{BLOCKS}.0.attn.to_q"):
+        assert pinned.format_for(path) == plain.format_for(path)
+
+
+#: An encoder carved into `keep_high`, the way several runners declare theirs
+#: so a tiered run leaves it at the better format.
+CARVED = GemmTargets(
+    transformer=Select(modules=(BLOCKS,)),
+    text_encoder=Select(modules=("text_encoder.encoder.block",)),
+    keep_high=Select(modules=("text_encoder.encoder.block",)),
+)
+
+
+def test_nothing_is_pinned_when_the_run_already_suits_the_component():
+    """A pin that changes nothing would still put a format in play and a line
+    in the log, so it is not recorded."""
+    assert dict(_plan("fp8").pinned) == {}
+
+
+def test_a_carve_out_the_loaders_can_place_needs_no_pin():
+    """`keep_high` already puts this encoder on the high tier, and the high
+    tier is a format its loaders have, so the pin has nothing to do."""
+    plan = resolve(
+        CARVED,
+        GemmQuantizationSpec.parse("low=fp4,high=fp8"),
+        enable=BOTH,
+        component_formats={"text_encoder": ENCODER},
+    )
+
+    assert dict(plan.pinned) == {}
+    assert plan.format_for(ENCODER_LEAF) == "fp8"
+
+
+def test_a_pin_outranks_a_carve_out_the_loaders_cannot_place():
+    """The same declaration under a profile whose high tier the encoder's
+    loaders do not have. `keep_high` asks for FP6 and the pin refuses it: a
+    model may say which half of a run a component belongs to, but not that it
+    takes a format nothing can load it in."""
+    plan = resolve(
+        CARVED,
+        GemmQuantizationSpec.parse("low=fp4,high=fp6"),
+        enable=BOTH,
+        component_formats={"text_encoder": ENCODER},
+    )
+
+    assert dict(plan.pinned) == {"text_encoder": "fp8"}
+    assert plan.format_for(ENCODER_LEAF) == "fp8"
+    assert plan.format_for(f"{BLOCKS}.0.attn.to_q") == "fp4", (
+        "the transformer keeps the tier it was given"
+    )
+
+
+def test_a_pin_puts_its_format_in_play():
+    """Whoever probes backends has to know the encoder's format is coming, or
+    it refuses to store a format the run never named."""
+    plan = _plan("fp4")
+
+    assert plan.pinned == {"text_encoder": "fp8"}
+    assert set(plan.formats_in_play) == {"fp4", "fp8"}
+    assert plan.formats_in_play[0] == "fp4", "the low format still comes first"
+
+
+def test_a_pinned_component_belongs_to_exactly_one_walk():
+    """Two walks reaching the same leaf would convert it twice."""
+    plan = _plan("low=fp4,high=fp6")
+    root = "text_encoder.encoder.block"
+
+    owners = [fmt for fmt in plan.formats_in_play if root in plan.roots(fmt)]
+    assert owners == ["fp8"]
+    assert plan.relative_to("text_encoder", plan.roots("fp8")) == ("encoder.block",)
+
+
+def test_a_component_with_no_declared_restriction_is_never_pinned():
+    """`component_formats` names the components whose loaders are limited;
+    anything unnamed keeps the tier the declaration gives it."""
+    plan = _plan("low=fp4,high=fp8")
+
+    assert "transformer" not in plan.pinned
+    assert plan.format_for(f"{BLOCKS}.0.attn.to_q") == "fp8"
+    assert plan.format_for(f"{BLOCKS}.20.attn.to_q") == "fp4"
+
+
+def test_a_run_that_quantizes_nothing_pins_nothing():
+    """`--gemm_quantization none` places no format, so there is nothing for a
+    pin to override and nothing to probe a backend for."""
+    plan = _plan("none")
+
+    assert dict(plan.pinned) == {}
+    assert plan.formats_in_play == ()
+    assert plan.format_for(ENCODER_LEAF) is None
+
+
+def test_a_pin_prefers_a_run_format_its_route_can_place():
+    """When the route grows a second format, a run naming it should get it
+    rather than the route's first. Nothing declares two today, so this states
+    the rule the resolver follows when something does."""
+    plan = resolve(
+        TARGETS,
+        GemmQuantizationSpec.parse("low=fp4,high=fp6"),
+        enable=BOTH,
+        component_formats={"text_encoder": ("fp8", "fp6")},
+    )
+
+    assert plan.format_for(ENCODER_LEAF) == "fp6"
+
+
+def test_the_log_names_a_pinned_component_and_why():
+    """A pinned component belongs to neither tier, so both tier loops pass
+    over it. A run that named FP4 and finds FP8 in its encoder has to be able
+    to read why out of the log rather than out of the source."""
+    from types import SimpleNamespace
+    from xfuser.model_executor.models.runner_models.loading import quantization_plan
+
+    plan = _plan("fp4")
+    lines = []
+    original = quantization_plan.log
+    quantization_plan.log = lines.append
+    try:
+        model = SimpleNamespace(
+            settings=SimpleNamespace(gemm_targets=TARGETS),
+            config=SimpleNamespace(use_hybrid_gemm_schedule=False),
+        )
+        quantization_plan.QuantizationPlan(model)._log_resolved_plan(plan)
+    finally:
+        quantization_plan.log = original
+
+    named = [line for line in lines if "text_encoder.encoder.block" in line]
+    assert len(named) == 1, f"the encoder is logged {len(named)} times: {lines}"
+    assert "-> FP8" in named[0]
+    assert "pinned" in named[0] and "fp4" in named[0]

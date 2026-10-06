@@ -78,11 +78,14 @@ class xFuserFlowMatchEulerDiscreteSchedulerWrapper(xFuserSchedulerBaseWrapper):
 
         sigma = self.sigmas[self.step_index]
 
-        gamma = (
-            min(s_churn / (len(self.sigmas) - 1), 2**0.5 - 1)
-            if s_tmin <= sigma <= s_tmax
-            else 0.0
-        )
+        if s_churn == 0.0:
+            gamma = 0.0
+        else:
+            gamma = (
+                min(s_churn / (len(self.sigmas) - 1), 2**0.5 - 1)
+                if s_tmin <= sigma <= s_tmax
+                else 0.0
+            )
 
         noise = randn_tensor(
             model_output.shape,

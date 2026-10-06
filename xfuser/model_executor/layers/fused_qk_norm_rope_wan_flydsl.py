@@ -37,7 +37,7 @@ from xfuser.model_executor.layers.flydsl_utils import get_device_wave_size
 try:
     import flydsl.compiler as flyc
     import flydsl.expr as fx
-    from flydsl.expr import range_constexpr
+    from flydsl.expr import const_expr, range_constexpr
     from flydsl.expr import math as fmath
     from flydsl.expr.arith import FastMathFlags
     from flydsl.expr.typing import ReductionOp, T
@@ -87,6 +87,30 @@ def _pick_tiling(H: int, D: int, wave_size: int) -> Optional[Tuple[int, int, int
 
 if _HAS_FLYDSL:
 
+    def _hadamard_head(values, lane, head_dim):
+        """Normalized in-register Walsh-Hadamard over one attention head."""
+        result = [values[i] for i in range(len(values))]
+        for stage in range(len(values).bit_length() - 1):
+            shift = 1 << stage
+            result = [
+                (
+                    result[i ^ shift] - result[i]
+                    if i & shift
+                    else result[i] + result[i ^ shift]
+                )
+                for i in range(len(values))
+            ]
+        for stage in range((head_dim // len(values)).bit_length() - 1):
+            shift = 1 << stage
+            result = [
+                ((lane & shift) == 0).select(
+                    value + value.shuffle_xor(shift, 64),
+                    value.shuffle_xor(shift, 64) - value,
+                )
+                for value in result
+            ]
+        return fx.Vector.from_elements(result, fx.Float32) * (head_dim**-0.5)
+
     @lru_cache(maxsize=32)
     def _build_kernel(
         *,
@@ -97,6 +121,8 @@ if _HAS_FLYDSL:
         N_TILES: int,
         eps: float,
         cos_is_f32: bool,
+        single_role: bool,
+        apply_hadamard: bool,
     ):
         """Build + cache the @flyc.jit launcher for one config.
 
@@ -121,7 +147,11 @@ if _HAS_FLYDSL:
             FREQ_CHUNKS.append((_off, _n))
             _off += _n
 
-        _kname = f"wan_fused_qk_norm_rope_HD{HD}_D{D}_v{VEC}_flydsl"
+        _kname = (
+            f"wan_fused_qk_norm_rope_HD{HD}_D{D}_v{VEC}"
+            f"{'_single' if single_role else ''}"
+            f"{'_hadamard' if apply_hadamard else ''}_flydsl"
+        )
 
         @flyc.kernel(name=_kname)
         def kernel(
@@ -232,6 +262,14 @@ if _HAS_FLYDSL:
                     out_v = fx.Vector.from_elements(
                         [o.ir_value() for o in outs], dtype=fx.Float32
                     )
+                    if const_expr(apply_hadamard):
+                        # Preserve the previous two-kernel numerical boundary:
+                        # norm/RoPE rounds to BF16 before the FP32 Hadamard, then
+                        # the final BF16 store is consumed by Attention A2A.
+                        rounded = out_v.truncf(T.vec(VEC, T.bf16)).to(fx.Float32)
+                        out_v = _hadamard_head(
+                            [rounded[i] for i in range_constexpr(VEC)], tid, D
+                        )
                     out_.store(
                         out_row_off + base_c + tid * VEC,
                         out_v.truncf(T.vec(VEC, T.bf16)),
@@ -240,7 +278,8 @@ if _HAS_FLYDSL:
             # q reads strided rows (tok * q_rs) -> contiguous out rows [0, S);
             # k reads strided rows (tok * k_rs) -> contiguous out rows [S, 2S).
             process(qin_, tok * q_rs, out_row_base, wq_)
-            process(kin_, tok * k_rs, k_out_off + out_row_base, wk_)
+            if const_expr(not single_role):
+                process(kin_, tok * k_rs, k_out_off + out_row_base, wk_)
 
         @flyc.jit
         def launch_wan_fused_qk_norm_rope(
@@ -284,6 +323,8 @@ if _HAS_FLYDSL:
         sin: torch.Tensor,   # [S, D]
         heads: int,
         eps: float,
+        single_role: bool,
+        apply_hadamard: bool,
     ) -> torch.Tensor:
         """Opaque launch boundary for torch.compile.
 
@@ -309,17 +350,23 @@ if _HAS_FLYDSL:
             N_TILES=n_tiles,
             eps=eps,
             cos_is_f32=(cos.dtype == torch.float32),
+            single_role=single_role,
+            apply_hadamard=apply_hadamard,
         )
 
-        # One allocation for both outputs (halves the per-call torch.empty
-        # python/dispatch cost) as a single [2, S, heads, D] tensor -- the two
-        # halves are contiguous [S, heads, D] views the caller splits AFTER the
-        # op (custom_op forbids two returns aliasing one storage)
-        out = torch.empty((2, S, heads, D), dtype=q.dtype, device=q.device)
+        # Pair mode uses one allocation for both outputs. Single-role overlap
+        # mode allocates only Q or K, avoiding duplicate compute and storage.
+        # The caller splits pair output after the op because custom_op forbids
+        # returning two aliases of one backing allocation.
+        out = torch.empty(
+            (1 if single_role else 2, S, heads, D),
+            dtype=q.dtype,
+            device=q.device,
+        )
 
         # Fetch the stream on q's device directly instead of a
         # ``torch.cuda.device(...)`` context manager (two cudaSetDevice calls) --
-        # at the Wan shape this is a ~5us boundary 
+        # at the Wan shape this is a ~5us boundary
         stream = torch.cuda.current_stream(q.device)
         # q/k may be non-contiguous rows (e.g. chunks of a fused-QKV projection,
         # row stride 3*H*D).  Pass their runtime row strides so the kernel reads
@@ -329,7 +376,7 @@ if _HAS_FLYDSL:
             launcher,
             q,
             k,
-            out.view(2 * S, HD),
+            out.view((1 if single_role else 2) * S, HD),
             wq,
             wk,
             cos,
@@ -343,10 +390,96 @@ if _HAS_FLYDSL:
         return out
 
     @_wan_flydsl_qk_norm_rope_launch.register_fake
-    def _wan_flydsl_qk_norm_rope_launch_fake(q, k, wq, wk, cos, sin, heads, eps):
+    def _wan_flydsl_qk_norm_rope_launch_fake(
+        q, k, wq, wk, cos, sin, heads, eps, single_role, apply_hadamard
+    ):
         S, HD = q.shape
         D = HD // heads
-        return q.new_empty((2, S, heads, D))
+        return q.new_empty((1 if single_role else 2, S, heads, D))
+
+    _HADAMARD_KERNEL_CACHE = {}
+
+    def _build_hadamard_kernel(
+        *,
+        H: int,
+        D: int,
+        BLOCK_THREADS: int,
+        VEC: int,
+        N_TILES: int,
+    ):
+        key = (H, D, BLOCK_THREADS, VEC, N_TILES)
+        cached = _HADAMARD_KERNEL_CACHE.get(key)
+        if cached is not None:
+            return cached
+        HD = H * D
+        TILE = BLOCK_THREADS * VEC
+
+        @flyc.kernel(name=f"wan_hadamard_H{H}_D{D}_v{VEC}_flydsl")
+        def kernel(source: fx.Tensor, output: fx.Tensor):
+            tok = fx.Int32(fx.block_idx.x)
+            tid = fx.Int32(fx.thread_idx.x)
+            source_ = GTensor(source, dtype=T.bf16, shape=(-1,))
+            output_ = GTensor(output, dtype=T.bf16, shape=(-1,))
+            row = tok * HD
+            for tile_idx in range_constexpr(N_TILES):
+                offset = row + tile_idx * TILE + tid * VEC
+                values = fx.Vector(
+                    source_.load(offset, vec_size=VEC)
+                ).to(fx.Float32)
+                rotated = _hadamard_head(
+                    [values[i] for i in range_constexpr(VEC)], tid, D
+                )
+                output_.store(offset, rotated.truncf(T.vec(VEC, T.bf16)))
+
+        @flyc.jit
+        def launch_wan_hadamard(
+            source: fx.Tensor,
+            output: fx.Tensor,
+            n_tokens: fx.Int32,
+            stream: fx.Stream = fx.Stream(None),
+        ):
+            k = kernel(source, output)
+            k.launch(
+                grid=(n_tokens, 1, 1),
+                block=(BLOCK_THREADS, 1, 1),
+                stream=stream,
+            )
+
+        launch_wan_hadamard.compile_hints = {
+            "waves_per_eu": 8,
+            "fast_fp_math": True,
+        }
+        _HADAMARD_KERNEL_CACHE[key] = launch_wan_hadamard
+        return launch_wan_hadamard
+
+    @torch.library.custom_op("xfuser::wan_flydsl_hadamard", mutates_args=())
+    def _wan_flydsl_hadamard_launch(x: torch.Tensor) -> torch.Tensor:
+        _, S, H, D = x.shape
+        wave_size = get_device_wave_size(x)
+        tiling = _pick_tiling(H, D, wave_size) if wave_size is not None else None
+        if tiling is None:
+            raise RuntimeError("unsupported WAN FlyDSL Hadamard tiling")
+        bt, vec, n_tiles = tiling
+        launcher = _build_hadamard_kernel(
+            H=H,
+            D=D,
+            BLOCK_THREADS=bt,
+            VEC=vec,
+            N_TILES=n_tiles,
+        )
+        output = torch.empty_like(x)
+        _run_compiled(
+            launcher,
+            x.view(S, H * D),
+            output.view(S, H * D),
+            S,
+            torch.cuda.current_stream(x.device),
+        )
+        return output
+
+    @_wan_flydsl_hadamard_launch.register_fake
+    def _wan_flydsl_hadamard_launch_fake(x):
+        return torch.empty_like(x)
 
 
 def _reference(
@@ -382,6 +515,24 @@ def _reference(
     return query, key
 
 
+def wan_flydsl_hadamard(x: torch.Tensor) -> torch.Tensor:
+    """Apply normalized per-head Hadamard in a separate FlyDSL launch."""
+    if not _HAS_FLYDSL:
+        raise RuntimeError("pre-transport Hadamard requires FlyDSL")
+    if (
+        x.device.type != "cuda"
+        or x.dtype != torch.bfloat16
+        or x.dim() != 4
+        or x.shape[0] != 1
+        or not x.is_contiguous()
+    ):
+        raise ValueError("Wan Hadamard expects contiguous CUDA BF16 [1, S, H, D]")
+    D = x.shape[-1]
+    if D <= 0 or (D & (D - 1)) != 0:
+        raise ValueError(f"Wan Hadamard requires power-of-two head dim, got {D}")
+    return torch.ops.xfuser.wan_flydsl_hadamard(x)
+
+
 def fused_qk_norm_rope(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -390,17 +541,28 @@ def fused_qk_norm_rope(
     freqs_cos: torch.Tensor,
     freqs_sin: torch.Tensor,
     heads: int,
+    *,
+    single_role: bool = False,
+    apply_hadamard: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Return ``(q, k)`` normed, head-split and rotated as ``[B, S, H, D]``.
 
     ``query`` / ``key`` are the raw projection outputs of shape ``[B, S, H*D]``.
     Runs the fused FlyDSL kernel when the shape is in-envelope, otherwise falls
     back to the unfused diffusers reference (``_reference``) so the result is
-    identical either way 
+    identical either way. ``single_role`` processes only ``query`` and returns it
+    in both tuple positions; it is used by projection/A2A interleaving. Optional
+    Hadamard is fused after the BF16 norm/RoPE boundary and before the final store.
     """
-    _ref = lambda: _reference(  # noqa: E731 - local fallback shorthand
-        query, key, norm_q, norm_k, freqs_cos, freqs_sin, heads
-    )
+    def _ref():
+        if apply_hadamard:
+            raise RuntimeError(
+                "pre-transport Hadamard requires the Wan FlyDSL preprocessing path"
+            )
+        return _reference(
+            query, key, norm_q, norm_k, freqs_cos, freqs_sin, heads
+        )
+
     if not _HAS_FLYDSL:
         return _ref()
     # Inference-only fast path: the fused op has no autograd formula, so any
@@ -431,6 +593,8 @@ def fused_qk_norm_rope(
         return _ref()
     D = HD // heads
     if D % 2:
+        return _ref()
+    if apply_hadamard and (D <= 0 or (D & (D - 1)) != 0):
         return _ref()
     if tuple(norm_q.normalized_shape) != (HD,) or tuple(
         norm_k.normalized_shape
@@ -478,6 +642,18 @@ def fused_qk_norm_rope(
     wkc = wk.contiguous()
 
     out = torch.ops.xfuser.wan_flydsl_qk_norm_rope(
-        q2, k2, wqc, wkc, cos2, sin2, heads, float(eps_q)
+        q2,
+        k2,
+        wqc,
+        wkc,
+        cos2,
+        sin2,
+        heads,
+        float(eps_q),
+        single_role,
+        apply_hadamard,
     )
-    return out[0].view(1, S, heads, D), out[1].view(1, S, heads, D)
+    query_out = out[0].view(1, S, heads, D)
+    if single_role:
+        return query_out, query_out
+    return query_out, out[1].view(1, S, heads, D)

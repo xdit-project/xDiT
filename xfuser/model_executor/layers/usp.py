@@ -1,8 +1,9 @@
 # This file implements USP with torch version >= '2.5.0'
-import torch
 import functools
+import inspect
 from typing import Tuple
 
+import torch
 import torch.distributed._functional_collectives as ft_c
 
 from torch.distributed.tensor.experimental._attention import _templated_ring_attention
@@ -23,6 +24,7 @@ from xfuser.core.distributed import (
 )
 
 from xfuser.compat import version_at_least
+from xfuser.config.attention_a2a import AttentionA2AConfig
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from xfuser.logger import init_logger
 from xfuser.core.attention import registry as attention_registry
@@ -38,6 +40,16 @@ from xfuser.core.sparge_attention.head_balance import (
     apply_head_balance,
     revert_head_balance,
 )
+from xfuser.model_executor.layers.fused_a2a_integration import (
+    _register_ordered_effect,
+    fused_a2a_input,
+    fused_a2a_input_consumer_done,
+    fused_a2a_input_role,
+    get_fused_a2a_mode,
+    get_fused_a2a_profile,
+    use_fused_a2a_interleave,
+    use_fused_a2a_packed,
+)
 
 # Sparge backends whose kernel cost can be load-balanced across Ulysses ranks.
 # These all build a block mask via _build_sparge_block_mask and write the
@@ -49,6 +61,12 @@ _FP8_NCCL_NEEDS_VIEW = not version_at_least(torch.__version__, "2.11.0")
 _FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz)
 _warned_fp8_comms_missing_attn = False
 logger = init_logger(__name__)
+_CUSTOM_OP_OPTIONS = (
+    {"tags": (torch.Tag.cudagraph_unsafe,)}
+    if hasattr(torch, "Tag")
+    and "tags" in inspect.signature(torch.library.custom_op).parameters
+    else {}
+)
 
 
 def _warn_fp8_comms_missing_attn():
@@ -381,6 +399,389 @@ def _trim_trailing_kv_padding(key, value, attention_kwargs, backend=None):
     return key[:, :, :valid_kv_len], value[:, :, :valid_kv_len], consumed
 
 
+def _allocate_compact_attention_a2a_kv(
+    key,
+    value,
+    k_scales,
+    v_scales,
+    valid_kv_len,
+    *,
+    profile,
+    copy_values,
+):
+    """Rebuild tiled packed K/V only when trimming crosses a 128-row tile.
+
+    The ordinary USP path delegates trailing padding and arbitrary varlen keys
+    to the backend Spec. Pre-quantized A2A operands are different: MXFP4/MXFP6
+    K and FP6-P V encode the sequence tile count in their head strides, so a
+    slice that removes a whole tile would no longer satisfy MHA-v4's packed
+    layout. This is the narrow case where a compact backing buffer is required.
+    """
+    from aiter.ops.mha_v4_quant import (
+        MHA_V4_KV_SCALE_LOOKAHEAD_ROWS,
+        MHA_V4_KV_TILE_ROWS,
+        MHA_V4_MXFP4_K_SCALE_SLACK_BYTES,
+        MHA_V4_MXFP4_V_SCALE_SLACK_BYTES,
+        MHA_V4_MXFP4_V_SCALE_TILE_BYTES,
+        block_scale_storage,
+        mxfp4_k_raw_buffer_size,
+        mxfp4_k_view,
+        mxfp4_v_raw_buffer_size,
+        mxfp4_v_view,
+        mxfp6_v_raw_buffer_size,
+    )
+    from aiter.ops.triton.quant.mxfp6_fmha_pack import (
+        FP6_K_TILE_BYTES,
+        fp6_k_lds_order_views_from_raw,
+        fp6_k_raw_buffer_sizes,
+    )
+
+    b, source_sequence, heads, _ = key.shape
+    config = AttentionA2AConfig(profile=profile)
+    qk_codec, _, v_codec = config.codecs
+    blocks = 4
+    source_tiles = (source_sequence + 127) // 128
+    target_tiles = (valid_kv_len + 127) // 128
+
+    def flat_storage(tensor):
+        return tensor.as_strided(
+            (tensor.untyped_storage().nbytes() // tensor.element_size(),),
+            (1,),
+            0,
+        )
+
+    def copy_tiles(source, target, tile_bytes):
+        source_main = flat_storage(source)[: b * heads * source_tiles * tile_bytes]
+        target_main = target[: b * heads * target_tiles * tile_bytes]
+        target_main.view(b, heads, target_tiles, tile_bytes).copy_(
+            source_main.view(b, heads, source_tiles, tile_bytes)[
+                :, :, :target_tiles
+            ]
+        )
+
+    if qk_codec == "mxfp4":
+        k_raw = key.new_zeros(
+            (mxfp4_k_raw_buffer_size(b, valid_kv_len, heads),)
+        )
+        compact_k_scales = block_scale_storage(
+            key,
+            b,
+            valid_kv_len,
+            heads,
+            blocks,
+            MHA_V4_KV_TILE_ROWS,
+            lookahead_rows=MHA_V4_KV_SCALE_LOOKAHEAD_ROWS,
+            extra=MHA_V4_MXFP4_K_SCALE_SLACK_BYTES,
+        )
+        compact_key = mxfp4_k_view(k_raw, compact_k_scales)
+        if copy_values:
+            copy_tiles(key, k_raw, 8192)
+            compact_k_scales.copy_(k_scales[:, :valid_kv_len])
+    elif qk_codec == "mxfp6":
+        k_size, k_scale_size = fp6_k_raw_buffer_sizes(
+            b, valid_kv_len, heads
+        )
+        k_raw = key.new_zeros((k_size,))
+        k_scale_raw = k_scales.new_zeros((k_scale_size,))
+        compact_key, compact_k_scales = fp6_k_lds_order_views_from_raw(
+            k_raw,
+            k_scale_raw,
+            b,
+            valid_kv_len,
+            heads,
+        )
+        if copy_values:
+            copy_tiles(key, k_raw, FP6_K_TILE_BYTES)
+            compact_k_scales.copy_(k_scales[:, :valid_kv_len])
+    else:
+        compact_key = key.new_empty(
+            (b, valid_kv_len, heads, key.shape[-1])
+        )
+        compact_k_scales = k_scales.new_empty(k_scales.shape)
+        if copy_values:
+            compact_key.copy_(key[:, :valid_kv_len])
+            compact_k_scales.copy_(k_scales)
+
+    if v_codec == "mxfp4":
+        v_raw = value.new_zeros(
+            (mxfp4_v_raw_buffer_size(b, valid_kv_len, heads),)
+        )
+        scale_elements = (
+            b * heads * target_tiles * MHA_V4_MXFP4_V_SCALE_TILE_BYTES
+        )
+        scale_storage = v_scales.new_zeros(
+            (scale_elements + MHA_V4_MXFP4_V_SCALE_SLACK_BYTES,)
+        )
+        compact_v_scales = scale_storage[:scale_elements].view(
+            b,
+            heads,
+            target_tiles * MHA_V4_MXFP4_V_SCALE_TILE_BYTES,
+        )
+        compact_value = mxfp4_v_view(
+            v_raw, compact_v_scales, valid_kv_len
+        )
+        v_tile_bytes = 8192
+    elif v_codec == "mxfp6_p":
+        v_raw = value.new_zeros(
+            (mxfp6_v_raw_buffer_size(b, valid_kv_len, heads),)
+        )
+        compact_v_scales = v_scales.new_zeros(
+            (b, heads, target_tiles * 512)
+        )
+        compact_value = torch.as_strided(
+            v_raw,
+            (b, valid_kv_len, heads, 128),
+            (heads * target_tiles * 12288, 96, target_tiles * 12288, 1),
+        )
+        v_tile_bytes = 12288
+    else:
+        compact_value = value.new_empty(
+            (b, valid_kv_len, heads, value.shape[-1])
+        )
+        compact_v_scales = v_scales.new_empty(v_scales.shape)
+        v_tile_bytes = None
+
+    if copy_values:
+        if v_tile_bytes is None:
+            compact_value.copy_(value[:, :valid_kv_len])
+            compact_v_scales.copy_(v_scales)
+        else:
+            copy_tiles(value, v_raw, v_tile_bytes)
+            compact_v_scales.copy_(v_scales[:, :, : target_tiles * 512])
+
+    return compact_key, compact_value, compact_k_scales, compact_v_scales
+
+
+@torch.library.custom_op(
+    "xfuser::compact_attention_a2a_tiled_kv",
+    mutates_args=(),
+    **_CUSTOM_OP_OPTIONS,
+)
+def _compact_attention_a2a_tiled_kv(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    k_scales: torch.Tensor,
+    v_scales: torch.Tensor,
+    valid_kv_len: int,
+    profile: str,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    return _allocate_compact_attention_a2a_kv(
+        key,
+        value,
+        k_scales,
+        v_scales,
+        valid_kv_len,
+        profile=profile,
+        copy_values=True,
+    )
+
+
+@_compact_attention_a2a_tiled_kv.register_fake
+def _compact_attention_a2a_tiled_kv_fake(
+    key,
+    value,
+    k_scales,
+    v_scales,
+    valid_kv_len,
+    profile,
+):
+    return _allocate_compact_attention_a2a_kv(
+        key,
+        value,
+        k_scales,
+        v_scales,
+        valid_kv_len,
+        profile=profile,
+        copy_values=False,
+    )
+
+
+def _trim_packed_attention_a2a_padding(
+    key,
+    value,
+    packed_scales,
+    valid_kv_len,
+    config,
+):
+    """Consume Wan's uniform trailing pad without reimplementing varlen packing."""
+    if valid_kv_len is None:
+        return key, value, packed_scales
+    source_sequence = key.shape[1]
+    if value.shape[1] != source_sequence:
+        raise ValueError("packed Attention A2A K/V sequence lengths must match")
+    if not 0 < valid_kv_len <= source_sequence:
+        raise ValueError(
+            f"valid_kv_len must be in [1, {source_sequence}], got {valid_kv_len}."
+        )
+    if valid_kv_len == source_sequence:
+        return key, value, packed_scales
+
+    qk_codec, _, v_codec = config.codecs
+    source_tiles = (source_sequence + 127) // 128
+    target_tiles = (valid_kv_len + 127) // 128
+    tiled_layout = qk_codec in ("mxfp4", "mxfp6") or v_codec in (
+        "mxfp4",
+        "mxfp6_p",
+    )
+    if tiled_layout and source_tiles != target_tiles:
+        compact_key, compact_value, k_scales, v_scales = (
+            _compact_attention_a2a_tiled_kv(
+                key,
+                value,
+                packed_scales[1],
+                packed_scales[2],
+                valid_kv_len,
+                config.profile,
+            )
+        )
+        return (
+            compact_key,
+            compact_value,
+            (packed_scales[0], k_scales, v_scales),
+        )
+
+    # Plain byte layouts, and tiled layouts that retain the same tile count,
+    # remain valid views. Only token-indexed K scales need the matching slice.
+    key = key[:, :valid_kv_len]
+    value = value[:, :valid_kv_len]
+    k_scales = packed_scales[1]
+    if k_scales.ndim == 4 and k_scales.shape[1] == source_sequence:
+        k_scales = k_scales[:, :valid_kv_len]
+    return key, value, (packed_scales[0], k_scales, packed_scales[2])
+
+
+def _attention_a2a_packed_attn_impl(
+    q_packed: torch.Tensor,
+    k_packed: torch.Tensor,
+    v_packed: torch.Tensor,
+    q_scales: torch.Tensor,
+    k_scales: torch.Tensor,
+    v_scales: torch.Tensor,
+    profile: str,
+    softmax_scale: float,
+) -> torch.Tensor:
+    from aiter import dtypes
+    from aiter.ops.mha_v4 import (
+        AttentionFormat,
+        AttentionPack,
+        AttentionScaleMode,
+        mha_v4_packed,
+        native_fp8_format,
+    )
+
+    config = AttentionA2AConfig(profile=profile)
+    qk_codec, _, v_codec = config.consumer_codecs
+    v_pack = (
+        AttentionPack.V_FOR_FP6_P
+        if config.v_pack == "fp6_p"
+        else AttentionPack.DEFAULT
+    )
+    format_by_codec = {
+        "bf16": AttentionFormat.BF16,
+        "int8": AttentionFormat.INT8,
+        "e4m3": native_fp8_format(),
+        "mxfp8": native_fp8_format(),
+        "mxfp4": AttentionFormat.MXFP4,
+        "mxfp6": AttentionFormat.MXFP6,
+    }
+    try:
+        q_format = k_format = format_by_codec[qk_codec]
+        v_format = format_by_codec[v_codec]
+    except KeyError as exc:
+        raise RuntimeError(
+            f"unsupported packed Attention A2A codec {exc.args[0]!r}"
+        ) from None
+
+    if qk_codec == "int8":
+        q_packed = q_packed.view(torch.int8)
+        k_packed = k_packed.view(torch.int8)
+    elif qk_codec in ("e4m3", "mxfp8"):
+        q_packed = q_packed.view(dtypes.fp8)
+        k_packed = k_packed.view(dtypes.fp8)
+    if v_codec in ("e4m3", "mxfp8"):
+        v_packed = v_packed.view(dtypes.fp8)
+
+    scale_mode_by_name = {
+        "f32_per_tensor": AttentionScaleMode.F32_PER_TENSOR,
+        "f32_per_channel": AttentionScaleMode.F32_PER_CHANNEL,
+        "e8m0_per_1x32": AttentionScaleMode.E8M0_PER_1X32,
+    }
+    q_scale_mode, k_scale_mode, v_scale_mode = tuple(
+        scale_mode_by_name[mode] for mode in config.scale_modes
+    )
+    out = mha_v4_packed(
+        q_packed,
+        k_packed,
+        v_packed,
+        q_scales,
+        k_scales,
+        v_scales,
+        q_format,
+        k_format,
+        v_format,
+        q_scale_mode,
+        k_scale_mode,
+        v_scale_mode,
+        v_pack=v_pack,
+        softmax_scale=softmax_scale,
+    )
+    # This records after the MHA launch on the same stream, protecting the
+    # public per-role buffers from reuse by the next layer's side stream.
+    fused_a2a_input_consumer_done(q_packed.device)
+    return out.transpose(1, 2)
+
+
+@torch.library.custom_op(
+    "xfuser::attention_a2a_packed_attention",
+    mutates_args=(),
+    **_CUSTOM_OP_OPTIONS,
+)
+def _attention_a2a_packed_attn_call(
+    q_packed: torch.Tensor,
+    k_packed: torch.Tensor,
+    v_packed: torch.Tensor,
+    q_scales: torch.Tensor,
+    k_scales: torch.Tensor,
+    v_scales: torch.Tensor,
+    profile: str,
+    softmax_scale: float,
+) -> torch.Tensor:
+    return _attention_a2a_packed_attn_impl(
+        q_packed,
+        k_packed,
+        v_packed,
+        q_scales,
+        k_scales,
+        v_scales,
+        profile,
+        softmax_scale,
+    )
+
+
+@_attention_a2a_packed_attn_call.register_fake
+def _attention_a2a_packed_attn_fake(
+    q_packed,
+    k_packed,
+    v_packed,
+    q_scales,
+    k_scales,
+    v_scales,
+    profile,
+    softmax_scale,
+):
+    del k_packed, v_packed, q_scales, k_scales, v_scales
+    del profile, softmax_scale
+    b, s, h, _ = q_packed.shape
+    return q_packed.new_empty(
+        (b, s, h, 128), dtype=torch.bfloat16
+    ).transpose(1, 2)
+
+
+_register_ordered_effect(
+    torch.ops.xfuser.attention_a2a_packed_attention.default
+)
+
+
 def _get_attention_function(backend=None):
     """
     Get the attention function based on the runtime state or from a given explicit backend.
@@ -491,6 +892,29 @@ def _ulysses_extra_inputs(attention_kwargs, query):
     return extras
 
 
+def usp_fused_a2a_input_role(input, role, pending=None):
+    """Submit one sequence-major Wan role to the active Ulysses A2A input hop."""
+    return fused_a2a_input_role(
+        input,
+        role,
+        PROCESS_GROUP.ULYSSES_PG,
+        get_ulysses_parallel_rank(),
+        pending,
+    )
+
+
+def usp_fused_a2a_input_q(input):
+    return usp_fused_a2a_input_role(input, 0)
+
+
+def usp_fused_a2a_input_k(input, pending):
+    return usp_fused_a2a_input_role(input, 1, pending)
+
+
+def usp_fused_a2a_input_v(input, pending):
+    return usp_fused_a2a_input_role(input, 2, pending)
+
+
 def USP(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -507,6 +931,8 @@ def USP(
     attention_kwargs: dict | None = None,
     head_balance_layer=None,
     kv_head_repeat: int = 1,
+    attention_a2a_enabled: bool = False,
+    attention_a2a_pending=None,
 ):
     """
     Unified Sequence Parallelism (USP) attention call, supporting combinations of Ulysses and
@@ -536,6 +962,70 @@ def USP(
         combine_qkv_a2a = False
     _validate_gqa_params(query, key, value, kv_head_repeat, joint_strategy)
 
+    runtime_state = get_runtime_state()
+    ulysses_world_size = get_ulysses_parallel_world_size()
+    ring_world_size = get_ring_parallel_world_size()
+    use_attention_a2a = (
+        attention_a2a_enabled and get_fused_a2a_mode() > 0
+    )
+    if attention_a2a_pending is not None and not (
+        use_attention_a2a and use_fused_a2a_interleave()
+    ):
+        raise ValueError(
+            "interleaved input requires eligible Attention A2A transport"
+        )
+
+    hb_backend = backend if backend is not None else runtime_state.attention_backend
+    attention_a2a_config = None
+    if use_attention_a2a:
+        if ulysses_world_size <= 1:
+            raise NotImplementedError(
+                "Attention A2A requires Ulysses parallelism"
+            )
+        if ring_world_size != 1:
+            raise NotImplementedError(
+                "Attention A2A does not support ring parallelism"
+            )
+        if joint_strategy is not None:
+            raise NotImplementedError(
+                "Attention A2A does not support joint attention"
+            )
+        if kv_head_repeat != 1:
+            raise NotImplementedError(
+                "Attention A2A does not support grouped-query KV repetition"
+            )
+        if runtime_state.runtime_config.use_spargeattn_head_balance:
+            raise NotImplementedError(
+                "Attention A2A does not support sparse head balancing"
+            )
+        if query.shape != key.shape or query.shape != value.shape:
+            raise NotImplementedError(
+                "Attention A2A requires equal self-attention Q/K/V shapes"
+            )
+        if not use_fused_a2a_packed():
+            raise RuntimeError(
+                "Attention A2A requires packed per-role transport results"
+            )
+        spec = attention_registry.find(hb_backend)
+        if spec is None:
+            raise NotImplementedError(
+                f"attention backend {hb_backend} is not registered"
+            )
+        if spec.is_sparse:
+            raise NotImplementedError(
+                "Attention A2A supports dense attention backends only"
+            )
+        attention_a2a_config = AttentionA2AConfig(
+            profile=get_fused_a2a_profile()
+        ).resolve_for_backend(hb_backend)
+        if (
+            not attention_a2a_config.enabled
+            or attention_a2a_config.is_auto
+        ):
+            raise RuntimeError(
+                "Attention A2A runtime did not activate a concrete profile"
+            )
+
     attention_function = _get_attention_function(backend=backend)
 
     fp8_module = attn_layer if attn_layer is not None else head_balance_layer
@@ -544,7 +1034,6 @@ def USP(
         if fp8_module is None:
             _warn_fp8_comms_missing_attn()
         else:
-            runtime_state = get_runtime_state()
             fp8_backend = backend if backend is not None else runtime_state.attention_backend
             fp8_comms = fp8_attention_kwargs(
                 runtime_state.fp8_comms,
@@ -558,21 +1047,31 @@ def USP(
 
     if kv_head_repeat > 1 and fp8_comms is not None:
         raise NotImplementedError("GQA KV repetition does not support FP8 communication.")
+    if use_attention_a2a and fp8_comms is not None:
+        raise ValueError(
+            "Attention A2A and --use_fp8_comms are mutually exclusive"
+        )
 
-    hb_uly = get_ulysses_parallel_world_size()
-    hb_backend = backend if backend is not None else get_runtime_state().attention_backend
+    hb_uly = ulysses_world_size
     query, key, value, hb_applied, attention_kwargs = apply_head_balance(
         query,
         key,
         value,
         head_balance_layer,
-        enabled=(get_runtime_state().runtime_config.use_spargeattn_head_balance and kv_head_repeat == 1),
+        enabled=(
+            runtime_state.runtime_config.use_spargeattn_head_balance
+            and kv_head_repeat == 1
+        ),
         ulysses_world_size=hb_uly,
-        ring_world_size=get_ring_parallel_world_size(),
+        ring_world_size=ring_world_size,
         is_sparge_backend=hb_backend in _HEAD_BALANCE_BACKENDS,
         joint_strategy=joint_strategy,
         attention_kwargs=attention_kwargs,
     )
+    if use_attention_a2a and hb_applied:
+        raise NotImplementedError(
+            "Attention A2A does not support sparse head balancing"
+        )
 
     if fp8_comms is not None and joint_strategy:
         # query is fp8-quantized before the all-to-all but joint_key/value stay bf16.
@@ -591,10 +1090,38 @@ def USP(
         }
 
     extra_inputs = _ulysses_extra_inputs(attention_kwargs, query)
+    if use_attention_a2a:
+        unsupported = []
+        if extra_inputs:
+            unsupported.append("extra Ulysses inputs")
+        if _has_kv_cache(attn_layer):
+            unsupported.append("KV caching")
+        if dropout_p not in (None, 0.0):
+            unsupported.append("dropout")
+        if is_causal:
+            unsupported.append("causal masking")
+        if (attention_kwargs or {}).get("indices_k") is not None:
+            unsupported.append("arbitrary varlen key packing")
+        if unsupported:
+            raise NotImplementedError(
+                "packed Attention A2A does not support "
+                + ", ".join(unsupported)
+            )
 
     qkv_amaxes = None
-    if get_ulysses_parallel_world_size() > 1:
-        if fp8_comms is not None:
+    packed_scales = None
+    if ulysses_world_size > 1:
+        if use_attention_a2a:
+            (query, key, value), packed_scales = fused_a2a_input(
+                query,
+                key,
+                value,
+                PROCESS_GROUP.ULYSSES_PG,
+                get_ulysses_parallel_rank(),
+                softmax_scale=query.shape[-1] ** -0.5,
+                pending=attention_a2a_pending,
+            )
+        elif fp8_comms is not None:
             if extra_inputs:
                 raise NotImplementedError(
                     f"fp8 comms does not support extra Ulysses inputs: {', '.join(name for name, _ in extra_inputs)}."
@@ -627,13 +1154,26 @@ def USP(
             for name, tensor in extra_inputs:
                 attention_kwargs[name] = _ft_c_input_all_to_all(tensor)
 
+    if use_attention_a2a:
+        valid_kv_len = (attention_kwargs or {}).get("valid_kv_len")
+        key, value, packed_scales = _trim_packed_attention_a2a_padding(
+            key,
+            value,
+            packed_scales,
+            valid_kv_len,
+            attention_a2a_config,
+        )
+
     if _has_kv_cache(attn_layer):
         key, value = _update_and_get_kv_cache(key, value, attn_layer)
 
     # Uniform trailing padding needs no mask or varlen packing. Keeping all Q
     # rows but slicing K/V is equivalent to masking those keys and lets dense
     # backends retain their optimized cross-attention path.
-    key, value, attention_kwargs = _trim_trailing_kv_padding(key, value, attention_kwargs, hb_backend)
+    if not use_attention_a2a:
+        key, value, attention_kwargs = _trim_trailing_kv_padding(
+            key, value, attention_kwargs, hb_backend
+        )
 
     if kv_head_repeat > 1:
         key, value = _repeat_kv_heads(key, value, kv_head_repeat)
@@ -649,7 +1189,7 @@ def USP(
             attention_kwargs=attention_kwargs,
         )
 
-    elif get_ulysses_parallel_world_size() == 1:  # Ring only
+    elif ulysses_world_size == 1:  # Ring only
         out = ring_attn(
             attention_function,
             query,
@@ -662,7 +1202,16 @@ def USP(
         )
 
     else:
-        if get_ring_parallel_world_size() == 1:  # Ulysses only
+        if use_attention_a2a:
+            out = _attention_a2a_packed_attn_call(
+                query,
+                key,
+                value,
+                *packed_scales,
+                attention_a2a_config.profile,
+                query.shape[-1] ** -0.5,
+            )
+        elif ring_world_size == 1:  # Ulysses only
             out, _ = attention_function(
                 query,
                 key,

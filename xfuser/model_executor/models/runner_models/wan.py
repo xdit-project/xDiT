@@ -791,7 +791,11 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
     )
 
     # See xFuserWan22I2VModel: "fbcache" == DBCache first-block (Fn_compute_blocks=1).
-    capabilities = replace(xFuserWan21T2VModel.capabilities, use_fp8_comms=True)
+    capabilities = replace(
+        xFuserWan21T2VModel.capabilities,
+        use_fp8_comms=True,
+        supports_attention_a2a=True,
+    )
 
     def _customize_settings(self, config: xFuserArgs) -> None:
         super()._customize_settings(config)

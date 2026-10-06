@@ -368,8 +368,21 @@ def test_a_config_file_can_hold_extra_modules_high():
 
 def test_a_config_file_can_clear_the_models_keep_high():
     plan = _configured("low=fp4,high=fp8", targets="none")
-    assert plan.format_for(f"{TEXT_ENCODER}.3.mlp") == "fp4"
     assert plan.format_for(f"{TRANSFORMER[0]}.0.attn.to_qkv") == "fp4"
+
+
+def test_a_config_file_cannot_clear_what_is_not_a_precision_preference():
+    """`gemm_high_precision_targets: none` drops the model's quality carve-outs
+    to the low tier, which is what the file is for.
+
+    The encoder is not one of those. It sits at FP8 because that is what its
+    loaders place, so the plan pins it there and the file has no say -- it
+    would otherwise ask for an FP4 encoder that no route can produce, which is
+    the mismatch the pin exists to prevent."""
+    plan = _configured("low=fp4,high=fp8", targets="none")
+
+    assert plan.format_for(f"{TEXT_ENCODER}.3.mlp") == "fp8"
+    assert dict(plan.pinned) == {"text_encoder": "fp8"}
 
 
 def test_config_suffixes_hold_matching_leaves_high():

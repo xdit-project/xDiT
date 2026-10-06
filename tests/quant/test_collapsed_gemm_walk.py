@@ -200,16 +200,18 @@ def test_the_adapter_decides_which_side_of_the_device_move_it_runs_on():
     assert loader.backends.format.kept == _block_leaves()
 
 
-def test_one_format_sends_everything_to_one_converter():
-    """Including the text encoder, and including what keep_high names: one
-    format means the model's high/low preference has nothing to act on."""
+def test_one_format_sends_every_transformer_target_to_one_converter():
+    """Including what keep_high names: one format means the model's high/low
+    preference has nothing to act on.
+
+    The encoder is the exception, and not as a preference -- its loaders place
+    one format, so the plan pins it there and it reaches that converter even in
+    a run that named nothing but FP4."""
     loader = _loader("fp4", text_encoder=True)
     _run(loader, before_device_move=True)
     _run(loader, before_device_move=False)
-    assert loader.backends.format.kept == sorted(
-        leaf for root in BLOCKS + (TEXT_ENCODER,) for leaf in _leaves_under(root)
-    )
-    assert loader.backends.blockwise_fp8.kept == []
+    assert loader.backends.format.kept == _block_leaves()
+    assert loader.backends.blockwise_fp8.kept == sorted(_leaves_under(TEXT_ENCODER))
 
 
 def test_the_text_encoder_is_skipped_unless_the_run_asks():
@@ -421,10 +423,20 @@ def test_the_high_tier_is_what_the_primary_format_leaves():
     assert set(plan.roots("fp4")) == set(BLOCKS)
 
 
-@pytest.mark.parametrize("raw", ["fp8", "fp4"])
-def test_a_pure_profile_puts_one_format_in_play(raw):
+def test_a_pure_profile_holds_nothing_back():
     """Nothing is held back, so only one converter is ever resolved."""
-    assert _backends_for(raw)._formats_in_play() == (raw,)
+    assert _backends_for("fp4", text_encoder=False)._formats_in_play() == ("fp4",)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("fp8", ("fp8",)), ("fp4", ("fp4", "fp8"))],
+)
+def test_a_pinned_component_resolves_its_own_converter(raw, expected):
+    """A pure profile still resolves a second converter when a component is
+    pinned: FLUX.2's encoder is loaded at FP8, so an FP4 run needs that one
+    too -- and an FP8 run needs nothing extra, because the pin agrees."""
+    assert _backends_for(raw)._formats_in_play() == expected
 
 
 def test_a_tier_puts_both_formats_in_play():

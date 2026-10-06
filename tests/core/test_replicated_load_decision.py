@@ -1412,12 +1412,14 @@ def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
     }
 
 
-def test_a_non_fp8_run_says_the_encoder_is_still_stored_at_fp8(monkeypatch):
-    """The limitation is stated, not silently applied.
+def test_a_non_fp8_run_still_stores_the_encoder_at_fp8(monkeypatch):
+    """The encoder's loaders carry one format, so a run that named another
+    still gets FP8 here -- and is recorded under it, so the format-agnostic
+    walks leave those leaves where this route put them.
 
-    Everything below the resolver is format-agnostic except this route: the
-    meta and broadcast load paths an encoder goes through have only ever
-    carried FP8. A run that asked for something else gets FP8 here and is told.
+    This route no longer explains itself: the plan pins the component and says
+    so on its own line, which is pinned by
+    `tests/quant/test_gemm_targets.py::test_the_log_names_a_pinned_component_and_why`.
     """
     from xfuser.model_executor.quant.targets import resolve
     from xfuser.config.gemm import GemmQuantizationSpec
@@ -1451,17 +1453,23 @@ def test_a_non_fp8_run_says_the_encoder_is_still_stored_at_fp8(monkeypatch):
 
     _attach_backends(runner)
     loader = loader_for(runner)
+    gemm_plan = resolve(
+        targets,
+        GemmQuantizationSpec.parse("fp4"),
+        enable=("transformer", "text_encoder"),
+        component_formats={"text_encoder": ("fp8",)},
+    )
     loader.quantization_plan = SimpleNamespace(
-        gemm_plan=resolve(
-            targets,
-            GemmQuantizationSpec.parse("fp4"),
-            enable=("transformer", "text_encoder"),
-        )
+        gemm_plan=gemm_plan,
+        component_format=partial(QuantizationPlan.component_format, 
+                                 SimpleNamespace(gemm_plan=gemm_plan)),
     )
     text_encoder_plan.plan_text_encoders(loader)
 
-    assert any("stored at fp8" in message for message in logs)
-    assert any("asked for fp4" in message for message in logs)
+    # The run named FP4; the encoder is pinned to FP8 and recorded there.
+    assert gemm_plan.format_for("text_encoder.encoder.block.0.attn.q") == "fp8"
+    assert loader.quantization_ledger.streamed_at("fp4") == set()
+    assert any("requested=fp8" in message for message in logs)
 
 
 def test_hybrid_meta_te_uses_the_fp8_adapter(monkeypatch):

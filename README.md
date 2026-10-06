@@ -118,6 +118,7 @@ The following open-sourced DiT Models are released with xDiT in day 1.
 | [🎬 Wan2.1-T2V-1.3B](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🎬 Wan2.2](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B-Diffusers) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🎬 Wan2.2-Distilled (LightX2V 4-step)](https://huggingface.co/lightx2v/Wan2.2-Distill-Models) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
+| [🎬 SkyReels-V2](https://huggingface.co/Skywork/SkyReels-V2-T2V-14B-540P-Diffusers) (T2V, I2V) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🎬 CausalWan2.2](https://huggingface.co/FastVideo/CausalWan2.2-I2V-A14B-Preview-Diffusers) | ❎ | ❎ | ❎ | ❎ | ✔️ | NA |
 | [🎬 LTX-2](https://huggingface.co/Lightricks/LTX-2) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🎬 LTX-2.5](https://huggingface.co/Lightricks/LTX-2.5) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
@@ -343,6 +344,7 @@ Below is a list of validated diffusers version requirements. If the model is not
 | [Wan2.1](https://huggingface.co/Wan-AI/Wan2.1-T2V-14B-Diffusers) | >= 0.35.2 |
 | [Wan2.2](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B-Diffusers) | >= 0.35.2 |
 | [Wan2.2-Distilled (LightX2V)](https://huggingface.co/lightx2v/Wan2.2-Distill-Models) | >= 0.35.2 |
+| [SkyReels-V2](https://huggingface.co/Skywork/SkyReels-V2-T2V-14B-540P-Diffusers) | >= 0.36.0 |
 
 <h2 id="dev-guide">📚  Develop Guide</h2>
 

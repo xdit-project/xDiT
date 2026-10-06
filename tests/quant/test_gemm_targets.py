@@ -617,3 +617,25 @@ def test_the_log_names_a_pinned_component_and_why():
     assert len(named) == 1, f"the encoder is logged {len(named)} times: {lines}"
     assert "-> FP8" in named[0]
     assert "pinned" in named[0] and "fp4" in named[0]
+
+
+@pytest.mark.parametrize("profile", ["fp4", "fp6", "int8", "low=fp4,high=fp6"])
+def test_an_encoder_the_run_did_not_ask_for_is_left_alone(profile):
+    """`--quantize_text_encoder` is what puts the encoder in the plan, and the
+    pin only acts on a component that is in it.
+
+    Without the flag the encoder is not quantized at all, and -- just as
+    important -- its format never reaches the set of backends the run probes,
+    so a machine that cannot store FP8 is never asked to.
+    """
+    plan = resolve(
+        TARGETS,
+        GemmQuantizationSpec.parse(profile),
+        enable=("transformer",),
+        component_formats={"text_encoder": ENCODER},
+    )
+
+    assert dict(plan.pinned) == {}
+    assert plan.format_for(ENCODER_LEAF) is None
+    assert plan.declared_roots(component="text_encoder") == ()
+    assert "fp8" not in plan.formats_in_play

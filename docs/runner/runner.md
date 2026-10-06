@@ -86,6 +86,7 @@ Individual model classes that inherit from `xFuserModel`:
 | Model | Valid Model Name(s) |
 |-------|-----------------|
 | CausalWan | `CausalWan` |
+| Chroma1-HD | `Chroma1-HD`, `lodestones/Chroma1-HD` |
 | Cosmos3-Nano | `Cosmos3-Nano`, `nvidia/Cosmos3-Nano` |
 | Cosmos3-Super | `Cosmos3-Super`, `nvidia/Cosmos3-Super` |
 | FLUX.1-dev | `FLUX.1-dev`, `black-forest-labs/FLUX.1-dev` |

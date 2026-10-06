@@ -104,9 +104,17 @@ def _require_mha_v4_aiter(backend_name, supported_arches=("gfx950",)):
 
     kernel_dir = Path(aiter.__file__).resolve().parent.parent / "hsa" / arch / "fmha_v4_fwd"
     kernel_name = backend_name.removeprefix("AITER_").lower()
-    candidates = [kernel_dir / f"fwd_hd128_{kernel_name}.co"]
+    kernel_names = [kernel_name]
+    if backend_name == "AITER_F6F6":
+        # AITER's all-MXFP6 contract shares the generic MXFP6 code object;
+        # the V format selects MXFP6 rather than FP8 at launch.
+        kernel_names.append("mxfp6")
+    candidates = [kernel_dir / f"fwd_hd128_{name}.co" for name in kernel_names]
     if arch == "gfx942":
-        candidates.append(kernel_dir / "MI300" / f"fwd_hd128_{kernel_name}.co")
+        candidates.extend(
+            kernel_dir / "MI300" / f"fwd_hd128_{name}.co"
+            for name in kernel_names
+        )
     if not any(path.exists() for path in candidates):
         pytest.skip(f"AITER does not include the {arch} {kernel_name} FMHA kernel.")
 
@@ -152,6 +160,7 @@ def _xfail_broken_mxfp4_v(backend_name, sequence_length):
         "AITER_BF16FP8",
         "AITER_MXFP8",
         "AITER_F8F6",
+        "AITER_F6F6",
         "AITER_F6F4",
         "AITER_MXFP4",
         "AITER_F4F4",
@@ -188,6 +197,7 @@ def test_aiter_mixed_attention_matches_sdpa(backend_name, sequence_length):
         "AITER_BF16FP8",
         "AITER_MXFP8",
         "AITER_F8F6",
+        "AITER_F6F6",
         "AITER_F6F4",
         "AITER_MXFP4",
         "AITER_F4F4",
@@ -268,6 +278,7 @@ def test_aiter_mxfp8_gqa_compiles_and_matches_sdpa():
         "AITER_BF16FP8",
         "AITER_MXFP8",
         "AITER_F8F6",
+        "AITER_F6F6",
         "AITER_F6F4",
         "AITER_MXFP4",
         "AITER_F4F4",
@@ -297,6 +308,7 @@ def test_aiter_mixed_attention_unequal_sequence_lengths(backend_name):
         "AITER_MXFP8",
         "AITER_F8F6",
         "AITER_MXFP6",
+        "AITER_F6F6",
         "AITER_MXFP4",
     ],
 )
@@ -435,6 +447,7 @@ def test_mha_v4_refuses_several_packed_sequences():
         "AITER_BF16FP8",
         "AITER_MXFP8",
         "AITER_F8F6",
+        "AITER_F6F6",
         "AITER_F6F4",
         "AITER_MXFP4",
         "AITER_F4F4",

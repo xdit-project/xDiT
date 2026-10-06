@@ -113,10 +113,18 @@ def _probe_torchao_config(kind: str) -> tuple[bool, str | None]:
             quant = import_module("torchao.quantization.quant_api")
             granularity = import_module("torchao.quantization.granularity")
             common = import_module("torchao.quantization.quantize_.common")
+            from xfuser.core.utils.runner_utils import FP8_ACTIVATION_SCALE_FLOOR
+
             config = quant.Float8DynamicActivationFloat8WeightConfig(
                 granularity=granularity.PerTensor(),
                 set_inductor_config=False,
                 kernel_preference=common.KernelPreference.AUTO,
+                # Probe what conversion will build, floor included. The config
+                # is discarded, but every construction site carries the floor
+                # -- an unfloored one turns an all-zero activation into NaN,
+                # and `test_every_place_the_config_is_built_sets_the_floor`
+                # holds the rule for all of them.
+                activation_value_lb=FP8_ACTIVATION_SCALE_FLOOR,
             )
             # Conversion goes through these two as well, so a build carrying
             # the config class but not them still cannot store FP8.

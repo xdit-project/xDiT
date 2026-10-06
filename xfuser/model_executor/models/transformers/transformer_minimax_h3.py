@@ -23,6 +23,11 @@ from xfuser.core.distributed import (
 from xfuser.core.attention import registry as attention_registry
 from xfuser.core.attention.spec import Sparsity
 from xfuser.core.attention.backends.vsa_h3.attention import build_h3_vsa_metadata
+from xfuser.model_executor.layers.fused_qk_rope_flydsl import (
+    _HAS_FLYDSL,
+    flydsl_fused_qk_norm_rope,
+    prepare_neox_rope_tables,
+)
 from xfuser.model_executor.layers.usp import (
     ULYSSES_EXTRA_INPUTS_KEY,
     USP,
@@ -75,12 +80,36 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
         key = key.unflatten(-1, (attn.heads, -1))
         value = value.unflatten(-1, (attn.heads, -1))
 
-        query = attn.norm_q(query)
-        key = attn.norm_k(key)
+        # Fuse norm_q -> norm_k -> rope(q) -> rope(k) into one FlyDSL kernel.
+        # Unfused, inductor cannot fold the RoPE into the norm (the RMS
+        # reduction sits between them) and emits a bandwidth-bound chain of
+        # conversion kernels per layer -- 0.318 s/request at 50 layers x 49
+        # steps in the MiniMax-H3 profile.  The wrapper falls back to the exact
+        # unfused path for anything out of envelope.  In envelope it is not
+        # bit-exact: the rotate runs in fp32 and rounds once where eager
+        # diffusers rounds three times in bf16, so q/k differ by at most 1 bf16
+        # ULP -- in the kernel's favour, it is the more accurate of the two.
+        #
+        # ``rotary_emb`` is a 4-tuple (cos, sin, cos_pad, sin_fold) when the
+        # transformer prepared the folded tables, else the plain 2-tuple.
+        if _HAS_FLYDSL and rotary_emb is not None and len(rotary_emb) == 4:
+            query, key = flydsl_fused_qk_norm_rope(
+                query,
+                key,
+                attn.norm_q,
+                attn.norm_k,
+                rotary_emb[:2],
+                rope_style="neox",
+                rotary_dim=rotary_emb[0].shape[-1],
+                neox_tables=(rotary_emb[2], rotary_emb[3]),
+            )
+        else:
+            query = attn.norm_q(query)
+            key = attn.norm_k(key)
 
-        if rotary_emb is not None:
-            query = _apply_rotary_emb(query, *rotary_emb)
-            key = _apply_rotary_emb(key, *rotary_emb)
+            if rotary_emb is not None:
+                query = _apply_rotary_emb(query, rotary_emb[0], rotary_emb[1])
+                key = _apply_rotary_emb(key, rotary_emb[0], rotary_emb[1])
 
         use_vsa_h3 = self.use_vsa_h3
         if use_vsa_h3:
@@ -470,6 +499,21 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
             rotary_emb[0][local_start:local_stop],
             rotary_emb[1][local_start:local_stop],
         )
+        if _HAS_FLYDSL:
+            # Build the folded width-D rope tables ONCE per forward and carry
+            # them alongside the originals.  The fused kernel needs them; the
+            # unfused fallback needs the originals, so both travel together as a
+            # 4-tuple down the existing block argument.  A tuple rather than
+            # shared mutable state because this model runs under
+            # mode="reduce-overhead": per-call Python is not replayed, so a
+            # mutated box would bake a stale tensor into every CUDA-Graph replay.
+            #
+            # Per-forward, not per-layer: this is a cat over [S_local, D] and
+            # rebuilding it in each of the 50 blocks would cost more bandwidth
+            # than the fusion saves.
+            rotary_emb = rotary_emb + prepare_neox_rope_tables(
+                rotary_emb[0], rotary_emb[1], self.config.attention_head_dim
+            )
 
         packed_hidden_states = packed_hidden_states[:, local_start:local_stop]
         local_timestep_indices = padded_timestep_indices[local_start:local_stop]

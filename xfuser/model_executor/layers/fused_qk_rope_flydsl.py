@@ -1,8 +1,29 @@
-"""Fused QK-RMSNorm + interleaved (GPT-J) RoPE for FLUX joint attention (FlyDSL).
+"""Fused QK-RMSNorm + RoPE (FlyDSL), for FLUX joint attention and MiniMax-H3.
 
 Written in the high-level ``flydsl.expr`` (fx) API on top of aiter's
 ``GTensor`` buffer-tensor shim (the same style aiter uses in
 ``aiter/ops/flydsl/kernels/qk_norm_rope_quant.py``).
+
+Two rotations share this kernel, picked by ``rope_style`` and specialised at
+build time with ``const_expr`` so neither pays for the other:
+
+``"gptj"`` (default; FLUX)
+    Interleaved pairs ``(2k, 2k+1)``, full-width tables, rotate in fp32.
+
+``"neox"`` (MiniMax-H3)
+    ``rotate_half`` pairs ``(k, k + rotary_dim/2)`` over the leading
+    ``rotary_dim`` channels with the remainder passed through, rotate in bf16.
+    The partner channel lives in a *different* lane, and ``shuffle_xor`` cannot
+    express that lane shift -- but the RMS butterfly is an all-reduce, so every
+    lane holds the same ``rstd`` and simply re-loads the partner's raw value and
+    weight to rebuild its normalized value locally, bit-for-bit, with no
+    cross-lane traffic.  The three-way channel classification (lower half /
+    upper half / pass-through) is folded into the *tables* by
+    :func:`prepare_neox_rope_tables`, so the kernel body stays branch-free.
+
+Because the flags are ``const_expr`` and are part of the kernel symbol name,
+``NEOX=False`` builds emit exactly the code this file emitted before the neox
+variant existed.
 
 Layout / algorithm (per attention layer the baseline runs norm_q/norm_k then
 diffusers ``apply_rotary_emb``; this fuses the whole chain):
@@ -32,9 +53,15 @@ to be packed.  Outputs are always freshly allocated and contiguous.
 Envelope: bf16 activations, 4-D ``[B, S, H, D]`` (sequence_dim == 1), even ``D``
 that factors into a power-of-two lane count with an even per-lane width, plain
 (affine-or-weightless) RMSNorm, and a full-D cos/sin table whose row count is
-``S`` or ``B*S``.  Anything outside that falls back to the unfused diffusers
-reference (norm then ``apply_rotary_emb``) so selection never changes the
-result, only the speed.
+``S`` or ``B*S``.  neox additionally needs ``VEC`` to divide ``rotary_dim/2`` and
+a pass-through tail no wider than ``rotary_dim/2``.  Anything outside that falls
+back to the unfused reference.
+
+Selecting the fused path is bit-exact for GPT-J -- it replays the reference's
+rounding schedule, not just its formula.  neox is not: it rotates in fp32 and
+rounds once where eager diffusers rounds three times in bf16, so it differs by
+at most 1 bf16 ULP (the pass-through tail stays bit-exact).  See
+:func:`flydsl_fused_qk_norm_rope` and the note in the kernel body.
 """
 
 # NOTE: no ``from __future__ import annotations`` -- PEP 563 stringifies the
@@ -50,6 +77,20 @@ import torch
 
 from diffusers.models.embeddings import apply_rotary_emb
 from diffusers.models.normalization import RMSNorm as _DiffusersRMSNorm
+
+# The neox fallback has to be diffusers' own rotate, not a copy of it, or the
+# out-of-envelope path can silently drift from the model it stands in for.
+# Guarded because MiniMax-H3 postdates the ``diffusers>=0.33`` floor in
+# pyproject.toml, and this module is also imported by FLUX, FLUX.2, Qwen and
+# Z-Image, none of which may be broken by a MiniMax-only import.  ``None`` is
+# unreachable from the only caller: xfuser's MiniMax-H3 transformer imports this
+# same symbol at its own module scope, so it cannot load without it.
+try:
+    from diffusers.models.transformers.transformer_minimax_h3 import (
+        _apply_rotary_emb as _minimax_h3_apply_rotary_emb,
+    )
+except ImportError:
+    _minimax_h3_apply_rotary_emb = None
 
 from xfuser.logger import init_logger
 from xfuser.model_executor.layers.flydsl_utils import get_device_wave_size
@@ -82,21 +123,82 @@ except Exception:  # pragma: no cover - only exercised where flydsl is absent
 MAX_GRID_Y = 65535
 
 
-def _pick_block(d: int, wave_size: int) -> Optional[Tuple[int, int]]:
+def _pick_block(
+    d: int, wave_size: int, half: Optional[int] = None
+) -> Optional[Tuple[int, int]]:
     """Return ``(BLOCK_THREADS, VEC)`` for head_dim ``d`` or None if unsupported.
 
     Prefer the widest wave (few lanes, more work each) while keeping VEC even
     (GPT-J pairs stay lane-local) and BLOCK_THREADS no larger than the hardware
     wave, so the sum-of-squares reduction is a pure shuffle_xor butterfly.
+
+    ``half`` is ``rotary_dim // 2`` for the neox variant and is None for GPT-J
+    (which leaves the search below exactly as it was).  Under neox the two
+    halves of the rotary span take opposite-signed sin coefficients, so a lane's
+    VEC-wide block must not straddle the ``half`` boundary; requiring
+    ``half % vec == 0`` guarantees that, and -- since ``vec`` also divides ``d``
+    -- that the partner block is VEC-aligned too.
     """
     bt = wave_size
     while bt >= 2:
         if d % bt == 0:
             vec = d // bt
-            if vec >= 2 and vec % 2 == 0:
+            if vec >= 2 and vec % 2 == 0 and (half is None or half % vec == 0):
                 return bt, vec
         bt //= 2
     return None
+
+
+def prepare_neox_rope_tables(
+    cos: torch.Tensor, sin: torch.Tensor, head_dim: int
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Fold the neox sign pattern and the pass-through tail into width-D tables.
+
+    neox (``rotate_half``) RoPE over the leading ``rot`` channels of a ``D``-wide
+    head is, with ``half = rot // 2``::
+
+        out[c]        = x[c]        * cos[c] - x[c + half] * sin[c]   c <  half
+        out[c]        = x[c]        * cos[c] + x[c - half] * sin[c]   half <= c < rot
+        out[c]        = x[c]                                          c >= rot
+
+    Three cases, selected on a channel index the kernel only knows at runtime.
+    Folding the sign and the tail into the *tables* collapses all three to one
+    branch-free expression over the full width ``D``::
+
+        out[c] = x[c] * cos_pad[c] + x[(c + half) % rot] * sin_fold[c]
+
+    because ``cos_pad`` is 1 and ``sin_fold`` is 0 on the pass-through tail, and
+    ``sin_fold`` carries the sign.  ``(c + half) % rot`` lands inside
+    ``[half, rot)`` for ``c >= rot`` -- in bounds, and multiplied by zero.  This
+    needs no select/mask primitives in the kernel at all.
+
+    Exactness: ``(-x)*s == x*(-s)`` is a sign-bit flip with no rounding, and
+    ``own*1 + partner*0 == own``.  The one wart is that a pass-through value of
+    exactly ``-0.0`` comes back as ``+0.0``.
+
+    Returns ``(cos_pad, sin_fold)``, both ``[rows, head_dim]`` contiguous bf16 --
+    bf16 because the diffusers reference does ``cos.to(hidden_states.dtype)``
+    before the rotate, so the kernel must see the same bf16-rounded angles.
+    Negating before or after that cast is identical, so the fold is safe either
+    way.
+
+    Hoist this: it is a ``cat`` over ``[S, D]`` and rebuilding it per layer would
+    cost more bandwidth than the fusion saves.
+    """
+    rot = cos.shape[-1]
+    half = rot // 2
+    cos2 = cos.reshape(-1, rot)
+    sin2 = sin.reshape(-1, rot)
+    rows = cos2.shape[0]
+    pad = head_dim - rot
+    cos_pad = torch.cat([cos2, cos2.new_ones((rows, pad))], dim=-1)
+    sin_fold = torch.cat(
+        [-sin2[:, :half], sin2[:, half:], sin2.new_zeros((rows, pad))], dim=-1
+    )
+    return (
+        cos_pad.to(torch.bfloat16).contiguous(),
+        sin_fold.to(torch.bfloat16).contiguous(),
+    )
 
 
 
@@ -118,6 +220,8 @@ if _HAS_FLYDSL:
         ROUND_AFTER_NORM: bool,
         ROUND_AFTER_AFFINE: bool,
         CONTIG: bool,
+        NEOX: bool,
+        HALF: int,
     ):
         """Build + cache the @flyc.jit launcher for one config.
 
@@ -128,11 +232,19 @@ if _HAS_FLYDSL:
         PAIRS = VEC // 2
         INV_D = 1.0 / D
         HD = H * D
+        # Guarded so the GPT-J build never forms ``% 0``; under NEOX this is the
+        # full rotary span and the partner index is ``(c + HALF) % ROT``.
+        ROT = 2 * HALF if NEOX else 1
 
         # CONTIG must be in the symbol name: the two addressing variants are
-        # separate compilations and would otherwise share an MLIR symbol.
+        # separate compilations and would otherwise share an MLIR symbol.  The
+        # same applies to NEOX/HALF, which change the emitted addressing --
+        # a collision here is a silent miscompile, not an error.  The suffix is
+        # empty for GPT-J, so the FLUX symbol string is byte-identical to what
+        # it was before this kernel grew a neox variant.
         _kname = (
             f"fused_qk_norm_rope_H{H}_D{D}_v{VEC}"
+            f"{f'_n{HALF}' if NEOX else ''}"
             f"{'_c' if CONTIG else '_s'}_flydsl"
         )
 
@@ -192,6 +304,32 @@ if _HAS_FLYDSL:
             coff = row * D + tid * VEC
             woff = tid * VEC
 
+            if const_expr(NEOX):
+                # Partner channel block for the rotate.  ``(c + HALF) % ROT`` is
+                # the single expression that covers all three regions: it maps
+                # the lower rotary half to the upper, the upper back to the
+                # lower, and -- for the pass-through tail, where ``c >= ROT`` and
+                # ``D - ROT <= HALF`` -- into ``[HALF, ROT)``, which is in bounds
+                # and gets multiplied by a zeroed ``sin_fold``.
+                #
+                # ``_pick_block`` guarantees ``VEC | HALF``, so ``p_choff`` is a
+                # multiple of VEC and the partner block is a whole, aligned,
+                # in-head VEC block -- never a straddle of the half boundary.
+                p_choff = (tid * VEC + HALF) % ROT
+                p_hoff = head * D + p_choff
+                pwoff = p_choff
+                if const_expr(CONTIG):
+                    q_pbase = gtok * HD + p_hoff
+                    k_pbase = q_pbase
+                else:
+                    q_pbase = gtok * fx.Int32(q_rs) + p_hoff
+                    k_pbase = gtok * fx.Int32(k_rs) + p_hoff
+            else:
+                # Bound so ``process`` has the parameter either way; DCE'd.
+                q_pbase = q_base
+                k_pbase = k_base
+                pwoff = woff
+
             qin_ = GTensor(q_in, dtype=T.bf16, shape=(-1,))
             kin_ = GTensor(k_in, dtype=T.bf16, shape=(-1,))
             qout_ = GTensor(q_out, dtype=T.bf16, shape=(-1,))
@@ -223,7 +361,16 @@ if _HAS_FLYDSL:
                 ff = fx.Vector(bf).to(fx.Float32)
                 return [ff[i] for i in range_constexpr(VEC)]
 
-            def process(g_in, in_base, g_out, out_base, g_w, NORM, HAS_W):
+            def affine(vals, g_w, w_off, HAS_W):
+                """Weight-multiply + the post-affine rounding, on a VEC list."""
+                if const_expr(HAS_W):
+                    w = fx.Vector(g_w.load(w_off, vec_size=VEC)).to(fx.Float32)
+                    vals = [vals[i] * w[i] for i in range_constexpr(VEC)]
+                    if const_expr(ROUND_AFTER_AFFINE):
+                        vals = round_bf16(vals)
+                return vals
+
+            def process(g_in, in_base, p_base, g_out, out_base, g_w, NORM, HAS_W):
                 x = fx.Vector(g_in.load(in_base, vec_size=VEC)).to(fx.Float32)
 
                 if const_expr(NORM):
@@ -237,29 +384,66 @@ if _HAS_FLYDSL:
                 else:
                     scaled = [x[i] for i in range_constexpr(VEC)]
 
-                if const_expr(HAS_W):
-                    w = fx.Vector(g_w.load(woff, vec_size=VEC)).to(fx.Float32)
-                    scaled = [scaled[i] * w[i] for i in range_constexpr(VEC)]
-                    if const_expr(ROUND_AFTER_AFFINE):
-                        scaled = round_bf16(scaled)
+                scaled = affine(scaled, g_w, woff, HAS_W)
 
-                # interleaved GPT-J rope on lane-local pairs (2k, 2k+1):
-                #   out[2k]   = e*cos[2k]   - o*sin[2k]
-                #   out[2k+1] = o*cos[2k+1] + e*sin[2k+1]
-                outs = [None] * VEC
-                for kk in range_constexpr(PAIRS):
-                    e = scaled[2 * kk]
-                    o = scaled[2 * kk + 1]
-                    outs[2 * kk] = e * cos_f[2 * kk] - o * sin_f[2 * kk]
-                    outs[2 * kk + 1] = o * cos_f[2 * kk + 1] + e * sin_f[2 * kk + 1]
+                if const_expr(NEOX):
+                    # The partner channels live in a different lane, and
+                    # shuffle_xor cannot express the required +HALF/VEC lane
+                    # shift.  Re-load them instead: wave_reduce_add is an xor
+                    # butterfly, i.e. an all-reduce, so every lane already holds
+                    # the *same* rstd and can reconstruct the partner's
+                    # normalized value bit-for-bit with no cross-lane traffic.
+                    # The extra loads are L1-resident (another lane of the same
+                    # block just read them).
+                    xp = fx.Vector(g_in.load(p_base, vec_size=VEC)).to(fx.Float32)
+                    if const_expr(NORM):
+                        p_scaled = [xp[i] * rstd for i in range_constexpr(VEC)]
+                        if const_expr(ROUND_AFTER_NORM):
+                            p_scaled = round_bf16(p_scaled)
+                    else:
+                        p_scaled = [xp[i] for i in range_constexpr(VEC)]
+                    p_scaled = affine(p_scaled, g_w, pwoff, HAS_W)
+
+                    # Branch-free: the sign and the pass-through mask are folded
+                    # into the tables by prepare_neox_rope_tables.
+                    #
+                    # NOTE on numerics: diffusers' MiniMax-H3 _apply_rotary_emb
+                    # casts cos/sin to the activation dtype and does the rotate
+                    # in bf16, i.e. it rounds three times (both products and the
+                    # sum).  This computes in fp32 and rounds once at the store.
+                    # Inserting explicit round_bf16 after each product to replay
+                    # the reference schedule was MEASURED to have no effect: the
+                    # launcher's fast_fp_math folds the truncf/extf pair away and
+                    # contracts the multiply-add into an FMA regardless, so the
+                    # flag that used to gate it was inert and has been removed.
+                    # Net effect: the fused rotate is *more* accurate than eager
+                    # diffusers, differing by at most 1 bf16 ULP (measured: ~31%
+                    # of rotary channels, max 3.1e-2, mean 1.2e-3 at these
+                    # magnitudes).  The pass-through tail stays bit-exact.
+                    outs = [
+                        scaled[i] * cos_f[i] + p_scaled[i] * sin_f[i]
+                        for i in range_constexpr(VEC)
+                    ]
+                else:
+                    # interleaved GPT-J rope on lane-local pairs (2k, 2k+1):
+                    #   out[2k]   = e*cos[2k]   - o*sin[2k]
+                    #   out[2k+1] = o*cos[2k+1] + e*sin[2k+1]
+                    outs = [None] * VEC
+                    for kk in range_constexpr(PAIRS):
+                        e = scaled[2 * kk]
+                        o = scaled[2 * kk + 1]
+                        outs[2 * kk] = e * cos_f[2 * kk] - o * sin_f[2 * kk]
+                        outs[2 * kk + 1] = (
+                            o * cos_f[2 * kk + 1] + e * sin_f[2 * kk + 1]
+                        )
 
                 out_v = fx.Vector.from_elements(
                     [o.ir_value() for o in outs], dtype=fx.Float32
                 )
                 g_out.store(out_base, out_v.truncf(T.vec(VEC, T.bf16)))
 
-            process(qin_, q_base, qout_, out_base, wq_, NORM_Q, HAS_WQ)
-            process(kin_, k_base, kout_, out_base, wk_, NORM_K, HAS_WK)
+            process(qin_, q_base, q_pbase, qout_, out_base, wq_, NORM_Q, HAS_WQ)
+            process(kin_, k_base, k_pbase, kout_, out_base, wk_, NORM_K, HAS_WK)
 
         @flyc.jit
         def launch_fused_qk_norm_rope(
@@ -326,6 +510,8 @@ if _HAS_FLYDSL:
         norm_k: bool,
         round_after_norm: bool,
         round_after_affine: bool,
+        neox: bool,
+        half_rot: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Opaque launch boundary for torch.compile.
 
@@ -392,6 +578,8 @@ if _HAS_FLYDSL:
             ROUND_AFTER_NORM=round_after_norm,
             ROUND_AFTER_AFFINE=round_after_affine,
             CONTIG=(q_rs == h * d and k_rs == h * d),
+            NEOX=neox,
+            HALF=half_rot,
         )
 
         # kernel always binds wq/wk params; pass a 1-elem dummy when unused (the
@@ -450,13 +638,17 @@ if _HAS_FLYDSL:
         norm_k,
         round_after_norm,
         round_after_affine,
+        neox,
+        half_rot,
     ):
         # Contiguous, matching the real op exactly -- a fake/real stride
-        # mismatch is a silent miscompile under Inductor.
+        # mismatch is a silent miscompile under Inductor.  Output shapes do not
+        # depend on the neox flags, but the parameter list must still match the
+        # real op positionally.
         return q.new_empty(q.shape), k.new_empty(k.shape)
 
 
-def _supported(query, key, cos) -> bool:
+def _supported(query, key, cos, half: Optional[int] = None) -> bool:
     if not _HAS_FLYDSL:
         return False
     if not query.is_cuda:
@@ -469,8 +661,10 @@ def _supported(query, key, cos) -> bool:
         return False
     d = query.shape[-1]
     wave_size = get_device_wave_size(query)
-    if wave_size is None or _pick_block(d, wave_size) is None:
+    if wave_size is None or _pick_block(d, wave_size, half) is None:
         return False
+    # Width-D for both variants: the neox tables are pre-padded to the head dim
+    # by prepare_neox_rope_tables, so this check stays correct unchanged.
     if not isinstance(cos, torch.Tensor) or cos.shape[-1] != d:
         return False
     return True
@@ -558,58 +752,140 @@ def _reference(
     return query, key
 
 
+def _reference_neox(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    norm_q,
+    norm_k,
+    rotary_emb,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Unfused path for the neox variant: RMSNorm then rotate_half RoPE.
+
+    Runs diffusers' own MiniMax-H3 ``_apply_rotary_emb``, which rotates only the
+    leading ``cos.shape[-1]`` channels and does so in the activation dtype --
+    not fp32 like FLUX's interleaved ``apply_rotary_emb``, which is why the
+    GPT-J ``_reference`` above cannot serve this.
+    """
+    if norm_q is not None:
+        query = norm_q(query)
+    if norm_k is not None:
+        key = norm_k(key)
+    if rotary_emb is not None:
+        cos, sin = rotary_emb[0], rotary_emb[1]
+        query = _minimax_h3_apply_rotary_emb(query, cos, sin)
+        key = _minimax_h3_apply_rotary_emb(key, cos, sin)
+    return query, key
+
+
 def flydsl_fused_qk_norm_rope(
     query: torch.Tensor,
     key: torch.Tensor,
     norm_q,
     norm_k,
     rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]],
+    *,
+    rope_style: str = "gptj",
+    rotary_dim: Optional[int] = None,
+    neox_tables: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """FlyDSL RMSNorm(q)/RMSNorm(k) + interleaved RoPE, fused.
+    """FlyDSL RMSNorm(q)/RMSNorm(k) + RoPE, fused.
 
     ``query`` / ``key`` are ``[B, S, H, D]`` (sequence_dim == 1); ``rotary_emb``
-    is the diffusers ``(cos, sin)`` pair broadcastable to ``[S, D]``.  Falls back
-    to the unfused diffusers reference (norm then ``apply_rotary_emb``) for
-    anything outside the supported envelope so the result is identical either
-    way.
+    is the diffusers ``(cos, sin)`` pair.  Falls back to the unfused diffusers
+    reference for anything outside the supported envelope so the result is
+    identical either way.
+
+    Two rotations are supported, selected by ``rope_style``:
+
+    ``"gptj"`` (default, FLUX / Z-Image / Wan)
+        Interleaved pairs ``(2k, 2k+1)``, full-width ``cos``/``sin``, rotate
+        computed in fp32.  This is the original behaviour and the defaults keep
+        every existing caller byte-identical.
+
+    ``"neox"`` (MiniMax-H3)
+        ``rotate_half`` pairs ``(k, k + rotary_dim/2)`` over the leading
+        ``rotary_dim`` channels, the rest passed through.  Requires
+        ``rotary_dim`` and ``neox_tables`` -- the ``(cos_pad, sin_fold)`` pair
+        from :func:`prepare_neox_rope_tables`, which must be built *once per
+        forward* by the caller, not per layer.  ``rotary_emb`` is still the
+        original unpadded ``(cos, sin)`` and is used only by the fallback.
+
+    neox numerics: the rotate runs in fp32 and rounds once, while eager
+    diffusers rounds three times in bf16, so neox output differs from the unfused
+    reference by at most 1 bf16 ULP (the pass-through tail is bit-exact).  See
+    the note in the kernel body -- fast_fp_math makes replaying the reference's
+    rounding schedule impossible without disabling FMA contraction.
     """
+    neox = rope_style == "neox"
+
+    def _ref():
+        if neox:
+            return _reference_neox(query, key, norm_q, norm_k, rotary_emb)
+        return _reference(query, key, norm_q, norm_k, rotary_emb)
+
+    if rope_style not in ("gptj", "neox"):
+        return _ref()
+    # Inference-only fast path: the custom op has no autograd formula, so any
+    # grad-enabled call falls back (matching the Z-Image sibling).
+    if torch.is_grad_enabled():
+        return _ref()
     if (
         rotary_emb is None
         or not isinstance(rotary_emb, (tuple, list))
-        or len(rotary_emb) != 2
+        or len(rotary_emb) < 2
     ):
-        return _reference(query, key, norm_q, norm_k, rotary_emb)
+        return _ref()
     sched_q = _norm_schedule(norm_q)
     sched_k = _norm_schedule(norm_k)
     if sched_q is None or sched_k is None:
-        return _reference(query, key, norm_q, norm_k, rotary_emb)
+        return _ref()
     # One kernel build serves q and k, so a single rounding schedule has to
     # cover both.  Mixed norm implementations are not something any model does.
     active = [s for s, m in ((sched_q, norm_q), (sched_k, norm_k)) if m is not None]
     if len(set(active)) > 1:
-        return _reference(query, key, norm_q, norm_k, rotary_emb)
+        return _ref()
     round_after_norm, round_after_affine = active[0] if active else (False, False)
 
-    cos, sin = rotary_emb
-    if not _supported(query, key, cos):
-        return _reference(query, key, norm_q, norm_k, rotary_emb)
+    d_q = query.shape[-1]
+    half = None
+    if neox:
+        if (
+            neox_tables is None
+            or not isinstance(neox_tables, (tuple, list))
+            or len(neox_tables) != 2
+            or rotary_dim is None
+            or rotary_dim % 2 != 0
+            or rotary_dim > d_q
+        ):
+            return _ref()
+        # The partner index ``(c + half) % rot`` only stays inside the rotary
+        # span for the pass-through tail while the tail is no wider than half.
+        if (d_q - rotary_dim) > rotary_dim // 2:
+            return _ref()
+        half = rotary_dim // 2
+        cos, sin = neox_tables
+    else:
+        cos, sin = rotary_emb[0], rotary_emb[1]
+
+    if not _supported(query, key, cos, half):
+        return _ref()
 
     b, s, h, d = query.shape
     cos2 = cos.reshape(-1, d)
     sin2 = sin.reshape(-1, d)
     if cos2.shape != sin2.shape or cos2.shape[0] not in (s, b * s):
-        return _reference(query, key, norm_q, norm_k, rotary_emb)
+        return _ref()
     cos_rows = cos2.shape[0]
 
     if cos2.dtype not in (torch.float32, torch.bfloat16):
-        return _reference(query, key, norm_q, norm_k, rotary_emb)
+        return _ref()
 
     wave_size = get_device_wave_size(query)
     if wave_size is None:
-        return _reference(query, key, norm_q, norm_k, rotary_emb)
-    block_vec = _pick_block(d, wave_size)
+        return _ref()
+    block_vec = _pick_block(d, wave_size, half)
     if block_vec is None:  # already checked in _supported, belt & suspenders
-        return _reference(query, key, norm_q, norm_k, rotary_emb)
+        return _ref()
     block_threads, vec = block_vec
 
     # Buffer loads scale the element offset by the element size in i32, so for
@@ -618,7 +894,7 @@ def flydsl_fused_qk_norm_rope(
     # inside the custom op, which can fall back to a copy on its own.  Reading
     # .stride() out here would break Dynamo under dynamic shapes.
     if b * s * h * d >= (1 << 30):
-        return _reference(query, key, norm_q, norm_k, rotary_emb)
+        return _ref()
 
     cos2 = cos2.contiguous()
     sin2 = sin2.contiguous()
@@ -634,7 +910,7 @@ def flydsl_fused_qk_norm_rope(
     # bf16 weight required to replay the round-after-norm schedule; otherwise
     # (or if weightless) the diffusers reference is the safer match.
     if (has_wq and wq.dtype != torch.bfloat16) or (has_wk and wk.dtype != torch.bfloat16):
-        return _reference(query, key, norm_q, norm_k, rotary_emb)
+        return _ref()
 
     eps = 1e-6
     for m in (norm_q, norm_k):
@@ -644,7 +920,7 @@ def flydsl_fused_qk_norm_rope(
         if e is None:
             # torch.nn.RMSNorm reads eps=None as finfo(dtype).eps, which is not
             # the 1e-6 default below.
-            return _reference(query, key, norm_q, norm_k, rotary_emb)
+            return _ref()
         eps = float(e)
         break
 
@@ -665,6 +941,8 @@ def flydsl_fused_qk_norm_rope(
         norm_k is not None,
         round_after_norm,
         round_after_affine,
+        neox,
+        half if half is not None else 0,
     )
 
     return oq, ok

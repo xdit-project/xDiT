@@ -433,7 +433,7 @@ pip install onediff
 pip install -U nexfort
 ```
 
-For usage instructions, refer to the [example/run.sh](./examples/run.sh). Simply append `--use_torch_compile` or `--use_onediff` to your command. Note that these options are mutually exclusive, and their performance varies across different scenarios.
+For usage instructions, refer to the [examples/run.sh](./examples/run.sh). Simply append `--use_torch_compile` or `--use_onediff` to your command. Note that these options are mutually exclusive, and their performance varies across different scenarios.
 
 <h4 id="cache_acceleration">Cache Acceleration</h4>
 

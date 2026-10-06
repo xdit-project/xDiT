@@ -952,9 +952,10 @@ class xFuserModel(abc.ABC):
 
         output = self._gather_dp_outputs(output)
 
-        if len(timings) > 1:
-            timings.pop(0)  # Remove first timing for more accurate average # TODO: fix
-        log(f"Average time over {self.config.num_iterations} runs: {sum(timings) / len(timings):.2f}s")
+        if not self.config.warmup_calls and len(timings) > 1:
+            # Without warmup calls, the first timed run absorbs one-time costs such as compilation.
+            timings.pop(0)
+        log(f"Average time over {len(timings)} runs: {sum(timings) / len(timings):.2f}s")
         log(f"Total time spent: {inference_start.elapsed_time(inference_end) / 1000:.2f}s")
 
         return output, timings

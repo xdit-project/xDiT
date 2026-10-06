@@ -408,7 +408,7 @@ These examples show how the flags are wired, not tuned recommendations: output q
 | Argument | Description | Default |
 |----------|-------------|---------|
 | `--num_iterations` | Number of benchmark iterations | 1 |
-| `--warmup_calls` | Warmup iterations before timing | 0 |
+| `--warmup_calls` | Warmup iterations before timing. With none, the first of several timed iterations is left out of the reported timings | 0 |
 | `--batch_size` | Batch size for dataset inference | None |
 | `--dataset_path` | Path to prompt dataset csv | None |
 | `--output_directory` | Output save directory | `.` |

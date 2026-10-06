@@ -27,6 +27,7 @@ from xfuser.core.attention.requirements import (
 from xfuser.core.attention.constraints import (
     ANY_CALL,
     HEAD_DIM,
+    MASKED_VARLEN,
     MHA_ONLY,
     NON_CAUSAL,
     NO_VARLEN,
@@ -988,9 +989,9 @@ def test_hadamard_declares_its_symbol_once():
 #     gathering the valid rows, or scattering several sequences into a padded
 #     batch whose true lengths travel in seqlens_k.
 #
-# Everything else must declare NO_VARLEN: accepting a packed call without
-# honouring it runs dense attention over padded keys and returns wrong numbers
-# rather than failing.
+# Everything else must declare NO_VARLEN, or MASKED_VARLEN when its kernel
+# applies attn_mask: accepting a packed call without honouring it runs dense
+# attention over padded keys and returns wrong numbers rather than failing.
 #
 # Maintained by hand on purpose. Deriving it from the specs would compare the
 # registry with itself; the point is that adding a name here is a claim someone
@@ -1036,6 +1037,49 @@ def test_only_varlen_capable_backends_accept_packed_keys():
         f"unexpected: {sorted(accepting - VARLEN_CAPABLE)}, "
         f"missing: {sorted(VARLEN_CAPABLE - accepting)}"
     )
+
+
+# Backends whose kernel applies ``attn_mask``. The models that pack their keys
+# (Krea-2, LTX-2) derive the packing from a dense key mask and pass both, so a
+# kernel that applies the mask serves the call without the packing. Maintained
+# by hand for the reason above.
+MASK_APPLYING = {"SDPA", "SDPA_MATH"}
+
+
+def _masked_pack(batch=1, kv_len=8):
+    mask = torch.ones(batch, kv_len, dtype=torch.bool)
+    mask[:, kv_len // 2 :] = False
+    return AttnCall(
+        varlen=VarlenPacking(
+            indices_k=mask.flatten().nonzero().flatten(),
+            cu_seqlens_k=torch.arange(batch + 1, dtype=torch.int32) * (kv_len // 2),
+            max_seqlen_k=kv_len // 2,
+        ),
+        attention_kwargs={"attn_mask": mask[:, None, None, :]},
+    )
+
+
+def test_masked_varlen_accepts_a_pack_only_when_a_mask_comes_with_it():
+    t = torch.empty((1, 2, 8, 128))
+    assert MASKED_VARLEN.unmet(t, t, t, AttnCall()) is None
+    assert MASKED_VARLEN.unmet(t, t, t, _masked_pack()) is None
+
+    unmasked = _masked_pack()
+    unmasked.attention_kwargs["attn_mask"] = None
+    assert "attn_mask" in MASKED_VARLEN.unmet(t, t, t, unmasked)
+
+
+def test_a_masked_pack_reaches_the_varlen_and_mask_applying_backends_only():
+    """Krea-2 and LTX-2 send both the mask and the packing. Before SDPA could
+    serve that through the mask, every such call on SDPA raised; the aten
+    flash, efficient and cuDNN rows pass no mask and must still refuse it."""
+    from xfuser.core.attention import registry
+
+    q = torch.zeros(1, 4, 8, 128)
+    call = _masked_pack()
+    accepting = {backend.name for backend, spec in registry.REGISTRY.items() if spec.rejects(q, q, q, call) is None}
+    expected = VARLEN_CAPABLE | MASK_APPLYING
+    assert accepting == expected, f"unexpected: {sorted(accepting - expected)}, missing: {sorted(expected - accepting)}"
 
 
 # --------------------------------------------------------------------------

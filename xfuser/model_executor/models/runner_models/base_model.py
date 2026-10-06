@@ -871,6 +871,15 @@ class xFuserModel(abc.ABC):
                         compiled_any = True
                 if compiled_any and mode in self.CUDAGRAPH_COMPILE_MODES:
                     self._mark_cudagraph_steps(component)
+                if not compiled_any and self.config.cache_method:
+                    # Compiling the whole component would put the step cache's
+                    # transformer.forward patch behind (or inside) the compiled graph.
+                    raise ValueError(
+                        f"--cache_method {self.config.cache_method} with --use_torch_compile compiles "
+                        f"{component_name} block by block, but none of its block lists "
+                        f"{list(wrap_attrs)} exist. Name them in "
+                        f"fsdp_strategy[{component_name!r}]['wrap_attrs'] of {type(self).__name__}."
+                    )
                 if not compiled_any:
                     setattr(self.pipe, component_name, torch.compile(component, mode=mode, dynamic=dynamic))
             else:

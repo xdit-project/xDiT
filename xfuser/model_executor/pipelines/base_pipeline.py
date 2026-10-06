@@ -1,7 +1,7 @@
 from abc import ABCMeta, abstractmethod
 from functools import wraps
 from xfuser.compat import version_at_least
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 import sys
 import torch
 import torch.distributed
@@ -557,6 +557,44 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
                 get_pp_group().add_pipeline_recv_task(patch_idx)
 
         return patch_latents
+
+    def _async_pipeline_step_end(
+        self,
+        callback_on_step_end: Optional[Callable],
+        callback_on_step_end_tensor_inputs: List[str],
+        step: int,
+        t: torch.Tensor,
+        patch_latents: List[torch.Tensor],
+        *,
+        patch_dim: int,
+        step_tensors: Dict[str, torch.Tensor],
+    ) -> None:
+        """Run ``callback_on_step_end`` once per PipeFusion async step.
+
+        Only the last pipeline stage holds denoised latents. By the end of a step it
+        has already sent every patch on to the next step, so the callback sees the
+        step's latents but cannot replace them. ``step_tensors`` holds the other
+        callback tensor inputs this pipeline's async loop can provide.
+        """
+        if callback_on_step_end is None or not is_pipeline_last_stage():
+            return
+        step_tensors = {**step_tensors, "latents": torch.cat(patch_latents, dim=patch_dim)}
+        missing = [k for k in callback_on_step_end_tensor_inputs if k not in step_tensors]
+        if missing:
+            raise ValueError(
+                f"callback_on_step_end_tensor_inputs {missing} are not available in the PipeFusion "
+                f"loop; available: {sorted(step_tensors)}"
+            )
+        callback_kwargs = {k: step_tensors[k] for k in callback_on_step_end_tensor_inputs}
+        callback_outputs = callback_on_step_end(self, step, t, callback_kwargs)
+        replaced = [
+            k for k, v in (callback_outputs or {}).items() if k in callback_kwargs and v is not callback_kwargs[k]
+        ]
+        if replaced:
+            logger.warning(
+                f"callback_on_step_end returned new {replaced}, which PipeFusion "
+                "cannot apply after a step has been sent; the values are ignored."
+            )
 
     def _process_cfg_split_batch(
         self,

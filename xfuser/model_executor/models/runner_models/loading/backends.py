@@ -750,6 +750,9 @@ class EagerBlockwisePlan:
 
 @stores("fp8", AITER_FP8)
 class AiterFp8BackendAdapter(QuantAdapter):
+    # AiterFp8BlockScaleTEConfig to stream through, and the
+    # xFuserFP8BlockScaleLinear layout _swap_meta_te_to_fp8 fills.
+    places_text_encoder = True
     storage_semantics = "block_128_scaled"
     # A plain nn.Parameter, which is why this one needs no FSDP2 patches.
     parameter_semantics = "packed_weight_parameter"
@@ -801,6 +804,9 @@ class AiterFp8BackendAdapter(QuantAdapter):
 
 @stores("fp8", TORCHAO_FP8)
 class TorchaoFp8BackendAdapter(QuantAdapter):
+    # a Transformers TorchAoConfig carrying the same
+    # Float8DynamicActivationFloat8WeightConfig this stores a transformer with.
+    places_text_encoder = True
     default_unavailable_reason = "Diffusers TorchAoConfig API is unavailable"
     storage_semantics = "tensorwise_dynamic"
     parameter_semantics = "torchao_float8_tensor_subclass"

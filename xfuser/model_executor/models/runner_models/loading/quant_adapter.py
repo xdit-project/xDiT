@@ -99,6 +99,29 @@ def stores(format_name: str, impl: str):
     return register
 
 
+def text_encoder_formats() -> Tuple[str, ...]:
+    """The formats some implementation can place in a text encoder.
+
+    In ``IMPL_PREFERENCE`` order, so a caller choosing among several gets a
+    stable answer. Read off the registry rather than listed, so wiring up a new
+    encoder format is flipping one attribute on one class.
+    """
+
+    # Imported for their registrations, the same way `_select` does it.
+    from . import backends  # noqa: F401
+    from .contracts import IMPL_PREFERENCE
+
+    return tuple(
+        format_name
+        for format_name, impls in IMPL_PREFERENCE.items()
+        if any(
+            REGISTRY[(format_name, impl)].places_text_encoder
+            for impl in impls
+            if (format_name, impl) in REGISTRY
+        )
+    )
+
+
 def build_adapter(format_name: str, impl: str, *, capability, hybrid: bool = False):
     """The adapter for one pair, built from what this machine measured.
 
@@ -305,6 +328,19 @@ class QuantAdapter:
     #: converter that takes the targets positively needs no structure at all.
     streams_by_exclusion = True
     supports_text_encoder_post_load = True
+    #: Whether this pair can be placed in a text encoder at all: whether a
+    #: framework quantization config exists to stream a checkpoint through,
+    #: and a meta layout exists for the broadcast fill to land in.
+    #:
+    #: Per pair rather than per format, because that wiring is written per
+    #: implementation -- `component_quantization_config` dispatches on the
+    #: backend, so "fp8 through aiter" and "fp8 through torchao" are two
+    #: independent pieces of code that happen to both exist.
+    #:
+    #: Declared rather than probed: it says which code was written, not what
+    #: this machine can run. `FormatCapability.te_streams` asks the second
+    #: question, and only for a pair that answers True here.
+    places_text_encoder = False
     #: Why this implementation's weights do not survive the host round trip a
     #: group-offload hook performs, keyed by whether the hook pins each tensor
     #: first. None means they do, or that nothing has measured otherwise --

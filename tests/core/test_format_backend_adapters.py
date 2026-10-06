@@ -794,3 +794,54 @@ def test_probing_is_narrowed_to_what_the_run_will_actually_place(
     )
 
     assert sorted(backends._formats_requested()) == expected
+
+
+def test_the_encoder_formats_are_read_off_the_registry(modules):
+    """Not a list kept somewhere: wiring up a new encoder format should be
+    flipping one attribute on the one class that gained the wiring."""
+    declared = {
+        format_name
+        for (format_name, _), cls in modules.adapter.REGISTRY.items()
+        if cls.places_text_encoder
+    }
+
+    assert set(modules.adapter.text_encoder_formats()) == declared
+    assert declared == {"fp8"}, (
+        "a pair gained or lost text-encoder wiring; if that was deliberate, "
+        "check component_quantization_config has a branch for its backend"
+    )
+
+
+def test_every_pair_claiming_an_encoder_has_a_framework_branch(modules):
+    """`places_text_encoder` claims a framework config exists for that
+    implementation. The dispatch is the claim's only backing, so read it."""
+    import ast
+
+    source = (
+        ROOT
+        / "xfuser/model_executor/models/runner_models/loading/text_encoder_adapter.py"
+    ).read_text()
+    dispatch = next(
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "component_quantization_config"
+    )
+    wired = {
+        value.value
+        for node in ast.walk(dispatch)
+        if isinstance(node, ast.Compare)
+        for value in node.comparators
+        if isinstance(value, ast.Constant) and isinstance(value.value, str)
+    }
+    claimed = {
+        impl
+        for (_, impl), cls in modules.adapter.REGISTRY.items()
+        if cls.places_text_encoder
+    }
+
+    assert claimed, "nothing declares text-encoder wiring any more"
+    assert claimed <= wired, (
+        f"{sorted(claimed - wired)} declare a text encoder, but "
+        "component_quantization_config has no branch for them"
+    )

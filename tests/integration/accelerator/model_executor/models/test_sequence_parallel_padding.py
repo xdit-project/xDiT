@@ -305,7 +305,7 @@ def _cosmos3(device, tokens):
         vision_timesteps=torch.full((gen_len,), 500.0, device=device),
         vision_noisy_frame_indexes=[torch.arange(frames, device=device)],
     )
-    return reference, parallel, dict(inputs, return_dict=False), inputs
+    return reference, parallel, dict(inputs, return_dict=False), dict(inputs, return_dict=False)
 
 
 _MODELS = {

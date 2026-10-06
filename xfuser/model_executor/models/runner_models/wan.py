@@ -615,15 +615,12 @@ class xFuserWan21T2VModel(xFuserWanModel):
         use_fp8_gemms=True,
         use_fp8_text_encoder=True,
         use_fp4_gemms=True,
-        use_fp6_gemms=True,
-        use_a6w4_gemms=True,
         use_hybrid_attn_schedule=True,
         use_parallel_vae=True,
         cross_attention_backend=True,
         supports_sparge_attention_backends=True,
         enable_tiling=True,
         enable_slicing=True,
-        supports_step_caching=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -635,6 +632,22 @@ class xFuserWan21T2VModel(xFuserWanModel):
         guidance_scale_2=None,
         flow_shift=12,
         num_hybrid_attn_high_precision_steps=5,
+    )
+    capabilities = ModelCapabilities(
+        ulysses_degree=True,
+        ring_degree=True,
+        fully_shard_degree=True,
+        use_fp8_gemms=True,
+        use_fp4_gemms=True,
+        use_fp6_gemms=True,
+        use_a6w4_gemms=True,
+        use_hybrid_attn_schedule=True,
+        use_parallel_vae=True,
+        cross_attention_backend=True,
+        supports_sparge_attention_backends=True,
+        enable_tiling=True,
+        enable_slicing=True,
+        supports_step_caching=True,
     )
     settings = ModelSettings(
         mod_value=8,

@@ -29,6 +29,12 @@ def _normalize_prompt(prompt_input):
     raise TypeError(f"prompt must be str or list[str], got {type(prompt_input)}")
 
 
+def _check_negative_prompt_is_used(model, input_args: dict) -> None:
+    # ZImagePipeline only encodes the negative prompt when guidance_scale > 0.
+    if input_args["negative_prompt"] and input_args["guidance_scale"] <= 0:
+        raise ValueError(f"{model.settings.model_name} ignores --negative_prompt unless --guidance_scale is above 0.")
+
+
 def _keep_timesteps_host_resident(pipe) -> None:
     """Elide the per-denoise-step device->host sync in ``ZImagePipeline.__call__``.
 
@@ -192,12 +198,17 @@ class xFuserZImageModel(xFuserModel):
         _keep_timesteps_host_resident(pipe)
         return pipe
 
+    def _validate_args(self, input_args: dict) -> None:
+        super()._validate_args(input_args)
+        _check_negative_prompt_is_used(self, input_args)
+
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         prompt = _normalize_prompt(input_args["prompt"])
         output = self.pipe(
             height=input_args["height"],
             width=input_args["width"],
             prompt=prompt,
+            negative_prompt=input_args["negative_prompt"],
             num_inference_steps=input_args["num_inference_steps"],
             guidance_scale=input_args["guidance_scale"],
             generator=self._make_generator(input_args["seed"]),
@@ -287,12 +298,17 @@ class xFuserZImageTurboModel(xFuserModel):
         _keep_timesteps_host_resident(pipe)
         return pipe
 
+    def _validate_args(self, input_args: dict) -> None:
+        super()._validate_args(input_args)
+        _check_negative_prompt_is_used(self, input_args)
+
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         prompt = _normalize_prompt(input_args["prompt"])
         output = self.pipe(
             height=input_args["height"],
             width=input_args["width"],
             prompt=prompt,
+            negative_prompt=input_args["negative_prompt"],
             num_inference_steps=input_args["num_inference_steps"],
             guidance_scale=input_args["guidance_scale"],
             generator=self._make_generator(input_args["seed"]),

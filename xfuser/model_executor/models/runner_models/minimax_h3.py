@@ -302,6 +302,16 @@ def _wrap_compiled_forward(transformer, original_forward, compiled_forward):
     return forward_outside_the_graph
 
 
+def _count_steps_as_forwards(scheduler) -> None:
+    set_grid_points = scheduler.set_timesteps
+
+    def set_timesteps(num_inference_steps, device=None):
+        # MiniMaxH3Scheduler runs one step fewer than requested, so ask for one extra.
+        set_grid_points(num_inference_steps + 1, device=device)
+
+    scheduler.set_timesteps = set_timesteps
+
+
 class MiniMaxH3DiffusionOutput(DiffusionOutput):
     def __init__(
         self,
@@ -486,6 +496,8 @@ class xFuserMiniMaxH3Model(xFuserModel):
         pipe.transformer.fuse_qkv_projections()
         pipe.text_encoder.lm_head = None
         self._parallelize_text_encoder(pipe.text_encoder)
+        _count_steps_as_forwards(pipe.scheduler)
+        _count_steps_as_forwards(pipe.audio_scheduler)
         return pipe
 
     @staticmethod
@@ -627,7 +639,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
     def _run_warmup_calls(self, input_args: dict) -> None:
         if not self.config.warmup_calls:
             return
-        log(f"Warming up MiniMax-H3 with {self.config.warmup_calls} {self._warmup_num_inference_steps}-point calls...")
+        log(f"Warming up MiniMax-H3 with {self.config.warmup_calls} {self._warmup_num_inference_steps}-step calls...")
         warmup_args = copy.deepcopy(input_args)
         warmup_args["num_inference_steps"] = self._warmup_num_inference_steps
         for iteration in range(self.config.warmup_calls):
@@ -705,9 +717,7 @@ class xFuserFastH3Model(xFuserMiniMaxH3Model):
         height=768,
         width=1344,
         num_frames=124,
-        # MiniMaxH3Scheduler includes the terminal zero sigma, so five points
-        # produce the four transformer forwards used to train FastH3.
-        num_inference_steps=5,
+        num_inference_steps=4,
     )
 
     settings = copy.deepcopy(xFuserMiniMaxH3Model.settings)
@@ -716,7 +726,7 @@ class xFuserFastH3Model(xFuserMiniMaxH3Model):
     settings.valid_tasks = ["t2va"]
     settings.default_attention_backend = AttentionBackendType.TRITON_VSA_H3.name
 
-    _warmup_num_inference_steps = 5
+    _warmup_num_inference_steps = 4
     _enable_fasth3_vsa = True
     supported_attn_backends = _SUPPORTED_ATTN_BACKENDS | _FASTH3_ATTN_BACKENDS
 
@@ -738,10 +748,9 @@ class xFuserFastH3Model(xFuserMiniMaxH3Model):
 
     def _validate_args(self, input_args: dict) -> None:
         super()._validate_args(input_args)
-        if input_args["num_inference_steps"] != 5:
+        if input_args["num_inference_steps"] != 4:
             raise ValueError(
-                "FastH3 Preview v1 requires 5 scheduler points, which produce "
-                "the checkpoint's trained 4 transformer forwards."
+                f"FastH3 Preview v1 requires 4 transformer forwards, got {input_args['num_inference_steps']}."
             )
 
 
@@ -772,31 +781,27 @@ class xFuserFastH3DenseModel(xFuserFastH3Model):
 
 @register_model(FASTH3_V2_MODEL_ID)
 class xFuserFastH3V2Model(xFuserFastH3Model):
-    """FastH3 V2 runner. Same VSA-H3 attention backend as V1 but trained for 9
-    scheduler points (8 transformer forwards)."""
+    """FastH3 V2 runner. Same VSA-H3 attention backend as V1 but trained for 8
+    transformer forwards."""
 
     default_input_values = DefaultInputValues(
         height=768,
         width=1344,
         num_frames=124,
-        # MiniMaxH3Scheduler includes the terminal zero sigma, so nine points
-        # produce the eight transformer forwards used to train FastH3 V2.
-        num_inference_steps=9,
+        num_inference_steps=8,
     )
 
     settings = copy.deepcopy(xFuserFastH3Model.settings)
     settings.model_name = FASTH3_V2_MODEL_ID
     settings.output_name = "fasth3_v2"
 
-    _warmup_num_inference_steps = 9
+    _warmup_num_inference_steps = 8
 
     def _validate_args(self, input_args: dict) -> None:
         # Skip the V1 step-count check; delegate to xFuserMiniMaxH3Model.
         xFuserMiniMaxH3Model._validate_args(self, input_args)
-        if input_args["num_inference_steps"] != 9:
-            raise ValueError(
-                "FastH3 V2 requires 9 scheduler points, which produce the checkpoint's trained 8 transformer forwards."
-            )
+        if input_args["num_inference_steps"] != 8:
+            raise ValueError(f"FastH3 V2 requires 8 transformer forwards, got {input_args['num_inference_steps']}.")
 
 
 @register_model("MiniMax-H3-Ref2VA")
@@ -860,6 +865,8 @@ class xFuserMiniMaxH3Ref2VAModel(xFuserMiniMaxH3Model):
         pipe.transformer_ref.fuse_qkv_projections()
         pipe.text_encoder.lm_head = None
         self._parallelize_text_encoder(pipe.text_encoder)
+        _count_steps_as_forwards(pipe.scheduler)
+        _count_steps_as_forwards(pipe.audio_scheduler)
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:

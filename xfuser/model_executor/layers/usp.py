@@ -45,6 +45,7 @@ from xfuser.model_executor.layers.fused_a2a_integration import (
     fused_a2a_input,
     fused_a2a_input_consumer_done,
     fused_a2a_input_role,
+    get_fused_a2a_codecs,
     get_fused_a2a_mode,
     get_fused_a2a_profile,
     use_fused_a2a_interleave,
@@ -601,7 +602,8 @@ def _trim_packed_attention_a2a_padding(
     value,
     packed_scales,
     valid_kv_len,
-    config,
+    codecs,
+    profile,
 ):
     """Consume Wan's uniform trailing pad without reimplementing varlen packing."""
     if valid_kv_len is None:
@@ -616,7 +618,7 @@ def _trim_packed_attention_a2a_padding(
     if valid_kv_len == source_sequence:
         return key, value, packed_scales
 
-    qk_codec, _, v_codec = config.codecs
+    qk_codec, _, v_codec = codecs
     source_tiles = (source_sequence + 127) // 128
     target_tiles = (valid_kv_len + 127) // 128
     tiled_layout = qk_codec in ("mxfp4", "mxfp6") or v_codec in (
@@ -631,7 +633,7 @@ def _trim_packed_attention_a2a_padding(
                 packed_scales[1],
                 packed_scales[2],
                 valid_kv_len,
-                config.profile,
+                profile,
             )
         )
         return (
@@ -976,7 +978,7 @@ def USP(
         )
 
     hb_backend = backend if backend is not None else runtime_state.attention_backend
-    attention_a2a_config = None
+    attention_a2a_profile = None
     if use_attention_a2a:
         if ulysses_world_size <= 1:
             raise NotImplementedError(
@@ -1006,31 +1008,21 @@ def USP(
             raise RuntimeError(
                 "Attention A2A requires packed per-role transport results"
             )
-        spec = attention_registry.find(hb_backend)
-        if spec is None:
-            raise NotImplementedError(
-                f"attention backend {hb_backend} is not registered"
-            )
-        if spec.is_sparse:
-            raise NotImplementedError(
-                "Attention A2A supports dense attention backends only"
-            )
-        attention_a2a_config = AttentionA2AConfig(
-            profile=get_fused_a2a_profile()
-        ).resolve_for_backend(hb_backend)
-        if (
-            not attention_a2a_config.enabled
-            or attention_a2a_config.is_auto
-        ):
+        attention_a2a_profile = get_fused_a2a_profile()
+        if attention_a2a_profile in ("none", "auto"):
             raise RuntimeError(
                 "Attention A2A runtime did not activate a concrete profile"
             )
 
-    attention_function = _get_attention_function(backend=backend)
+    # Packed Attention A2A calls MHA-v4 directly below. Resolving a registry
+    # adapter here would build an unused closure in every attention block.
+    attention_function = (
+        None if use_attention_a2a else _get_attention_function(backend=backend)
+    )
 
     fp8_module = attn_layer if attn_layer is not None else head_balance_layer
     fp8_comms = None
-    if not joint_strategy:
+    if not use_attention_a2a and not joint_strategy:
         if fp8_module is None:
             _warn_fp8_comms_missing_attn()
         else:
@@ -1053,24 +1045,23 @@ def USP(
         )
 
     hb_uly = ulysses_world_size
-    query, key, value, hb_applied, attention_kwargs = apply_head_balance(
-        query,
-        key,
-        value,
-        head_balance_layer,
-        enabled=(
-            runtime_state.runtime_config.use_spargeattn_head_balance
-            and kv_head_repeat == 1
-        ),
-        ulysses_world_size=hb_uly,
-        ring_world_size=ring_world_size,
-        is_sparge_backend=hb_backend in _HEAD_BALANCE_BACKENDS,
-        joint_strategy=joint_strategy,
-        attention_kwargs=attention_kwargs,
-    )
-    if use_attention_a2a and hb_applied:
-        raise NotImplementedError(
-            "Attention A2A does not support sparse head balancing"
+    if use_attention_a2a:
+        hb_applied = False
+    else:
+        query, key, value, hb_applied, attention_kwargs = apply_head_balance(
+            query,
+            key,
+            value,
+            head_balance_layer,
+            enabled=(
+                runtime_state.runtime_config.use_spargeattn_head_balance
+                and kv_head_repeat == 1
+            ),
+            ulysses_world_size=hb_uly,
+            ring_world_size=ring_world_size,
+            is_sparge_backend=hb_backend in _HEAD_BALANCE_BACKENDS,
+            joint_strategy=joint_strategy,
+            attention_kwargs=attention_kwargs,
         )
 
     if fp8_comms is not None and joint_strategy:
@@ -1161,7 +1152,8 @@ def USP(
             value,
             packed_scales,
             valid_kv_len,
-            attention_a2a_config,
+            get_fused_a2a_codecs(),
+            attention_a2a_profile,
         )
 
     if _has_kv_cache(attn_layer):
@@ -1208,7 +1200,7 @@ def USP(
                 key,
                 value,
                 *packed_scales,
-                attention_a2a_config.profile,
+                attention_a2a_profile,
                 query.shape[-1] ** -0.5,
             )
         elif ring_world_size == 1:  # Ulysses only
@@ -1241,7 +1233,7 @@ def USP(
             # costs across the Ulysses group, and plan next step's permutation.
             out = revert_head_balance(out, attention_kwargs, head_balance_layer, hb_uly)
 
-    if fp8_module is not None and not joint_strategy:
+    if fp8_module is not None and not use_attention_a2a and not joint_strategy:
         fp8_observe_output(get_runtime_state().fp8_comms, fp8_module, out, False)
 
     return out

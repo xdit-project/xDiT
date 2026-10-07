@@ -118,6 +118,38 @@ def test_profiles_use_validated_wan_launch_geometry():
     assert AttentionA2AConfig(profile="e4m3-e4m3").block_num == 512
 
 
+@pytest.mark.parametrize(
+    ("profile", "scale_modes", "v_pack"),
+    (
+        ("e4m3-e4m3", ("f32_per_tensor",) * 3, "default"),
+        ("int8-e4m3", ("f32_per_tensor",) * 3, "default"),
+        (
+            "mxfp8-e4m3",
+            ("e8m0_per_1x32", "e8m0_per_1x32", "f32_per_tensor"),
+            "default",
+        ),
+        (
+            "e4m3-mxfp6",
+            ("f32_per_tensor", "f32_per_tensor", "e8m0_per_1x32"),
+            "fp6_p",
+        ),
+        (
+            "mxfp6-e4m3",
+            ("e8m0_per_1x32", "e8m0_per_1x32", "f32_per_channel"),
+            "default",
+        ),
+        ("mxfp6-mxfp6", ("e8m0_per_1x32",) * 3, "fp6_p"),
+        ("mxfp6-mxfp4", ("e8m0_per_1x32",) * 3, "fp6_p"),
+        ("mxfp4-mxfp4", ("e8m0_per_1x32",) * 3, "fp6_p"),
+    ),
+)
+def test_profile_scale_and_pack_contract(profile, scale_modes, v_pack):
+    config = AttentionA2AConfig(profile=profile)
+
+    assert config.scale_modes == scale_modes
+    assert config.v_pack == v_pack
+
+
 def test_explicit_profile_requires_matching_backend():
     with pytest.raises(ValueError, match="requires an explicit"):
         xFuserArgs(

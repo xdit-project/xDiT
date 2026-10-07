@@ -88,6 +88,9 @@ _SPARSE_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SS
 _SPARGE_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SPARGE) | attention_registry.types_where(
     sparsity=Sparsity.VSA
 )
+# Prism's block-sparse attention needs a token grid that only models declaring the
+# capability publish; anywhere else it would quietly run dense.
+_BSA_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.BSA)
 
 
 def _parse_attention_backend(name: Optional[str], kind: str) -> Optional[AttentionBackendType]:
@@ -199,6 +202,7 @@ class ModelCapabilities:
     cross_attention_backend: bool = False
     supports_sparse_attention_backends: bool = False
     supports_sparge_attention_backends: bool = False
+    supports_bsa_attention_backends: bool = False
     supports_distilled_weights: bool = False
     profile_capture_phase: bool = False
 
@@ -640,6 +644,20 @@ class xFuserModel(abc.ABC):
                 )
 
         self._validate_supported_attn_backends(config)
+
+        if not self.capabilities.supports_bsa_attention_backends:
+            for value, label in (
+                (config.attention_backend, "attention backend"),
+                (config.cross_attention_backend, "cross attention backend"),
+                (config.hybrid_attn_low_precision_backend, "hybrid low-precision attention backend"),
+                (config.hybrid_attn_high_precision_backend, "hybrid high-precision attention backend"),
+            ):
+                bsa = _parse_attention_backend(value, label)
+                if bsa in _BSA_ATTENTION_BACKENDS:
+                    raise ValueError(
+                        f"Model {config.model} does not support {bsa.name}: it publishes no token grid "
+                        f"for block-sparse attention, so every call would run dense."
+                    )
 
         backend = _parse_attention_backend(config.attention_backend, "attention backend")
         supports_sparse = self.capabilities.supports_sparse_attention_backends

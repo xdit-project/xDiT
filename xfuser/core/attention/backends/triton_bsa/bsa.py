@@ -65,6 +65,8 @@ if torch.version.hip:
     }
 
 
+# The dots ask for IEEE fp32: on NVIDIA, fp32 inputs would otherwise run as TF32
+# (~1e-3 relative error). bf16 inputs, the sampling path, are unaffected.
 @triton.jit
 def _attn_fwd_bsa_varlen(
     Q,
@@ -175,7 +177,7 @@ def _attn_fwd_bsa_varlen(
         for start_n in range(lo, hi, BLOCK_N):
             start_n = tl.multiple_of(start_n, BLOCK_N)
             kT = tl.load(KT_block_ptr_i)
-            qkT = tl.dot(q, kT)
+            qkT = tl.dot(q, kT, input_precision="ieee")
 
             if HAS_KV_MASK:
                 offs_n = mask_offset + tl.arange(0, BLOCK_N)
@@ -195,7 +197,7 @@ def _attn_fwd_bsa_varlen(
             l_ij = tl.sum(p, 1)
             acc = acc * alpha[:, None]
             v = tl.load(V_block_ptr_i)
-            acc = tl.dot(p.to(v.dtype), v, acc)
+            acc = tl.dot(p.to(v.dtype), v, acc, input_precision="ieee")
             l_i = l_i * alpha + l_ij
             m_i = m_ij
             V_block_ptr_i = tl.advance(V_block_ptr_i, (BLOCK_N, 0))
@@ -315,7 +317,7 @@ def _attn_fwd_bsa_varlen_align(
         V_block_ptr_i = tl.advance(V_block_ptr, (lo, 0))
 
         kT = tl.load(KT_block_ptr_i)
-        qkT = tl.dot(q, kT)
+        qkT = tl.dot(q, kT, input_precision="ieee")
 
         if HAS_KV_MASK:
             offs_n = lo + tl.arange(0, BLOCK_N_LG)
@@ -334,7 +336,7 @@ def _attn_fwd_bsa_varlen_align(
         l_ij = tl.sum(p, 1)
         acc = acc * alpha[:, None]
         v = tl.load(V_block_ptr_i)
-        acc = tl.dot(p.to(v.dtype), v, acc)
+        acc = tl.dot(p.to(v.dtype), v, acc, input_precision="ieee")
         l_i = l_i * alpha + l_ij
         m_i = m_ij
 
@@ -376,7 +378,8 @@ def _block_scores(q, k):
 
 @torch.compile
 def _select_topk(score, sparsity):
-    num_selected = int((1 - sparsity) * score.shape[-1])
+    # At least one block: upstream allows zero here, which makes the kernel emit zeros.
+    num_selected = max(1, int((1 - sparsity) * score.shape[-1]))
     block_indices = torch.sort(torch.topk(score, num_selected)[1], dim=-1)[0]
     lens = torch.full(score.shape[:3], num_selected, dtype=torch.int32, device=score.device)
     return block_indices, lens
@@ -536,7 +539,9 @@ def _block_sparse_attention_3d(q, k, v, thw, chunk_thw, sparsity, cdf_threshold)
 
 
 # An opaque op to torch.compile: traced, the Triton launch is re-issued by Inductor
-# without the ROCm launch options above, and ran 16.8 ms against 12.2 ms eager.
+# without the ROCm launch options above. In one MI350X benchmark at Prism's Ulysses-8
+# shape (5 heads x 82680 tokens x 128) the traced call took 16.8 ms against 12.2 ms
+# eager; the eager call itself measures 10.8-12.2 ms from run to run.
 @torch.library.custom_op("xfuser::prism_block_sparse_attention_3d", mutates_args=())
 def _block_sparse_attention_3d_op(
     q: torch.Tensor,

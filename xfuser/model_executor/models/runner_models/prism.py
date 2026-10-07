@@ -62,6 +62,7 @@ class xFuserPrismModel(xFuserModel):
         data_parallel_degree=False,
         # Everything but video self-attention runs on it, e.g. dense beside TRITON_BSA.
         cross_attention_backend=True,
+        supports_bsa_attention_backends=True,
         enable_tiling=True,
     )
     default_input_values = DefaultInputValues(
@@ -202,7 +203,8 @@ class xFuserPrismModel(xFuserModel):
         video, audio = self.pipe(
             prompt=input_args["prompt"],
             image=input_args["input_images"][0],
-            audio_prompt=input_args.get("audio_prompt") or input_args["prompt"],
+            # None lets the pipeline reuse the video prompt embedding rather than re-encode it.
+            audio_prompt=input_args.get("audio_prompt") or None,
             negative_prompt=input_args["negative_prompt"],
             height=input_args["height"],
             width=input_args["width"],

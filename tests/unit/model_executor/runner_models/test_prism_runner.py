@@ -1,7 +1,7 @@
 """Runner contract for Prism: which layouts and requests it accepts and refuses.
 
 Ulysses splits the video tower's 40 heads, so a degree that does not divide them must
-be refused at config time, before 130 GB of weights are read. Ring attention would need
+be refused at config time, before 65 GB of weights are read. Ring attention would need
 the key trimming per ring step, and the pipeline has no offload or batching, so those
 are refused up front too.
 """

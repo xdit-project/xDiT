@@ -41,6 +41,19 @@ def test_sparse_selection_drops_blocks():
     assert (sparse - dense).abs().max() > 1e-2
 
 
+def test_top_k_keeps_at_least_one_block():
+    """With 12 key blocks, sparsity 0.95 rounds the top-k count down to zero, which
+    made the kernel return zeros; it keeps one block, as sparsity 11/12 does."""
+    from xfuser.core.attention.backends.triton_bsa.bsa import block_sparse_attention_3d
+
+    thw = (8, 8, 12)
+    q, k, v = _qkv(thw[0] * thw[1] * thw[2], torch.float32)
+    extreme = block_sparse_attention_3d(q, k, v, thw, (4, 4, 4), sparsity=0.95, cdf_threshold=None)
+    one_block = block_sparse_attention_3d(q, k, v, thw, (4, 4, 4), sparsity=11 / 12, cdf_threshold=None)
+    assert extreme.abs().max() > 0
+    torch.testing.assert_close(extreme, one_block, rtol=0, atol=0)
+
+
 def test_compiled_callers_run_the_same_kernel_launch():
     """torch.compile must not re-issue the Triton launch itself: Inductor drops the
     ROCm launch options, which cost speed and changed the output by up to 2.4e-4."""

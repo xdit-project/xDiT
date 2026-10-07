@@ -49,17 +49,23 @@ import html
 import re
 from typing import Optional
 
-import ftfy
 import PIL.Image
 import torch
+from diffusers.utils import is_ftfy_available
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.video_processor import VideoProcessor
 from tqdm import tqdm
 
 from xfuser.core.distributed import get_world_group
 
+# Optional: only prompt encoding needs it, so the transformer imports without it.
+if is_ftfy_available():
+    import ftfy
+
 
 def _prompt_clean(text):
+    if not is_ftfy_available():
+        raise ImportError("Prism cleans prompts with ftfy, as the reference does: pip install ftfy")
     text = html.unescape(html.unescape(ftfy.fix_text(text))).strip()
     return re.sub(r"\s+", " ", text).strip()
 

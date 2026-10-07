@@ -405,6 +405,8 @@ These examples show how the flags are wired, not tuned recommendations: output q
 | `--distilled_transformer_path` | Path to the **high-noise** distilled transformer safetensors | `Wan2.2-Distilled-I2V` |
 | `--distilled_transformer_2_path` | Path to the **low-noise** distilled transformer safetensors | `Wan2.2-Distilled-I2V` |
 | `--audio_prompt` | Prompt for the audio stream; defaults to `--prompt` | Optional for `Prism` |
+| `--bsa_sparsity` | `TRITON_BSA`: fraction of 4x4x4 key blocks each query block skips (top-k); default 0.75 | Optional for `Prism` with `--attention_backend TRITON_BSA` |
+| `--bsa_cdf_threshold` | `TRITON_BSA`: also keep the key blocks holding this much attention weight (top-p), floored at the top-k count; 0 disables; default 0.2 | Optional for `Prism` with `--attention_backend TRITON_BSA` |
 
 ### Benchmarking
 
@@ -458,6 +460,23 @@ xdit --model Wan2.2-Distilled-I2V \
     --input_images /path/to/image.jpg \
     --prompt "A cat walking in a garden" \
     --ulysses_degree 8
+```
+
+### Video with Audio from a Reference Image (Prism)
+
+Prism animates one reference image and generates a matching 48 kHz audio track.
+`TRITON_BSA` runs Prism's block-sparse attention on the video self-attention; every
+other attention call uses `--cross_attention_backend`.
+
+```bash
+torchrun --nproc_per_node=8 -m xfuser.runner \
+    --model Prism \
+    --input_images ./reference.png \
+    --prompt "A woman speaks to the camera in a quiet room" \
+    --audio_prompt "A woman speaks in a calm, low voice" \
+    --ulysses_degree 8 \
+    --attention_backend TRITON_BSA \
+    --cross_attention_backend AITER
 ```
 
 ### Benchmarking with Multiple Iterations

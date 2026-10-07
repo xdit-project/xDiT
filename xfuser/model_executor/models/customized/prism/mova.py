@@ -86,6 +86,10 @@ class MOVABridge(ModelMixin, ConfigMixin):
         self.audio_dit = audio_dit
         self.dual_tower_bridge = dual_tower_bridge
 
+        # Options for the video self-attention backend, e.g. block-sparse
+        # settings; the token grid is added per call.
+        self.video_attention_kwargs = {}
+
     @classmethod
     def from_mova_config(cls, model_dir: str) -> "MOVABridge":
         """Build the module tree from a MOVA checkpoint folder's configs, without weights.
@@ -164,7 +168,11 @@ class MOVABridge(ModelMixin, ConfigMixin):
                 dtype=visual_x.dtype,
             )
 
-        seq = PrismSeqInfo(video=SeqShard.for_length(visual_x.shape[1]), audio=SeqShard.for_length(audio_len))
+        seq = PrismSeqInfo(
+            video=SeqShard.for_length(visual_x.shape[1]),
+            audio=SeqShard.for_length(audio_len),
+            video_attention_kwargs={**self.video_attention_kwargs, "bsa_thw": tuple(grid_size)},
+        )
         visual_x = seq.video.split(visual_x, dim=1)
         audio_x = seq.audio.split(audio_x, dim=1)
         visual_rope_table = seq.video.split(visual_rope_table, dim=0)

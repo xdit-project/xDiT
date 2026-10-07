@@ -309,6 +309,9 @@ class xFuserArgs:
     use_vsa_static_block_mask: bool = True
     use_vsa_first_frame_mask: bool = True
     vsa_collect_density: bool = False
+    # Prism block-sparse attention (TRITON_BSA)
+    bsa_sparsity: float = 0.75
+    bsa_cdf_threshold: float = 0.2
     # Distilled model weight paths
     distilled_transformer_path: Optional[str] = None
     distilled_transformer_2_path: Optional[str] = None
@@ -1298,6 +1301,18 @@ class xFuserArgs:
             type=float,
             default=0.9,
             help="Jenga cumulative probability threshold for AITER VSA.",
+        )
+        parser.add_argument(
+            "--bsa_sparsity",
+            type=float,
+            default=0.75,
+            help="TRITON_BSA: fraction of key blocks each query block skips (top-k).",
+        )
+        parser.add_argument(
+            "--bsa_cdf_threshold",
+            type=float,
+            default=0.2,
+            help="TRITON_BSA: also keep the key blocks holding this much attention weight (top-p); 0 disables.",
         )
         parser.add_argument(
             "--vsa_reorder_sequence",

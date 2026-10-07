@@ -65,6 +65,16 @@ def test_offload_and_batching_are_refused(config):
         _model(**config)
 
 
+def test_block_sparse_attention_runs_beside_a_dense_cross_attention_backend():
+    _model(attention_backend="TRITON_BSA", cross_attention_backend="AITER", ulysses_degree=8)
+
+
+@pytest.mark.parametrize("config", [{"bsa_sparsity": 1.0}, {"bsa_sparsity": -0.1}, {"bsa_cdf_threshold": 1.5}])
+def test_block_sparse_settings_must_lie_in_the_unit_interval(config):
+    with pytest.raises(ValueError, match=r"must lie in \[0, 1\)"):
+        _model(**config)
+
+
 @pytest.mark.parametrize("input_images", [[], ["first.png", "second.png"]])
 def test_exactly_one_reference_image_is_required(input_images):
     model = _model()

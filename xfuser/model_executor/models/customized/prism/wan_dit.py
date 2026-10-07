@@ -16,7 +16,7 @@ from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
 from torch.nn import RMSNorm
 
-from .sp import PrismSeqInfo, gathered_kv_attention, local_attention, usp_attention
+from .sp import PrismSeqInfo, cross_backend, gathered_kv_attention, local_attention, usp_attention
 
 VIDEO = "video"
 AUDIO = "audio"
@@ -104,9 +104,9 @@ class SelfAttention(nn.Module):
         k = rope_apply(self.norm_k(self.k(x)), freqs, self.head_dim)
         v = self.v(x)
         if self.stream == VIDEO:
-            x = usp_attention(q, k, v, self.num_heads, seq.video)
+            x = usp_attention(q, k, v, self.num_heads, seq.video, seq.video_attention_kwargs)
         else:
-            x = gathered_kv_attention(q, k, v, self.num_heads, seq.audio)
+            x = gathered_kv_attention(q, k, v, self.num_heads, seq.audio, backend=cross_backend())
         return self.o(x)
 
 
@@ -128,7 +128,7 @@ class CrossAttention(nn.Module):
         q = self.norm_q(self.q(x))
         k = self.norm_k(self.k(context))
         v = self.v(context)
-        return self.o(local_attention(q, k, v, self.num_heads))
+        return self.o(local_attention(q, k, v, self.num_heads, backend=cross_backend()))
 
 
 class DiTBlock(nn.Module):

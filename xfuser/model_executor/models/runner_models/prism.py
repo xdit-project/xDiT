@@ -20,6 +20,8 @@ PRISM_REPO = "FrancisRing/Prism"
 # the base folder supplies the configs, VAEs, text encoder, tokenizer and scheduler.
 _BASE_SUBFOLDER = "pretrained_models/MOVA-360p"
 _VIDEO_HEADS = 40
+# Block shape Prism's block-sparse attention was trained and sampled with.
+_BSA_CHUNK_THW = (4, 4, 4)
 
 # Prism's sampler default (hymm/sample/sample_mova_single.py), the Wan negative prompt.
 DEFAULT_NEGATIVE_PROMPT = (
@@ -58,6 +60,8 @@ class xFuserPrismModel(xFuserModel):
         # Ring would need the audio-length key trimming and the head padding done per ring step.
         ring_degree=False,
         data_parallel_degree=False,
+        # Everything but video self-attention runs on it, e.g. dense beside TRITON_BSA.
+        cross_attention_backend=True,
         enable_tiling=True,
     )
     default_input_values = DefaultInputValues(
@@ -93,6 +97,11 @@ class xFuserPrismModel(xFuserModel):
             raise ValueError("Prism does not support CPU offloading.")
         if config.batch_size is not None or config.dataset_path is not None:
             raise ValueError("Prism generates one clip per request and does not support batching or datasets.")
+        if not 0.0 <= config.bsa_sparsity < 1.0 or not 0.0 <= config.bsa_cdf_threshold < 1.0:
+            raise ValueError(
+                f"--bsa_sparsity and --bsa_cdf_threshold must lie in [0, 1), "
+                f"got {config.bsa_sparsity} and {config.bsa_cdf_threshold}."
+            )
 
     def preprocess_args(self, input_args: dict) -> dict:
         args = super().preprocess_args(input_args)
@@ -147,6 +156,12 @@ class xFuserPrismModel(xFuserModel):
                 f"{len(missing)} missing keys (e.g. {missing[:3]}), {len(unexpected)} unexpected (e.g. {unexpected[:3]})."
             )
         transformer.eval().requires_grad_(False)
+        # Read by TRITON_BSA on the video self-attention and ignored by dense backends.
+        transformer.video_attention_kwargs = {
+            "bsa_sparsity": self.config.bsa_sparsity,
+            "bsa_cdf_threshold": self.config.bsa_cdf_threshold or None,
+            "bsa_chunk_thw": _BSA_CHUNK_THW,
+        }
 
         return PrismPipeline(
             transformer=transformer,

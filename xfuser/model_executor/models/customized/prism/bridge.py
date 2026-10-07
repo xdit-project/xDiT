@@ -13,7 +13,7 @@ from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
 from torch.nn import RMSNorm
 
-from .sp import PrismSeqInfo, gathered_kv_attention, usp_attention
+from .sp import PrismSeqInfo, cross_backend, gathered_kv_attention, usp_attention
 from .wan_dit import AUDIO, VIDEO
 
 
@@ -88,10 +88,10 @@ class ConditionalCrossAttention(nn.Module):
             k = apply_rotary_emb(k.unflatten(-1, (-1, self.head_dim)), *y_freqs).flatten(2)
         if self.q_stream == VIDEO:
             # Video queries over the short audio stream: gather it everywhere.
-            out = gathered_kv_attention(q, k, v, self.num_heads, seq.audio)
+            out = gathered_kv_attention(q, k, v, self.num_heads, seq.audio, backend=cross_backend())
         else:
             # Audio queries over the long video stream: Ulysses.
-            out = usp_attention(q, k, v, self.num_heads, seq.video)
+            out = usp_attention(q, k, v, self.num_heads, seq.video, backend=cross_backend())
         return self.o(out)
 
 

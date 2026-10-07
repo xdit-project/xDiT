@@ -135,6 +135,7 @@ def test_runtime_does_not_access_private_aiter_buffers():
     assert ".outputs_sets" not in source
     assert ".scales_sets" not in source
     assert "lru_cache" not in source
+    assert "_INPUT_CONSUMER_DONE" not in source
 
 
 def test_heap_size_parser():

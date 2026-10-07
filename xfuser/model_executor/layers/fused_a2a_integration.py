@@ -49,7 +49,6 @@ _MORI_GROUP_KEY = None
 _MORI_CPU_GROUP = None
 _OP_CACHE = {}
 _INPUT_SIDE_STREAMS = {}
-_INPUT_CONSUMER_DONE = {}
 _INPUT_PENDING = {}
 _INPUT_COLLECTIVE_WAITS = {}
 _INPUT_COLLECTIVE_LIB = None
@@ -366,7 +365,7 @@ def configure_attention_a2a(
     if not isinstance(config, AttentionA2AConfig):
         raise TypeError("Attention A2A configuration must be AttentionA2AConfig")
     if config != _ATTENTION_A2A_POLICY and (
-        _OP_CACHE or _INPUT_SIDE_STREAMS or _INPUT_PENDING or _INPUT_CONSUMER_DONE or _MORI_GROUP_KEY is not None
+        _OP_CACHE or _INPUT_SIDE_STREAMS or _INPUT_PENDING or _MORI_GROUP_KEY is not None
     ):
         raise RuntimeError("Attention A2A policy cannot change after its runtime state is created")
     if not config.enabled:
@@ -446,7 +445,6 @@ def shutdown_attention_a2a() -> None:
     finally:
         _INPUT_PENDING.clear()
         _INPUT_COLLECTIVE_WAITS.clear()
-        _INPUT_CONSUMER_DONE.clear()
         _INPUT_SIDE_STREAMS.clear()
         _OP_CACHE.clear()
         if _MORI_CPU_GROUP is not None and dist.is_initialized():
@@ -533,28 +531,6 @@ def _input_side_stream(device):
             "tier2" if _FUSED_A2A_COLLECTIVE else "tier1",
         )
     return _INPUT_SIDE_STREAMS[device]
-
-
-@torch.library.custom_op(
-    "xfuser::fused_a2a_consumer_done",
-    mutates_args=(),
-    **_CUSTOM_OP_OPTIONS,
-)
-def fused_a2a_input_consumer_done(consumed: torch.Tensor) -> None:
-    if not (_FUSED_A2A_SIDESTREAM and (_FUSED_A2A_PACKED or use_fused_a2a_interleave())):
-        return
-    device = consumed.device
-    done = torch.cuda.Event()
-    done.record(torch.cuda.current_stream(device))
-    _INPUT_CONSUMER_DONE[device] = done
-
-
-@fused_a2a_input_consumer_done.register_fake
-def _fused_a2a_consumer_done_fake(consumed):
-    return None
-
-
-_register_ordered_effect(torch.ops.xfuser.fused_a2a_consumer_done.default)
 
 
 def get_fused_a2a_mode():
@@ -713,9 +689,6 @@ def _submit_input_role(input, role, group, rank, pending=None):
     if role == 0:
         in_op = _get_ops(group, rank, tuple(input.shape), input.dtype, input.device)
         side = _input_side_stream(input.device)
-        consumer_done = _INPUT_CONSUMER_DONE.get(input.device)
-        if consumer_done is not None:
-            side.wait_event(consumer_done)
         pending = {
             "op": in_op,
             "side": side,
@@ -726,6 +699,9 @@ def _submit_input_role(input, role, group, rank, pending=None):
     if pending is None or pending["next_role"] != role:
         raise ValueError("interleave requires Q, K, V in order")
     side = pending["side"]
+    # On role 0 this producer is downstream of the preceding block's MHA, so
+    # its compute-to-side event also drains the prior packed-buffer consumer
+    # before AITER publishes parity reuse.
     producer_done = torch.cuda.Event()
     producer_done.record(torch.cuda.current_stream(input.device))
     side.wait_event(producer_done)
@@ -932,12 +908,11 @@ def _fused_a2a_input_runtime(
         outputs = _collect_packed_role_results(results)
     else:
         compute_stream = torch.cuda.current_stream(q.device)
-        consumer_done = _INPUT_CONSUMER_DONE.get(q.device)
-        if consumer_done is not None:
-            # Conservatively drain the previous consumer, not just the reused parity.
-            side_stream.wait_event(consumer_done)
         producer_done = torch.cuda.Event()
-        # Include lazy op initialization as well as Q/K/V and norm/RoPE production.
+        # Q/K/V are downstream of the preceding block's packed MHA. Waiting
+        # for their producer therefore also drains any earlier consumer before
+        # AITER's stream-ordered parity-reuse barrier publishes readiness.
+        # This avoids a separate event and ordered custom op after every MHA.
         producer_done.record(compute_stream)
         side_stream.wait_event(producer_done)
         for tensor in (q, k, v):

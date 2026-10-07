@@ -267,8 +267,6 @@ def _default_guidance_schedule(num_inference_steps: int) -> list[float]:
 
 
 @register_model("ideogram-ai/ideogram-v4")
-@register_model("ideogram-ai/ideogram-4-nf4")
-@register_model("ideogram-ai/ideogram-4-nf4-diffusers")
 @register_model("ideogram-ai/ideogram-4-fp8")
 @register_model("CalamitousFelicitousness/Ideogram-4-bf16-Diffusers")
 @register_model("Ideogram-4")
@@ -339,13 +337,6 @@ class xFuserIdeogram4Model(xFuserModel):
 
     def _customize_settings(self, config) -> None:
         super()._customize_settings(config)
-        if "nf4" in config.model:
-            raise ValueError(
-                f"{config.model} is an NF4 checkpoint, which xDiT cannot load for "
-                "Ideogram 4. Use ideogram-ai/ideogram-4-fp8 (or the "
-                "Ideogram-4 alias) or a BF16 Diffusers checkpoint such as "
-                "CalamitousFelicitousness/Ideogram-4-bf16-Diffusers."
-            )
         # Ideogram-4 and ideogram-ai/ideogram-v4 are aliases of the default FP8 checkpoint.
         if config.model not in ("Ideogram-4", "ideogram-ai/ideogram-v4"):
             self.settings.model_name = config.model

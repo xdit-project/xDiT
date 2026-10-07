@@ -30,13 +30,14 @@ def test_ideogram4_broadcast_object_uses_cpu_subgroup(monkeypatch):
 def build_ideogram4(monkeypatch):
     from xfuser import xFuserArgs
     from xfuser.model_executor.models.runner_models import ideogram4  # noqa: F401  registers
-    from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY
+    from xfuser.runner import xFuserModelRunner
 
     monkeypatch.setenv("RANK", "0")
     monkeypatch.setenv("WORLD_SIZE", "1")
+    runner = object.__new__(xFuserModelRunner)
 
     def _build(name):
-        return MODEL_REGISTRY[name](xFuserArgs(model=name))
+        return runner._select_model(name, xFuserArgs(model=name))
 
     return _build
 
@@ -60,6 +61,6 @@ def test_ideogram4_name_selects_its_checkpoint(build_ideogram4, name, checkpoint
 
 
 @pytest.mark.parametrize("name", ["ideogram-ai/ideogram-4-nf4", "ideogram-ai/ideogram-4-nf4-diffusers"])
-def test_ideogram4_refuses_nf4_checkpoints_instead_of_loading_fp8(build_ideogram4, name):
-    with pytest.raises(ValueError, match="NF4 checkpoint"):
+def test_ideogram4_nf4_checkpoints_are_not_registered(build_ideogram4, name):
+    with pytest.raises(ValueError, match="not found in registry"):
         build_ideogram4(name)

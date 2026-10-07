@@ -160,8 +160,14 @@ class PrismPipeline:
             raise ValueError(f"num_frames - 1 must be divisible by {self.vae_scale_factor_temporal}, got {num_frames}.")
 
         prompt_embeds = self.encode_prompt(prompt)
-        audio_prompt_embeds = self.encode_prompt(audio_prompt) if audio_prompt is not None else None
         negative_prompt_embeds = self.encode_prompt(negative_prompt)
+        # The audio tower falls back to the video prompt. Separate copies keep every call
+        # free of aliased inputs, which a compiled transformer would otherwise trace apart.
+        if audio_prompt is not None:
+            audio_prompt_embeds = self.encode_prompt(audio_prompt)
+        else:
+            audio_prompt_embeds = prompt_embeds.clone()
+        negative_audio_embeds = negative_prompt_embeds.clone()
 
         latents, condition = self.prepare_latents(image, height, width, num_frames, generator)
         audio_latents = self.prepare_audio_latents(num_frames, video_fps, generator)
@@ -185,7 +191,9 @@ class PrismPipeline:
             video_pred, audio_pred = self.transformer(context=prompt_embeds, audio_context=audio_prompt_embeds, **call)
             video_pred, audio_pred = video_pred.float(), audio_pred.float()
             if cfg_scale != 1.0:
-                video_neg, audio_neg = self.transformer(context=negative_prompt_embeds, audio_context=None, **call)
+                video_neg, audio_neg = self.transformer(
+                    context=negative_prompt_embeds, audio_context=negative_audio_embeds, **call
+                )
                 video_pred = video_neg.float() + cfg_scale * (video_pred - video_neg.float())
                 audio_pred = audio_neg.float() + cfg_scale * (audio_pred - audio_neg.float())
 

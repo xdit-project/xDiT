@@ -84,6 +84,26 @@ def test_exactly_one_reference_image_is_required(input_images):
         )
 
 
+@pytest.mark.parametrize("flow_shift", [7.0, 9.0, 13.0, 17.0])
+def test_compile_warmup_reaches_the_low_noise_expert(flow_shift):
+    """Each video expert is its own compiled graph; a warmup that never switches
+    experts leaves the second graph to compile inside the first timed run."""
+    from types import SimpleNamespace
+
+    from xfuser.model_executor.models.customized.prism.scheduler import FlowMatchPairScheduler
+
+    model = _model()
+    # MOVA-360p's scheduler config.
+    scheduler = FlowMatchPairScheduler(shift=5, sigma_min=0.0, extra_one_step=True)
+    model.pipe = SimpleNamespace(transformer=SimpleNamespace(boundary_ratio=0.9), scheduler=scheduler)
+
+    steps = model._get_compile_warmup_steps({"num_inference_steps": 50, "flow_shift": flow_shift})
+
+    video_timesteps = scheduler.set_pair_timesteps(steps, flow_shift, 7.0)[:, 0]
+    assert steps < 50
+    assert (video_timesteps < 0.9 * 1000).any()
+
+
 @pytest.mark.parametrize(
     ("requested", "snapped"),
     [(205, 205), (206, 205), (208, 205), (209, 209), (2, 5)],

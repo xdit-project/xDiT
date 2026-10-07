@@ -41,6 +41,20 @@ def test_sparse_selection_drops_blocks():
     assert (sparse - dense).abs().max() > 1e-2
 
 
+def test_compiled_callers_run_the_same_kernel_launch():
+    """torch.compile must not re-issue the Triton launch itself: Inductor drops the
+    ROCm launch options, which cost speed and changed the output by up to 2.4e-4."""
+    from xfuser.core.attention.backends.triton_bsa.bsa import block_sparse_attention_3d
+
+    thw = (7, 7, 11)
+    q, k, v = _qkv(thw[0] * thw[1] * thw[2], torch.bfloat16)
+
+    def attend(q, k, v):
+        return block_sparse_attention_3d(q, k, v, thw, (4, 4, 4), sparsity=0.75, cdf_threshold=0.2)
+
+    torch.testing.assert_close(torch.compile(attend, fullgraph=True)(q, k, v), attend(q, k, v), rtol=0, atol=0)
+
+
 def test_calls_without_a_grid_run_dense():
     from xfuser.core.attention.backends.triton_bsa.kernel import triton_bsa
     from xfuser.core.attention.spec import AttnCall

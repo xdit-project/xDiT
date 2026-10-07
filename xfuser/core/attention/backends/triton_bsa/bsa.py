@@ -10,6 +10,7 @@ which blocks win, matches the reference. The Triton kernels are unchanged.
 """
 
 import math
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -132,7 +133,8 @@ def _attn_fwd_bsa_varlen(
     m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
     l_i = tl.zeros([BLOCK_M], dtype=tl.float32) + 1.0
     acc = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)
-    qk_scale = sm_scale
+    # Inductor hands a captured kernel Python floats as fp64; keep the softmax state fp32.
+    qk_scale = sm_scale.to(tl.float32)
     qk_scale *= 1.44269504  # 1/ln2
     q = tl.load(Q_block_ptr)
     S = tl.load(block_indices_lens)
@@ -274,7 +276,8 @@ def _attn_fwd_bsa_varlen_align(
     m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
     l_i = tl.zeros([BLOCK_M], dtype=tl.float32) + 1.0
     acc = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)
-    qk_scale = sm_scale
+    # Inductor hands a captured kernel Python floats as fp64; keep the softmax state fp32.
+    qk_scale = sm_scale.to(tl.float32)
     qk_scale *= 1.44269504  # 1/ln2
     q = tl.load(Q_block_ptr)
     S = tl.load(block_indices_lens)
@@ -465,15 +468,8 @@ def _sparse_attention(q, k, v, chunk_size, sparsity, cdf_threshold, kv_valid_mas
     return out
 
 
-def block_sparse_attention_3d(q, k, v, thw, chunk_thw=(4, 4, 4), sparsity=0.75, cdf_threshold=None):
-    """Self-attention over a ``T x H x W`` token grid, ``[B, heads, T*H*W, D]`` in THW order.
-
-    The grid is zero-padded up to whole blocks; padded keys are masked out of both
-    the block scores and the attention, and padded queries are dropped from the
-    output. ``sparsity`` is the fraction of key blocks each query block skips
-    (top-k); ``cdf_threshold`` keeps the smallest set of blocks holding that much
-    softmax weight (top-p). With both, top-p is floored at the top-k count.
-    """
+def _block_sparse_attention_3d(q, k, v, thw, chunk_thw, sparsity, cdf_threshold):
+    """See block_sparse_attention_3d."""
     T, H, W = thw
     t, h, w = chunk_thw
     pad_t, pad_h, pad_w = (-T) % t, (-H) % h, (-W) % w
@@ -510,4 +506,36 @@ def block_sparse_attention_3d(q, k, v, thw, chunk_thw=(4, 4, 4), sparsity=0.75, 
     out = _from_blocks(out, grid, chunk_thw)
     if valid_mask is not None:
         out = out.view(B, heads, T_p, H_p, W_p, D)[:, :, :T, :H, :W].reshape(B, heads, T * H * W, D)
-    return out
+    return out.contiguous()
+
+
+# An opaque op to torch.compile: traced, the Triton launch is re-issued by Inductor
+# without the ROCm launch options above, and ran 16.8 ms against 12.2 ms eager.
+@torch.library.custom_op("xfuser::prism_block_sparse_attention_3d", mutates_args=())
+def _block_sparse_attention_3d_op(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    thw: list[int],
+    chunk_thw: list[int],
+    sparsity: Optional[float],
+    cdf_threshold: Optional[float],
+) -> torch.Tensor:
+    return _block_sparse_attention_3d(q, k, v, tuple(thw), tuple(chunk_thw), sparsity, cdf_threshold)
+
+
+@_block_sparse_attention_3d_op.register_fake
+def _(q, k, v, thw, chunk_thw, sparsity, cdf_threshold):
+    return q.new_empty(q.shape)
+
+
+def block_sparse_attention_3d(q, k, v, thw, chunk_thw=(4, 4, 4), sparsity=0.75, cdf_threshold=None):
+    """Self-attention over a ``T x H x W`` token grid, ``[B, heads, T*H*W, D]`` in THW order.
+
+    The grid is zero-padded up to whole blocks; padded keys are masked out of both
+    the block scores and the attention, and padded queries are dropped from the
+    output. ``sparsity`` is the fraction of key blocks each query block skips
+    (top-k); ``cdf_threshold`` keeps the smallest set of blocks holding that much
+    softmax weight (top-p). With both, top-p is floored at the top-k count.
+    """
+    return _block_sparse_attention_3d_op(q, k, v, list(thw), list(chunk_thw), sparsity, cdf_threshold)

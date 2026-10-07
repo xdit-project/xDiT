@@ -84,6 +84,19 @@ class xFuserPrismModel(xFuserModel):
     )
     _AUDIO_SHIFT = 7.0
 
+    def _get_compile_warmup_steps(self, input_args: dict) -> int | None:
+        """Fewest steps whose schedule reaches the low-noise expert.
+
+        Each video expert compiles to its own graph, so a warmup that stays on the
+        high-noise one leaves the other to compile in the middle of the first timed run.
+        """
+        boundary = self.pipe.transformer.boundary_ratio * self.pipe.scheduler.config.num_train_timesteps
+        for steps in range(2, input_args["num_inference_steps"] + 1):
+            pairs = self.pipe.scheduler.set_pair_timesteps(steps, input_args["flow_shift"], self._AUDIO_SHIFT)
+            if (pairs[:, 0] < boundary).any():
+                return steps
+        return None
+
     def _validate_config(self, config) -> None:
         super()._validate_config(config)
         ulysses_degree = config.ulysses_degree or 1

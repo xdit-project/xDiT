@@ -123,6 +123,8 @@ class xFuserVAEWrapper:
         if hasattr(self.vae, "reset_activation_cache"):
             self.vae.reset_activation_cache()
 
+    # The Ray VAE worker calls this outside any pipeline __call__, and DistVAE refuses grad mode.
+    @torch.no_grad()
     def execute(self, output_type: str):
         if self.vae is not None:
             device = get_device(get_world_group().local_rank)

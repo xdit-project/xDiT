@@ -659,11 +659,10 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         torch.distributed.all_gather(gathered_ranks, rank_tensor, group=get_dit_group())
         # Filter out valid ranks (non -1)
         dp_rank_list = [int(r.item()) for r in gathered_ranks if r.item() != -1]
+        # new_group is collective: every DiT rank creates it, not only members.
+        dp_last_group = self._get_dp_last_group(dp_rank_list)
 
         if is_dp_last_group():
-            # Create group for DP last ranks
-            dp_last_group = torch.distributed.new_group(dp_rank_list)
-
             # Gather latents to the last DP worker
             if rank == dp_rank_list[-1]:
                 latents_list = [torch.zeros_like(latents) for _ in dp_rank_list]

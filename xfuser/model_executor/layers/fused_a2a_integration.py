@@ -58,6 +58,7 @@ _ATTENTION_A2A_TIER2_ENABLED = False
 _ATTENTION_A2A_TIER2_REASON = "Attention A2A is disabled"
 _ATTENTION_A2A_TIER1_ENABLED = False
 _ATTENTION_A2A_TIER1_REASON = "Attention A2A is disabled"
+_ATTENTION_A2A_PACKED_LAUNCHER = None
 _MAX_OP_CACHE_ENTRIES = 4
 _ATTENTION_A2A_POISONED = None
 
@@ -282,6 +283,17 @@ def _heap_size_bytes(value):
     return int(number) * suffixes[suffix]
 
 
+def _prepare_attention_a2a_packed_launcher():
+    """Resolve the traceable packed MHA launcher before model compilation."""
+    global _ATTENTION_A2A_PACKED_LAUNCHER
+    if _ATTENTION_A2A_PACKED_LAUNCHER is None:
+        from xfuser.core.attention.backends.aiter_mha_v4.kernel import (
+            mha_v4_attention_a2a_packed,
+        )
+
+        _ATTENTION_A2A_PACKED_LAUNCHER = mha_v4_attention_a2a_packed
+
+
 def preflight_attention_a2a(config: AttentionA2AConfig) -> None:
     """Collectively validate the optional A2A runtime before model execution."""
     if not config.enabled:
@@ -294,6 +306,7 @@ def preflight_attention_a2a(config: AttentionA2AConfig) -> None:
             PackedRoleResult,
         )
 
+        _prepare_attention_a2a_packed_launcher()
         if getattr(PackedRoleResult, "_fields", ()) != ("payload", "scale"):
             raise RuntimeError("installed AITER has an incompatible PackedRoleResult contract")
         source = inspect.getsource(AttentionA2AIntraNodeOp.__init__)
@@ -527,16 +540,17 @@ def _input_side_stream(device):
     mutates_args=(),
     **_CUSTOM_OP_OPTIONS,
 )
-def fused_a2a_input_consumer_done(device: torch.device) -> None:
+def fused_a2a_input_consumer_done(consumed: torch.Tensor) -> None:
     if not (_FUSED_A2A_SIDESTREAM and (_FUSED_A2A_PACKED or use_fused_a2a_interleave())):
         return
+    device = consumed.device
     done = torch.cuda.Event()
     done.record(torch.cuda.current_stream(device))
     _INPUT_CONSUMER_DONE[device] = done
 
 
 @fused_a2a_input_consumer_done.register_fake
-def _fused_a2a_consumer_done_fake(device):
+def _fused_a2a_consumer_done_fake(consumed):
     return None
 
 
@@ -585,6 +599,32 @@ def get_fused_a2a_profile():
 
 def get_fused_a2a_v_pack():
     return _FUSED_A2A_V_PACK
+
+
+def launch_attention_a2a_packed(
+    query,
+    key,
+    value,
+    query_scale,
+    key_scale,
+    value_scale,
+    profile,
+    softmax_scale,
+):
+    """Call the plain packed MHA launcher resolved during A2A preflight."""
+    launcher = _ATTENTION_A2A_PACKED_LAUNCHER
+    if launcher is None:
+        raise RuntimeError("Attention A2A packed MHA launcher was not initialized")
+    return launcher(
+        query,
+        key,
+        value,
+        query_scale,
+        key_scale,
+        value_scale,
+        profile,
+        softmax_scale,
+    )
 
 
 def _require_active_profile(profile):

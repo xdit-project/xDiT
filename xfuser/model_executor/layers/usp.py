@@ -41,13 +41,13 @@ from xfuser.core.sparge_attention.head_balance import (
     revert_head_balance,
 )
 from xfuser.model_executor.layers.fused_a2a_integration import (
-    _register_ordered_effect,
     fused_a2a_input,
     fused_a2a_input_consumer_done,
     fused_a2a_input_role,
     get_fused_a2a_codecs,
     get_fused_a2a_mode,
     get_fused_a2a_profile,
+    launch_attention_a2a_packed,
     use_fused_a2a_interleave,
     use_fused_a2a_packed,
 )
@@ -652,92 +652,6 @@ def _trim_packed_attention_a2a_padding(
     return key, value, (packed_scales[0], k_scales, packed_scales[2])
 
 
-def _attention_a2a_packed_attn_impl(
-    q_packed: torch.Tensor,
-    k_packed: torch.Tensor,
-    v_packed: torch.Tensor,
-    q_scales: torch.Tensor,
-    k_scales: torch.Tensor,
-    v_scales: torch.Tensor,
-    profile: str,
-    softmax_scale: float,
-) -> torch.Tensor:
-    from aiter import dtypes
-    from aiter.ops.mha_v4 import (
-        AttentionFormat,
-        AttentionPack,
-        AttentionScaleMode,
-        mha_v4_packed,
-        native_fp8_format,
-    )
-
-    config = AttentionA2AConfig(profile=profile)
-    qk_codec, _, v_codec = config.consumer_codecs
-    v_pack = (
-        AttentionPack.V_FOR_FP6_P
-        if config.v_pack == "fp6_p"
-        else AttentionPack.DEFAULT
-    )
-    format_by_codec = {
-        "bf16": AttentionFormat.BF16,
-        "int8": AttentionFormat.INT8,
-        "e4m3": native_fp8_format(),
-        "mxfp8": native_fp8_format(),
-        "mxfp4": AttentionFormat.MXFP4,
-        "mxfp6": AttentionFormat.MXFP6,
-    }
-    try:
-        q_format = k_format = format_by_codec[qk_codec]
-        v_format = format_by_codec[v_codec]
-    except KeyError as exc:
-        raise RuntimeError(
-            f"unsupported packed Attention A2A codec {exc.args[0]!r}"
-        ) from None
-
-    if qk_codec == "int8":
-        q_packed = q_packed.view(torch.int8)
-        k_packed = k_packed.view(torch.int8)
-    elif qk_codec in ("e4m3", "mxfp8"):
-        q_packed = q_packed.view(dtypes.fp8)
-        k_packed = k_packed.view(dtypes.fp8)
-    if v_codec in ("e4m3", "mxfp8"):
-        v_packed = v_packed.view(dtypes.fp8)
-
-    scale_mode_by_name = {
-        "f32_per_tensor": AttentionScaleMode.F32_PER_TENSOR,
-        "f32_per_channel": AttentionScaleMode.F32_PER_CHANNEL,
-        "e8m0_per_1x32": AttentionScaleMode.E8M0_PER_1X32,
-    }
-    q_scale_mode, k_scale_mode, v_scale_mode = tuple(
-        scale_mode_by_name[mode] for mode in config.scale_modes
-    )
-    out = mha_v4_packed(
-        q_packed,
-        k_packed,
-        v_packed,
-        q_scales,
-        k_scales,
-        v_scales,
-        q_format,
-        k_format,
-        v_format,
-        q_scale_mode,
-        k_scale_mode,
-        v_scale_mode,
-        v_pack=v_pack,
-        softmax_scale=softmax_scale,
-    )
-    # This records after the MHA launch on the same stream, protecting the
-    # public per-role buffers from reuse by the next layer's side stream.
-    fused_a2a_input_consumer_done(q_packed.device)
-    return out.transpose(1, 2)
-
-
-@torch.library.custom_op(
-    "xfuser::attention_a2a_packed_attention",
-    mutates_args=(),
-    **_CUSTOM_OP_OPTIONS,
-)
 def _attention_a2a_packed_attn_call(
     q_packed: torch.Tensor,
     k_packed: torch.Tensor,
@@ -748,7 +662,7 @@ def _attention_a2a_packed_attn_call(
     profile: str,
     softmax_scale: float,
 ) -> torch.Tensor:
-    return _attention_a2a_packed_attn_impl(
+    out = launch_attention_a2a_packed(
         q_packed,
         k_packed,
         v_packed,
@@ -758,30 +672,10 @@ def _attention_a2a_packed_attn_call(
         profile,
         softmax_scale,
     )
-
-
-@_attention_a2a_packed_attn_call.register_fake
-def _attention_a2a_packed_attn_fake(
-    q_packed,
-    k_packed,
-    v_packed,
-    q_scales,
-    k_scales,
-    v_scales,
-    profile,
-    softmax_scale,
-):
-    del k_packed, v_packed, q_scales, k_scales, v_scales
-    del profile, softmax_scale
-    b, s, h, _ = q_packed.shape
-    return q_packed.new_empty(
-        (b, s, h, 128), dtype=torch.bfloat16
-    ).transpose(1, 2)
-
-
-_register_ordered_effect(
-    torch.ops.xfuser.attention_a2a_packed_attention.default
-)
+    # This records after the MHA launch on the same stream, protecting the
+    # public per-role buffers from reuse by the next layer's side stream.
+    fused_a2a_input_consumer_done(out)
+    return out.transpose(1, 2)
 
 
 def _get_attention_function(backend=None):

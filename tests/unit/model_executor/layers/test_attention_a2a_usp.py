@@ -31,7 +31,8 @@ def test_trims_plain_packed_attention_padding():
         value,
         scales,
         13,
-        usp.AttentionA2AConfig(profile="e4m3-e4m3"),
+        ("e4m3", "e4m3", "e4m3"),
+        "e4m3-e4m3",
     )
 
     assert key.shape[1] == value.shape[1] == 13
@@ -64,29 +65,11 @@ def test_routes_packed_a2a_input_and_rccl_output():
             SimpleNamespace(group_name="test"),
         ),
         mock.patch.object(usp, "get_runtime_state", return_value=_runtime_state()),
-        mock.patch.object(usp, "fp8_attention_kwargs", return_value={}),
-        mock.patch.object(
-            usp,
-            "apply_head_balance",
-            return_value=(
-                query,
-                key,
-                value,
-                False,
-                {"valid_kv_len": 13},
-            ),
-        ),
         mock.patch.object(usp, "_ulysses_extra_inputs", return_value=[]),
         mock.patch.object(usp, "_has_kv_cache", return_value=False),
         mock.patch.object(usp, "get_fused_a2a_mode", return_value=1),
         mock.patch.object(usp, "use_fused_a2a_packed", return_value=True),
         mock.patch.object(usp, "get_fused_a2a_profile", return_value="e4m3-e4m3"),
-        mock.patch.object(
-            usp.attention_registry,
-            "find",
-            return_value=SimpleNamespace(is_sparse=False),
-        ),
-        mock.patch.object(usp, "_get_attention_function"),
         mock.patch.object(
             usp,
             "fused_a2a_input",
@@ -113,6 +96,7 @@ def test_routes_packed_a2a_input_and_rccl_output():
             value,
             backend=AttentionBackendType.AITER_FP8,
             attn_layer=object(),
+            attention_kwargs={"valid_kv_len": 13},
             attention_a2a_enabled=True,
         )
 

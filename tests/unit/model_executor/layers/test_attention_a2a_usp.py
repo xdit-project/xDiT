@@ -39,24 +39,18 @@ def test_trims_plain_packed_attention_padding():
     assert all(scale.numel() == 1 for scale in scales)
 
 
-def test_packed_attention_is_traceable_and_records_output_dependency():
+def test_packed_attention_is_traceable_without_an_outer_custom_op():
     query = torch.empty(1, 16, 2, 128, dtype=torch.uint8)
     key = torch.empty_like(query)
     value = torch.empty_like(query)
     scales = (torch.empty(1), torch.empty(1), torch.empty(1))
     output = torch.randn(1, 16, 2, 128, dtype=torch.bfloat16)
 
-    with (
-        mock.patch.object(
-            usp,
-            "launch_attention_a2a_packed",
-            return_value=output,
-        ) as launch,
-        mock.patch.object(
-            usp,
-            "fused_a2a_input_consumer_done",
-        ) as consumer_done,
-    ):
+    with mock.patch.object(
+        usp,
+        "launch_attention_a2a_packed",
+        return_value=output,
+    ) as launch:
         result = usp._attention_a2a_packed_attn_call(
             query,
             key,
@@ -74,7 +68,6 @@ def test_packed_attention_is_traceable_and_records_output_dependency():
         "e4m3-e4m3",
         0.125,
     )
-    consumer_done.assert_called_once_with(output)
     assert torch.equal(result, output.transpose(1, 2))
     assert not hasattr(torch.ops.xfuser, "attention_a2a_packed_attention")
 

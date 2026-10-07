@@ -42,7 +42,6 @@ from xfuser.core.sparge_attention.head_balance import (
 )
 from xfuser.model_executor.layers.fused_a2a_integration import (
     fused_a2a_input,
-    fused_a2a_input_consumer_done,
     fused_a2a_input_role,
     get_fused_a2a_codecs,
     get_fused_a2a_mode,
@@ -460,9 +459,18 @@ def _allocate_compact_attention_a2a_kv(
             ]
         )
 
+    def empty_with_zeroed_slack(reference, size, main_size):
+        storage = reference.new_empty((size,))
+        if size > main_size:
+            storage[main_size:].zero_()
+        return storage
+
     if qk_codec == "mxfp4":
-        k_raw = key.new_zeros(
-            (mxfp4_k_raw_buffer_size(b, valid_kv_len, heads),)
+        k_main_size = b * heads * target_tiles * 8192
+        k_raw = empty_with_zeroed_slack(
+            key,
+            mxfp4_k_raw_buffer_size(b, valid_kv_len, heads),
+            k_main_size,
         )
         compact_k_scales = block_scale_storage(
             key,
@@ -482,8 +490,16 @@ def _allocate_compact_attention_a2a_kv(
         k_size, k_scale_size = fp6_k_raw_buffer_sizes(
             b, valid_kv_len, heads
         )
-        k_raw = key.new_zeros((k_size,))
-        k_scale_raw = k_scales.new_zeros((k_scale_size,))
+        k_raw = empty_with_zeroed_slack(
+            key,
+            k_size,
+            b * heads * target_tiles * FP6_K_TILE_BYTES,
+        )
+        k_scale_raw = empty_with_zeroed_slack(
+            k_scales,
+            k_scale_size,
+            b * valid_kv_len * heads * blocks,
+        )
         compact_key, compact_k_scales = fp6_k_lds_order_views_from_raw(
             k_raw,
             k_scale_raw,
@@ -504,14 +520,19 @@ def _allocate_compact_attention_a2a_kv(
             compact_k_scales.copy_(k_scales)
 
     if v_codec == "mxfp4":
-        v_raw = value.new_zeros(
-            (mxfp4_v_raw_buffer_size(b, valid_kv_len, heads),)
+        v_main_size = b * heads * target_tiles * 8192
+        v_raw = empty_with_zeroed_slack(
+            value,
+            mxfp4_v_raw_buffer_size(b, valid_kv_len, heads),
+            v_main_size,
         )
         scale_elements = (
             b * heads * target_tiles * MHA_V4_MXFP4_V_SCALE_TILE_BYTES
         )
-        scale_storage = v_scales.new_zeros(
-            (scale_elements + MHA_V4_MXFP4_V_SCALE_SLACK_BYTES,)
+        scale_storage = empty_with_zeroed_slack(
+            v_scales,
+            scale_elements + MHA_V4_MXFP4_V_SCALE_SLACK_BYTES,
+            scale_elements,
         )
         compact_v_scales = scale_storage[:scale_elements].view(
             b,
@@ -523,10 +544,13 @@ def _allocate_compact_attention_a2a_kv(
         )
         v_tile_bytes = 8192
     elif v_codec == "mxfp6_p":
-        v_raw = value.new_zeros(
-            (mxfp6_v_raw_buffer_size(b, valid_kv_len, heads),)
+        v_main_size = b * heads * target_tiles * 12288
+        v_raw = empty_with_zeroed_slack(
+            value,
+            mxfp6_v_raw_buffer_size(b, valid_kv_len, heads),
+            v_main_size,
         )
-        compact_v_scales = v_scales.new_zeros(
+        compact_v_scales = v_scales.new_empty(
             (b, heads, target_tiles * 512)
         )
         compact_value = torch.as_strided(
@@ -672,9 +696,6 @@ def _attention_a2a_packed_attn_call(
         profile,
         softmax_scale,
     )
-    # This records after the MHA launch on the same stream, protecting the
-    # public per-role buffers from reuse by the next layer's side stream.
-    fused_a2a_input_consumer_done(out)
     return out.transpose(1, 2)
 
 

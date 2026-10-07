@@ -738,7 +738,10 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
 
         # broadcast latents
         if rank != src:
-            dtype = get_runtime_state().runtime_config.dtype
+            # Receive in the dtype the pipeline was loaded in, which a runner may
+            # choose apart from the engine config's default. Earlier PipeFusion
+            # stages hold no latents, so they read it from the VAE.
+            dtype = latents.dtype if latents is not None else self.vae.dtype
             latents = torch.zeros(torch.Size(input_shape), dtype=dtype, device=device)
         get_world_group().broadcast(latents, src=src)
 

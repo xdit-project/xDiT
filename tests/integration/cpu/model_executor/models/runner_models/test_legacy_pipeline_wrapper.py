@@ -53,7 +53,11 @@ def _worker(rank, world_size, init_method, result_queue, degrees):
 
         from xfuser.config.config import RuntimeConfig
         from xfuser.core.distributed import parallel_state, runtime_state
-        from xfuser.core.distributed.parallel_state import is_dp_last_group
+        from xfuser.core.distributed.parallel_state import (
+            get_pipeline_parallel_rank,
+            get_pipeline_parallel_world_size,
+            is_dp_last_group,
+        )
         from xfuser.core.distributed.runtime_state import DiTRuntimeState
         from xfuser.model_executor.models.runner_models import base_model
         from xfuser.model_executor.models.runner_models.base_model import DiffusionOutput, xFuserModel
@@ -69,6 +73,8 @@ def _worker(rank, world_size, init_method, result_queue, degrees):
             @xFuserPipelineBaseWrapper.enable_data_parallel
             def __call__(self, prompt=None):
                 latents = _latents(prompt)
+                if get_pipeline_parallel_rank() != get_pipeline_parallel_world_size() - 1:
+                    latents = None  # earlier PipeFusion stages hold no final latents
                 image = None
                 if use_parallel_vae:
                     latents = self.gather_broadcast_latents(latents)
@@ -119,10 +125,13 @@ def _worker(rank, world_size, init_method, result_queue, degrees):
                 classifier_free_guidance_degree=degrees["cfg"],
                 sequence_parallel_degree=degrees["ulysses"],
                 ulysses_degree=degrees["ulysses"],
+                pipeline_parallel_degree=degrees["pp"],
                 use_parallel_vae=use_parallel_vae,
             )
             state = DiTRuntimeState.__new__(DiTRuntimeState)
-            state.runtime_config = RuntimeConfig(dtype=torch.float32, use_parallel_vae=use_parallel_vae)
+            # The runner may load the pipeline in a dtype other than the engine
+            # config's default, as SD3.5 does (bfloat16 against float16).
+            state.runtime_config = RuntimeConfig(dtype=torch.float16, use_parallel_vae=use_parallel_vae)
             state.parallel_config = SimpleNamespace(dp_degree=degrees["dp"], vae_parallel_size=0)
             runtime_state._RUNTIME = state
 
@@ -155,7 +164,8 @@ def _worker(rank, world_size, init_method, result_queue, degrees):
             torch.cuda.Event.return_value.elapsed_time.return_value = 1.0
             output, _ = runner.run({"prompt": list(_PROMPTS)})
 
-        images = None if output is None else [image.clone() for image in output.images]
+        # Plain arrays: tensors would be shared through memory this process frees on exit.
+        images = None if output is None else [image.numpy() for image in output.images]
         result_queue.put(("returned", rank, images))
     except Exception:  # noqa: BLE001 - report arbitrary child failures to the parent
         result_queue.put(("error", rank, traceback.format_exc()))
@@ -193,23 +203,24 @@ def _run_spawned(torch, init_method, degrees, *, world_size, timeout):
 
 
 @pytest.mark.parametrize(
-    "dp, cfg, ulysses, use_parallel_vae",
+    "dp, cfg, ulysses, pp, use_parallel_vae",
     [
-        pytest.param(2, 1, 1, False, id="dp2"),
-        pytest.param(2, 1, 2, False, id="dp2-ulysses2"),
-        pytest.param(2, 2, 1, False, id="dp2-cfg2"),
-        pytest.param(1, 1, 2, True, id="ulysses2-parallel-vae"),
-        pytest.param(2, 1, 2, True, id="dp2-ulysses2-parallel-vae"),
+        pytest.param(2, 1, 1, 1, False, id="dp2"),
+        pytest.param(2, 1, 2, 1, False, id="dp2-ulysses2"),
+        pytest.param(2, 2, 1, 1, False, id="dp2-cfg2"),
+        pytest.param(1, 1, 2, 1, True, id="ulysses2-parallel-vae"),
+        pytest.param(2, 1, 2, 1, True, id="dp2-ulysses2-parallel-vae"),
+        pytest.param(1, 1, 1, 2, True, id="pipefusion2-parallel-vae"),
     ],
 )
-def test_last_rank_receives_one_image_per_prompt(tmp_path, dp, cfg, ulysses, use_parallel_vae):
+def test_last_rank_receives_one_image_per_prompt(tmp_path, dp, cfg, ulysses, pp, use_parallel_vae):
     torch = pytest.importorskip("torch")
     pytest.importorskip("distvae")
     if not torch.distributed.is_available() or not torch.distributed.is_gloo_available():
         pytest.skip("torch.distributed with the gloo backend is unavailable")
 
-    world_size = dp * cfg * ulysses
-    degrees = {"dp": dp, "cfg": cfg, "ulysses": ulysses, "use_parallel_vae": use_parallel_vae}
+    world_size = dp * cfg * ulysses * pp
+    degrees = {"dp": dp, "cfg": cfg, "ulysses": ulysses, "pp": pp, "use_parallel_vae": use_parallel_vae}
     processes, hung, results = _run_spawned(
         torch,
         f"file://{tmp_path / 'legacy-wrapper-init'}",
@@ -230,4 +241,4 @@ def test_last_rank_receives_one_image_per_prompt(tmp_path, dp, cfg, ulysses, use
         expected = _tiny_vae().decode(_latents(expected_order), return_dict=False)[0]
     last = images[world_size - 1]
     assert last is not None and len(last) == len(_PROMPTS)
-    torch.testing.assert_close(torch.stack(last), expected, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(torch.stack([torch.from_numpy(image) for image in last]), expected, atol=1e-5, rtol=1e-5)

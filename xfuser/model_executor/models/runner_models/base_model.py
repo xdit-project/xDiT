@@ -263,6 +263,27 @@ class ModelSettings:
     transformer_attr_names: List[str] = field(default_factory=lambda: ["transformer"])
 
 
+def _legacy_pipeline_wrapper(pipe):
+    """Return ``pipe`` if it is a legacy xFuserPipelineBaseWrapper, else None."""
+    from xfuser.model_executor.pipelines.base_pipeline import xFuserPipelineBaseWrapper
+
+    return pipe if isinstance(pipe, xFuserPipelineBaseWrapper) else None
+
+
+def _wrapper_parallelizes_vae(pipe) -> bool:
+    """Return whether a legacy wrapper runs its own parallel VAE decode.
+
+    Such a wrapper shards its decoder at construction and drives the decode
+    itself, so the runner must not shard the same decoder again.
+    """
+    legacy_pipe = _legacy_pipeline_wrapper(pipe)
+    return (
+        legacy_pipe is not None
+        and legacy_pipe.engine_config.runtime_config.use_parallel_vae
+        and not legacy_pipe.use_naive_forward()
+    )
+
+
 class DiffusionOutput:
     """Class to encapsulate diffusion model outputs"""
 
@@ -433,12 +454,16 @@ class xFuserModel(abc.ABC):
         self.engine_config, _ = self.config.create_config()
         log("Loading model pipeline...")
         self.pipe = self._load_model_checked()
+        legacy_pipe = _legacy_pipeline_wrapper(self.pipe)
+        if legacy_pipe is not None:
+            # The runner gives each DP group its prompts; the wrapper must not split them again.
+            legacy_pipe.prompts_split_by_caller = True
 
         log("Initializing runtime state...")
         initialize_runtime_state(self._get_runtime_state_pipeline(), self.engine_config)
 
         self._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
+        if self.config.use_parallel_vae and not _wrapper_parallelizes_vae(self.pipe):
             self._vae_manager.setup_parallel_vae(self._decoding_vaes())
         self._enable_options()
         fp8_comms = get_runtime_state().fp8_comms if runtime_state_is_initialized() else None
@@ -1329,14 +1354,24 @@ class xFuserModel(abc.ABC):
         Only the first rank in the SP group sends the real payload,
         the other ranks send None to keep the collective valid.
 
+        A legacy pipeline wrapper returns images only on the ranks its own
+        ``is_dp_last_group()`` selects (rank 0 alone when it gathers every DP
+        group for a parallel VAE decode), so those ranks send instead, and the
+        result is moved to the last rank even without data parallelism.
         """
-        if self.config.data_parallel_degree == 1:
+        legacy_pipe = _legacy_pipeline_wrapper(getattr(self, "pipe", None))
+        if legacy_pipe is None and self.config.data_parallel_degree == 1:
             return output
 
         world_group = get_world_group()
-        last_rank = world_group.world_size - 1
+        if legacy_pipe is not None:
+            if world_group.world_size == 1:
+                return output
+            is_representative = legacy_pipe.is_dp_last_group()
+        else:
+            is_representative = get_sequence_parallel_rank() == 0 and get_classifier_free_guidance_rank() == 0
 
-        is_representative = get_sequence_parallel_rank() == 0 and get_classifier_free_guidance_rank() == 0
+        last_rank = world_group.world_size - 1
         send_obj = output if is_representative else None
 
         gather_list = [None] * world_group.world_size if world_group.rank == last_rank else None

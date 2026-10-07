@@ -242,6 +242,10 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
     def enable_data_parallel(func):
         @wraps(func)
         def data_parallel_fn(self, *args, **kwargs):
+            # A caller that already gave this DP group its own prompts (the
+            # xFuserModel runner) sets this so they are not split a second time.
+            if self.__dict__.get("prompts_split_by_caller", False):
+                return func(self, *args, **kwargs)
             prompt = kwargs.get("prompt", None)
             negative_prompt = kwargs.get("negative_prompt", "")
             # dp_degree <= batch_size

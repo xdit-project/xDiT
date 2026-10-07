@@ -213,6 +213,12 @@ class AttentionA2AConfig:
         return self._recipe()["pad_multiple"]
 
     @property
+    def block_num(self) -> int:
+        if not self.enabled:
+            return 128
+        return self._recipe().get("block_num", 512)
+
+    @property
     def hadamard_placement(self) -> str:
         if not self.enabled:
             return "none"

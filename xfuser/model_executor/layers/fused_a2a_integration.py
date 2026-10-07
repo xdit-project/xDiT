@@ -779,6 +779,7 @@ def _get_ops(group, rank, shape, dtype, device, softmax_scale=None):
         _FUSED_A2A_CODECS,
         v_pack,
         _TRANSPORT_HADAMARD,
+        _ATTENTION_A2A_CONFIG.block_num,
     )
     op = _OP_CACHE.get(key)
     if op is None:
@@ -792,6 +793,7 @@ def _get_ops(group, rank, shape, dtype, device, softmax_scale=None):
             rank=rank,
             world_size=len(ranks),
             shape=shape,
+            block_num=_ATTENTION_A2A_CONFIG.block_num,
             quant=(_FUSED_A2A_CODECS[0], _FUSED_A2A_CODECS[2]),
             return_packed=True,
             v_pack=v_pack,

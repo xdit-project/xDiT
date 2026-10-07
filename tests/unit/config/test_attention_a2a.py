@@ -113,6 +113,11 @@ def test_auto_infers_dense_mha_v4_profiles():
     assert policy.resolve_for_backend("aiter_f4f4").profile == "mxfp4-mxfp4"
 
 
+def test_profiles_use_validated_wan_launch_geometry():
+    assert AttentionA2AConfig(profile="mxfp6-mxfp4").block_num == 512
+    assert AttentionA2AConfig(profile="e4m3-e4m3").block_num == 512
+
+
 def test_explicit_profile_requires_matching_backend():
     with pytest.raises(ValueError, match="requires an explicit"):
         xFuserArgs(

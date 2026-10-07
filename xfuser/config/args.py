@@ -312,6 +312,8 @@ class xFuserArgs:
     # Distilled model weight paths
     distilled_transformer_path: Optional[str] = None
     distilled_transformer_2_path: Optional[str] = None
+    # Separate prompt for the audio stream of joint video-audio models
+    audio_prompt: Optional[str] = None
 
     def __post_init__(self):
         self.determinism_check_report_ranks = _normalize_determinism_check_report_ranks(
@@ -1331,6 +1333,12 @@ class xFuserArgs:
             type=nullable_str,
             default=None,
             help="Path to the low-noise distilled transformer_2 safetensors file.",
+        )
+        parser.add_argument(
+            "--audio_prompt",
+            type=nullable_str,
+            default=None,
+            help="Prompt for the audio stream of a joint video-audio model (Prism). Defaults to --prompt.",
         )
         parser.add_argument(
             "--use_teacache",

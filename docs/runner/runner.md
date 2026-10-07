@@ -112,6 +112,7 @@ Individual model classes that inherit from `xFuserModel`:
 | LTX-Video 0.9.7 | `LTX-Video-0.9.7-dev`, `Lightricks/LTX-Video-0.9.7-dev` |
 | Lumina-Image-2.0 | `Lumina2`, `Lumina-Image-2.0`, `Alpha-VLLM/Lumina-Image-2.0` |
 | MiniMax-H3 | `MiniMaxAI/MiniMax-H3`, `MiniMax-H3`, `MiniMax-H3-Ref2VA` |
+| Prism (preview-alpha) | `Prism`, `Prism-preview-alpha`, `FrancisRing/Prism` |
 | FastH3 Preview v1 | `FastH3`, `FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree`, `FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1300`, `FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1900` |
 | FastH3 Preview v1 (Dense) | `FastH3-Dense`, `FastVideo/FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree` |
 | FastH3 V2 | `FastVideo/FastVideo-FastH3-8-Step-V2` |
@@ -299,6 +300,7 @@ fill it from rank 0.
 | CausalWan | No shared load route declared; direct load with manual single-file fallback | None | Rejected before allocation: fallback discovery is not collective-safe | No |
 | Ideogram 4 | Streaming; both the conditional and unconditional transformer declared | None | Both transformers; text encoder loads normally | Yes, for both transformers; the `trust_remote_code` text encoder is filled eagerly because the manifest cannot read its parameter names ahead of the load |
 | MiniMax-H3 and MiniMax-H3-Ref2VA | Modular `ModularPipeline` construction with fused QKV projections; direct load only | None | Rejected before allocation: fusion rewrites attention into `attn.to_qkv`, so live tensor names stop matching checkpoint keys | No |
+| Prism | Vendored MOVA module tree built on meta from the `MOVA-360p` configs; the single Prism state dict is read straight onto each rank's device; no shared load route declared | None | Not exposed by this runner | No |
 
 The FLUX PipeFusion loading branches construct their complete pipelines directly, so they do not use transformer streaming, and replicated meta-load is excluded whenever PipeFusion is active. Each runner keeps class-level `load_support` beside its capabilities and settings. The declaration positively names eligible meta transformers and text encoders and records standard-collective and local-blockwise routes independently; a requested unsupported meta mode fails before model allocation.
 
@@ -316,7 +318,7 @@ A listed target is only half the answer: the format still has to survive the har
 | MiniMax-H3 | `transformer.transformer_blocks`; the Ref2VA variant declares `transformer_ref.transformer_blocks` | No |
 | Cosmos3-Super and Cosmos3-Nano | `transformer.layers` | No |
 | Z-Image and Z-Image-Turbo | No | `transformer.layers`, `transformer.noise_refiner`, and `transformer.context_refiner`; `context_refiner` drops out under sequence parallelism |
-| FLUX.1, FLUX.1-Kontext, FLUX.2-klein, Wan 2.1 VACE, Qwen-Image variants, Stable Diffusion 3.5, HunyuanVideo variants, LTX variants, CausalWan | No | No |
+| FLUX.1, FLUX.1-Kontext, FLUX.2-klein, Wan 2.1 VACE, Qwen-Image variants, Stable Diffusion 3.5, HunyuanVideo variants, LTX variants, CausalWan, Prism | No | No |
 
 Several runners hold part of an FP4 target at FP8 where full FP4 costs too much
 quality: Wan 2.1 I2V and T2V keep blocks 0-9 and 30-39, Wan 2.2 TI2V keeps
@@ -402,6 +404,7 @@ These examples show how the flags are wired, not tuned recommendations: output q
 |----------|-------------|--------------|
 | `--distilled_transformer_path` | Path to the **high-noise** distilled transformer safetensors | `Wan2.2-Distilled-I2V` |
 | `--distilled_transformer_2_path` | Path to the **low-noise** distilled transformer safetensors | `Wan2.2-Distilled-I2V` |
+| `--audio_prompt` | Prompt for the audio stream; defaults to `--prompt` | Optional for `Prism` |
 
 ### Benchmarking
 

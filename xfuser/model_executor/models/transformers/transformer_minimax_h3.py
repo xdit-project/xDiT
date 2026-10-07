@@ -117,17 +117,14 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
                 raise RuntimeError("FastH3 VSA metadata was not configured.")
             if self.attention_kwargs.get("vsa_h3_metadata") is None:
                 raise RuntimeError("FastH3 VSA metadata was not prepared.")
-            self.attention_kwargs["vsa_h3_gate"] = attn.to_gate_compress(
-                hidden_states
-            ).unflatten(-1, (attn.heads, -1)).transpose(1, 2)
+            self.attention_kwargs["vsa_h3_gate"] = (
+                attn.to_gate_compress(hidden_states).unflatten(-1, (attn.heads, -1)).transpose(1, 2)
+            )
             # The gate is per-head like QKV, so it has to follow them through
             # the Ulysses exchange before the VSA-H3 backend consumes it.
             self.attention_kwargs[ULYSSES_EXTRA_INPUTS_KEY] = ("vsa_h3_gate",)
 
-        use_ulysses = (
-            self.use_ulysses_parallel_attention
-            and get_ulysses_parallel_world_size() > 1
-        )
+        use_ulysses = self.use_ulysses_parallel_attention and get_ulysses_parallel_world_size() > 1
         attention_function = USP if use_ulysses else attention
         attention_args = {
             "dropout_p": 0.0,
@@ -219,9 +216,7 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
             except AssertionError:
                 attention_backend = None
         self.attention_backend = attention_backend
-        self.use_vsa_h3 = (
-            enable_fasth3_vsa and attention_backend in VSA_H3_BACKENDS
-        )
+        self.use_vsa_h3 = enable_fasth3_vsa and attention_backend in VSA_H3_BACKENDS
         # VSA-H3 tile geometry is fixed for a run but can only be recovered from
         # position_ids, which costs device syncs and is untraceable. Derive it
         # once and cache it, so the recovery branch folds away at trace time on
@@ -260,9 +255,7 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
                 )
             )
 
-        self.register_forward_pre_hook(
-            lambda module, args: get_runtime_state().increment_step_counter()
-        )
+        self.register_forward_pre_hook(lambda module, args: get_runtime_state().increment_step_counter())
 
     @staticmethod
     def _pad_rows(
@@ -348,10 +341,7 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
             # against a stale length and nothing more: two grids that pack the
             # same token count pass it. What keeps those apart under compile is
             # the wrapper, which primes on every call against the full key.
-            if (
-                self._vsa_h3_metadata is None
-                or self._vsa_h3_metadata.total_seq_length != position_ids.shape[0]
-            ):
+            if self._vsa_h3_metadata is None or self._vsa_h3_metadata.total_seq_length != position_ids.shape[0]:
                 raise RuntimeError(
                     "VSA-H3 tile geometry was not primed for the sequence being "
                     "traced. Compiling MiniMax-H3's forward requires the "
@@ -384,23 +374,15 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
             and torch.equal(audio_indices, expected_audio)
             and torch.equal(video_indices, expected_video)
         ):
-            raise ValueError(
-                "FastH3 Preview v1 VSA requires the T2VA packed order "
-                "[text | audio | generated video]."
-            )
+            raise ValueError("FastH3 Preview v1 VSA requires the T2VA packed order [text | audio | generated video].")
         video_positions = position_ids.index_select(0, video_indices)
-        video_shape = tuple(
-            int(torch.unique(video_positions[:, axis]).numel())
-            for axis in range(3)
-        )
+        video_shape = tuple(int(torch.unique(video_positions[:, axis]).numel()) for axis in range(3))
         if math.prod(video_shape) != video_indices.numel():
             raise ValueError(
                 "Could not recover FastH3's generated-video grid from "
                 f"position_ids: shape={video_shape}, rows={video_indices.numel()}."
             )
-        self._vsa_h3_metadata = build_h3_vsa_metadata(
-            (text_count, audio_count), video_shape, position_ids.device
-        )
+        self._vsa_h3_metadata = build_h3_vsa_metadata((text_count, audio_count), video_shape, position_ids.device)
         self._vsa_h3_metadata_key = key
 
     @apply_lora_scale("attention_kwargs")
@@ -420,13 +402,9 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
         return_dict: bool = True,
     ) -> MiniMaxH3TransformerOutput | tuple[torch.Tensor, torch.Tensor]:
         if position_ids.ndim != 2 or position_ids.shape[-1] != 3:
-            raise ValueError(
-                f"`position_ids` must be a `(seq_len, 3)` tensor, got {list(position_ids.shape)}."
-            )
+            raise ValueError(f"`position_ids` must be a `(seq_len, 3)` tensor, got {list(position_ids.shape)}.")
         sequence_length = position_ids.shape[0]
-        if token_tags.shape != (sequence_length,) or timestep_indices.shape != (
-            sequence_length,
-        ):
+        if token_tags.shape != (sequence_length,) or timestep_indices.shape != (sequence_length,):
             raise ValueError(
                 "`token_tags` and `timestep_indices` must both be `(seq_len,)` "
                 f"tensors matching `position_ids`, got {list(token_tags.shape)} "
@@ -434,39 +412,23 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
             )
 
         if self.use_vsa_h3:
-            self.prepare_vsa_h3_metadata(
-                position_ids, video_indices, audio_indices, text_indices
-            )
+            self.prepare_vsa_h3_metadata(position_ids, video_indices, audio_indices, text_indices)
             self._usp_attention_kwargs["vsa_h3_metadata"] = self._vsa_h3_metadata
         else:
             self._usp_attention_kwargs["vsa_h3_metadata"] = None
 
         video_embeds = self.proj_in(hidden_states.to(self.proj_in.weight.dtype))
-        audio_embeds = self.audio_proj_in(
-            audio_hidden_states.to(self.audio_proj_in.weight.dtype)
-        )
-        text_embeds = self.context_embedder(
-            encoder_hidden_states.to(self.context_embedder.weight.dtype)
-        )
+        audio_embeds = self.audio_proj_in(audio_hidden_states.to(self.audio_proj_in.weight.dtype))
+        text_embeds = self.context_embedder(encoder_hidden_states.to(self.context_embedder.weight.dtype))
         text_embeds = self.token_refiner(text_embeds)
 
-        packed_hidden_states = text_embeds.new_zeros(
-            (text_embeds.shape[0], sequence_length, text_embeds.shape[-1])
-        )
-        packed_hidden_states = packed_hidden_states.index_copy(
-            1, text_indices, text_embeds
-        )
-        packed_hidden_states = packed_hidden_states.index_copy(
-            1, video_indices, video_embeds.to(text_embeds.dtype)
-        )
-        packed_hidden_states = packed_hidden_states.index_copy(
-            1, audio_indices, audio_embeds.to(text_embeds.dtype)
-        )
+        packed_hidden_states = text_embeds.new_zeros((text_embeds.shape[0], sequence_length, text_embeds.shape[-1]))
+        packed_hidden_states = packed_hidden_states.index_copy(1, text_indices, text_embeds)
+        packed_hidden_states = packed_hidden_states.index_copy(1, video_indices, video_embeds.to(text_embeds.dtype))
+        packed_hidden_states = packed_hidden_states.index_copy(1, audio_indices, audio_embeds.to(text_embeds.dtype))
 
         temb = self.time_proj(timestep)
-        temb = self.time_embedder(
-            temb.to(self.time_embedder.linear_1.weight.dtype)
-        )
+        temb = self.time_embedder(temb.to(self.time_embedder.linear_1.weight.dtype))
 
         (
             packed_hidden_states,
@@ -518,10 +480,7 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
         packed_hidden_states = packed_hidden_states[:, local_start:local_stop]
         local_timestep_indices = padded_timestep_indices[local_start:local_stop]
         local_token_tags = padded_token_tags[local_start:local_stop]
-        adaln_indices = (
-            local_timestep_indices * MINIMAX_H3_MODALITY_NUM
-            + local_token_tags.clamp(min=0)
-        )
+        adaln_indices = local_timestep_indices * MINIMAX_H3_MODALITY_NUM + local_token_tags.clamp(min=0)
 
         if pad_amount:
             indices_k = torch.arange(

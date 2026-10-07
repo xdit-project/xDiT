@@ -69,7 +69,6 @@ at most 1 bf16 ULP (the pass-through tail stays bit-exact).  See
 # params (cos_rows / tok_off / q_rs / k_rs), forcing a fresh JIT per value.
 
 import math
-import os
 from functools import lru_cache
 from typing import Optional, Tuple
 
@@ -123,9 +122,7 @@ except Exception:  # pragma: no cover - only exercised where flydsl is absent
 MAX_GRID_Y = 65535
 
 
-def _pick_block(
-    d: int, wave_size: int, half: Optional[int] = None
-) -> Optional[Tuple[int, int]]:
+def _pick_block(d: int, wave_size: int, half: Optional[int] = None) -> Optional[Tuple[int, int]]:
     """Return ``(BLOCK_THREADS, VEC)`` for head_dim ``d`` or None if unsupported.
 
     Prefer the widest wave (few lanes, more work each) while keeping VEC even
@@ -149,9 +146,7 @@ def _pick_block(
     return None
 
 
-def prepare_neox_rope_tables(
-    cos: torch.Tensor, sin: torch.Tensor, head_dim: int
-) -> Tuple[torch.Tensor, torch.Tensor]:
+def prepare_neox_rope_tables(cos: torch.Tensor, sin: torch.Tensor, head_dim: int) -> Tuple[torch.Tensor, torch.Tensor]:
     """Fold the neox sign pattern and the pass-through tail into width-D tables.
 
     neox (``rotate_half``) RoPE over the leading ``rot`` channels of a ``D``-wide
@@ -192,14 +187,11 @@ def prepare_neox_rope_tables(
     rows = cos2.shape[0]
     pad = head_dim - rot
     cos_pad = torch.cat([cos2, cos2.new_ones((rows, pad))], dim=-1)
-    sin_fold = torch.cat(
-        [-sin2[:, :half], sin2[:, half:], sin2.new_zeros((rows, pad))], dim=-1
-    )
+    sin_fold = torch.cat([-sin2[:, :half], sin2[:, half:], sin2.new_zeros((rows, pad))], dim=-1)
     return (
         cos_pad.to(torch.bfloat16).contiguous(),
         sin_fold.to(torch.bfloat16).contiguous(),
     )
-
 
 
 if _HAS_FLYDSL:
@@ -242,26 +234,22 @@ if _HAS_FLYDSL:
         # a collision here is a silent miscompile, not an error.  The suffix is
         # empty for GPT-J, so the FLUX symbol string is byte-identical to what
         # it was before this kernel grew a neox variant.
-        _kname = (
-            f"fused_qk_norm_rope_H{H}_D{D}_v{VEC}"
-            f"{f'_n{HALF}' if NEOX else ''}"
-            f"{'_c' if CONTIG else '_s'}_flydsl"
-        )
+        _kname = f"fused_qk_norm_rope_H{H}_D{D}_v{VEC}{f'_n{HALF}' if NEOX else ''}{'_c' if CONTIG else '_s'}_flydsl"
 
         @flyc.kernel(name=_kname)
         def kernel(
-            q_in: fx.Tensor,   # [T, H, D] bf16, row stride q_rs, (H, D) packed
-            k_in: fx.Tensor,   # [T, H, D] bf16, row stride k_rs, (H, D) packed
+            q_in: fx.Tensor,  # [T, H, D] bf16, row stride q_rs, (H, D) packed
+            k_in: fx.Tensor,  # [T, H, D] bf16, row stride k_rs, (H, D) packed
             q_out: fx.Tensor,  # [T, H, D] bf16, contiguous
             k_out: fx.Tensor,  # [T, H, D] bf16, contiguous
-            wq: fx.Tensor,      # [D] bf16 (dummy when not HAS_WQ)
-            wk: fx.Tensor,      # [D] bf16 (dummy when not HAS_WK)
-            cos: fx.Tensor,     # [cos_rows, D] cos_dt
-            sin: fx.Tensor,     # [cos_rows, D] cos_dt
+            wq: fx.Tensor,  # [D] bf16 (dummy when not HAS_WQ)
+            wk: fx.Tensor,  # [D] bf16 (dummy when not HAS_WK)
+            cos: fx.Tensor,  # [cos_rows, D] cos_dt
+            sin: fx.Tensor,  # [cos_rows, D] cos_dt
             cos_rows: Int32,
-            tok_off: Int32,     # global token index of this chunk's row 0
-            q_rs: Int32,        # q_in row stride in elements (H*D if contiguous)
-            k_rs: Int32,        # k_in row stride in elements
+            tok_off: Int32,  # global token index of this chunk's row 0
+            q_rs: Int32,  # q_in row stride in elements (H*D if contiguous)
+            k_rs: Int32,  # k_in row stride in elements
         ):
             fm_fast = FastMathFlags.fast
             # Resolve element types inside the kernel body: T.* needs a live MLIR
@@ -354,9 +342,7 @@ if _HAS_FLYDSL:
             def round_bf16(vals):
                 # round-trip fp32 -> bf16 -> fp32 to replay diffusers' RMSNorm
                 # intermediate rounding on the whole VEC-wide fragment.
-                fv = fx.Vector.from_elements(
-                    [v.ir_value() for v in vals], dtype=fx.Float32
-                )
+                fv = fx.Vector.from_elements([v.ir_value() for v in vals], dtype=fx.Float32)
                 bf = fv.truncf(T.vec(VEC, T.bf16))
                 ff = fx.Vector(bf).to(fx.Float32)
                 return [ff[i] for i in range_constexpr(VEC)]
@@ -420,10 +406,7 @@ if _HAS_FLYDSL:
                     # diffusers, differing by at most 1 bf16 ULP (measured: ~31%
                     # of rotary channels, max 3.1e-2, mean 1.2e-3 at these
                     # magnitudes).  The pass-through tail stays bit-exact.
-                    outs = [
-                        scaled[i] * cos_f[i] + p_scaled[i] * sin_f[i]
-                        for i in range_constexpr(VEC)
-                    ]
+                    outs = [scaled[i] * cos_f[i] + p_scaled[i] * sin_f[i] for i in range_constexpr(VEC)]
                 else:
                     # interleaved GPT-J rope on lane-local pairs (2k, 2k+1):
                     #   out[2k]   = e*cos[2k]   - o*sin[2k]
@@ -433,13 +416,9 @@ if _HAS_FLYDSL:
                         e = scaled[2 * kk]
                         o = scaled[2 * kk + 1]
                         outs[2 * kk] = e * cos_f[2 * kk] - o * sin_f[2 * kk]
-                        outs[2 * kk + 1] = (
-                            o * cos_f[2 * kk + 1] + e * sin_f[2 * kk + 1]
-                        )
+                        outs[2 * kk + 1] = o * cos_f[2 * kk + 1] + e * sin_f[2 * kk + 1]
 
-                out_v = fx.Vector.from_elements(
-                    [o.ir_value() for o in outs], dtype=fx.Float32
-                )
+                out_v = fx.Vector.from_elements([o.ir_value() for o in outs], dtype=fx.Float32)
                 g_out.store(out_base, out_v.truncf(T.vec(VEC, T.bf16)))
 
             process(qin_, q_base, q_pbase, qout_, out_base, wq_, NORM_Q, HAS_WQ)
@@ -496,12 +475,12 @@ if _HAS_FLYDSL:
 
     @torch.library.custom_op("xfuser::flydsl_qk_norm_rope", mutates_args=())
     def _flydsl_qk_norm_rope_launch(
-        q: torch.Tensor,       # [B, S, H, D] bf16, (H, D) packed, any row stride
-        k: torch.Tensor,       # [B, S, H, D] bf16, (H, D) packed, any row stride
+        q: torch.Tensor,  # [B, S, H, D] bf16, (H, D) packed, any row stride
+        k: torch.Tensor,  # [B, S, H, D] bf16, (H, D) packed, any row stride
         wq: Optional[torch.Tensor],  # [D] bf16 or None (weightless RMSNorm)
         wk: Optional[torch.Tensor],
-        cos: torch.Tensor,     # [cos_rows, D]
-        sin: torch.Tensor,     # [cos_rows, D]
+        cos: torch.Tensor,  # [cos_rows, D]
+        sin: torch.Tensor,  # [cos_rows, D]
         cos_rows: int,
         eps: float,
         vec: int,
@@ -704,9 +683,7 @@ def _norm_schedule(m) -> Optional[Tuple[bool, bool]]:
     return None
 
 
-def _as_token_view(
-    x: torch.Tensor, b: int, s: int, h: int, d: int, vec: int
-) -> torch.Tensor:
+def _as_token_view(x: torch.Tensor, b: int, s: int, h: int, d: int, vec: int) -> torch.Tensor:
     """``[B, S, H, D]`` -> ``[B*S, H, D]``, without copying when it is legal.
 
     The kernel indexes rows by a runtime stride, so an arbitrary row stride is
@@ -715,12 +692,7 @@ def _as_token_view(
     remaining condition (``stride(0) == S * stride(1)``, so B and S can flatten)
     for free -- ``as_strided`` would skip that check and happily alias.
     """
-    if (
-        x.stride(-1) == 1
-        and x.stride(-2) == d
-        and x.stride(1) % vec == 0
-        and x.storage_offset() % vec == 0
-    ):
+    if x.stride(-1) == 1 and x.stride(-2) == d and x.stride(1) % vec == 0 and x.storage_offset() % vec == 0:
         try:
             return x.view(b * s, h, d)
         except RuntimeError:
@@ -829,11 +801,7 @@ def flydsl_fused_qk_norm_rope(
     # grad-enabled call falls back (matching the Z-Image sibling).
     if torch.is_grad_enabled():
         return _ref()
-    if (
-        rotary_emb is None
-        or not isinstance(rotary_emb, (tuple, list))
-        or len(rotary_emb) < 2
-    ):
+    if rotary_emb is None or not isinstance(rotary_emb, (tuple, list)) or len(rotary_emb) < 2:
         return _ref()
     sched_q = _norm_schedule(norm_q)
     sched_k = _norm_schedule(norm_k)

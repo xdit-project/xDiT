@@ -84,9 +84,7 @@ def test_reference_neox_is_norm_then_the_diffusers_rotation():
     tables ride along behind the originals, and the reference has to keep
     reading the originals and ignore the rest.
     """
-    diffusers_rotate = pytest.importorskip(
-        "diffusers.models.transformers.transformer_minimax_h3"
-    )._apply_rotary_emb
+    diffusers_rotate = pytest.importorskip("diffusers.models.transformers.transformer_minimax_h3")._apply_rotary_emb
 
     cos, sin = _rope_tables(64, ROTARY_DIM)
     query, key = _qk(64, 4, HEAD_DIM)
@@ -166,9 +164,7 @@ def test_passthrough_tail_normalizes_negative_zero_to_positive_zero():
     hidden_states = torch.zeros(1, 1, 1, HEAD_DIM, dtype=torch.float32)
     hidden_states[..., ROTARY_DIM] = -0.0
 
-    folded = _apply_folded(
-        hidden_states, cos_pad.to(torch.float32), sin_fold.to(torch.float32), ROTARY_DIM
-    )
+    folded = _apply_folded(hidden_states, cos_pad.to(torch.float32), sin_fold.to(torch.float32), ROTARY_DIM)
 
     assert torch.signbit(hidden_states[0, 0, 0, ROTARY_DIM])
     assert not torch.signbit(folded[0, 0, 0, ROTARY_DIM])
@@ -256,9 +252,7 @@ def test_neox_entry_point_matches_the_unfused_reference(envelope_probe):
         (32, True, "passthrough tail wider than half"),
     ],
 )
-def test_out_of_envelope_neox_requests_fall_back(
-    rotary_dim, with_tables, reason, envelope_probe
-):
+def test_out_of_envelope_neox_requests_fall_back(rotary_dim, with_tables, reason, envelope_probe):
     """Every rejected shape bails early and still produces the reference result.
 
     A guard that bails is fine; a guard that is missing computes a wrong
@@ -289,17 +283,13 @@ def test_out_of_envelope_neox_requests_fall_back(
 
 
 def test_an_unknown_rope_style_falls_back_to_the_interleaved_reference():
-    apply_rotary_emb = pytest.importorskip(
-        "diffusers.models.embeddings"
-    ).apply_rotary_emb
+    apply_rotary_emb = pytest.importorskip("diffusers.models.embeddings").apply_rotary_emb
     cos, sin = _rope_tables(64, HEAD_DIM)
     query, key = _qk(64, 4, HEAD_DIM)
     norm_q = torch.nn.RMSNorm(HEAD_DIM, eps=1e-5, dtype=torch.bfloat16)
 
     with torch.no_grad():
-        got_q, _ = flydsl_fused_qk_norm_rope(
-            query, key, norm_q, norm_q, (cos, sin), rope_style="not-a-rotation"
-        )
+        got_q, _ = flydsl_fused_qk_norm_rope(query, key, norm_q, norm_q, (cos, sin), rope_style="not-a-rotation")
         want_q = apply_rotary_emb(norm_q(query), (cos, sin), sequence_dim=1)
 
     assert torch.equal(got_q, want_q)
@@ -307,9 +297,7 @@ def test_an_unknown_rope_style_falls_back_to_the_interleaved_reference():
 
 def test_default_rope_style_is_still_the_interleaved_rotation():
     """Guards FLUX/Qwen/Z-Image: adding neox must not move the default."""
-    apply_rotary_emb = pytest.importorskip(
-        "diffusers.models.embeddings"
-    ).apply_rotary_emb
+    apply_rotary_emb = pytest.importorskip("diffusers.models.embeddings").apply_rotary_emb
     cos, sin = _rope_tables(64, HEAD_DIM)
     query, key = _qk(64, 4, HEAD_DIM)
     norm_q = torch.nn.RMSNorm(HEAD_DIM, eps=1e-5, dtype=torch.bfloat16)

@@ -119,13 +119,22 @@ class xFuserCosmos3SuperModel(xFuserModel):
         )
         return pipe
 
+    def _single_prompt(self, value, name: str):
+        # Checked here rather than in _validate_args, which runs before the
+        # data-parallel split and --batch_size batching have cut the prompts
+        # down to the one each call receives.
+        if isinstance(value, list):
+            if len(value) > 1:
+                raise ValueError(
+                    f"{self.settings.model_name} runs one {name} per pipeline call, got {len(value)}; "
+                    "pass --batch_size 1 to run them one call at a time."
+                )
+            value = value[0] if value else ""
+        return value
+
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
-        prompt = input_args.get("prompt", "")
-        negative_prompt = input_args.get("negative_prompt", "")
-        if isinstance(prompt, list):
-            prompt = prompt[0] if prompt else ""
-        if isinstance(negative_prompt, list):
-            negative_prompt = negative_prompt[0] if negative_prompt else ""
+        prompt = self._single_prompt(input_args.get("prompt", ""), "prompt")
+        negative_prompt = self._single_prompt(input_args.get("negative_prompt", ""), "negative_prompt")
 
         # Cosmos3 expects JSON-formatted prompts for best quality.
         # If prompt is a path to a .json file, load and serialize it.

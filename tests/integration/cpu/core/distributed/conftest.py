@@ -6,7 +6,11 @@ import time
 import pytest
 
 
-def _run_spawned(torch, worker, init_method, *, world_size, timeout):
+def _run_spawned(torch, worker, init_method, *, world_size, timeout=600):
+    """Run ranks within one budget, including interpreter startup and imports.
+
+    Cold worker imports took 388 s on a slow filesystem (#817).
+    """
     context = torch.multiprocessing.get_context("spawn")
     result_queue = context.Queue()
     processes = [
@@ -16,10 +20,9 @@ def _run_spawned(torch, worker, init_method, *, world_size, timeout):
         )
         for rank in range(world_size)
     ]
+    deadline = time.monotonic() + timeout
     for process in processes:
         process.start()
-
-    deadline = time.monotonic() + timeout
     for process in processes:
         process.join(max(0.0, deadline - time.monotonic()))
 

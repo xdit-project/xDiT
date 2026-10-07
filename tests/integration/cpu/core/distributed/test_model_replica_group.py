@@ -143,7 +143,6 @@ def test_model_replica_group_on_real_gpus_without_hanging(tmp_path, run_spawned)
         _nccl_model_replica_group_worker,
         f"file://{tmp_path / 'model-replica-nccl-init'}",
         world_size=_WORLD_SIZE,
-        timeout=60,
     )
 
     _assert_replica_group_results(processes, hung, survivors, results)
@@ -162,7 +161,6 @@ def test_model_replica_group_on_cpu_without_hanging(tmp_path, run_spawned):
         _gloo_model_replica_group_worker,
         f"file://{tmp_path / 'model-replica-gloo-init'}",
         world_size=_WORLD_SIZE,
-        timeout=30,
     )
 
     _assert_replica_group_results(processes, hung, survivors, results)

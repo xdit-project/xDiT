@@ -6,6 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from xfuser.config.attention_a2a import AttentionA2AConfig
 from xfuser.core.attention import registry
 from xfuser.core.attention.spec import (
     AttentionBackendType,
@@ -57,6 +58,62 @@ def _run(backend, query, key, value, **kwargs):
 
 def _as_type(backend):
     return backend if isinstance(backend, AttentionBackendType) else AttentionBackendType[backend]
+
+
+@pytest.mark.parametrize(
+    "profile",
+    (
+        "e4m3-e4m3",
+        "int8-e4m3",
+        "mxfp8-e4m3",
+        "e4m3-mxfp6",
+        "mxfp6-e4m3",
+        "mxfp6-mxfp6",
+        "mxfp6-mxfp4",
+        "mxfp4-mxfp4",
+    ),
+)
+def test_attention_a2a_profile_matches_aiter_mha_v4_contract(profile):
+    from aiter.ops.mha_v4 import (
+        AttentionFormat,
+        AttentionPack,
+        AttentionScaleMode,
+        _resolve_raw_recipe,
+    )
+
+    config = AttentionA2AConfig(profile=profile)
+    native_fp8 = AttentionFormat.FP8_E4M3
+    formats = {
+        "int8": AttentionFormat.INT8,
+        "e4m3": native_fp8,
+        "mxfp8": native_fp8,
+        "mxfp4": AttentionFormat.MXFP4,
+        "mxfp6": AttentionFormat.MXFP6,
+    }
+    scale_modes = {
+        "f32_per_tensor": AttentionScaleMode.F32_PER_TENSOR,
+        "f32_per_channel": AttentionScaleMode.F32_PER_CHANNEL,
+        "e8m0_per_1x32": AttentionScaleMode.E8M0_PER_1X32,
+    }
+    qk_codec, _, v_codec = config.consumer_codecs
+    qk_format, v_format = formats[qk_codec], formats[v_codec]
+    expected_scales = tuple(
+        scale_modes[mode] for mode in config.scale_modes
+    )
+    plan = _resolve_raw_recipe(
+        qk_format,
+        qk_format,
+        v_format,
+        *expected_scales,
+        sparse=False,
+    )
+
+    assert plan.scale_modes == expected_scales
+    assert plan.v_pack == (
+        AttentionPack.V_FOR_FP6_P
+        if config.v_pack == "fp6_p"
+        else AttentionPack.DEFAULT
+    )
 
 
 def test_bf16_rows_route_to_mha_v4_while_aiter_stays_on_mha_v3():

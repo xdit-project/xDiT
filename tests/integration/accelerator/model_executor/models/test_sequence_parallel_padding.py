@@ -358,7 +358,9 @@ def _build(model, tokens, device, engine_config, ring):
     torch.manual_seed(0)
     reference, parallel, reference_inputs, parallel_inputs = _MODELS[model](device, tokens)
     reference = reference.to(device).eval()
-    parallel.load_state_dict(reference.state_dict())
+    incompatible = parallel.load_state_dict(reference.state_dict(), strict=False)
+    assert not incompatible.unexpected_keys
+    assert all(key.endswith("._ones_weight") for key in incompatible.missing_keys)
     parallel = parallel.to(device).eval()
     # The runtime state a pipeline would set up, which the wrappers step.
     initialize_runtime_state(pipeline=_Pipeline(parallel), engine_config=engine_config)

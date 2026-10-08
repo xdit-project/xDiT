@@ -97,9 +97,7 @@ def test_attention_a2a_profile_matches_aiter_mha_v4_contract(profile):
     }
     qk_codec, _, v_codec = config.consumer_codecs
     qk_format, v_format = formats[qk_codec], formats[v_codec]
-    expected_scales = tuple(
-        scale_modes[mode] for mode in config.scale_modes
-    )
+    expected_scales = tuple(scale_modes[mode] for mode in config.scale_modes)
     plan = _resolve_raw_recipe(
         qk_format,
         qk_format,
@@ -109,11 +107,7 @@ def test_attention_a2a_profile_matches_aiter_mha_v4_contract(profile):
     )
 
     assert plan.scale_modes == expected_scales
-    assert plan.v_pack == (
-        AttentionPack.V_FOR_FP6_P
-        if config.v_pack == "fp6_p"
-        else AttentionPack.DEFAULT
-    )
+    assert plan.v_pack == (AttentionPack.V_FOR_FP6_P if config.v_pack == "fp6_p" else AttentionPack.DEFAULT)
 
 
 def test_bf16_rows_route_to_mha_v4_while_aiter_stays_on_mha_v3():
@@ -168,10 +162,7 @@ def _require_mha_v4_aiter(backend_name, supported_arches=("gfx950",)):
         kernel_names.append("mxfp6")
     candidates = [kernel_dir / f"fwd_hd128_{name}.co" for name in kernel_names]
     if arch == "gfx942":
-        candidates.extend(
-            kernel_dir / "MI300" / f"fwd_hd128_{name}.co"
-            for name in kernel_names
-        )
+        candidates.extend(kernel_dir / "MI300" / f"fwd_hd128_{name}.co" for name in kernel_names)
     if not any(path.exists() for path in candidates):
         pytest.skip(f"AITER does not include the {arch} {kernel_name} FMHA kernel.")
 

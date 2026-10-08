@@ -86,9 +86,7 @@ class RuntimeConfig:
     use_fp8_comms: bool = False
     fp8_comms_scale: Optional[float] = None
     fp8_comms_safety_factor: float = DEFAULT_FP8_COMMS_SAFETY_FACTOR
-    attention_a2a: AttentionA2AConfig = field(
-        default_factory=AttentionA2AConfig
-    )
+    attention_a2a: AttentionA2AConfig = field(default_factory=AttentionA2AConfig)
 
     def __post_init__(self):
         check_packages()

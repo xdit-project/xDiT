@@ -407,42 +407,28 @@ class xFuserArgs:
         elif config.is_auto:
             if self.attention_backend is None:
                 raise ValueError(
-                    "--attention_a2a auto requires --attention_backend outside "
-                    "a hybrid attention schedule"
+                    "--attention_a2a auto requires --attention_backend outside a hybrid attention schedule"
                 )
             config.resolve_for_backend(self.attention_backend)
         elif self.attention_backend is None:
             raise ValueError(
-                f"--attention_a2a {config.profile} requires an explicit "
-                f"--attention_backend {config.attention_backend}"
+                f"--attention_a2a {config.profile} requires an explicit --attention_backend {config.attention_backend}"
             )
         else:
             config.resolve_for_backend(self.attention_backend)
         if self.use_fp8_comms:
-            raise ValueError(
-                "--attention_a2a and --use_fp8_comms are mutually exclusive"
-            )
+            raise ValueError("--attention_a2a and --use_fp8_comms are mutually exclusive")
         if self.ulysses_degree not in (2, 4, 8):
-            raise ValueError(
-                "--attention_a2a requires --ulysses_degree 2, 4, or 8"
-            )
+            raise ValueError("--attention_a2a requires --ulysses_degree 2, 4, or 8")
         effective_batch = (
-            self.batch_size
-            if self.batch_size is not None
-            else len(self.prompt)
-            if isinstance(self.prompt, list)
-            else 1
+            self.batch_size if self.batch_size is not None else len(self.prompt) if isinstance(self.prompt, list) else 1
         )
         if effective_batch != 1:
             raise ValueError("--attention_a2a currently requires batch size 1")
         if self.ring_degree != 1:
-            raise ValueError(
-                "--attention_a2a does not support ring parallelism"
-            )
+            raise ValueError("--attention_a2a does not support ring parallelism")
         if self.use_spargeattn_head_balance:
-            raise ValueError(
-                "--attention_a2a does not support Sparge head balancing"
-            )
+            raise ValueError("--attention_a2a does not support Sparge head balancing")
 
     @property
     def gemm_quantization_spec(self) -> GemmQuantizationSpec:

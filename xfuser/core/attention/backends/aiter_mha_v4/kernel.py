@@ -115,14 +115,8 @@ def mha_v4_attention_a2a_packed(
     if v_codec in ("e4m3", "mxfp8"):
         v = v.view(dtypes.fp8)
 
-    q_scale_mode, k_scale_mode, v_scale_mode = tuple(
-        _PACKED_SCALE[mode] for mode in config.scale_modes
-    )
-    v_pack = (
-        AttentionPack.V_FOR_FP6_P
-        if config.v_pack == "fp6_p"
-        else AttentionPack.DEFAULT
-    )
+    q_scale_mode, k_scale_mode, v_scale_mode = tuple(_PACKED_SCALE[mode] for mode in config.scale_modes)
+    v_pack = AttentionPack.V_FOR_FP6_P if config.v_pack == "fp6_p" else AttentionPack.DEFAULT
     return mha_v4_packed(
         q,
         k,

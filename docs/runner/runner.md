@@ -96,11 +96,11 @@ Individual model classes that inherit from `xFuserModel`:
 | FLUX.2 | `FLUX.2-dev`, `black-forest-labs/FLUX.2-dev` |
 | FLUX.2-klein | `FLUX.2-klein-9B`, `black-forest-labs/FLUX.2-klein-9B`, `FLUX.2-klein-4B`, `black-forest-labs/FLUX.2-klein-4B` |
 | HunyuanVideo | `HunyuanVideo`, `tencent/HunyuanVideo` |
-| HunyuanVideo-1.5 | `Hunyuanvideo-1.5`, `tencent/HunyuanVideo-1.5`, `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v`, `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v`, `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v` |
+| HunyuanVideo-1.5 | `Hunyuanvideo-1.5`, `tencent/HunyuanVideo-1.5` (both load the 720p checkpoint for `--task`), `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v`, `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v`, `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v`, `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v` (each repo id loads that checkpoint and must match `--task`) |
 | HunyuanVideo-1.5 Distilled | `Hunyuanvideo-1.5-Distilled`, `tencent/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled`, `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled` |
 | HunyuanVideo-1.5 Sparse | `Hunyuanvideo-1.5-Sparse`, `tencent/HunyuanVideo-1.5-Sparse`, `tencent/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled_sparse` |
-| Ideogram 4 | `Ideogram-4`, `ideogram-ai/ideogram-v4`, `ideogram-ai/ideogram-4-nf4`, `ideogram-ai/ideogram-4-fp8` |
-| Ideogram 4 Diffusers | `ideogram-ai/ideogram-4-nf4-diffusers`, `CalamitousFelicitousness/Ideogram-4-bf16-Diffusers` |
+| Ideogram 4 | `Ideogram-4`, `ideogram-ai/ideogram-v4`, `ideogram-ai/ideogram-4-fp8` (all load the FP8 checkpoint) |
+| Ideogram 4 Diffusers (BF16) | `CalamitousFelicitousness/Ideogram-4-bf16-Diffusers` |
 | Krea2-Raw | `krea/krea-2-raw`, `krea/Krea-2-Raw`, `Krea-2-Raw` |
 | Krea2-Turbo | `krea/krea-2-turbo`, `krea/Krea-2-Turbo`, `Krea-2-Turbo` |
 | LingBot-Video-Dense | `LingBot-Video-Dense`, `robbyant/lingbot-video-dense-1.3b` |

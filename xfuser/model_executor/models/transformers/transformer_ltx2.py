@@ -55,7 +55,9 @@ class xFuserLTX2PerturbedAttnProcessor:
         if self.gather_kv:
             encoder_hidden_states = get_sp_group().all_gather(encoder_hidden_states, dim=1)
             key_rotary_emb = [x.contiguous() for x in key_rotary_emb]
-            key_rotary_emb = [get_sp_group().all_gather(x, dim=2) for x in key_rotary_emb]
+            # Tokens sit second to last in both RoPE layouts: interleaved
+            # cos/sin are [B, S, D], split ones [B, H, S, D // 2].
+            key_rotary_emb = [get_sp_group().all_gather(x, dim=-2) for x in key_rotary_emb]
 
         if isinstance(attention_mask, AttentionMaskWithMeta):
             attn_kw = {
@@ -157,7 +159,9 @@ class xFuserLTX2AudioVideoAttnProcessor:
         if self.gather_kv:
             encoder_hidden_states = get_sp_group().all_gather(encoder_hidden_states, dim=1)
             key_rotary_emb = [x.contiguous() for x in key_rotary_emb]
-            key_rotary_emb = [get_sp_group().all_gather(x, dim=2) for x in key_rotary_emb]
+            # Tokens sit second to last in both RoPE layouts: interleaved
+            # cos/sin are [B, S, D], split ones [B, H, S, D // 2].
+            key_rotary_emb = [get_sp_group().all_gather(x, dim=-2) for x in key_rotary_emb]
 
         if isinstance(attention_mask, AttentionMaskWithMeta):
             attn_kw = {

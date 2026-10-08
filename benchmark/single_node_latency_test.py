@@ -29,14 +29,12 @@ def run_command(cmd):
 def main():
     parser = argparse.ArgumentParser(description="Run benchmark tests")
     parser.add_argument("--model_id", type=str, required=True, help="Path to the model")
-    parser.add_argument(
-        "--sizes", type=int, nargs="+", required=True, help="List of sizes to test"
-    )
+    parser.add_argument("--sizes", type=int, nargs="+", required=True, help="List of sizes to test")
     parser.add_argument(
         "--script",
         type=str,
         required=True,
-        help="Script to run (e.g., tests/test_pixartalpha.py)",
+        help="Script to run (e.g., examples/pixartalpha_example.py)",
     )
     parser.add_argument("--n_gpus", type=int, default=8, help="Number of GPUs to use")
     parser.add_argument(
@@ -62,12 +60,9 @@ def main():
     N_GPUS = args.n_gpus
     NOT_USE_CFG = args.no_use_cfg_parallel
     STEPS = args.num_inference_steps
-    RESOLUTION_BINNING = (
-        "--no_use_resolution_binning" if args.no_use_resolution_binning else ""
-    )
+    RESOLUTION_BINNING = "--no_use_resolution_binning" if args.no_use_resolution_binning else ""
 
     visited = set()
-    dp_degree = 1
     cfg_degree_list = [1] if NOT_USE_CFG else [1, 2]
     for size in SIZES:
         for cfg_degree in cfg_degree_list:
@@ -78,7 +73,6 @@ def main():
                 for i in range(int(math.log2(sp_degree)) + 1):
                     ulysses_degree = int(math.pow(2, i))
                     ring_degree = sp_degree // ulysses_degree
-                    last_num_patch = None
                     for num_pipeline_patches in [
                         max(1, pp_degree // 2),
                         pp_degree,
@@ -86,9 +80,7 @@ def main():
                     ]:
                         for warmup_step in [0, 1, 2]:
                             # pp_degree = 1, no warmup and num_pipeline_patches
-                            if pp_degree == 1 and (
-                                warmup_step > 0 or num_pipeline_patches > 1
-                            ):
+                            if pp_degree == 1 and (warmup_step > 0 or num_pipeline_patches > 1):
                                 continue
 
                             if (
@@ -111,7 +103,6 @@ def main():
                                     warmup_step,
                                 )
                             )
-                            # if num_pipeline_patches != last_num_patch:
                             if cfg_degree == 2:
                                 print(
                                     f"Running test for size {size}, split batch, warmup_step {warmup_step}, pp_degree {pp_degree}, ulysses_degree {ulysses_degree}, ring_degree {ring_degree}, num_pipeline_patches {num_pipeline_patches}",

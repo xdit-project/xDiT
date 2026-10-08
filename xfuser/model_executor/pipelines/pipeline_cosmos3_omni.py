@@ -6,8 +6,6 @@ the CFG group and combined before the scheduler step.
 """
 
 import copy
-import os
-from typing import Any, Callable, Optional, Union
 
 import torch
 from diffusers.callbacks import PipelineCallback, MultiPipelineCallbacks
@@ -31,7 +29,6 @@ def _make_xfuser_cosmos3_pipeline_class():
     )
 
     class xFuserCosmos3OmniPipeline(Cosmos3OmniPipeline):
-
         @torch.no_grad()
         def __call__(self, *args, **kwargs):
             try:
@@ -93,14 +90,23 @@ def _make_xfuser_cosmos3_pipeline_class():
                     width = 1280
 
             self.check_inputs(
-                prompt, negative_prompt, image, height, width, num_frames,
-                guidance_scale, enable_sound, callback_on_step_end_tensor_inputs, action,
+                prompt,
+                negative_prompt,
+                image,
+                height,
+                width,
+                num_frames,
+                guidance_scale,
+                enable_sound,
+                callback_on_step_end_tensor_inputs,
+                action,
             )
 
             action_mode = action.mode if action is not None else None
             if action is not None:
                 from diffusers.video_processor import VideoProcessor
                 from diffusers.pipelines.cosmos.pipeline_cosmos3_omni import _ACTION_RESOLUTION_BINS
+
                 num_frames = action.chunk_size + 1
                 conditioning_clip = [action.image] if action.image is not None else action.video
                 probe = self.video_processor.preprocess_video(conditioning_clip)
@@ -122,7 +128,11 @@ def _make_xfuser_cosmos3_pipeline_class():
             device = self._get_execution_device()
             dtype = self.transformer.dtype
 
-            if enable_safety_check and CosmosSafetyChecker is not None and isinstance(getattr(self, 'safety_checker', None), CosmosSafetyChecker):
+            if (
+                enable_safety_check
+                and CosmosSafetyChecker is not None
+                and isinstance(getattr(self, "safety_checker", None), CosmosSafetyChecker)
+            ):
                 self.safety_checker.to(device)
                 try:
                     if not self.safety_checker.check_text_safety(prompt):
@@ -132,8 +142,13 @@ def _make_xfuser_cosmos3_pipeline_class():
 
             # Tokenize
             cond_input_ids, uncond_input_ids = self.tokenize_prompt(
-                prompt, negative_prompt, num_frames=num_frames, height=height,
-                width=width, fps=fps, use_system_prompt=use_system_prompt,
+                prompt,
+                negative_prompt,
+                num_frames=num_frames,
+                height=height,
+                width=width,
+                fps=fps,
+                use_system_prompt=use_system_prompt,
                 add_resolution_template=add_resolution_template,
                 add_duration_template=add_duration_template,
                 action_mode=action_mode,
@@ -150,28 +165,46 @@ def _make_xfuser_cosmos3_pipeline_class():
 
             # Prepare latents (same on both ranks)
             (
-                latents, sound_latents, action_latents, fps_vision, fps_sound,
-                vision_condition_mask, sound_condition_mask, action_condition_mask,
-                action_domain_id, action_image_size, raw_action_dim_resolved,
+                latents,
+                sound_latents,
+                action_latents,
+                fps_vision,
+                fps_sound,
+                vision_condition_mask,
+                sound_condition_mask,
+                action_condition_mask,
+                action_domain_id,
+                action_image_size,
+                raw_action_dim_resolved,
                 action_condition_frame_indexes,
             ) = self.prepare_latents(
-                image=image, num_frames=num_frames, height=height, width=width,
-                fps=fps, latents=latents, sound_latents=sound_latents,
-                action_latents=action_latents, generator=generator,
-                device=device, dtype=dtype, enable_sound=enable_sound, action=action,
+                image=image,
+                num_frames=num_frames,
+                height=height,
+                width=width,
+                fps=fps,
+                latents=latents,
+                sound_latents=sound_latents,
+                action_latents=action_latents,
+                generator=generator,
+                device=device,
+                dtype=dtype,
+                enable_sound=enable_sound,
+                action=action,
             )
-            vision_condition_indexes = torch.nonzero(
-                vision_condition_mask[:, 0, 0] > 0, as_tuple=False
-            ).flatten()
+            vision_condition_indexes = torch.nonzero(vision_condition_mask[:, 0, 0] > 0, as_tuple=False).flatten()
             vision_condition_indexes = [int(idx.item()) for idx in vision_condition_indexes]
             has_image_condition = bool(vision_condition_indexes)
 
             # Prepare vision/sound segments (each rank uses its own text segment offset)
             my_vision_segment = self._prepare_vision_segment(
-                input_vision_tokens=latents, has_image_condition=has_image_condition,
+                input_vision_tokens=latents,
+                has_image_condition=has_image_condition,
                 mrope_offset=my_text_segment["vision_start_temporal_offset"],
-                vision_fps=fps_vision, curr=my_text_segment["und_len"],
-                device=device, condition_frame_indexes=vision_condition_indexes,
+                vision_fps=fps_vision,
+                curr=my_text_segment["und_len"],
+                device=device,
+                condition_frame_indexes=vision_condition_indexes,
             )
             my_sound_segment = {}
             if sound_latents is not None:
@@ -189,7 +222,9 @@ def _make_xfuser_cosmos3_pipeline_class():
                     condition_frame_indexes=action_condition_frame_indexes,
                     mrope_offset=my_text_segment["vision_start_temporal_offset"],
                     action_fps=fps_vision,
-                    curr=my_text_segment["und_len"] + my_vision_segment["num_vision_tokens"] + my_sound_segment.get("sound_len", 0),
+                    curr=my_text_segment["und_len"]
+                    + my_vision_segment["num_vision_tokens"]
+                    + my_sound_segment.get("sound_len", 0),
                     device=device,
                 )
 
@@ -200,12 +235,17 @@ def _make_xfuser_cosmos3_pipeline_class():
                 mrope_segments.append(my_action_segment["action_mrope_ids"])
 
             my_packed_static = {
-                **my_text_segment, **my_vision_segment, **my_sound_segment, **my_action_segment,
+                **my_text_segment,
+                **my_vision_segment,
+                **my_sound_segment,
+                **my_action_segment,
                 "position_ids": torch.cat(mrope_segments, dim=1),
-                "sequence_length": (my_text_segment["und_len"]
+                "sequence_length": (
+                    my_text_segment["und_len"]
                     + my_vision_segment["num_vision_tokens"]
                     + my_sound_segment.get("sound_len", 0)
-                    + my_action_segment.get("action_len", 0)),
+                    + my_action_segment.get("action_len", 0)
+                ),
             }
 
             num_noisy_vision_tokens = my_vision_segment["num_noisy_vision_tokens"]
@@ -231,10 +271,16 @@ def _make_xfuser_cosmos3_pipeline_class():
 
                     vision_tokens = latents.to(device=device, dtype=dtype)
                     sound_tokens = sound_latents.to(device=device, dtype=dtype) if sound_latents is not None else None
-                    action_tokens = action_latents.to(device=device, dtype=dtype) if action_latents is not None else None
+                    action_tokens = (
+                        action_latents.to(device=device, dtype=dtype) if action_latents is not None else None
+                    )
                     vision_timesteps_t = torch.full((num_noisy_vision_tokens,), timestep, device=device)
-                    sound_timesteps_t = torch.full((sound_len,), timestep, device=device) if sound_tokens is not None else None
-                    action_timesteps_t = torch.full((action_noisy_len,), timestep, device=device) if action_tokens is not None else None
+                    sound_timesteps_t = (
+                        torch.full((sound_len,), timestep, device=device) if sound_tokens is not None else None
+                    )
+                    action_timesteps_t = (
+                        torch.full((action_noisy_len,), timestep, device=device) if action_tokens is not None else None
+                    )
 
                     # Each rank runs ONE transformer pass (cond or uncond)
                     preds_vision, preds_sound, preds_action = self.transformer(
@@ -262,9 +308,11 @@ def _make_xfuser_cosmos3_pipeline_class():
                         action_timesteps=action_timesteps_t,
                         action_noisy_frame_indexes=my_packed_static.get("action_noisy_frame_indexes"),
                         action_domain_ids=[action_domain_id] if action_domain_id is not None else None,
+                        return_dict=False,
                     )
                     my_v_vision, my_v_sound, my_v_action = self._mask_velocity_predictions(
-                        preds_vision, preds_sound,
+                        preds_vision,
+                        preds_sound,
                         vision_condition_mask=[vision_condition_mask],
                         sound_condition_mask=[sound_condition_mask] if sound_condition_mask is not None else None,
                         preds_action=preds_action,
@@ -274,9 +322,7 @@ def _make_xfuser_cosmos3_pipeline_class():
 
                     # Gather velocity predictions across CFG ranks
                     # Rank 0 = uncond, Rank 1 = cond
-                    uncond_v_vision, cond_v_vision = get_cfg_group().all_gather(
-                        my_v_vision, separate_tensors=True
-                    )
+                    uncond_v_vision, cond_v_vision = get_cfg_group().all_gather(my_v_vision, separate_tensors=True)
                     velocity_vision = uncond_v_vision + guidance_scale * (cond_v_vision - uncond_v_vision)
 
                     latents = self.scheduler.step(
@@ -284,21 +330,18 @@ def _make_xfuser_cosmos3_pipeline_class():
                     )[0].squeeze(0)
 
                     if sound_scheduler is not None and my_v_sound is not None:
-                        uncond_v_sound, cond_v_sound = get_cfg_group().all_gather(
-                            my_v_sound, separate_tensors=True
-                        )
+                        uncond_v_sound, cond_v_sound = get_cfg_group().all_gather(my_v_sound, separate_tensors=True)
                         velocity_sound = uncond_v_sound + guidance_scale * (cond_v_sound - uncond_v_sound)
                         sound_latents = sound_scheduler.step(
                             velocity_sound.unsqueeze(0), t, sound_latents.unsqueeze(0), return_dict=False
                         )[0].squeeze(0)
 
                     has_noisy_action = (
-                        action_condition_mask is not None and action_condition_mask.sum() < action_condition_mask.numel()
+                        action_condition_mask is not None
+                        and action_condition_mask.sum() < action_condition_mask.numel()
                     )
                     if action_scheduler is not None and has_noisy_action and my_v_action is not None:
-                        uncond_v_action, cond_v_action = get_cfg_group().all_gather(
-                            my_v_action, separate_tensors=True
-                        )
+                        uncond_v_action, cond_v_action = get_cfg_group().all_gather(my_v_action, separate_tensors=True)
                         velocity_action = uncond_v_action + guidance_scale * (cond_v_action - uncond_v_action)
                         action_latents = action_scheduler.step(
                             velocity_action.unsqueeze(0), t, action_latents.unsqueeze(0), return_dict=False
@@ -353,6 +396,7 @@ def _make_xfuser_cosmos3_pipeline_class():
 
 
 _pipeline_cls = None
+
 
 def get_cosmos3_pipeline_class():
     global _pipeline_cls

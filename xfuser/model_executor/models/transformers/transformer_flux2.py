@@ -1,8 +1,10 @@
+import inspect
 import torch
 from typing import Optional, Tuple
 from diffusers.models.transformers.transformer_flux2 import (
     Flux2Attention,
     Flux2AttnProcessor,
+    Flux2Modulation,
     Flux2Transformer2DModel,
     Flux2ParallelSelfAttention,
     Flux2ParallelSelfAttnProcessor,
@@ -53,7 +55,6 @@ from xfuser.model_executor.layers import (
 )
 from xfuser.model_executor.models.transformers.transformer_flux import (
     flux_attn_modules,
-    xFuserFluxAttentionWrapper,
     _split_rotary_emb,
 )
 from xfuser.model_executor.layers.fused_qk_rope_flydsl import (
@@ -70,15 +71,19 @@ from xfuser.model_executor.models.transformers.base_transformer import (
 env_info = PACKAGES_CHECKER.get_packages_info()
 HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
 
+# diffusers 0.37 moved the modulation split into the blocks: the modulation layers
+# return one tensor, which blocks take as temb_mod_img / temb_mod_txt / temb_mod. In
+# 0.36 the layers returned the split parameter sets and blocks took them as
+# temb_mod_params_img / temb_mod_params_txt / temb_mod_params. The PipeFusion wrapper
+# calls the blocks itself, so it has to follow whichever API is installed.
+_BLOCKS_SPLIT_MODULATION = hasattr(Flux2Modulation, "split")
+
 
 @xFuserAttentionProcessorRegister.register(Flux2AttnProcessor)
 class xFuserFlux2AttnProcessor(Flux2AttnProcessor):
-
     def __init__(self):
         super().__init__()
-        self.use_long_ctx_attn_kvcache = (
-            HAS_LONG_CTX_ATTN and _SP and get_sequence_parallel_world_size() > 1
-        )
+        self.use_long_ctx_attn_kvcache = HAS_LONG_CTX_ATTN and _SP and get_sequence_parallel_world_size() > 1
 
     def __call__(
         self,
@@ -88,8 +93,8 @@ class xFuserFlux2AttnProcessor(Flux2AttnProcessor):
         attention_mask: Optional[torch.Tensor] = None,
         image_rotary_emb: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        query, key, value, encoder_query, encoder_key, encoder_value = (
-            _get_qkv_projections(attn, hidden_states, encoder_hidden_states)
+        query, key, value, encoder_query, encoder_key, encoder_value = _get_qkv_projections(
+            attn, hidden_states, encoder_hidden_states
         )
 
         query = query.unflatten(-1, (attn.heads, -1))
@@ -110,9 +115,7 @@ class xFuserFlux2AttnProcessor(Flux2AttnProcessor):
                 # per stream.  RoPE is per-token, so applying it before the
                 # joint concat over dim=1 is mathematically identical to
                 # applying it after.  Mirrors xFuserFluxAttnProcessor.
-                txt_rope, img_rope = _split_rotary_emb(
-                    image_rotary_emb, num_encoder_tokens, num_query_tokens
-                )
+                txt_rope, img_rope = _split_rotary_emb(image_rotary_emb, num_encoder_tokens, num_query_tokens)
                 encoder_query, encoder_key = flydsl_fused_qk_norm_rope(
                     encoder_query,
                     encoder_key,
@@ -120,9 +123,7 @@ class xFuserFlux2AttnProcessor(Flux2AttnProcessor):
                     attn.norm_added_k,
                     txt_rope,
                 )
-                query, key = flydsl_fused_qk_norm_rope(
-                    query, key, attn.norm_q, attn.norm_k, img_rope
-                )
+                query, key = flydsl_fused_qk_norm_rope(query, key, attn.norm_q, attn.norm_k, img_rope)
 
                 query = torch.cat([encoder_query, query], dim=1)
                 key = torch.cat([encoder_key, key], dim=1)
@@ -130,9 +131,7 @@ class xFuserFlux2AttnProcessor(Flux2AttnProcessor):
 
                 if txt_rope is None and image_rotary_emb is not None:
                     # tables could not be split -> apply RoPE on the joint stream
-                    query, key = flydsl_fused_qk_norm_rope(
-                        query, key, None, None, image_rotary_emb
-                    )
+                    query, key = flydsl_fused_qk_norm_rope(query, key, None, None, image_rotary_emb)
             else:
                 # No AITER: the original unfused diffusers path, unchanged.
                 query = attn.norm_q(query)
@@ -149,9 +148,7 @@ class xFuserFlux2AttnProcessor(Flux2AttnProcessor):
                     key = apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
         else:
             if _HAS_FLYDSL:
-                query, key = flydsl_fused_qk_norm_rope(
-                    query, key, attn.norm_q, attn.norm_k, image_rotary_emb
-                )
+                query, key = flydsl_fused_qk_norm_rope(query, key, attn.norm_q, attn.norm_k, image_rotary_emb)
             else:
                 query = attn.norm_q(query)
                 key = attn.norm_k(key)
@@ -162,17 +159,9 @@ class xFuserFlux2AttnProcessor(Flux2AttnProcessor):
         # PipeFusion stale-KV: cache image KV per patch, keep encoder (text) KV fresh.
         # Mirrors xFuserFluxAttnProcessor.
         distri_cache_updated = False
-        if (
-            get_runtime_state().num_pipeline_patch > 1
-            and not self.use_long_ctx_attn_kvcache
-            and num_encoder_tokens > 0
-        ):
-            encoder_key, key = key.split(
-                [num_encoder_tokens, key.shape[1] - num_encoder_tokens], dim=1
-            )
-            encoder_value, value = value.split(
-                [num_encoder_tokens, value.shape[1] - num_encoder_tokens], dim=1
-            )
+        if get_runtime_state().num_pipeline_patch > 1 and not self.use_long_ctx_attn_kvcache and num_encoder_tokens > 0:
+            encoder_key, key = key.split([num_encoder_tokens, key.shape[1] - num_encoder_tokens], dim=1)
+            encoder_value, value = value.split([num_encoder_tokens, value.shape[1] - num_encoder_tokens], dim=1)
             key, value = get_cache_manager().update_and_get_kv_cache(
                 new_kv=[key, value],
                 layer=attn,
@@ -194,15 +183,9 @@ class xFuserFlux2AttnProcessor(Flux2AttnProcessor):
             if get_runtime_state().split_text_embed_in_sp:
                 joint_q = joint_k = joint_v = None
             else:
-                joint_q, query = query.split(
-                    [num_encoder_tokens, query.shape[2] - num_encoder_tokens], dim=2
-                )
-                joint_k, key = key.split(
-                    [num_encoder_tokens, key.shape[2] - num_encoder_tokens], dim=2
-                )
-                joint_v, value = value.split(
-                    [num_encoder_tokens, value.shape[2] - num_encoder_tokens], dim=2
-                )
+                joint_q, query = query.split([num_encoder_tokens, query.shape[2] - num_encoder_tokens], dim=2)
+                joint_k, key = key.split([num_encoder_tokens, key.shape[2] - num_encoder_tokens], dim=2)
+                joint_v, value = value.split([num_encoder_tokens, value.shape[2] - num_encoder_tokens], dim=2)
             hidden_states = USP(
                 query,
                 key,
@@ -215,6 +198,10 @@ class xFuserFlux2AttnProcessor(Flux2AttnProcessor):
                 joint_strategy="front",
                 attn_layer=attn,
             )
+        elif distri_cache_updated:
+            # The stale-KV cache was updated above. Passing the module as attn_layer
+            # would make USP update it again with the joint text+image KV.
+            hidden_states = USP(query, key, value, head_balance_layer=attn)
         else:
             hidden_states = USP(query, key, value, attn_layer=attn)
 
@@ -245,12 +232,9 @@ class xFuserFlux2AttnProcessor(Flux2AttnProcessor):
 
 @xFuserAttentionProcessorRegister.register(Flux2ParallelSelfAttnProcessor)
 class xFuserFlux2ParallelSelfAttnProcessor(Flux2ParallelSelfAttnProcessor):
-
     def __init__(self):
         super().__init__()
-        self.use_long_ctx_attn_kvcache = (
-            HAS_LONG_CTX_ATTN and _SP and get_sequence_parallel_world_size() > 1
-        )
+        self.use_long_ctx_attn_kvcache = HAS_LONG_CTX_ATTN and _SP and get_sequence_parallel_world_size() > 1
 
     def __call__(
         self,
@@ -282,9 +266,7 @@ class xFuserFlux2ParallelSelfAttnProcessor(Flux2ParallelSelfAttnProcessor):
             # the joint table covering exactly it.  query/key are non-contiguous
             # chunks of the fused to_qkv_mlp_proj; the kernel reads them in
             # place, so do NOT make them contiguous first.
-            query, key = flydsl_fused_qk_norm_rope(
-                query, key, attn.norm_q, attn.norm_k, image_rotary_emb
-            )
+            query, key = flydsl_fused_qk_norm_rope(query, key, attn.norm_q, attn.norm_k, image_rotary_emb)
         else:
             # No AITER: the original unfused diffusers path, unchanged.
             query = attn.norm_q(query)
@@ -299,17 +281,10 @@ class xFuserFlux2ParallelSelfAttnProcessor(Flux2ParallelSelfAttnProcessor):
         # num_txt_tokens is passed from the transformer wrapper via joint_attention_kwargs.
         num_txt_tokens = kwargs.get("num_txt_tokens", 0)
         distri_cache_updated = False
-        if (
-            get_runtime_state().num_pipeline_patch > 1
-            and not self.use_long_ctx_attn_kvcache
-        ):
+        if get_runtime_state().num_pipeline_patch > 1 and not self.use_long_ctx_attn_kvcache:
             if num_txt_tokens > 0:
-                text_key, key = key.split(
-                    [num_txt_tokens, key.shape[1] - num_txt_tokens], dim=1
-                )
-                text_value, value = value.split(
-                    [num_txt_tokens, value.shape[1] - num_txt_tokens], dim=1
-                )
+                text_key, key = key.split([num_txt_tokens, key.shape[1] - num_txt_tokens], dim=1)
+                text_value, value = value.split([num_txt_tokens, value.shape[1] - num_txt_tokens], dim=1)
                 key, value = get_cache_manager().update_and_get_kv_cache(
                     new_kv=[key, value],
                     layer=attn,
@@ -332,21 +307,11 @@ class xFuserFlux2ParallelSelfAttnProcessor(Flux2ParallelSelfAttnProcessor):
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
 
-        if (
-            get_runtime_state().num_pipeline_patch > 1
-            and not distri_cache_updated
-            and num_txt_tokens > 0
-        ):
+        if get_runtime_state().num_pipeline_patch > 1 and not distri_cache_updated and num_txt_tokens > 0:
             # SP+PP hybrid: split text/image QKV, pass attn_layer for KV buffer
-            joint_q, query = query.split(
-                [num_txt_tokens, query.shape[2] - num_txt_tokens], dim=2
-            )
-            joint_k, key = key.split(
-                [num_txt_tokens, key.shape[2] - num_txt_tokens], dim=2
-            )
-            joint_v, value = value.split(
-                [num_txt_tokens, value.shape[2] - num_txt_tokens], dim=2
-            )
+            joint_q, query = query.split([num_txt_tokens, query.shape[2] - num_txt_tokens], dim=2)
+            joint_k, key = key.split([num_txt_tokens, key.shape[2] - num_txt_tokens], dim=2)
+            joint_v, value = value.split([num_txt_tokens, value.shape[2] - num_txt_tokens], dim=2)
             hidden_states = USP(
                 query,
                 key,
@@ -360,10 +325,11 @@ class xFuserFlux2ParallelSelfAttnProcessor(Flux2ParallelSelfAttnProcessor):
                 attn_layer=attn,
                 combine_qkv_a2a=True,
             )
+        elif distri_cache_updated:
+            # The stale-KV cache was updated above; see xFuserFlux2AttnProcessor.
+            hidden_states = USP(query, key, value, combine_qkv_a2a=True, head_balance_layer=attn)
         else:
-            hidden_states = USP(
-                query, key, value, combine_qkv_a2a=True, attn_layer=attn
-            )
+            hidden_states = USP(query, key, value, combine_qkv_a2a=True, attn_layer=attn)
 
         # Transpose back to original shape
         hidden_states = hidden_states.transpose(1, 2)
@@ -392,9 +358,7 @@ class xFuserFlux2AttentionWrapper(xFuserAttentionBaseWrapper):
 
     def __init__(self, attention: Flux2Attention):
         xFuserLayerBaseWrapper.__init__(self, module=attention)
-        self.processor = xFuserAttentionProcessorRegister.get_processor(
-            attention.processor
-        )()
+        self.processor = xFuserAttentionProcessorRegister.get_processor(attention.processor)()
 
     def forward(
         self,
@@ -425,9 +389,7 @@ class xFuserFlux2ParallelSelfAttention(xFuserAttentionBaseWrapper):
 
     def __init__(self, attention: Flux2ParallelSelfAttention):
         xFuserLayerBaseWrapper.__init__(self, module=attention)
-        self.processor = xFuserAttentionProcessorRegister.get_processor(
-            attention.processor
-        )()
+        self.processor = xFuserAttentionProcessorRegister.get_processor(attention.processor)()
 
     def forward(
         self,
@@ -436,13 +398,20 @@ class xFuserFlux2ParallelSelfAttention(xFuserAttentionBaseWrapper):
         image_rotary_emb: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
-        return self.processor(
-            self, hidden_states, attention_mask, image_rotary_emb, **kwargs
-        )
+        return self.processor(self, hidden_states, attention_mask, image_rotary_emb, **kwargs)
+
+
+def _accepts_guidance_embeds() -> bool:
+    """Whether the installed Flux2Transformer2DModel takes ``guidance_embeds``.
+
+    diffusers added it in 0.37, together with FLUX.2-klein, whose transformers have no
+    guidance embedder. Earlier releases always build one, as FLUX.2-dev needs, and
+    reject the argument.
+    """
+    return "guidance_embeds" in inspect.signature(Flux2Transformer2DModel.__init__).parameters
 
 
 class xFuserFlux2Transformer2DWrapper(Flux2Transformer2DModel):
-
     def __init__(
         self,
         patch_size: int = 1,
@@ -460,6 +429,12 @@ class xFuserFlux2Transformer2DWrapper(Flux2Transformer2DModel):
         eps: float = 1e-6,
         guidance_embeds: bool = True,
     ):
+        # Where the argument is not accepted the embedder is always built, so leave it
+        # out. A request to drop it is still passed on, and fails there, rather than
+        # silently building the wrong model.
+        guidance_kwargs = {"guidance_embeds": guidance_embeds}
+        if guidance_embeds and not _accepts_guidance_embeds():
+            guidance_kwargs = {}
         super().__init__(
             patch_size=patch_size,
             in_channels=in_channels,
@@ -474,7 +449,7 @@ class xFuserFlux2Transformer2DWrapper(Flux2Transformer2DModel):
             axes_dims_rope=axes_dims_rope,
             rope_theta=rope_theta,
             eps=eps,
-            guidance_embeds=guidance_embeds,
+            **guidance_kwargs,
         )
 
         for block in self.transformer_blocks:
@@ -483,9 +458,7 @@ class xFuserFlux2Transformer2DWrapper(Flux2Transformer2DModel):
             block.attn.processor = xFuserFlux2ParallelSelfAttnProcessor()
         register_fp8_comms_eligible_modules(self, flux_attn_modules(self))
 
-    def _pad_to_sp_divisible(
-        self, tensor: torch.Tensor, padding_length: int, dim: int
-    ) -> torch.Tensor:
+    def _pad_to_sp_divisible(self, tensor: torch.Tensor, padding_length: int, dim: int) -> torch.Tensor:
         padding = torch.zeros(
             *tensor.shape[:dim],
             padding_length,
@@ -506,44 +479,31 @@ class xFuserFlux2Transformer2DWrapper(Flux2Transformer2DModel):
         txt_ids: torch.Tensor = None,
         **kwargs,
     ):
-
         sp_world_size = get_sequence_parallel_world_size()
         sequence_length = hidden_states.shape[1]
-        padding_length = (
-            sp_world_size - (sequence_length % sp_world_size)
-        ) % sp_world_size
+        padding_length = (sp_world_size - (sequence_length % sp_world_size)) % sp_world_size
         if padding_length > 0:
-            hidden_states = self._pad_to_sp_divisible(
-                hidden_states, padding_length, dim=1
-            )
+            hidden_states = self._pad_to_sp_divisible(hidden_states, padding_length, dim=1)
             img_ids = self._pad_to_sp_divisible(img_ids, padding_length, dim=1)
 
-        if (
-            isinstance(timestep, torch.Tensor)
-            and timestep.ndim != 0
-            and timestep.shape[0] == hidden_states.shape[0]
-        ):
-            timestep = torch.chunk(
-                timestep, get_classifier_free_guidance_world_size(), dim=0
-            )[get_classifier_free_guidance_rank()]
-        hidden_states = torch.chunk(
-            hidden_states, get_classifier_free_guidance_world_size(), dim=0
-        )[get_classifier_free_guidance_rank()]
-        hidden_states = torch.chunk(
-            hidden_states, get_sequence_parallel_world_size(), dim=-2
-        )[get_sequence_parallel_rank()]
-        encoder_hidden_states = torch.chunk(
-            encoder_hidden_states, get_classifier_free_guidance_world_size(), dim=0
-        )[get_classifier_free_guidance_rank()]
-        encoder_hidden_states = torch.chunk(
-            encoder_hidden_states, get_sequence_parallel_world_size(), dim=-2
-        )[get_sequence_parallel_rank()]
-        img_ids = torch.chunk(img_ids, get_sequence_parallel_world_size(), dim=-2)[
+        if isinstance(timestep, torch.Tensor) and timestep.ndim != 0 and timestep.shape[0] == hidden_states.shape[0]:
+            timestep = torch.chunk(timestep, get_classifier_free_guidance_world_size(), dim=0)[
+                get_classifier_free_guidance_rank()
+            ]
+        hidden_states = torch.chunk(hidden_states, get_classifier_free_guidance_world_size(), dim=0)[
+            get_classifier_free_guidance_rank()
+        ]
+        hidden_states = torch.chunk(hidden_states, get_sequence_parallel_world_size(), dim=-2)[
             get_sequence_parallel_rank()
         ]
-        txt_ids = torch.chunk(txt_ids, get_sequence_parallel_world_size(), dim=-2)[
+        encoder_hidden_states = torch.chunk(encoder_hidden_states, get_classifier_free_guidance_world_size(), dim=0)[
+            get_classifier_free_guidance_rank()
+        ]
+        encoder_hidden_states = torch.chunk(encoder_hidden_states, get_sequence_parallel_world_size(), dim=-2)[
             get_sequence_parallel_rank()
         ]
+        img_ids = torch.chunk(img_ids, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
+        txt_ids = torch.chunk(txt_ids, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
 
         output = super().forward(
             hidden_states,
@@ -605,6 +565,19 @@ class xFuserFlux2Transformer2DModelWrapper(xFuserTransformerBaseWrapper):
         double_stream_mod_img = self.double_stream_modulation_img(temb)
         double_stream_mod_txt = self.double_stream_modulation_txt(temb)
         single_stream_mod = self.single_stream_modulation(temb)
+        if _BLOCKS_SPLIT_MODULATION:
+            double_mod_kwargs = {
+                "temb_mod_img": double_stream_mod_img,
+                "temb_mod_txt": double_stream_mod_txt,
+            }
+            single_mod_kwargs = {"temb_mod": single_stream_mod}
+        else:
+            double_mod_kwargs = {
+                "temb_mod_params_img": double_stream_mod_img,
+                "temb_mod_params_txt": double_stream_mod_txt,
+            }
+            # the single-stream layer has one parameter set
+            single_mod_kwargs = {"temb_mod_params": single_stream_mod[0]}
 
         # 2. input projection (first stage only); other stages receive already
         #    embedded streams from the previous stage via P2P.
@@ -635,8 +608,7 @@ class xFuserFlux2Transformer2DModelWrapper(xFuserTransformerBaseWrapper):
             encoder_hidden_states, hidden_states = block(
                 hidden_states=hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
-                temb_mod_img=double_stream_mod_img,
-                temb_mod_txt=double_stream_mod_txt,
+                **double_mod_kwargs,
                 image_rotary_emb=concat_rotary_emb,
                 joint_attention_kwargs=joint_attention_kwargs,
             )
@@ -651,7 +623,7 @@ class xFuserFlux2Transformer2DModelWrapper(xFuserTransformerBaseWrapper):
                 hidden_states = block(
                     hidden_states=hidden_states,
                     encoder_hidden_states=None,
-                    temb_mod=single_stream_mod,
+                    **single_mod_kwargs,
                     image_rotary_emb=concat_rotary_emb,
                     joint_attention_kwargs=single_kwargs,
                 )

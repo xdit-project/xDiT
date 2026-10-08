@@ -62,13 +62,12 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
 
 def _is_hip():
-    has_rocm = torch.version.hip is not None
-    return has_rocm
+    # A ROCm or CUDA build of torch can run with no visible GPU.
+    return torch.version.hip is not None and torch.cuda.is_available()
 
 
 def _is_cuda():
-    has_cuda = torch.version.cuda is not None
-    return has_cuda
+    return torch.version.cuda is not None and torch.cuda.is_available()
 
 
 def _is_musa():

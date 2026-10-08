@@ -1,10 +1,10 @@
-# Example for parallelize new models with USP
-# run with 
+# Example for parallelize new models with CFG parallel
+# run with
 #     torchrun --nproc_per_node=2 \
-#          adding_cogvideox.py <cogvideox-checkpoint-path>
+#          adding_model_cfg.py <cogvideox-checkpoint-path>
 import sys
 import functools
-from typing import List, Optional, Tuple, Union
+from typing import Optional, Tuple, Union
 
 import time
 import torch
@@ -23,6 +23,7 @@ from xfuser.core.distributed import (
 
 from diffusers.utils import export_to_video
 
+
 def parallelize_transformer(pipe: DiffusionPipeline):
     transformer = pipe.transformer
     original_forward = transformer.forward
@@ -38,10 +39,16 @@ def parallelize_transformer(pipe: DiffusionPipeline):
         image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         **kwargs,
     ):
-        timestep = torch.chunk(timestep, get_classifier_free_guidance_world_size(),dim=0)[get_classifier_free_guidance_rank()]
-        hidden_states = torch.chunk(hidden_states, get_classifier_free_guidance_world_size(),dim=0)[get_classifier_free_guidance_rank()]
-        encoder_hidden_states = torch.chunk(encoder_hidden_states, get_classifier_free_guidance_world_size(),dim=0)[get_classifier_free_guidance_rank()]
-        
+        timestep = torch.chunk(timestep, get_classifier_free_guidance_world_size(), dim=0)[
+            get_classifier_free_guidance_rank()
+        ]
+        hidden_states = torch.chunk(hidden_states, get_classifier_free_guidance_world_size(), dim=0)[
+            get_classifier_free_guidance_rank()
+        ]
+        encoder_hidden_states = torch.chunk(encoder_hidden_states, get_classifier_free_guidance_world_size(), dim=0)[
+            get_classifier_free_guidance_rank()
+        ]
+
         output = original_forward(
             hidden_states,
             encoder_hidden_states,
@@ -61,13 +68,11 @@ def parallelize_transformer(pipe: DiffusionPipeline):
 
     new_forward = new_forward.__get__(transformer)
     transformer.forward = new_forward
-    
+
+
 if __name__ == "__main__":
     dist.init_process_group("nccl")
-    init_distributed_environment(
-        rank=dist.get_rank(), 
-        world_size=dist.get_world_size()
-    )
+    init_distributed_environment(rank=dist.get_rank(), world_size=dist.get_world_size())
     initialize_model_parallel(
         classifier_free_guidance_degree=2,
     )
@@ -82,7 +87,7 @@ if __name__ == "__main__":
     pipe.vae.enable_tiling()
 
     parallelize_transformer(pipe)
-    
+
     torch.cuda.reset_peak_memory_stats()
     start_time = time.time()
 

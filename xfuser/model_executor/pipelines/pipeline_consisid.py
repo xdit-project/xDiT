@@ -59,9 +59,7 @@ def draw_kps(
     try:
         import cv2
     except ImportError:
-        raise ImportError(
-            "cv2 is not installed. Please install it using `apt install libgl1-mesa-glx libglib2.0-0`."
-        )
+        raise ImportError("cv2 is not installed. Please install it using `apt install libgl1-mesa-glx libglib2.0-0`.")
 
     stickwidth = 4
     limbSeq = np.array([[0, 2], [1, 2], [3, 2], [4, 2]])
@@ -100,7 +98,6 @@ def draw_kps(
 
 @xFuserPipelineWrapperRegister.register(ConsisIDPipeline)
 class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
-
     @classmethod
     def from_pretrained(
         cls,
@@ -108,9 +105,7 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
         engine_config: EngineConfig,
         **kwargs,
     ):
-        pipeline = ConsisIDPipeline.from_pretrained(
-            pretrained_model_name_or_path, **kwargs
-        )
+        pipeline = ConsisIDPipeline.from_pretrained(pretrained_model_name_or_path, **kwargs)
         return cls(pipeline, engine_config)
 
     @torch.no_grad()
@@ -243,14 +238,8 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
         if isinstance(callback_on_step_end, (PipelineCallback, MultiPipelineCallbacks)):
             callback_on_step_end_tensor_inputs = callback_on_step_end.tensor_inputs
 
-        height = (
-            height
-            or self.transformer.config.sample_height * self.vae_scale_factor_spatial
-        )
-        width = (
-            width
-            or self.transformer.config.sample_width * self.vae_scale_factor_spatial
-        )
+        height = height or self.transformer.config.sample_height * self.vae_scale_factor_spatial
+        width = width or self.transformer.config.sample_width * self.vae_scale_factor_spatial
         num_frames = num_frames or self.transformer.config.sample_frames
 
         num_videos_per_prompt = 1
@@ -306,14 +295,11 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
             max_sequence_length=max_sequence_length,
             device=device,
         )
-        prompt_embeds = self._process_cfg_split_batch(
-            negative_prompt_embeds, prompt_embeds
-        )
+        if do_classifier_free_guidance:
+            prompt_embeds = self._process_cfg_split_batch(negative_prompt_embeds, prompt_embeds)
 
         # 4. Prepare timesteps
-        timesteps, num_inference_steps = retrieve_timesteps(
-            self.scheduler, num_inference_steps, device
-        )
+        timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device)
         self._num_timesteps = len(timesteps)
 
         # 5. Prepare latents
@@ -321,13 +307,11 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
         kps_cond = kps_cond if is_kps else None
         if kps_cond is not None:
             kps_cond = draw_kps(image, kps_cond)
-            kps_cond = self.video_processor.preprocess(
-                kps_cond, height=height, width=width
-            ).to(device, dtype=prompt_embeds.dtype)
+            kps_cond = self.video_processor.preprocess(kps_cond, height=height, width=width).to(
+                device, dtype=prompt_embeds.dtype
+            )
 
-        image = self.video_processor.preprocess(image, height=height, width=width).to(
-            device, dtype=prompt_embeds.dtype
-        )
+        image = self.video_processor.preprocess(image, height=height, width=width).to(device, dtype=prompt_embeds.dtype)
 
         latent_channels = self.transformer.config.in_channels // 2
         latents, image_latents = self.prepare_latents(
@@ -349,22 +333,16 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
 
         # 7. Create rotary embeds if required
         image_rotary_emb = (
-            self._prepare_rotary_positional_embeddings(
-                height, width, latents.size(1), device
-            )
+            self._prepare_rotary_positional_embeddings(height, width, latents.size(1), device)
             if self.transformer.config.use_rotary_positional_embeddings
             else None
         )
 
         # 8. Denoising loop
-        num_warmup_steps = max(
-            len(timesteps) - num_inference_steps * self.scheduler.order, 0
-        )
+        num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
 
-        latents, image_latents, prompt_embeds, image_rotary_emb = (
-            self._init_sync_pipeline(
-                latents, image_latents, prompt_embeds, image_rotary_emb, latents.size(1)
-            )
+        latents, image_latents, prompt_embeds, image_rotary_emb = self._init_sync_pipeline(
+            latents, image_latents, prompt_embeds, image_rotary_emb, latents.size(1)
         )
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
@@ -376,25 +354,16 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
                     continue
 
                 if do_classifier_free_guidance:
-                    latent_model_input = torch.cat(
-                        [latents] * (2 // get_classifier_free_guidance_world_size())
-                    )
+                    latent_model_input = torch.cat([latents] * (2 // get_classifier_free_guidance_world_size()))
                 else:
                     latent_model_input = latents
-                latent_model_input = self.scheduler.scale_model_input(
-                    latent_model_input, t
-                )
+                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
                 if do_classifier_free_guidance:
-                    latent_image_input = torch.cat(
-                        [image_latents]
-                        * (2 // get_classifier_free_guidance_world_size())
-                    )
+                    latent_image_input = torch.cat([image_latents] * (2 // get_classifier_free_guidance_world_size()))
                 else:
                     latent_image_input = image_latents
-                latent_model_input = torch.cat(
-                    [latent_model_input, latent_image_input], dim=2
-                )
+                latent_model_input = torch.cat([latent_model_input, latent_image_input], dim=2)
 
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latent_model_input.shape[0])
@@ -418,12 +387,7 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
                         (
                             1
                             - math.cos(
-                                math.pi
-                                * (
-                                    (num_inference_steps - timesteps_cpu[i].item())
-                                    / num_inference_steps
-                                )
-                                ** 5.0
+                                math.pi * ((num_inference_steps - timesteps_cpu[i].item()) / num_inference_steps) ** 5.0
                             )
                         )
                         / 2
@@ -435,15 +399,11 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
                         noise_pred_uncond, noise_pred_text = get_cfg_group().all_gather(
                             noise_pred, separate_tensors=True
                         )
-                    noise_pred = noise_pred_uncond + self.guidance_scale * (
-                        noise_pred_text - noise_pred_uncond
-                    )
+                    noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
 
                 # compute the previous noisy sample x_t -> x_t-1
                 if not isinstance(self.scheduler.module, CogVideoXDPMScheduler):
-                    latents = self.scheduler.step(
-                        noise_pred, t, latents, **extra_step_kwargs, return_dict=False
-                    )[0]
+                    latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
                 else:
                     latents, old_pred_original_sample = self.scheduler.step(
                         noise_pred,
@@ -465,13 +425,9 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
 
                     latents = callback_outputs.pop("latents", latents)
                     prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
-                    negative_prompt_embeds = callback_outputs.pop(
-                        "negative_prompt_embeds", negative_prompt_embeds
-                    )
+                    negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
 
-                if i == len(timesteps) - 1 or (
-                    (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
-                ):
+                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
 
         if get_sequence_parallel_world_size() > 1:
@@ -480,9 +436,7 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
         if is_dp_last_group():
             if not output_type == "latent":
                 video = self.decode_latents(latents)
-                video = self.video_processor.postprocess_video(
-                    video=video, output_type=output_type
-                )
+                video = self.video_processor.postprocess_video(video=video, output_type=output_type)
             else:
                 video = latents
         else:
@@ -509,9 +463,9 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
 
         if get_runtime_state().split_text_embed_in_sp:
             if prompt_embeds.shape[-2] % get_sequence_parallel_world_size() == 0:
-                prompt_embeds = torch.chunk(
-                    prompt_embeds, get_sequence_parallel_world_size(), dim=-2
-                )[get_sequence_parallel_rank()]
+                prompt_embeds = torch.chunk(prompt_embeds, get_sequence_parallel_world_size(), dim=-2)[
+                    get_sequence_parallel_rank()
+                ]
             else:
                 get_runtime_state().split_text_embed_in_sp = False
 
@@ -522,9 +476,7 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
                 torch.cat(
                     [
                         image_rotary_emb[0]
-                        .reshape(latents_frames, -1, d)[
-                            :, start_token_idx:end_token_idx
-                        ]
+                        .reshape(latents_frames, -1, d)[:, start_token_idx:end_token_idx]
                         .reshape(-1, d)
                         for start_token_idx, end_token_idx in get_runtime_state().pp_patches_token_start_end_idx_global
                     ],
@@ -533,9 +485,7 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
                 torch.cat(
                     [
                         image_rotary_emb[1]
-                        .reshape(latents_frames, -1, d)[
-                            :, start_token_idx:end_token_idx
-                        ]
+                        .reshape(latents_frames, -1, d)[:, start_token_idx:end_token_idx]
                         .reshape(-1, d)
                         for start_token_idx, end_token_idx in get_runtime_state().pp_patches_token_start_end_idx_global
                     ],

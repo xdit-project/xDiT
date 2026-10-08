@@ -1,5 +1,4 @@
 import torch
-import math
 from typing import Optional, Union, Dict, Any, Tuple
 
 from diffusers.models.transformers.transformer_wan import WanAttnProcessor
@@ -18,9 +17,7 @@ from xfuser.core.distributed import (
     get_sp_group,
     get_runtime_state,
 )
-from xfuser.model_executor.layers.attention_processor import (
-    xFuserAttentionProcessorRegister
-)
+from xfuser.model_executor.layers.attention_processor import xFuserAttentionProcessorRegister
 from xfuser.envs import PACKAGES_CHECKER
 from xfuser.core.vsa_attention import jenga_scheduled_drop_rate
 from xfuser.model_executor.layers.fused_qk_norm_rope_wan_flydsl import (
@@ -31,9 +28,9 @@ from xfuser.model_executor.layers.fused_qk_norm_rope_wan_flydsl import (
 env_info = PACKAGES_CHECKER.get_packages_info()
 HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
 
+
 @xFuserAttentionProcessorRegister.register(WanAttnProcessor)
 class xFuserWanAttnProcessor(WanAttnProcessor):
-
     def __init__(
         self,
         use_ulysses_parallel_attention: bool = True,
@@ -51,7 +48,9 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
         # the I2V image-context sub-call below are dense, so they don't read it.
         self.attention_kwargs = attention_kwargs
 
-    def _get_qkv_projections(self, attn: "WanAttention", hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor):
+    def _get_qkv_projections(
+        self, attn: "WanAttention", hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor
+    ):
         # encoder_hidden_states is only passed for cross-attention
         if encoder_hidden_states is None:
             encoder_hidden_states = hidden_states
@@ -77,7 +76,6 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
             key_img = attn.add_k_proj(encoder_hidden_states_img)
             value_img = attn.add_v_proj(encoder_hidden_states_img)
         return key_img, value_img
-
 
     def __call__(
         self,
@@ -195,8 +193,6 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
 
 
 class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
-
-
     def __init__(
         self,
         patch_size: Tuple[int, ...] = (1, 2, 2),
@@ -218,27 +214,29 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
         attention_kwargs: Optional[Dict[str, Any]] = None,
     ) -> None:
         super().__init__(
-           patch_size,
-           num_attention_heads,
-           attention_head_dim,
-           in_channels,
-           out_channels,
-           text_dim,
-           freq_dim,
-           ffn_dim,
-           num_layers,
-           cross_attn_norm,
-           qk_norm,
-           eps,
-           image_dim,
-           added_kv_proj_dim,
-           rope_max_seq_len,
-           pos_embed_seq_len,
+            patch_size,
+            num_attention_heads,
+            attention_head_dim,
+            in_channels,
+            out_channels,
+            text_dim,
+            freq_dim,
+            ffn_dim,
+            num_layers,
+            cross_attn_norm,
+            qk_norm,
+            eps,
+            image_dim,
+            added_kv_proj_dim,
+            rope_max_seq_len,
+            pos_embed_seq_len,
         )
         self.attention_kwargs = attention_kwargs
         for block in self.blocks:
             block.attn1.processor = xFuserWanAttnProcessor(attention_kwargs=self.attention_kwargs)
-            block.attn2.processor = xFuserWanAttnProcessor(use_ulysses_parallel_attention=False, is_cross_attention=True)
+            block.attn2.processor = xFuserWanAttnProcessor(
+                use_ulysses_parallel_attention=False, is_cross_attention=True
+            )
             # Per-layer head permutation buffer for the Ulysses block-sparse head
             # balancer (read/updated in-place inside USP; identity = no balancing).
             # Registered pre-compile and non-persistent so it stays out of the
@@ -249,25 +247,15 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
                 persistent=False,
             )
         # attn2 is cross-attention over the text encoder: no Ulysses collective.
-        register_fp8_comms_eligible_modules(
-            self, [block.attn1 for block in self.blocks]
-        )
+        register_fp8_comms_eligible_modules(self, [block.attn1 for block in self.blocks])
 
-
-    def _update_vsa_attention_kwargs(
-        self, timestep: torch.LongTensor
-    ) -> None:
+    def _update_vsa_attention_kwargs(self, timestep: torch.LongTensor) -> None:
         """Publish the current AITER VSA schedule values to its backend."""
-        if (
-            self.attention_kwargs is None
-            or not self.attention_kwargs.get("vsa_drop_rates")
-        ):
+        if self.attention_kwargs is None or not self.attention_kwargs.get("vsa_drop_rates"):
             return
 
         runtime_state = get_runtime_state()
-        step_index, num_steps = runtime_state.advance_vsa_schedule(
-            float(timestep.reshape(-1)[0].item())
-        )
+        step_index, num_steps = runtime_state.advance_vsa_schedule(float(timestep.reshape(-1)[0].item()))
         self.attention_kwargs["vsa_step_index"] = step_index
         self.attention_kwargs["vsa_num_steps"] = num_steps
         effective_drop_rate = jenga_scheduled_drop_rate(
@@ -278,28 +266,32 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
         self.attention_kwargs["vsa_effective_drop_rate"] = effective_drop_rate
         self.attention_kwargs["vsa_use_dense"] = effective_drop_rate <= 0.25
 
-    def _chunk_and_pad_sequence(self, x: torch.Tensor, sp_world_rank: int, sp_world_size: int, pad_amount: int, dim: int) -> torch.Tensor:
+    def _chunk_and_pad_sequence(
+        self, x: torch.Tensor, sp_world_rank: int, sp_world_size: int, pad_amount: int, dim: int
+    ) -> torch.Tensor:
         if pad_amount > 0:
             if dim < 0:
                 dim = x.ndim + dim
             pad_shape = list(x.shape)
             pad_shape[dim] = pad_amount
-            x = torch.cat([x,
-                        torch.zeros(
-                            pad_shape,
-                            dtype=x.dtype,
-                            device=x.device,
-                        )], dim=dim)
-        x = torch.chunk(x,
-                        sp_world_size,
-                        dim=dim)[sp_world_rank]
+            x = torch.cat(
+                [
+                    x,
+                    torch.zeros(
+                        pad_shape,
+                        dtype=x.dtype,
+                        device=x.device,
+                    ),
+                ],
+                dim=dim,
+            )
+        x = torch.chunk(x, sp_world_size, dim=dim)[sp_world_rank]
         return x
 
     def _gather_and_unpad(self, x: torch.Tensor, pad_amount: int, dim: int) -> torch.Tensor:
         x = get_sp_group().all_gather(x, dim=dim)
         size = x.size(dim)
         return x.narrow(dim=dim, start=0, length=size - pad_amount)
-
 
     def forward(
         self,
@@ -310,14 +302,6 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
         return_dict: bool = True,
         attention_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
-
-        if attention_kwargs is not None:
-            attention_kwargs = attention_kwargs.copy()
-            lora_scale = attention_kwargs.pop("scale", 1.0)
-        else:
-            lora_scale = 1.0
-
-
         self._update_vsa_attention_kwargs(timestep)
         get_runtime_state().increment_step_counter()
 
@@ -340,7 +324,8 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
         rotary_emb = self.rope(hidden_states)
 
         hidden_states = self.patch_embedding(hidden_states)
-        hidden_states = hidden_states.flatten(2).transpose(1, 2)
+        # Without the copy, the strided layout slows every elementwise op in the residual stream.
+        hidden_states = hidden_states.flatten(2).transpose(1, 2).contiguous()
 
         # timestep shape: batch_size, or batch_size, seq_len (wan 2.2 ti2v)
         if timestep.ndim == 2:
@@ -367,7 +352,7 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
         pad_amount = (sp_world_size - (hidden_states.shape[1] % sp_world_size)) % sp_world_size
         hidden_states = self._chunk_and_pad_sequence(hidden_states, sp_world_rank, sp_world_size, pad_amount, dim=1)
 
-        if ts_seq_len is not None: # (wan2.2 ti2v)
+        if ts_seq_len is not None:  # (wan2.2 ti2v)
             temb = self._chunk_and_pad_sequence(temb, sp_world_rank, sp_world_size, pad_amount, dim=1)
             timestep_proj = self._chunk_and_pad_sequence(timestep_proj, sp_world_rank, sp_world_size, pad_amount, dim=1)
 
@@ -380,7 +365,6 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
         freqs_cos = get_rotary_emb_chunk(freqs_cos, pad_amount)
         freqs_sin = get_rotary_emb_chunk(freqs_sin, pad_amount)
         rotary_emb = (freqs_cos, freqs_sin)
-
 
         # 4. Transformer blocks
         if torch.is_grad_enabled() and self.gradient_checkpointing:

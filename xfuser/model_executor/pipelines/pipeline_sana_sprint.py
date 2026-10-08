@@ -4,7 +4,7 @@ import warnings
 import inspect
 import re
 import urllib.parse as ul
-from typing import Any, Callable, Dict, List, Tuple, Callable, Optional, Union
+from typing import Any, Dict, List, Tuple, Callable, Optional, Union
 
 import torch
 import torch.distributed
@@ -18,19 +18,12 @@ from diffusers.utils import (
     USE_PEFT_BACKEND,
     is_bs4_available,
     is_ftfy_available,
-    logging,
     replace_example_docstring,
     scale_lora_layers,
     unscale_lora_layers,
-    is_torch_xla_available
+    is_torch_xla_available,
 )
-from diffusers.pipelines.sana.pipeline_sana import (
-    ASPECT_RATIO_512_BIN,
-    ASPECT_RATIO_1024_BIN,
-    ASPECT_RATIO_2048_BIN,
-    ASPECT_RATIO_4096_BIN,
-    retrieve_timesteps
-)
+from diffusers.pipelines.sana.pipeline_sana import ASPECT_RATIO_1024_BIN, retrieve_timesteps
 
 if is_torch_xla_available():
     import torch_xla.core.xla_model as xm
@@ -79,9 +72,9 @@ EXAMPLE_DOC_STRING = """
         ```
 """
 
+
 @xFuserPipelineWrapperRegister.register(SanaSprintPipeline)
 class xFuserSanaSprintPipeline(xFuserPipelineBaseWrapper):
-    
     @classmethod
     def from_pretrained(
         cls,
@@ -90,16 +83,12 @@ class xFuserSanaSprintPipeline(xFuserPipelineBaseWrapper):
         return_org_pipeline: bool = False,
         **kwargs,
     ):
-        pipeline = SanaSprintPipeline.from_pretrained(
-            pretrained_model_name_or_path, **kwargs
-        )
+        pipeline = SanaSprintPipeline.from_pretrained(pretrained_model_name_or_path, **kwargs)
         if return_org_pipeline:
             return pipeline
         return cls(pipeline, engine_config)
-    
-    def prepare_run(
-        self, input_config: InputConfig, steps: int = 2, sync_steps: int = 1
-    ):
+
+    def prepare_run(self, input_config: InputConfig, steps: int = 2, sync_steps: int = 1):
         prompt = [""] * input_config.batch_size if input_config.batch_size > 1 else ""
         warmup_steps = get_runtime_state().runtime_config.warmup_steps
         get_runtime_state().runtime_config.warmup_steps = sync_steps
@@ -761,32 +750,32 @@ class xFuserSanaSprintPipeline(xFuserPipelineBaseWrapper):
         num_pipeline_warmup_steps = get_runtime_state().runtime_config.warmup_steps
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            if (
-                get_pipeline_parallel_world_size() > 1
-                and self._num_timesteps > num_pipeline_warmup_steps
-            ):
+            if get_pipeline_parallel_world_size() > 1 and self._num_timesteps > num_pipeline_warmup_steps:
                 raise NotImplementedError(
                     f"Pipeline parallelism is not supported with {self.__class__.__name__} pipeline."
                 )
             else:
                 latents = self._sync_pipeline(
-                        latents = latents,
-                        prompt_embeds = prompt_embeds,
-                        prompt_attention_mask = prompt_attention_mask,
-                        guidance = guidance,
-                        timesteps=timesteps,
-                        num_warmup_steps=num_warmup_steps,
-                        return_dict=False,
-                        extra_step_kwargs=extra_step_kwargs,
-                        callback_on_step_end_tensor_inputs=callback_on_step_end_tensor_inputs,
-                        callback_on_step_end=callback_on_step_end,
-                        progress_bar=progress_bar,
-                        sync_only=True
-                    )
+                    latents=latents,
+                    prompt_embeds=prompt_embeds,
+                    prompt_attention_mask=prompt_attention_mask,
+                    guidance=guidance,
+                    timesteps=timesteps,
+                    num_warmup_steps=num_warmup_steps,
+                    return_dict=False,
+                    extra_step_kwargs=extra_step_kwargs,
+                    callback_on_step_end_tensor_inputs=callback_on_step_end_tensor_inputs,
+                    callback_on_step_end=callback_on_step_end,
+                    progress_bar=progress_bar,
+                    sync_only=True,
+                )
 
         image = None
-        if not output_type == 'latent':
-            if get_runtime_state().runtime_config.use_parallel_vae and get_runtime_state().parallel_config.vae_parallel_size > 0:
+        if not output_type == "latent":
+            if (
+                get_runtime_state().runtime_config.use_parallel_vae
+                and get_runtime_state().parallel_config.vae_parallel_size > 0
+            ):
                 latents = self.gather_latents_for_vae(latents)
                 if latents is not None:
                     latents = latents.to(self.vae.dtype)
@@ -799,14 +788,14 @@ class xFuserSanaSprintPipeline(xFuserPipelineBaseWrapper):
                 image = self._vae_decode(latents.to(self.vae.dtype))
 
         if self.is_dp_last_group():
-            if output_type == 'latent':
+            if output_type == "latent":
                 image = latents
             elif image is not None:
                 # TODO: need to varify this part when use_resolution_binning is true
                 if use_resolution_binning:
                     image = self.image_processor.resize_and_crop_tensor(image, orig_width, orig_height)
                 image = self.image_processor.postprocess(image, output_type=output_type)
-            
+
             # Offload all models
             self.maybe_free_model_hooks()
 
@@ -816,7 +805,7 @@ class xFuserSanaSprintPipeline(xFuserPipelineBaseWrapper):
             return SanaPipelineOutput(images=image)
         else:
             None
-    
+
     def _vae_decode(self, latents):
         try:
             image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
@@ -827,7 +816,7 @@ class xFuserSanaSprintPipeline(xFuserPipelineBaseWrapper):
                 f"pipe.vae.enable_tiling(tile_sample_min_width=512, tile_sample_min_height=512)"
             )
         return image
-                
+
     def _init_sync_pipeline(self, latents, prompt_embeds):
         get_runtime_state().set_patched_mode(patch_mode=False)
 
@@ -839,25 +828,29 @@ class xFuserSanaSprintPipeline(xFuserPipelineBaseWrapper):
 
         if get_runtime_state().split_text_embed_in_sp:
             if prompt_embeds.shape[-2] % get_sequence_parallel_world_size() == 0:
-                prompt_embeds = torch.chunk(prompt_embeds, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
+                prompt_embeds = torch.chunk(prompt_embeds, get_sequence_parallel_world_size(), dim=-2)[
+                    get_sequence_parallel_rank()
+                ]
             else:
-                get_runtime_state().split_text_embed_in_sp = False                
+                get_runtime_state().split_text_embed_in_sp = False
 
         return latents, prompt_embeds
 
-    def _sync_pipeline(self,
-            latents,
-            prompt_embeds,
-            prompt_attention_mask,
-            guidance,
-            timesteps,
-            num_warmup_steps,
-            return_dict,
-            extra_step_kwargs,
-            callback_on_step_end_tensor_inputs,
-            callback_on_step_end,
-            progress_bar,
-            sync_only=False):
+    def _sync_pipeline(
+        self,
+        latents,
+        prompt_embeds,
+        prompt_attention_mask,
+        guidance,
+        timesteps,
+        num_warmup_steps,
+        return_dict,
+        extra_step_kwargs,
+        callback_on_step_end_tensor_inputs,
+        callback_on_step_end,
+        progress_bar,
+        sync_only=False,
+    ):
         latents, prompt_embeds = self._init_sync_pipeline(latents, prompt_embeds)
 
         for i, t in enumerate(timesteps):
@@ -873,7 +866,7 @@ class xFuserSanaSprintPipeline(xFuserPipelineBaseWrapper):
                 latents = latents.to(prompt_embeds.dtype)
             else:
                 latents = get_pp_group().pipeline_recv()
-            
+
             latents_ = self._backbone_forward(
                 latents=latents,
                 prompt_embeds=prompt_embeds,
@@ -884,7 +877,9 @@ class xFuserSanaSprintPipeline(xFuserPipelineBaseWrapper):
 
             if is_pipeline_last_stage():
                 # compute previous image: x_t -> x_t-1
-                latents_, denoised = self.scheduler.step(latents_, t, last_timestep_latents.contiguous(), **extra_step_kwargs, return_dict=False)
+                latents_, denoised = self.scheduler.step(
+                    latents_, t, last_timestep_latents.contiguous(), **extra_step_kwargs, return_dict=False
+                )
                 latents = latents_
 
                 if callback_on_step_end is not None:
@@ -902,12 +897,8 @@ class xFuserSanaSprintPipeline(xFuserPipelineBaseWrapper):
 
             if XLA_AVAILABLE:
                 xm.mark_step()
-            
-        if (
-            sync_only
-            and get_sequence_parallel_world_size() > 1
-            and is_pipeline_last_stage()
-        ):
+
+        if sync_only and get_sequence_parallel_world_size() > 1 and is_pipeline_last_stage():
             sp_degree = get_sequence_parallel_world_size()
             sp_denoised_list = get_sp_group().all_gather(denoised, separate_tensors=True)
             denoised_list = []
@@ -916,9 +907,9 @@ class xFuserSanaSprintPipeline(xFuserPipelineBaseWrapper):
                     sp_denoised_list[sp_patch_idx][
                         :,
                         :,
-                        get_runtime_state()
-                        .pp_patches_start_idx_local[pp_patch_idx] : get_runtime_state()
-                        .pp_patches_start_idx_local[pp_patch_idx + 1],
+                        get_runtime_state().pp_patches_start_idx_local[
+                            pp_patch_idx
+                        ] : get_runtime_state().pp_patches_start_idx_local[pp_patch_idx + 1],
                         :,
                     ]
                     for sp_patch_idx in range(sp_degree)
@@ -928,9 +919,10 @@ class xFuserSanaSprintPipeline(xFuserPipelineBaseWrapper):
         return denoised / self.scheduler.config.sigma_data
 
     def _backbone_forward(self, latents, prompt_embeds, prompt_attention_mask, guidance, t):
-        # broadcast to batch dimension in a way that
-
-        timestep = t.expand(latents.shape[0]).to(prompt_embeds.dtype)
+        # Keep the timestep and the SCM input scaling in float32 like diffusers does;
+        # only the transformer inputs take the transformer's dtype.
+        transformer_dtype = self.transformer.dtype
+        timestep = t.expand(latents.shape[0])
         latents_model_input = latents / self.scheduler.config.sigma_data
 
         scm_timestep = torch.sin(timestep) / (torch.cos(timestep) + torch.sin(timestep))
@@ -939,12 +931,11 @@ class xFuserSanaSprintPipeline(xFuserPipelineBaseWrapper):
         latent_model_input = latents_model_input * torch.sqrt(
             scm_timestep_expanded**2 + (1 - scm_timestep_expanded) ** 2
         )
-        latent_model_input = latent_model_input.to(prompt_embeds.dtype)
 
         # predict noise model_output
         noise_pred = self.transformer(
-            latent_model_input,
-            encoder_hidden_states=prompt_embeds,
+            latent_model_input.to(dtype=transformer_dtype),
+            encoder_hidden_states=prompt_embeds.to(dtype=transformer_dtype),
             encoder_attention_mask=prompt_attention_mask,
             guidance=guidance,
             timestep=scm_timestep,
@@ -957,5 +948,5 @@ class xFuserSanaSprintPipeline(xFuserPipelineBaseWrapper):
                 (1 - 2 * scm_timestep_expanded) * latent_model_input
                 + (1 - 2 * scm_timestep_expanded + 2 * scm_timestep_expanded**2) * noise_pred
             ) / torch.sqrt(scm_timestep_expanded**2 + (1 - scm_timestep_expanded) ** 2)
-            noise_pred:torch.Tensor = noise_pred.float() * self.scheduler.config.sigma_data
+            noise_pred: torch.Tensor = noise_pred.float() * self.scheduler.config.sigma_data
         return noise_pred.contiguous()

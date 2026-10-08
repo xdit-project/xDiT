@@ -17,6 +17,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="FP8 quant
 
 
 def _quantized_linear(**overrides):
+    pytest.importorskip("torchao")
     from torchao.quantization.granularity import PerTensor
     from torchao.quantization.quant_api import (
         Float8DynamicActivationFloat8WeightConfig,

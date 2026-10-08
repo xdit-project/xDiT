@@ -27,6 +27,8 @@ xdit --model FLUX.1-dev \
 
 This will generate an image with Flux.1-dev and uses the model-specific values for any parameters that were not provided.
 
+`xdit` starts one process per rank, the product of the parallel degrees (doubled by `--use_cfg_parallel`). To span several nodes, run the same command on every node with torchrun's `--nnodes`, `--node_rank`, `--master_addr` and `--master_port`; each node then starts that product divided by `--nnodes`, or `--nproc_per_node` if given.
+
 
 ## Architecture
 
@@ -86,6 +88,7 @@ Individual model classes that inherit from `xFuserModel`:
 | Model | Valid Model Name(s) |
 |-------|-----------------|
 | CausalWan | `CausalWan` |
+| Chroma1-HD | `Chroma1-HD`, `lodestones/Chroma1-HD` |
 | Cosmos3-Nano | `Cosmos3-Nano`, `nvidia/Cosmos3-Nano` |
 | Cosmos3-Super | `Cosmos3-Super`, `nvidia/Cosmos3-Super` |
 | FLUX.1-dev | `FLUX.1-dev`, `black-forest-labs/FLUX.1-dev` |
@@ -93,11 +96,11 @@ Individual model classes that inherit from `xFuserModel`:
 | FLUX.2 | `FLUX.2-dev`, `black-forest-labs/FLUX.2-dev` |
 | FLUX.2-klein | `FLUX.2-klein-9B`, `black-forest-labs/FLUX.2-klein-9B`, `FLUX.2-klein-4B`, `black-forest-labs/FLUX.2-klein-4B` |
 | HunyuanVideo | `HunyuanVideo`, `tencent/HunyuanVideo` |
-| HunyuanVideo-1.5 | `Hunyuanvideo-1.5`, `tencent/HunyuanVideo-1.5`, `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v`, `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v`, `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v` |
+| HunyuanVideo-1.5 | `Hunyuanvideo-1.5`, `tencent/HunyuanVideo-1.5` (both load the 720p checkpoint for `--task`), `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v`, `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v`, `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v`, `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v` (each repo id loads that checkpoint and must match `--task`) |
 | HunyuanVideo-1.5 Distilled | `Hunyuanvideo-1.5-Distilled`, `tencent/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled`, `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled` |
 | HunyuanVideo-1.5 Sparse | `Hunyuanvideo-1.5-Sparse`, `tencent/HunyuanVideo-1.5-Sparse`, `tencent/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled_sparse` |
-| Ideogram 4 | `Ideogram-4`, `ideogram-ai/ideogram-v4`, `ideogram-ai/ideogram-4-nf4`, `ideogram-ai/ideogram-4-fp8` |
-| Ideogram 4 Diffusers | `ideogram-ai/ideogram-4-nf4-diffusers`, `CalamitousFelicitousness/Ideogram-4-bf16-Diffusers` |
+| Ideogram 4 | `Ideogram-4`, `ideogram-ai/ideogram-v4`, `ideogram-ai/ideogram-4-fp8` (all load the FP8 checkpoint) |
+| Ideogram 4 Diffusers (BF16) | `CalamitousFelicitousness/Ideogram-4-bf16-Diffusers` |
 | Krea2-Raw | `krea/krea-2-raw`, `krea/Krea-2-Raw`, `Krea-2-Raw` |
 | Krea2-Turbo | `krea/krea-2-turbo`, `krea/Krea-2-Turbo`, `Krea-2-Turbo` |
 | LingBot-Video-Dense | `LingBot-Video-Dense`, `robbyant/lingbot-video-dense-1.3b` |
@@ -106,6 +109,7 @@ Individual model classes that inherit from `xFuserModel`:
 | LTX-2.3 | `LTX-2.3`, `dg845/LTX-2.3-Diffusers` |
 | LTX-2.5 Distilled | `LTX-2.5`, `LTX-2.5-distilled`, `Lightricks/LTX-2.5-Diffusers` |
 | LTX-2.5 Full | `LTX-2.5-full` |
+| LTX-Video 0.9.7 | `LTX-Video-0.9.7-dev`, `Lightricks/LTX-Video-0.9.7-dev` |
 | Lumina-Image-2.0 | `Lumina2`, `Lumina-Image-2.0`, `Alpha-VLLM/Lumina-Image-2.0` |
 | MiniMax-H3 | `MiniMaxAI/MiniMax-H3`, `MiniMax-H3`, `MiniMax-H3-Ref2VA` |
 | FastH3 Preview v1 | `FastH3`, `FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree`, `FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1300`, `FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1900` |
@@ -113,10 +117,13 @@ Individual model classes that inherit from `xFuserModel`:
 | FastH3 V2 | `FastVideo/FastVideo-FastH3-8-Step-V2` |
 | Qwen-Image | `Qwen-Image`, `Qwen/Qwen-Image`, `Qwen-Image-2512`, `Qwen/Qwen-Image-2512` |
 | Qwen-Image-Edit | `Qwen-Image-Edit`, `Qwen/Qwen-Image-Edit`, `Qwen-Image-Edit-2509`, `Qwen/Qwen-Image-Edit-2509`, `Qwen-Image-Edit-2511`, `Qwen/Qwen-Image-Edit-2511` |
+| SkyReels-V2 T2V | `SkyReels-V2-T2V-14B`, `Skywork/SkyReels-V2-T2V-14B-540P-Diffusers` |
+| SkyReels-V2 I2V | `SkyReels-V2-I2V-14B`, `SkyReels-V2-I2V-1.3B`, `Skywork/SkyReels-V2-I2V-14B-540P-Diffusers`, `Skywork/SkyReels-V2-I2V-1.3B-540P-Diffusers` |
 | Stable Diffusion 3.5 | `SD3.5`, `stable-diffusion-3.5-large`, `stabilityai/stable-diffusion-3.5-large` |
 | Wan 2.1 VACE | `Wan2.1-VACE-14B`, `Wan2.1-VACE-1.3B`, `Wan-AI/Wan2.1-VACE-14B-diffusers`, `Wan-AI/Wan2.1-VACE-1.3B-diffusers` |
 | Wan 2.1/2.2 I2V | `Wan2.1-I2V`, `Wan2.2-I2V`, `Wan-AI/Wan2.1-I2V-14B-720P-Diffusers`, `Wan-AI/Wan2.2-I2V-A14B-Diffusers` |
 | Wan 2.1/2.2 T2V | `Wan2.1-T2V`, `Wan2.2-T2V`, `Wan-AI/Wan2.1-T2V-14B-Diffusers`, `Wan-AI/Wan2.2-T2V-A14B-Diffusers` |
+| Wan 2.1 T2V 1.3B | `Wan2.1-T2V-1.3B`, `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` |
 | Wan 2.2 Distilled I2V (LightX2V 4-step) | `Wan2.2-Distilled-I2V` |
 | Wan 2.2 TI2V | `Wan2.2-TI2V`, `Wan-AI/Wan2.2-TI2V-5B-Diffusers` |
 | Z-Image | `Z-Image`, `Tongyi-MAI/Z-Image` |
@@ -127,6 +134,8 @@ Individual model classes that inherit from `xFuserModel`:
 #### Note: not all models support all of the features.
 
 ### Model Selection
+
+For startup adapter fusion on FLUX.1-dev, see [LoRA support and limitations](lora.md).
 
 | Argument | Description |
 |----------|-------------|
@@ -282,6 +291,7 @@ fill it from rank 0.
 | Qwen-Image and Qwen-Image-Edit variants | Streaming; transformer targets declared | `text_encoder` | Transformer + targeted text encoder | Yes |
 | Z-Image and Z-Image-Turbo | Streaming; transformer, noise refiner, and context refiner covered | `text_encoder` | Transformer + targeted text encoder | Yes |
 | Krea2-Raw and Krea2-Turbo | Streaming; transformer targets declared | Not declared for shared loading: the Qwen3VL ROCm float32-Linear workaround has no exact quantization target/API contract | Transformer only; text encoder loads normally | Transformer only; text encoder loads per rank |
+| SkyReels-V2 T2V and I2V | No shared load route declared; direct load through the shared transformer seam | None | Rejected before allocation: not yet verified against the meta-load routes | No |
 | Stable Diffusion 3.5 | No shared load route declared; direct/post-load only | `text_encoder_3`, post-load only | Rejected before allocation: the composition wrapper has no config-only transformer seam | No |
 | HunyuanVideo | Streaming from pinned revision `refs/pr/18`; both transformer block lists declared | `text_encoder`, the Llama encoder; the CLIP encoder is left at pipeline dtype | Transformer + targeted text encoder | Yes |
 | HunyuanVideo-1.5, distilled, and sparse/remapped variants | No shared load route declared; direct/remapped loading only | None | Rejected before allocation: separate wrapper/config and remapped sparse composition are not verified against the standard seam | No |
@@ -400,7 +410,7 @@ These examples show how the flags are wired, not tuned recommendations: output q
 | Argument | Description | Default |
 |----------|-------------|---------|
 | `--num_iterations` | Number of benchmark iterations | 1 |
-| `--warmup_calls` | Warmup iterations before timing | 0 |
+| `--warmup_calls` | Warmup iterations before timing. With none, the first of several timed iterations is left out of the reported timings | 0 |
 | `--batch_size` | Batch size for dataset inference | None |
 | `--dataset_path` | Path to prompt dataset csv | None |
 | `--output_directory` | Output save directory | `.` |

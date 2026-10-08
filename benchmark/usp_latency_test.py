@@ -29,18 +29,14 @@ def run_command(cmd):
 def main():
     parser = argparse.ArgumentParser(description="Run benchmark tests")
     parser.add_argument("--model_id", type=str, required=True, help="Path to the model")
-    parser.add_argument(
-        "--sizes", type=int, nargs="+", required=True, help="List of sizes to test"
-    )
+    parser.add_argument("--sizes", type=int, nargs="+", required=True, help="List of sizes to test")
     parser.add_argument(
         "--script",
         type=str,
         required=True,
-        help="Script to run (e.g., tests/test_pixartalpha.py)",
+        help="Script to run (e.g., examples/pixartalpha_example.py)",
     )
-    parser.add_argument(
-        "--n_gpus", type=int, nargs="+", required=True, help="Number of GPUs to use"
-    )
+    parser.add_argument("--n_gpus", type=int, nargs="+", required=True, help="Number of GPUs to use")
     parser.add_argument("--steps", type=int, default=20, help="Number of steps")
     args = parser.parse_args()
     MODEL_ID = args.model_id

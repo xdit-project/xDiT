@@ -1,5 +1,7 @@
 import torch
 import copy
+import dataclasses
+from typing import Optional
 import json
 import numpy as np
 from safetensors.torch import load_file
@@ -32,16 +34,20 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
     STANDARD_LOAD_ROUTES,
 )
 
+
 @register_model("tencent/HunyuanVideo")
 @register_model("HunyuanVideo")
 class xFuserHunyuanvideoModel(xFuserModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 24
+
     # HunyuanVideoPipeline and HunyuanVideoTransformer3DModel both exist at the 0.33
     # install floor, so there is nothing extra to ask for here.
     min_diffusers_version = None
 
     load_support = LoadSupport(
-        meta_transformers=('transformer',),
-        meta_text_encoders=('text_encoder',),
+        meta_transformers=("transformer",),
+        meta_text_encoders=("text_encoder",),
         replicated_meta=True,
         routes=STANDARD_LOAD_ROUTES,
     )
@@ -63,7 +69,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
         num_frames=129,
         num_inference_steps=50,
         guidance_scale=6.0,
-        num_hybrid_attn_high_precision_steps = 5,
+        num_hybrid_attn_high_precision_steps=5,
     )
     settings = ModelSettings(
         model_name="tencent/HunyuanVideo",
@@ -84,9 +90,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
         fp8_text_encoder_module_list=["text_encoder.layers"],
         fsdp_strategy={
             "transformer": {
-                "wrap_attrs": [
-                    "transformer_blocks", "single_transformer_blocks"
-                ],
+                "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
                 "dtype": torch.bfloat16,
             },
             # The declared 14G Llama encoder would otherwise be this model's host peak: every rank
@@ -130,9 +134,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
             **te_kwargs,
             **request.from_pretrained_kwargs(include_subfolder=False),
         )
-        fix_llama_tokenizer_pretokenizer(
-            pipe, self.settings.model_name, revision=request.revision
-        )
+        fix_llama_tokenizer_pretokenizer(pipe, self.settings.model_name, revision=request.revision)
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
@@ -147,20 +149,28 @@ class xFuserHunyuanvideoModel(xFuserModel):
         )
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
+    def _get_compile_warmup_steps(self, input_args: dict) -> Optional[int]:
+        # A per-step attention schedule needs a full warmup to trigger every backend path.
+        return None if get_runtime_state().has_attention_schedule() else 2
+
     def _compile_model(self, input_args: dict) -> None:
-        """ Compile the model using torch.compile """
+        """Compile the model using torch.compile"""
         # Install Inductor post-grad pass that defeats a scheduler bug in the
         # asymmetric joint attention path with the AITER Sage backend. The pass
         # is pattern-matched on the FX graph and is a no-op for configurations
         # that don't produce the bad pattern (non-sage backends, symmetric SP).
         install_inductor_passes()
+        if self.config.cache_method:
+            # The step cache patches transformer.forward, so compile its blocks instead.
+            super()._compile_model(input_args)
+            return
         super()._enable_compute_comm_overlap()
         self.pipe.transformer.compile()
 
         compile_args = copy.deepcopy(input_args)
-        # If a per-step attention schedule is active, do a full warmup to trigger all backend paths.
-        if not get_runtime_state().has_attention_schedule():
-            compile_args["num_inference_steps"] = 2 # Reduce steps for warmup
+        warmup_steps = self._get_compile_warmup_steps(input_args)
+        if warmup_steps is not None:
+            compile_args["num_inference_steps"] = warmup_steps
         self._run_timed_pipe(compile_args)
 
 
@@ -169,8 +179,11 @@ class xFuserHunyuanvideoModel(xFuserModel):
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v")
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v")
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v")
-@register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v")
+@register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v")
 class xFuserHunyuanvideo15Model(xFuserModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 16
+
     min_diffusers_version = "0.36.0"
 
     # The 1.5 wrapper's config-only construction and checkpoint layout are unverified.
@@ -202,6 +215,8 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         fps=24,
         fp8_gemm_module_list=["transformer.transformer_blocks"],
         mod_value=16,
+        # Blocks that _compile_model compiles one by one under a step cache.
+        fsdp_strategy={"transformer": {"wrap_attrs": ["transformer_blocks"]}},
         valid_tasks=["i2v", "t2v"],
         step_cache_config={
             "dbcache": DBCacheSettings(
@@ -214,26 +229,33 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         },
     )
 
-
     def _customize_settings(self, config: xFuserArgs) -> None:
         super()._customize_settings(config)
-        if config.task == "i2v": # TODO: different model for 480p
-            self.settings.model_name = "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v"
-        else:
-            self.settings.model_name = "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v"
-
+        # Registered checkpoint IDs encode their task; output dimensions do not select weights.
+        checkpoint_task = config.model.rsplit("_", 1)[-1]
+        if checkpoint_task not in ("i2v", "t2v"):
+            task = "i2v" if config.task == "i2v" else "t2v"
+            self.settings.model_name = f"hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_{task}"
+            return
+        if config.task and config.task != checkpoint_task:
+            raise ValueError(f"{config.model} is a {checkpoint_task} checkpoint and cannot run --task {config.task}.")
+        self.settings.model_name = config.model
+        if "-480p_" in config.model:
+            # The 16:9 size Diffusers picks for the 480p checkpoints' 640 target size.
+            self.default_input_values = dataclasses.replace(self.default_input_values, height=480, width=848)
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import HunyuanVideo15Pipeline, HunyuanVideo15ImageToVideoPipeline
         from xfuser.model_executor.models.transformers.transformer_hunyuan_video15 import (
             xFuserHunyuanVideo15Transformer3DWrapper,
         )
+
         task = self.config.task
         pipeline = HunyuanVideo15Pipeline if task == "t2v" else HunyuanVideo15ImageToVideoPipeline
         transformer = xFuserHunyuanVideo15Transformer3DWrapper.from_pretrained(
             self.settings.model_name,
             torch_dtype=torch.bfloat16,
-            subfolder="transformer",
+            **self.loader.checkpoint_request("transformer").from_pretrained_kwargs(),
         )
         pipe = pipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
@@ -251,7 +273,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         }
         if self.config.task == "i2v":
             kwargs["image"] = input_args["image"]
-        else: #t2v task
+        else:  # t2v task
             kwargs["height"] = input_args["height"]
             kwargs["width"] = input_args["width"]
 
@@ -259,17 +281,22 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
     def _preprocess_args_images(self, input_args: dict) -> dict:
-        """ Preprocess input images if necessary based on task and other args """
+        """Preprocess input images if necessary based on task and other args"""
         input_args = super()._preprocess_args_images(input_args)
         if self.config.task == "i2v":
             image = input_args["input_images"][0]
             if input_args.get("resize_input_images", False):
-                image = resize_and_crop_image(image, input_args["width"], input_args["height"], self.settings.mod_value)
+                image = resize_and_crop_image(
+                    image,
+                    target_height=input_args["height"],
+                    target_width=input_args["width"],
+                    mod_value=self.settings.mod_value,
+                )
             input_args["image"] = image
         return input_args
 
     def _validate_args(self, input_args: dict) -> None:
-        """ Validate input arguments """
+        """Validate input arguments"""
         super()._validate_args(input_args)
         if self.config.task == "i2v":
             images = input_args.get("input_images", [])
@@ -277,20 +304,14 @@ class xFuserHunyuanvideo15Model(xFuserModel):
                 raise ValueError("Exactly one input image is required for HunyuanVideo-1.5 model when task is 'i2v'.")
 
     def _compile_model(self, input_args: dict) -> None:
-        """ Compile the model using torch.compile """
+        """Compile the model using torch.compile"""
         # Install Inductor post-grad pass that defeats a scheduler bug in the
         # asymmetric joint attention path with the AITER Sage backend. The pass
         # is pattern-matched on the FX graph and is a no-op for configurations
         # that don't produce the bad pattern (e.g., symmetric SP, non-sage
         # backends, models without the post-A2A joint cat).
         install_inductor_passes()
-        super()._enable_compute_comm_overlap()
-        self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
-
-        # two steps to warmup the torch compiler
-        compile_args = copy.deepcopy(input_args)
-        compile_args["num_inference_steps"] = 2
-        self._run_timed_pipe(compile_args)
+        super()._compile_model(input_args)
 
 
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled")
@@ -348,6 +369,7 @@ HUNYUANVIDEO_15_SPARSE_SINGLE_BLOCK_KEY_MAP = {
     "modulation.": "norm.",
 }
 
+
 @register_model("tencent/HunyuanVideo-1.5-Sparse")
 @register_model("Hunyuanvideo-1.5-Sparse")
 @register_model("tencent/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled_sparse")
@@ -372,7 +394,9 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
     def _validate_ssta_attention_kwargs(self, attn_param: dict) -> None:
         assert attn_param["tile_size"] is not None, "tile_size is not set"
         assert len(attn_param["tile_size"]) == 3, "tile_size must be a tuple of 3 integers"
-        assert np.prod(attn_param["tile_size"]) == 128 or np.prod(attn_param["tile_size"]) == 384, "product of ssta_tile_thw must be 128 or 384"
+        assert np.prod(attn_param["tile_size"]) == 128 or np.prod(attn_param["tile_size"]) == 384, (
+            "product of ssta_tile_thw must be 128 or 384"
+        )
 
     def _customize_settings(self, config: xFuserArgs) -> None:
         super()._customize_settings(config)
@@ -381,18 +405,19 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
         self.settings.valid_tasks = ["i2v"]
         self.pipe_name = "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled"
 
-
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import HunyuanVideo15ImageToVideoPipeline
         from xfuser.model_executor.models.transformers.transformer_hunyuan_video15 import (
             xFuserHunyuanVideo15Transformer3DWrapper,
         )
+
         pipeline = HunyuanVideo15ImageToVideoPipeline
         # Load the distilled transformer (diffusers format) to get non-block weights
         distilled_transformer = xFuserHunyuanVideo15Transformer3DWrapper.from_pretrained(
             self.pipe_name,
             subfolder="transformer",
             torch_dtype=torch.bfloat16,
+            local_files_only=self.loader.checkpoint_request().local_files_only,
         )
         distilled_state = distilled_transformer.state_dict()
 
@@ -406,7 +431,7 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
 
         sparse_config["attn_param"]["sparse_text_to_image"] = self.config.use_ssta_sparse_text_to_image
         self._validate_ssta_attention_kwargs(sparse_config["attn_param"])
-        
+
         transformer = xFuserHunyuanVideo15Transformer3DWrapper(
             in_channels=65,  # diffusers i2v: 32 latent * 2 + 1 mask
             out_channels=sparse_config.get("out_channels", 32),
@@ -415,7 +440,7 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
             num_layers=sparse_config.get("mm_double_blocks_depth", 54),
             num_refiner_layers=sparse_config.get("num_refiner_layers", 2),
             mlp_ratio=sparse_config.get("mlp_width_ratio", 4.0),
-            patch_size=sparse_config.get("patch_size",  1),
+            patch_size=sparse_config.get("patch_size", 1),
             patch_size_t=sparse_config.get("patch_size_t", 1),
             qk_norm=sparse_config.get("qk_norm_type", "rms_norm"),
             text_embed_dim=sparse_config.get("text_states_dim", 3584),
@@ -443,7 +468,7 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
             subfolder="transformer/720p_i2v_distilled_sparse",
         )
         state_dict = load_file(weight_file)
-        
+
         # Remap double_blocks -> transformer_blocks
         BLOCK_REMAP = {
             "double_blocks.": ("transformer_blocks.", HUNYUANVIDEO_15_SPARSE_BLOCK_KEY_MAP),
@@ -457,7 +482,7 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
                     block_idx, rest = parts[1], parts[2]
                     for old, new in key_map.items():
                         if rest.startswith(old):
-                            rest = new + rest[len(old):]
+                            rest = new + rest[len(old) :]
                             break
                     remapped[f"{dst_prefix}{block_idx}.{rest}"] = value
                     break

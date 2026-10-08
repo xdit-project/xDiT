@@ -267,8 +267,6 @@ def _default_guidance_schedule(num_inference_steps: int) -> list[float]:
 
 
 @register_model("ideogram-ai/ideogram-v4")
-@register_model("ideogram-ai/ideogram-4-nf4")
-@register_model("ideogram-ai/ideogram-4-nf4-diffusers")
 @register_model("ideogram-ai/ideogram-4-fp8")
 @register_model("CalamitousFelicitousness/Ideogram-4-bf16-Diffusers")
 @register_model("Ideogram-4")
@@ -336,6 +334,12 @@ class xFuserIdeogram4Model(xFuserModel):
         width = input_args["width"]
         if height < 256 or width < 256:
             raise ValueError(f"Ideogram 4 requires height and width of at least 256, got {height}x{width}.")
+
+    def _customize_settings(self, config) -> None:
+        super()._customize_settings(config)
+        # Ideogram-4 and ideogram-ai/ideogram-v4 are aliases of the default FP8 checkpoint.
+        if config.model not in ("Ideogram-4", "ideogram-ai/ideogram-v4"):
+            self.settings.model_name = config.model
 
     def _load_fp8_transformer(
         self,

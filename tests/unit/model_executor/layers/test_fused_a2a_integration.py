@@ -136,10 +136,4 @@ def test_runtime_does_not_access_private_aiter_buffers():
     assert ".scales_sets" not in source
     assert "lru_cache" not in source
     assert "_INPUT_CONSUMER_DONE" not in source
-
-
-def test_heap_size_parser():
-    assert fused_a2a_integration._heap_size_bytes("12G") == 12 << 30
-    assert fused_a2a_integration._heap_size_bytes("512M") == 512 << 20
-    with pytest.raises(ValueError, match="unsupported size suffix"):
-        fused_a2a_integration._heap_size_bytes("12T")
+    assert "MORI_SHMEM_HEAP_SIZE" not in source

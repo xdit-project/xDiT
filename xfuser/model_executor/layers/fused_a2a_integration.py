@@ -1,7 +1,6 @@
 """Feature-gated MoRI fused all-to-all integration for Wan USP."""
 
 import inspect
-import os
 import socket
 
 import torch
@@ -272,16 +271,6 @@ def _register_input_collective():
     return lib
 
 
-def _heap_size_bytes(value):
-    suffixes = {"": 1, "K": 1 << 10, "M": 1 << 20, "G": 1 << 30}
-    text = value.strip().upper()
-    suffix = text[-1] if text and text[-1].isalpha() else ""
-    number = text[:-1] if suffix else text
-    if suffix not in suffixes:
-        raise ValueError(f"unsupported size suffix {suffix!r}")
-    return int(number) * suffixes[suffix]
-
-
 def _prepare_attention_a2a_packed_launcher():
     """Resolve the traceable packed MHA launcher before model compilation."""
     global _ATTENTION_A2A_PACKED_LAUNCHER
@@ -321,12 +310,6 @@ def preflight_attention_a2a(config: AttentionA2AConfig) -> None:
         missing_mori = [name for name in required_mori if not hasattr(ms, name)]
         if missing_mori:
             raise RuntimeError("installed MORI lacks " + ", ".join(missing_mori))
-        heap = os.environ.get("MORI_SHMEM_HEAP_SIZE")
-        if not heap or _heap_size_bytes(heap) <= 0:
-            raise RuntimeError(
-                "MORI_SHMEM_HEAP_SIZE must be set before enabling Attention A2A "
-                "(12G is the validated Wan configuration)"
-            )
         arch = torch.cuda.get_device_properties(torch.cuda.current_device()).gcnArchName.split(":")[0]
         if arch not in {"gfx942", "gfx950"}:
             raise RuntimeError(f"Attention A2A requires gfx942 or gfx950, found {arch}")

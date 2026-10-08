@@ -195,8 +195,6 @@ Wan2.2 T2V can replace the Ulysses input RCCL all-to-all with AITER's
 intranode Attention A2A transport. The output hop remains RCCL.
 
 ```bash
-export MORI_SHMEM_HEAP_SIZE=12G
-
 xdit \
     --model Wan-AI/Wan2.2-T2V-A14B-Diffusers \
     --ulysses_degree 8 \

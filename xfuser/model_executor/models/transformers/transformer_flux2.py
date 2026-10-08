@@ -198,6 +198,10 @@ class xFuserFlux2AttnProcessor(Flux2AttnProcessor):
                 joint_strategy="front",
                 attn_layer=attn,
             )
+        elif distri_cache_updated:
+            # The stale-KV cache was updated above. Passing the module as attn_layer
+            # would make USP update it again with the joint text+image KV.
+            hidden_states = USP(query, key, value, head_balance_layer=attn)
         else:
             hidden_states = USP(query, key, value, attn_layer=attn)
 
@@ -321,6 +325,9 @@ class xFuserFlux2ParallelSelfAttnProcessor(Flux2ParallelSelfAttnProcessor):
                 attn_layer=attn,
                 combine_qkv_a2a=True,
             )
+        elif distri_cache_updated:
+            # The stale-KV cache was updated above; see xFuserFlux2AttnProcessor.
+            hidden_states = USP(query, key, value, combine_qkv_a2a=True, head_balance_layer=attn)
         else:
             hidden_states = USP(query, key, value, combine_qkv_a2a=True, attn_layer=attn)
 

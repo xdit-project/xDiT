@@ -1123,8 +1123,16 @@ class xFuserWan21VACEModel(xFuserWanModel):
             quantization_config=te_quant,
             **te_kwargs,
         )
-        pipe.scheduler.flow_shift = 5.0  # 5.0 for 720p, 3.0 for 480p
         return pipe
+
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        # The checkpoints' scheduler carries the 480p shift, 3.0; Wan samples 720p with 5.0.
+        flow_shift = input_args.get("flow_shift")
+        if flow_shift is None and input_args["height"] * input_args["width"] >= 720 * 1280:
+            flow_shift = 5.0
+        if flow_shift is not None:
+            self.pipe.scheduler.config.flow_shift = flow_shift
 
     def _prepare_video_and_mask(
         self, first_img: Image, last_img: Image, height: int, width: int, num_frames: int

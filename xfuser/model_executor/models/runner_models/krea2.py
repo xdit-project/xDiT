@@ -24,15 +24,16 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
 
 _QUANT_GEMM_MODULES = ["transformer.transformer_blocks"]
 
-# Backends that implement the _varlen_pack mask path and can correctly exclude
-# padding key positions.  SDPA_FLASH is excluded because
-# aten._scaled_dot_product_flash_attention has no mask parameter.
-# Quantised backends (FP8, SAGE, MLA, etc.) are excluded for the same reason.
+# Backends that exclude padded keys, through the varlen packing or the attn_mask.
+# SDPA_FLASH is excluded because aten._scaled_dot_product_flash_attention has no
+# mask parameter. Quantised backends (FP8, SAGE, MLA, etc.) are excluded for the
+# same reason.
 KREA2_SUPPORTED_ATTN_BACKENDS = frozenset(
     {
         AttentionBackendType.AITER,
         AttentionBackendType.SDPA,
         AttentionBackendType.SDPA_MATH,
+        AttentionBackendType.CUDNN,
         AttentionBackendType.FLASH,
         AttentionBackendType.FLASH_3,
         AttentionBackendType.FLASH_4,
@@ -86,7 +87,9 @@ class _Krea2BaseModel(xFuserModel):
         routes=STANDARD_LOAD_ROUTES,
     )
     supported_attn_backends = KREA2_SUPPORTED_ATTN_BACKENDS
-    unsupported_attn_backend_reason = "The attention mask requires a backend with varlen support."
+    unsupported_attn_backend_reason = (
+        "The attention mask requires a backend that excludes padded keys (varlen packing or attn_mask)."
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=False,

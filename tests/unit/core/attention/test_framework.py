@@ -1043,7 +1043,7 @@ def test_only_varlen_capable_backends_accept_packed_keys():
 # (Krea-2, LTX-2) derive the packing from a dense key mask and pass both, so a
 # kernel that applies the mask serves the call without the packing. Maintained
 # by hand for the reason above.
-MASK_APPLYING = {"SDPA", "SDPA_MATH"}
+MASK_APPLYING = {"SDPA", "SDPA_MATH", "SDPA_EFFICIENT", "CUDNN"}
 
 
 def _masked_pack(batch=1, kv_len=8):
@@ -1070,12 +1070,14 @@ def test_masked_varlen_accepts_a_pack_only_when_a_mask_comes_with_it():
 
 
 def test_a_masked_pack_reaches_the_varlen_and_mask_applying_backends_only():
-    """Krea-2 and LTX-2 send both the mask and the packing. Before SDPA could
-    serve that through the mask, every such call on SDPA raised; the aten
-    flash, efficient and cuDNN rows pass no mask and must still refuse it."""
+    """Krea-2 and LTX-2 send both the mask and the packing. Mask-applying
+    backends can serve the call through the mask; varlen backends honour the
+    packing directly."""
     from xfuser.core.attention import registry
 
-    q = torch.zeros(1, 4, 8, 128)
+    # xDiT's CUDNN spec accepts only half-precision calls; use a supported
+    # dtype so this test isolates masked-varlen support from the dtype gate.
+    q = torch.zeros(1, 4, 8, 128, dtype=torch.bfloat16)
     call = _masked_pack()
     accepting = {backend.name for backend, spec in registry.REGISTRY.items() if spec.rejects(q, q, q, call) is None}
     expected = VARLEN_CAPABLE | MASK_APPLYING

@@ -6,7 +6,8 @@ arrives. They cover tensor geometry (HEAD_DIM, MHA_ONLY, SELF_ATTENTION) and
 call parameters (NON_CAUSAL, NO_DROPOUT, NO_VARLEN, MASKED_VARLEN) alike.
 
 One declaration serves two readers: the pre-call check, and the conformance
-suite choosing which shapes to exercise.
+suite choosing which shapes to exercise. HALF_PRECISION, which limits the input
+dtype, is checked the same way.
 """
 
 from dataclasses import dataclass
@@ -173,6 +174,14 @@ class _SameQKV(CallConstraint):
         )
 
 
+@dataclass(frozen=True)
+class _HalfPrecision(CallConstraint):
+    def unmet(self, query, key, value, call) -> Optional[str]:
+        if query.dtype in (torch.float16, torch.bfloat16):
+            return None
+        return f"supports float16 and bfloat16 only, got {query.dtype}"
+
+
 NON_CAUSAL = _NonCausal()
 MHA_ONLY = _MhaOnly()
 SELF_ATTENTION = _SelfAttention()
@@ -182,3 +191,4 @@ PACKED_KEYS = _PackedKeys()
 NO_DROPOUT = _NoDropout()
 BF16 = _BFloat16()
 SAME_QKV = _SameQKV()
+HALF_PRECISION = _HalfPrecision()

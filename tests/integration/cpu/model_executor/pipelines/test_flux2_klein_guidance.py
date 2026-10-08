@@ -88,7 +88,7 @@ def _worker(rank, world_size, init_method, result_queue):
         from xfuser.config.args import xFuserArgs
         from xfuser.core.distributed import parallel_state
         from xfuser.model_executor.pipelines.base_pipeline import xFuserPipelineBaseWrapper
-        from xfuser.model_executor.pipelines.pipeline_flux2 import xFuserFlux2KleinPipeline
+        from xfuser.model_executor.pipelines.pipeline_flux2_klein import xFuserFlux2KleinPipeline
 
         results = {}
         # Torch is a CUDA build even on CPU-only machines; keep xDiT on the CPU.

@@ -318,6 +318,9 @@ class MiniMaxH3DiffusionOutput(DiffusionOutput):
 @register_model("MiniMaxAI/MiniMax-H3")
 @register_model("MiniMax-H3")
 class xFuserMiniMaxH3Model(xFuserModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 56
+
     # diffusers 0.40.0 is the first release with native MiniMax-H3.
     min_diffusers_version = "0.40.0"
 

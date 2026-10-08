@@ -47,6 +47,9 @@ DEFAULT_NEGATIVE_PROMPT = (
 @register_model("dg845/LTX-2.3-Diffusers")
 @register_model("LTX-2.3")
 class xFuserLTX23VideoModel(xFuserModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 32
+
     min_diffusers_version = "0.37.0"
 
     default_input_values = DefaultInputValues(
@@ -261,6 +264,9 @@ class xFuserLTX23VideoModel(xFuserModel):
 @register_model("Lightricks/LTX-2")
 @register_model("LTX-2")
 class xFuserLTX2VideoModel(xFuserModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 32
+
     min_diffusers_version = "0.37.0"
 
     default_input_values = DefaultInputValues(
@@ -436,6 +442,9 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
     xFuserLTX25FullVideoModel overrides them with the full-model reference
     parameters from LTX-2 package constants.py.
     """
+
+    # From the registered checkpoint's transformer config.
+    attention_heads = 32
 
     _TRANSFORMER_SUBFOLDER: str = "transformer"
     _DISTILLED: bool = True

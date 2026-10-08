@@ -38,6 +38,9 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
 @register_model("tencent/HunyuanVideo")
 @register_model("HunyuanVideo")
 class xFuserHunyuanvideoModel(xFuserModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 24
+
     # HunyuanVideoPipeline and HunyuanVideoTransformer3DModel both exist at the 0.33
     # install floor, so there is nothing extra to ask for here.
     min_diffusers_version = None
@@ -178,6 +181,9 @@ class xFuserHunyuanvideoModel(xFuserModel):
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v")
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v")
 class xFuserHunyuanvideo15Model(xFuserModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 16
+
     min_diffusers_version = "0.36.0"
 
     # The 1.5 wrapper's config-only construction and checkpoint layout are unverified.

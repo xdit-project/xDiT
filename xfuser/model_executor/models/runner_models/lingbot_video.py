@@ -79,6 +79,9 @@ def _load_json_prompt(prompt: str) -> str:
 @register_model("robbyant/lingbot-video-moe-30b-a3b")
 @register_model("LingBot-Video-MoE")
 class xFuserLingBotVideoMoEModel(xFuserModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 16
+
     def save_output(self, output):
         # Stock TI2V CFG parallel puts output on rank 0, but xDiT's runner
         # only saves from the last rank. Skip gracefully when no output.

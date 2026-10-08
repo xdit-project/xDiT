@@ -219,6 +219,13 @@ backend. Explicit profiles are also available:
 `--attention_a2a_hadamard auto` applies each recipe's validated placement.
 It can be overridden with `preprocess`, `transport`, `epilogue`, or `none`.
 
+For `aiter_f6f6`, `aiter_f6f4`, `aiter_mxfp4`, and `aiter_f4f4`, xDiT
+passes the unpadded K/V length to AITER so it emits compact packed K/V
+directly while retaining padded Q when padding is confined to the final rank's
+input shard. Profiles with sequence-wide K or V scales, and shapes whose
+padding spans multiple rank shards, use xDiT's existing post-transport
+trimming fallback.
+
 The feature requires AITER's public `AttentionA2AIntraNodeOp` per-role packed
 result API, MORI SHMEM, batch size one, intranode Ulysses degree 2, 4, or 8,
 head dimension 128, and no ring parallelism or Sparge head balancing. MX

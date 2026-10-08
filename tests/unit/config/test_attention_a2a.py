@@ -18,6 +18,7 @@ from xfuser.core.attention.spec import AttentionBackendType
         "consumer_codecs",
         "hadamard",
         "multiple",
+        "direct_kv_output",
     ),
     (
         (
@@ -27,6 +28,7 @@ from xfuser.core.attention.spec import AttentionBackendType
             ("e4m3", "e4m3", "e4m3"),
             "preprocess",
             32,
+            False,
         ),
         (
             "int8-e4m3",
@@ -35,6 +37,7 @@ from xfuser.core.attention.spec import AttentionBackendType
             ("int8", "int8", "e4m3"),
             "none",
             32,
+            False,
         ),
         (
             "mxfp8-e4m3",
@@ -43,6 +46,7 @@ from xfuser.core.attention.spec import AttentionBackendType
             ("e4m3", "e4m3", "e4m3"),
             "preprocess",
             32,
+            False,
         ),
         (
             "e4m3-mxfp6",
@@ -51,6 +55,7 @@ from xfuser.core.attention.spec import AttentionBackendType
             ("e4m3", "e4m3", "mxfp6"),
             "preprocess",
             64,
+            False,
         ),
         (
             "mxfp6-e4m3",
@@ -59,6 +64,7 @@ from xfuser.core.attention.spec import AttentionBackendType
             ("mxfp6", "mxfp6", "e4m3"),
             "preprocess",
             32,
+            False,
         ),
         (
             "mxfp6-mxfp6",
@@ -67,6 +73,7 @@ from xfuser.core.attention.spec import AttentionBackendType
             ("mxfp6", "mxfp6", "mxfp6"),
             "preprocess",
             64,
+            True,
         ),
         (
             "mxfp4-mxfp4",
@@ -75,6 +82,7 @@ from xfuser.core.attention.spec import AttentionBackendType
             ("mxfp4", "mxfp4", "mxfp4"),
             "preprocess",
             64,
+            True,
         ),
         (
             "mxfp6-mxfp4",
@@ -83,6 +91,7 @@ from xfuser.core.attention.spec import AttentionBackendType
             ("mxfp6", "mxfp6", "mxfp4"),
             "preprocess",
             64,
+            True,
         ),
     ),
 )
@@ -93,6 +102,7 @@ def test_profile_contract(
     consumer_codecs,
     hadamard,
     multiple,
+    direct_kv_output,
 ):
     config = AttentionA2AConfig(profile=profile)
 
@@ -101,6 +111,7 @@ def test_profile_contract(
     assert config.consumer_codecs == consumer_codecs
     assert config.hadamard_placement == hadamard
     assert config.local_sequence_multiple == multiple
+    assert config.supports_direct_kv_output is direct_kv_output
 
 
 def test_auto_infers_dense_mha_v4_profiles():

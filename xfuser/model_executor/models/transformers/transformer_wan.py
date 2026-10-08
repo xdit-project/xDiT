@@ -135,6 +135,9 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
             a2a_preprocessing
             and hadamard_placement in ("preprocess", "epilogue")
         )
+        attention_a2a_valid_kv_len = self.attention_kwargs.get(
+            "valid_kv_len"
+        )
         attention_a2a_pending = None
         if interleave:
             # Project and preprocess one role at a time so the public Q/K/V
@@ -153,7 +156,10 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
             )
             if hadamard_placement == "epilogue":
                 query = wan_flydsl_hadamard(query)
-            attention_a2a_pending = usp_fused_a2a_input_q(query)
+            attention_a2a_pending = usp_fused_a2a_input_q(
+                query,
+                attention_a2a_valid_kv_len,
+            )
 
             key = attn.to_k(hidden_states)
             key, _ = fused_qk_norm_rope(
@@ -170,12 +176,16 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
             if hadamard_placement == "epilogue":
                 key = wan_flydsl_hadamard(key)
             attention_a2a_pending = usp_fused_a2a_input_k(
-                key, attention_a2a_pending
+                key,
+                attention_a2a_pending,
+                attention_a2a_valid_kv_len,
             )
 
             value = attn.to_v(hidden_states).unflatten(2, (attn.heads, -1))
             attention_a2a_pending = usp_fused_a2a_input_v(
-                value, attention_a2a_pending
+                value,
+                attention_a2a_pending,
+                attention_a2a_valid_kv_len,
             )
         else:
             query, key, value = self._get_qkv_projections(

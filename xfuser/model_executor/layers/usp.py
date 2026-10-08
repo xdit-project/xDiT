@@ -409,13 +409,14 @@ def _allocate_compact_attention_a2a_kv(
     profile,
     copy_values,
 ):
-    """Rebuild tiled packed K/V only when trimming crosses a 128-row tile.
+    """Fallback rebuild for tiled K/V that AITER cannot emit compactly.
 
     The ordinary USP path delegates trailing padding and arbitrary varlen keys
     to the backend Spec. Pre-quantized A2A operands are different: MXFP4/MXFP6
     K and FP6-P V encode the sequence tile count in their head strides, so a
     slice that removes a whole tile would no longer satisfy MHA-v4's packed
-    layout. This is the narrow case where a compact backing buffer is required.
+    layout. AITER emits direct compact K/V when both roles have token-local
+    scales; this copy remains for recipes with a sequence-wide K or V scale.
     """
     from aiter.ops.mha_v4_quant import (
         MHA_V4_KV_SCALE_LOOKAHEAD_ROWS,
@@ -809,7 +810,12 @@ def _ulysses_extra_inputs(attention_kwargs, query):
     return extras
 
 
-def usp_fused_a2a_input_role(input, role, pending=None):
+def usp_fused_a2a_input_role(
+    input,
+    role,
+    pending=None,
+    valid_kv_len=None,
+):
     """Submit one sequence-major Wan role to the active Ulysses A2A input hop."""
     return fused_a2a_input_role(
         input,
@@ -817,19 +823,34 @@ def usp_fused_a2a_input_role(input, role, pending=None):
         PROCESS_GROUP.ULYSSES_PG,
         get_ulysses_parallel_rank(),
         pending,
+        valid_kv_len,
     )
 
 
-def usp_fused_a2a_input_q(input):
-    return usp_fused_a2a_input_role(input, 0)
+def usp_fused_a2a_input_q(input, valid_kv_len=None):
+    return usp_fused_a2a_input_role(
+        input,
+        0,
+        valid_kv_len=valid_kv_len,
+    )
 
 
-def usp_fused_a2a_input_k(input, pending):
-    return usp_fused_a2a_input_role(input, 1, pending)
+def usp_fused_a2a_input_k(input, pending, valid_kv_len=None):
+    return usp_fused_a2a_input_role(
+        input,
+        1,
+        pending,
+        valid_kv_len,
+    )
 
 
-def usp_fused_a2a_input_v(input, pending):
-    return usp_fused_a2a_input_role(input, 2, pending)
+def usp_fused_a2a_input_v(input, pending, valid_kv_len=None):
+    return usp_fused_a2a_input_role(
+        input,
+        2,
+        pending,
+        valid_kv_len,
+    )
 
 
 def USP(
@@ -1016,6 +1037,11 @@ def USP(
 
     qkv_amaxes = None
     packed_scales = None
+    valid_kv_len = (
+        (attention_kwargs or {}).get("valid_kv_len")
+        if use_attention_a2a
+        else None
+    )
     if ulysses_world_size > 1:
         if use_attention_a2a:
             (query, key, value), packed_scales = fused_a2a_input(
@@ -1026,6 +1052,7 @@ def USP(
                 get_ulysses_parallel_rank(),
                 softmax_scale=query.shape[-1] ** -0.5,
                 pending=attention_a2a_pending,
+                valid_kv_len=valid_kv_len,
             )
         elif fp8_comms is not None:
             if extra_inputs:
@@ -1061,7 +1088,6 @@ def USP(
                 attention_kwargs[name] = _ft_c_input_all_to_all(tensor)
 
     if use_attention_a2a:
-        valid_kv_len = (attention_kwargs or {}).get("valid_kv_len")
         key, value, packed_scales = _trim_packed_attention_a2a_padding(
             key,
             value,

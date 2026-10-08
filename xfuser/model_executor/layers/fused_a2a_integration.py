@@ -95,7 +95,7 @@ def _tier2_support_status():
         (
             "_CollectiveKernel.create_out_of_place",
             getattr(collective, "create_out_of_place", None),
-            (placeholder,) * 9,
+            (placeholder,) * 10,
             {},
         ),
         (
@@ -192,7 +192,7 @@ def _register_input_collective():
     lib.define(
         "fused_a2a_input_collective(Tensor input, Tensor lifetime, "
         "Tensor[] previous, int role, str profile, str group_name, "
-        "int rank, int world_size) -> Tensor[]",
+        "int rank, int world_size, int? valid_kv_len) -> Tensor[]",
         tags=(torch.Tag.cudagraph_unsafe,),
     )
     lib.define(
@@ -200,15 +200,22 @@ def _register_input_collective():
         tags=(torch.Tag.cudagraph_unsafe,),
     )
 
-    def submit(input, lifetime, previous, role, profile, group_name, rank, world_size):
-        del lifetime, previous
+    def submit(input, lifetime, previous, role, profile, group_name, rank, world_size, valid_kv_len):
+        del lifetime, previous, world_size
         _require_active_profile(profile)
         group = dist.distributed_c10d._resolve_process_group(group_name)
         handle = (group_name, rank, input.device.index)
         pending = _INPUT_PENDING.get(handle)
         if role == 0 and pending is not None:
             raise ValueError("previous interleaved input has not been consumed")
-        pending = _submit_input_role(input, role, group, rank, pending)
+        pending = _submit_input_role(
+            input,
+            role,
+            group,
+            rank,
+            pending,
+            valid_kv_len,
+        )
         _INPUT_PENDING[handle] = pending
         result = pending["results"][-1]
         payload = result.payload
@@ -219,13 +226,14 @@ def _register_input_collective():
             _INPUT_COLLECTIVE_WAITS[tensor.data_ptr()] = (done, handle, role)
         return [payload, scale]
 
-    def submit_fake(input, lifetime, previous, role, profile, group_name, rank, world_size):
+    def submit_fake(input, lifetime, previous, role, profile, group_name, rank, world_size, valid_kv_len):
         del lifetime, previous, group_name, rank
         head_major = input.transpose(1, 2)
         payloads, scales = _fake_packed_raw_outputs(
             head_major,
             profile,
             world_size,
+            valid_kv_len,
         )
         return [payloads[role], scales[role]]
 
@@ -247,7 +255,7 @@ def _register_input_collective():
         has_side_effect(op)
 
     @register_lowering(submit_op, type_promotion_kind=None)
-    def lower_submit(input, lifetime, previous, role, profile, group_name, rank, world_size):
+    def lower_submit(input, lifetime, previous, role, profile, group_name, rank, world_size, valid_kv_len):
         outputs = ir._CollectiveKernel.create_out_of_place(
             submit_op,
             input,
@@ -258,6 +266,7 @@ def _register_input_collective():
             group_name,
             rank,
             world_size,
+            valid_kv_len,
         )
         return [ir.TensorBox.create(output) for output in outputs]
 
@@ -297,6 +306,8 @@ def preflight_attention_a2a(config: AttentionA2AConfig) -> None:
         _prepare_attention_a2a_packed_launcher()
         if getattr(PackedRoleResult, "_fields", ()) != ("payload", "scale"):
             raise RuntimeError("installed AITER has an incompatible PackedRoleResult contract")
+        if "valid_kv_len" not in inspect.signature(AttentionA2AIntraNodeOp.__init__).parameters:
+            raise RuntimeError("installed AITER lacks Attention A2A direct valid K/V output")
         source = inspect.getsource(AttentionA2AIntraNodeOp.__init__)
         required_codecs = {"e4m3_pc", "mxfp6_p"} if config.is_auto else set(config.codecs)
         missing = sorted(codec for codec in required_codecs & {"e4m3_pc", "mxfp6_p"} if repr(codec) not in source)
@@ -598,12 +609,40 @@ def _require_active_profile(profile):
         )
 
 
+def _select_direct_valid_kv_len(
+    config,
+    valid_kv_len,
+    local_sequence,
+    world_size,
+):
+    if valid_kv_len is None or not config.supports_direct_kv_output:
+        return None
+    full_sequence = local_sequence * world_size
+    if not full_sequence - local_sequence < valid_kv_len <= full_sequence:
+        return None
+    return valid_kv_len
+
+
 def use_fused_a2a_interleave():
     return _FUSED_A2A_INTERLEAVE and _FUSED_A2A_SIDESTREAM and _FUSED_A2A_PACKED
 
 
-def fused_a2a_input_role(input, role, group, rank, pending=None):
+def fused_a2a_input_role(
+    input,
+    role,
+    group,
+    rank,
+    pending=None,
+    valid_kv_len=None,
+):
     """Submit one role, retaining only a traceable handle outside the opaque op."""
+    world_size = dist.get_world_size(group)
+    valid_kv_len = _select_direct_valid_kv_len(
+        _ATTENTION_A2A_CONFIG,
+        valid_kv_len,
+        input.shape[1],
+        world_size,
+    )
     if _FUSED_A2A_COLLECTIVE:
         previous = [] if pending is None else list(pending)
         outputs = torch.ops.xfuser.fused_a2a_input_collective.default(
@@ -614,13 +653,21 @@ def fused_a2a_input_role(input, role, group, rank, pending=None):
             _ATTENTION_A2A_CONFIG.profile,
             group.group_name,
             rank,
-            dist.get_world_size(group),
+            world_size,
+            valid_kv_len,
         )
         return (*previous, *outputs)
     handle = (group.group_name, rank, input.device.index)
     if role not in (0, 1, 2) or (role != 0 and pending != (*handle, role)):
         raise ValueError("interleave requires Q, K, V in order")
-    _fused_a2a_submit_role(input, role, _ATTENTION_A2A_CONFIG.profile, group.group_name, rank)
+    _fused_a2a_submit_role(
+        input,
+        role,
+        _ATTENTION_A2A_CONFIG.profile,
+        group.group_name,
+        rank,
+        valid_kv_len,
+    )
     return (*handle, role + 1)
 
 
@@ -635,6 +682,7 @@ def _fused_a2a_submit_role(
     profile: str,
     group_name: str,
     rank: int,
+    valid_kv_len: int | None,
 ) -> None:
     # The ordered effect owns peer buffers, handshake state and host parity. CUDA
     # graph replay would bypass those host updates and the runtime pending bridge.
@@ -645,7 +693,14 @@ def _fused_a2a_submit_role(
     if role == 0 and pending is not None:
         raise ValueError("previous interleaved input has not been consumed")
     try:
-        _INPUT_PENDING[handle] = _submit_input_role(input, role, group, rank, pending)
+        _INPUT_PENDING[handle] = _submit_input_role(
+            input,
+            role,
+            group,
+            rank,
+            pending,
+            valid_kv_len,
+        )
     except Exception as exc:
         global _ATTENTION_A2A_POISONED
         _INPUT_PENDING.pop(handle, None)
@@ -654,7 +709,14 @@ def _fused_a2a_submit_role(
 
 
 @_fused_a2a_submit_role.register_fake
-def _fused_a2a_submit_role_fake(input, role, profile, group_name, rank):
+def _fused_a2a_submit_role_fake(
+    input,
+    role,
+    profile,
+    group_name,
+    rank,
+    valid_kv_len,
+):
     return None
 
 
@@ -665,12 +727,26 @@ if _tier1_support_status()[0]:
     has_side_effect(with_effects)
 
 
-def _submit_input_role(input, role, group, rank, pending=None):
+def _submit_input_role(
+    input,
+    role,
+    group,
+    rank,
+    pending=None,
+    valid_kv_len=None,
+):
     """Submit one already-normalized sequence-major role without a compute join."""
     if not use_fused_a2a_interleave():
         raise RuntimeError("per-role input requires quantized sidestream interleave")
     if role == 0:
-        in_op = _get_ops(group, rank, tuple(input.shape), input.dtype, input.device)
+        in_op = _get_ops(
+            group,
+            rank,
+            tuple(input.shape),
+            input.dtype,
+            input.device,
+            valid_kv_len=valid_kv_len,
+        )
         side = _input_side_stream(input.device)
         pending = {
             "op": in_op,
@@ -678,9 +754,12 @@ def _submit_input_role(input, role, group, rank, pending=None):
             "inputs": [],
             "results": [],
             "next_role": 0,
+            "valid_kv_len": valid_kv_len,
         }
     if pending is None or pending["next_role"] != role:
         raise ValueError("interleave requires Q, K, V in order")
+    if pending["valid_kv_len"] != valid_kv_len:
+        raise ValueError("interleaved Q, K, and V must use the same valid_kv_len")
     side = pending["side"]
     # On role 0 this producer is downstream of the preceding block's MHA, so
     # its compute-to-side event also drains the prior packed-buffer consumer
@@ -736,7 +815,15 @@ def _init_mori(group, ranks):
     _MORI_GROUP_KEY = group_key
 
 
-def _get_ops(group, rank, shape, dtype, device, softmax_scale=None):
+def _get_ops(
+    group,
+    rank,
+    shape,
+    dtype,
+    device,
+    softmax_scale=None,
+    valid_kv_len=None,
+):
     from aiter.ops.flydsl.attention_a2a_intranode import (
         AttentionA2AIntraNodeOp,
     )
@@ -763,6 +850,7 @@ def _get_ops(group, rank, shape, dtype, device, softmax_scale=None):
         v_pack,
         _TRANSPORT_HADAMARD,
         _ATTENTION_A2A_CONFIG.block_num,
+        valid_kv_len,
     )
     op = _OP_CACHE.get(key)
     if op is None:
@@ -782,12 +870,19 @@ def _get_ops(group, rank, shape, dtype, device, softmax_scale=None):
             v_pack=v_pack,
             softmax_scale=softmax_scale,
             hadamard=_TRANSPORT_HADAMARD,
+            valid_kv_len=valid_kv_len,
         )
         _OP_CACHE[key] = op
     return op
 
 
-def _packed_output_views(outputs, scales, output_shape, codecs=None):
+def _packed_output_views(
+    outputs,
+    scales,
+    output_shape,
+    codecs=None,
+    valid_kv_len=None,
+):
     """Rebuild the role-specific logical MHA-v4 views over A2A raw buffers."""
     from aiter.ops.mha_v4 import (
         mxfp4_k_view,
@@ -796,46 +891,55 @@ def _packed_output_views(outputs, scales, output_shape, codecs=None):
     )
 
     b, sequence, heads, d = output_shape
+    kv_sequence = sequence if valid_kv_len is None else valid_kv_len
+    kv_shape = (b, kv_sequence, heads, d)
     q_raw, k_raw, v_raw = outputs
     q_scales, k_scales, v_scales = scales
     qk_codec, _, v_codec = codecs or _FUSED_A2A_CODECS
-    scale_shape = (*output_shape[:-1], d // 32)
-    tiles = (sequence + 127) // 128
+    q_scale_shape = (*output_shape[:-1], d // 32)
+    k_scale_shape = (*kv_shape[:-1], d // 32)
+    tiles = (kv_sequence + 127) // 128
 
     if qk_codec == "bf16":
         q = q_raw.view(b, heads, sequence, d).transpose(1, 2)
-        k = k_raw.view(b, heads, sequence, d).transpose(1, 2)
+        k = k_raw.view(b, heads, kv_sequence, d).transpose(1, 2)
     elif qk_codec in ("int8", "e4m3", "mxfp8"):
         q = q_raw.view(output_shape)
-        k = k_raw.view(output_shape)
+        k = k_raw.view(kv_shape)
         if qk_codec not in ("int8", "e4m3"):
-            q_scales = q_scales.view(scale_shape)
-            k_scales = k_scales.view(scale_shape)
+            q_scales = q_scales.view(q_scale_shape)
+            k_scales = k_scales.view(k_scale_shape)
     elif qk_codec == "mxfp4":
-        q_scales = q_scales.view(scale_shape)
-        k_scales = k_scales.view(*output_shape[:-1], d // 32)
+        q_scales = q_scales.view(q_scale_shape)
+        k_scales = k_scales.view(k_scale_shape)
         q = q_raw.view(*output_shape[:-1], d // 2)
         k = mxfp4_k_view(k_raw, k_scales)
     elif qk_codec == "mxfp6":
-        q_scales = q_scales.view(scale_shape)
+        q_scales = q_scales.view(q_scale_shape)
         q = q_raw.view(*output_shape[:-1], d // 32 * 24)
-        k, k_scales = mxfp6_k_view(k_raw, k_scales, b, sequence, heads)
+        k, k_scales = mxfp6_k_view(
+            k_raw,
+            k_scales,
+            b,
+            kv_sequence,
+            heads,
+        )
     else:
         raise RuntimeError(f"unsupported packed Q/K codec {qk_codec!r}")
 
     if v_codec == "e4m3":
-        v = v_raw.view(output_shape)
+        v = v_raw.view(kv_shape)
     elif v_codec == "e4m3_pc":
-        v = v_raw.view(output_shape)
+        v = v_raw.view(kv_shape)
         v_scales = v_scales.view(b, heads, d)
     elif v_codec == "mxfp4":
         v_scales = v_scales.view(b, heads, tiles * 512)
-        v = mxfp4_v_view(v_raw, v_scales, sequence)
+        v = mxfp4_v_view(v_raw, v_scales, kv_sequence)
     elif v_codec == "mxfp6_p":
         v_scales = v_scales.view(b, heads, tiles * 512)
         v = torch.as_strided(
             v_raw,
-            (b, sequence, heads, d),
+            (b, kv_sequence, heads, d),
             (heads * tiles * 12288, 96, tiles * 12288, 1),
         )
     else:
@@ -869,6 +973,7 @@ def _fused_a2a_input_runtime(
     sin=None,
     softmax_scale=None,
     pending=None,
+    valid_kv_len=None,
 ):
     """Run the fused in-hop from USP head-major views."""
     sequence_major = tuple(tensor.transpose(1, 2) for tensor in (query, key, value))
@@ -876,7 +981,15 @@ def _fused_a2a_input_runtime(
         raise ValueError("fused A2A requires Q/K/V backed by contiguous [B,S_local,H,D] tensors")
 
     q, k, v = sequence_major
-    in_op = _get_ops(group, rank, tuple(q.shape), q.dtype, q.device, softmax_scale)
+    in_op = _get_ops(
+        group,
+        rank,
+        tuple(q.shape),
+        q.dtype,
+        q.device,
+        softmax_scale,
+        valid_kv_len,
+    )
     side_stream = _input_side_stream(q.device)
     if pending is not None:
         if pending != (group.group_name, rank, q.device.index, 3):
@@ -912,7 +1025,12 @@ def _fused_a2a_input_runtime(
     if _FUSED_A2A_PACKED:
         outputs, scales = outputs
         output_shape = (b, world_size * s_local, h_total // world_size, d)
-        return _packed_output_views(outputs, scales, output_shape)
+        return _packed_output_views(
+            outputs,
+            scales,
+            output_shape,
+            valid_kv_len=valid_kv_len,
+        )
     output_shape = (b, h_total // world_size, world_size * s_local, d)
     return tuple(output.view(output_shape) for output in outputs)
 
@@ -937,7 +1055,15 @@ def fused_a2a_input(
     sin=None,
     softmax_scale=None,
     pending=None,
+    valid_kv_len=None,
 ):
+    world_size = dist.get_world_size(group)
+    valid_kv_len = _select_direct_valid_kv_len(
+        _ATTENTION_A2A_CONFIG,
+        valid_kv_len,
+        query.shape[2],
+        world_size,
+    )
     if _FUSED_A2A_COLLECTIVE and pending is not None:
         if len(pending) != 6:
             raise ValueError("Tier-2 input requires all three role outputs")
@@ -954,6 +1080,7 @@ def fused_a2a_input(
             (outputs[1], outputs[3], outputs[5]),
             output_shape,
             codecs=_ATTENTION_A2A_CONFIG.codecs,
+            valid_kv_len=valid_kv_len,
         )
     if pending is not None and pending != (group.group_name, rank, query.device.index, 3):
         raise ValueError("interleaved input handle must finish this group's Q/K/V trio")
@@ -964,12 +1091,13 @@ def fused_a2a_input(
         _ATTENTION_A2A_CONFIG.profile,
         group.group_name,
         rank,
-        dist.get_world_size(group),
+        world_size,
         norm_q,
         norm_k,
         cos,
         sin,
         softmax_scale,
+        valid_kv_len,
         pending is not None,
     )
     if _FUSED_A2A_PACKED:
@@ -995,6 +1123,7 @@ def _fused_a2a_wait(
     cos: torch.Tensor | None,
     sin: torch.Tensor | None,
     softmax_scale: float | None,
+    valid_kv_len: int | None,
     interleaved: bool,
 ) -> list[torch.Tensor]:
     _require_active_profile(profile)
@@ -1012,13 +1141,19 @@ def _fused_a2a_wait(
         sin,
         softmax_scale,
         pending,
+        valid_kv_len,
     )
     if _FUSED_A2A_PACKED:
         outputs = (*outputs[0], *outputs[1])
     return [_owned_transport_tensor(tensor) for tensor in outputs]
 
 
-def _fake_packed_raw_outputs(query, profile, world_size):
+def _fake_packed_raw_outputs(
+    query,
+    profile,
+    world_size,
+    valid_kv_len=None,
+):
     config = AttentionA2AConfig(profile=profile)
     codecs = config.codecs
     b, h, s, d = query.shape
@@ -1033,54 +1168,70 @@ def _fake_packed_raw_outputs(query, profile, world_size):
     )
 
     sequence = shape[1]
+    direct_valid_kv_len = _select_direct_valid_kv_len(
+        config,
+        valid_kv_len,
+        s,
+        world_size,
+    )
+    kv_sequence = (
+        sequence
+        if direct_valid_kv_len is None
+        else direct_valid_kv_len
+    )
     heads = shape[2]
-    numel = b * sequence * heads * d
+    q_numel = b * sequence * heads * d
+    kv_numel = b * kv_sequence * heads * d
     qk_codec, _, v_codec = codecs
 
     if qk_codec in ("int8", "e4m3", "mxfp8"):
-        q_raw = query.new_empty((numel,), dtype=torch.uint8)
-        k_raw = query.new_empty((numel,), dtype=torch.uint8)
+        q_raw = query.new_empty((q_numel,), dtype=torch.uint8)
+        k_raw = query.new_empty((kv_numel,), dtype=torch.uint8)
         if qk_codec in ("int8", "e4m3"):
             q_scales = query.new_empty((1,), dtype=torch.float32)
             k_scales = query.new_empty((1,), dtype=torch.float32)
         else:
-            q_scales = query.new_empty((numel // 32,), dtype=torch.uint8)
-            k_scales = query.new_empty((numel // 32,), dtype=torch.uint8)
+            q_scales = query.new_empty((q_numel // 32,), dtype=torch.uint8)
+            k_scales = query.new_empty((kv_numel // 32,), dtype=torch.uint8)
     elif qk_codec in ("mxfp4", "mxfp6"):
-        q_scales = query.new_empty((numel // 32,), dtype=torch.uint8)
+        q_scales = query.new_empty((q_numel // 32,), dtype=torch.uint8)
         if qk_codec == "mxfp4":
-            q_raw = query.new_empty((numel // 2,), dtype=torch.uint8)
+            q_raw = query.new_empty((q_numel // 2,), dtype=torch.uint8)
             k_raw = query.new_empty(
-                (mxfp4_k_raw_buffer_size(b, sequence, heads),),
+                (mxfp4_k_raw_buffer_size(b, kv_sequence, heads),),
                 dtype=torch.uint8,
             )
-            k_scales = query.new_empty((numel // 32,), dtype=torch.uint8)
+            k_scales = query.new_empty((kv_numel // 32,), dtype=torch.uint8)
         else:
-            q_raw = query.new_empty((numel * 3 // 4,), dtype=torch.uint8)
-            k_size, k_scale_size = fp6_k_raw_buffer_sizes(b, sequence, heads)
+            q_raw = query.new_empty((q_numel * 3 // 4,), dtype=torch.uint8)
+            k_size, k_scale_size = fp6_k_raw_buffer_sizes(
+                b,
+                kv_sequence,
+                heads,
+            )
             k_raw = query.new_empty((k_size,), dtype=torch.uint8)
             k_scales = query.new_empty((k_scale_size,), dtype=torch.uint8)
     else:
         raise RuntimeError(f"unsupported packed Q/K codec {qk_codec!r}")
 
     if v_codec == "e4m3":
-        v_raw = query.new_empty((numel,), dtype=torch.uint8)
+        v_raw = query.new_empty((kv_numel,), dtype=torch.uint8)
         v_scales = query.new_empty((1,), dtype=torch.float32)
     elif v_codec == "e4m3_pc":
-        v_raw = query.new_empty((numel,), dtype=torch.uint8)
+        v_raw = query.new_empty((kv_numel,), dtype=torch.uint8)
         v_scales = query.new_empty((b, heads, d), dtype=torch.float32)
     elif v_codec in ("mxfp4", "mxfp6_p"):
         v_raw_size = (
-            mxfp4_v_raw_buffer_size(b, sequence, heads)
+            mxfp4_v_raw_buffer_size(b, kv_sequence, heads)
             if v_codec == "mxfp4"
-            else mxfp6_v_raw_buffer_size(b, sequence, heads)
+            else mxfp6_v_raw_buffer_size(b, kv_sequence, heads)
         )
         v_raw = query.new_empty(
             (v_raw_size,),
             dtype=torch.uint8,
         )
         v_scales = query.new_empty(
-            (b * heads * ((sequence + 127) // 128) * 512,),
+            (b * heads * ((kv_sequence + 127) // 128) * 512,),
             dtype=torch.uint8,
         )
     else:
@@ -1102,6 +1253,7 @@ def _fused_a2a_wait_fake(
     cos,
     sin,
     softmax_scale,
+    valid_kv_len,
     interleaved,
 ):
     del key, value, group_name, rank, norm_q, norm_k, cos, sin
@@ -1110,13 +1262,25 @@ def _fused_a2a_wait_fake(
     b, h, s, d = query.shape
     if not config.enabled:
         return [query.new_empty((b, h // world_size, s * world_size, d)) for _ in range(3)]
-    raw_payloads, raw_scales = _fake_packed_raw_outputs(query, profile, world_size)
+    direct_valid_kv_len = _select_direct_valid_kv_len(
+        config,
+        valid_kv_len,
+        s,
+        world_size,
+    )
+    raw_payloads, raw_scales = _fake_packed_raw_outputs(
+        query,
+        profile,
+        world_size,
+        direct_valid_kv_len,
+    )
     shape = (b, s * world_size, h // world_size, d)
     payloads, scales = _packed_output_views(
         raw_payloads,
         raw_scales,
         shape,
         codecs=config.codecs,
+        valid_kv_len=direct_valid_kv_len,
     )
     return [*payloads, *scales]
 

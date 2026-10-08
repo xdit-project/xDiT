@@ -68,6 +68,7 @@ _PROFILE_RECIPES = {
         "v_pack": "fp6_p",
         "pad_multiple": 64,
         "default_hadamard": "preprocess",
+        "direct_kv_output": True,
     },
     "mxfp4-mxfp4": {
         "codecs": ("mxfp4", "mxfp4", "mxfp4"),
@@ -77,6 +78,7 @@ _PROFILE_RECIPES = {
         "v_pack": "fp6_p",
         "pad_multiple": 64,
         "default_hadamard": "preprocess",
+        "direct_kv_output": True,
     },
     "mxfp6-mxfp4": {
         "codecs": ("mxfp6", "mxfp6", "mxfp4"),
@@ -86,6 +88,7 @@ _PROFILE_RECIPES = {
         "v_pack": "fp6_p",
         "pad_multiple": 64,
         "default_hadamard": "preprocess",
+        "direct_kv_output": True,
     },
 }
 
@@ -217,6 +220,12 @@ class AttentionA2AConfig:
         if not self.enabled:
             return 128
         return self._recipe().get("block_num", 512)
+
+    @property
+    def supports_direct_kv_output(self) -> bool:
+        if not self.enabled or self.is_auto:
+            return False
+        return self._recipe().get("direct_kv_output", False)
 
     @property
     def hadamard_placement(self) -> str:

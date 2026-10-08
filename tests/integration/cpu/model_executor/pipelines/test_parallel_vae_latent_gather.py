@@ -1,4 +1,4 @@
-"""Gathering latents for dedicated VAE ranks creates its process group once, on every DiT rank."""
+"""Gathering latents for the parallel VAE creates its process group once, on every rank."""
 
 import datetime
 import queue
@@ -11,13 +11,14 @@ import pytest
 
 pytestmark = [pytest.mark.gloo, pytest.mark.slow]
 
-# Two DiT ranks plus one dedicated VAE rank, as with ``--vae_parallel_size 1``.
-_DIT_SIZE = 2
-_WORLD_SIZE = _DIT_SIZE + 1
+# Classifier-free guidance splits the batch across both ranks, so only rank 1 is
+# DP-last. Rank 0 never gathers, but ``new_group`` is collective and it must take
+# part in creating the group anyway.
+_WORLD_SIZE = 2
 _REQUESTS = 3
 
 
-def _gather_worker(rank, world_size, init_method, result_queue, parallel_degrees):
+def _gather_worker(rank, world_size, init_method, result_queue):
     dist = None
     try:
         import torch
@@ -45,32 +46,31 @@ def _gather_worker(rank, world_size, init_method, result_queue, parallel_degrees
                 rank=rank,
                 world_size=world_size,
             )
-            calls, gathered = 0, []
-            if rank >= _DIT_SIZE:
-                # A VAE rank only joins its own group, like the Ray VAE worker.
-                parallel_state.init_vae_group(_DIT_SIZE, world_size - _DIT_SIZE, "gloo")
-            else:
-                parallel_state.initialize_model_parallel(
-                    backend="gloo", vae_parallel_size=world_size - _DIT_SIZE, **parallel_degrees
-                )
-                state = DiTRuntimeState.__new__(DiTRuntimeState)
-                state.runtime_config = RuntimeConfig(dtype=torch.float32, use_parallel_vae=True)
-                state.parallel_config = SimpleNamespace(vae_parallel_size=world_size - _DIT_SIZE)
-                runtime_state._RUNTIME = state
+            parallel_state.initialize_model_parallel(
+                backend="gloo",
+                classifier_free_guidance_degree=world_size,
+                use_parallel_vae=True,
+            )
+            state = DiTRuntimeState.__new__(DiTRuntimeState)
+            state.runtime_config = RuntimeConfig(dtype=torch.float32, use_parallel_vae=True)
+            # The VAE shares the model ranks; dedicated VAE ranks are a Ray-only topology.
+            state.parallel_config = SimpleNamespace(vae_parallel_size=0)
+            runtime_state._RUNTIME = state
 
-                pipeline = _Pipeline.__new__(_Pipeline)
-                with patch.object(dist, "new_group", wraps=dist.new_group) as new_group:
-                    for request_idx in range(_REQUESTS):
-                        latents = torch.full((1, 4, 2, 2), float(10 * rank + request_idx))
-                        latents = pipeline.gather_latents_for_vae(latents)
-                        gathered.append([float(sample.unique()) for sample in latents])
-                    calls = new_group.call_count
+            pipeline = _Pipeline.__new__(_Pipeline)
+            gathered = []
+            with patch.object(dist, "new_group", wraps=dist.new_group) as new_group:
+                for request_idx in range(_REQUESTS):
+                    latents = torch.full((1, 4, 2, 2), float(10 * rank + request_idx))
+                    latents = pipeline.gather_latents_for_vae(latents)
+                    gathered.append([float(sample.unique()) for sample in latents])
+                calls = new_group.call_count
 
-                # Groups created later by all DiT ranks must still line up.
-                later = dist.new_group(list(range(_DIT_SIZE)), timeout=datetime.timedelta(seconds=20))
-                total = torch.ones(1)
-                dist.all_reduce(total, group=later)
-                assert total.item() == _DIT_SIZE
+            # Groups created later by all ranks must still line up.
+            later = dist.new_group(list(range(world_size)), timeout=datetime.timedelta(seconds=20))
+            total = torch.ones(1)
+            dist.all_reduce(total, group=later)
+            assert total.item() == world_size
 
             parallel_state.get_world_group().barrier()
 
@@ -82,13 +82,13 @@ def _gather_worker(rank, world_size, init_method, result_queue, parallel_degrees
             dist.destroy_process_group()
 
 
-def _run_spawned(torch, init_method, parallel_degrees, *, timeout):
+def _run_spawned(torch, init_method, *, timeout):
     context = torch.multiprocessing.get_context("spawn")
     result_queue = context.Queue()
     processes = [
         context.Process(
             target=_gather_worker,
-            args=(rank, _WORLD_SIZE, init_method, result_queue, parallel_degrees),
+            args=(rank, _WORLD_SIZE, init_method, result_queue),
         )
         for rank in range(_WORLD_SIZE)
     ]
@@ -118,17 +118,7 @@ def _requests(*ranks):
     return [[float(10 * rank + request_idx) for rank in ranks] for request_idx in range(_REQUESTS)]
 
 
-@pytest.mark.parametrize(
-    ("parallel_degrees", "expected"),
-    [
-        # Both DiT ranks are DP-last; rank 1 receives both replicas' latents.
-        ({"data_parallel_degree": 2}, {0: (1, _requests(0)), 1: (1, _requests(0, 1)), 2: (0, [])}),
-        # Only rank 1 is DP-last; rank 0 must still take part in creating the group.
-        ({"classifier_free_guidance_degree": 2}, {0: (1, _requests(0)), 1: (1, _requests(1)), 2: (0, [])}),
-    ],
-    ids=["data-parallel", "cfg-parallel"],
-)
-def test_repeated_requests_create_the_vae_gather_group_once_on_every_dit_rank(tmp_path, parallel_degrees, expected):
+def test_repeated_requests_create_the_vae_gather_group_once_on_every_rank(tmp_path):
     torch = pytest.importorskip("torch")
     if not torch.distributed.is_available() or not torch.distributed.is_gloo_available():
         pytest.skip("torch.distributed with the gloo backend is unavailable")
@@ -136,7 +126,6 @@ def test_repeated_requests_create_the_vae_gather_group_once_on_every_dit_rank(tm
     processes, hung, results = _run_spawned(
         torch,
         f"file://{tmp_path / 'vae-gather-init'}",
-        parallel_degrees,
         timeout=120,
     )
 
@@ -144,4 +133,8 @@ def test_repeated_requests_create_the_vae_gather_group_once_on_every_dit_rank(tm
     errors = [result for result in results if result[0] == "error"]
     assert not errors, "\n".join(result[2] for result in errors)
     assert [process.exitcode for process in processes] == [0] * _WORLD_SIZE
-    assert {rank: (calls, gathered) for _, rank, calls, gathered in results} == expected
+    # Rank 0 is not DP-last, so it keeps its own latents; rank 1 gathers only its own.
+    assert {rank: (calls, gathered) for _, rank, calls, gathered in results} == {
+        0: (1, _requests(0)),
+        1: (1, _requests(1)),
+    }

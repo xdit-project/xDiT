@@ -29,6 +29,9 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
 @register_model("black-forest-labs/FLUX.1-dev")
 @register_model("FLUX.1-dev")
 class xFuserFluxModel(xFuserModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 24
+
     min_diffusers_version = "0.35.2"
 
     load_support = LoadSupport(
@@ -49,6 +52,7 @@ class xFuserFluxModel(xFuserModel):
         fully_shard_degree=True,
         use_fp8_comms=True,
         supports_step_caching=True,
+        supports_lora=True,
         profile_capture_phase=True,
     )
     default_input_values = DefaultInputValues(
@@ -116,6 +120,10 @@ class xFuserFluxModel(xFuserModel):
                 **te_kwargs,
             )
 
+        if self.config.lora_path:
+            pipe.load_lora_weights(self.config.lora_path, weight_name=self.config.lora_weight_name)
+            pipe.fuse_lora(lora_scale=self.config.lora_scale, safe_fusing=True)
+            pipe.unload_lora_weights()
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
@@ -148,6 +156,9 @@ class xFuserFluxModel(xFuserModel):
 @register_model("black-forest-labs/FLUX.1-Kontext-dev")
 @register_model("FLUX.1-Kontext-dev")
 class xFuserFluxKontextModel(xFuserModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 24
+
     min_diffusers_version = "0.35.2"
 
     load_support = LoadSupport(
@@ -275,6 +286,9 @@ class xFuserFluxKontextModel(xFuserModel):
 @register_model("black-forest-labs/FLUX.2-dev")
 @register_model("FLUX.2-dev")
 class xFuserFlux2Model(xFuserModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 48
+
     # Flux2Pipeline and the transformer symbols the wrapper needs, including the
     # PipeFusion pipeline, all landed in 0.36.
     min_diffusers_version = "0.36.0"
@@ -422,6 +436,9 @@ class xFuserFlux2Model(xFuserModel):
 @register_model("black-forest-labs/FLUX.2-klein-9B")
 @register_model("FLUX.2-klein-9B")
 class xFuserFlux2Klein9BModel(xFuserModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 32
+
     # Flux2KleinPipeline landed in 0.37, one release after Flux2Pipeline.
     min_diffusers_version = "0.37.0"
 
@@ -550,6 +567,9 @@ class xFuserFlux2Klein9BModel(xFuserModel):
 @register_model("black-forest-labs/FLUX.2-klein-4B")
 @register_model("FLUX.2-klein-4B")
 class xFuserFlux2Klein4BModel(xFuserFlux2Klein9BModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 24
+
     load_support = LoadSupport(
         meta_transformers=("transformer",),
         meta_text_encoders=("text_encoder",),

@@ -14,7 +14,7 @@ import torch
 
 from xfuser.config import InputConfig
 from xfuser.model_executor.pipelines import pipeline_flux2
-from xfuser.model_executor.pipelines.pipeline_flux2 import xFuserFlux2KleinPipeline
+from xfuser.model_executor.pipelines.pipeline_flux2_klein import xFuserFlux2KleinPipeline
 
 
 @pytest.mark.parametrize("guidance_scale", [1.0, 4.5])

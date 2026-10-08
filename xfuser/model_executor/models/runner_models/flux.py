@@ -52,6 +52,7 @@ class xFuserFluxModel(xFuserModel):
         fully_shard_degree=True,
         use_fp8_comms=True,
         supports_step_caching=True,
+        supports_lora=True,
         profile_capture_phase=True,
     )
     default_input_values = DefaultInputValues(
@@ -119,6 +120,10 @@ class xFuserFluxModel(xFuserModel):
                 **te_kwargs,
             )
 
+        if self.config.lora_path:
+            pipe.load_lora_weights(self.config.lora_path, weight_name=self.config.lora_weight_name)
+            pipe.fuse_lora(lora_scale=self.config.lora_scale, safe_fusing=True)
+            pipe.unload_lora_weights()
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:

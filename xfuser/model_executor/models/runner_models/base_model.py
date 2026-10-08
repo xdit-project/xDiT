@@ -215,6 +215,7 @@ class ModelCapabilities:
     use_fp6_gemms: bool = False
     use_a6w4_gemms: bool = False
     supports_step_caching: bool = False
+    supports_lora: bool = False
     use_fp8_comms: bool = False
     use_hybrid_attn_schedule: bool = False
     use_hybrid_gemm_schedule: bool = False
@@ -648,6 +649,17 @@ class xFuserModel(abc.ABC):
     def _validate_config(self, config: xFuserArgs) -> None:
         """Validate if the model supports requested config"""
         config._validate_gemm_quantization_flags()
+        if config.lora_path:
+            if not self.capabilities.supports_lora:
+                raise ValueError(f"Model {self.settings.model_name} does not support startup LoRA fusion.")
+            if (
+                config.pipefusion_parallel_degree > 1
+                or config.fully_shard_degree > 1
+                or config.memory_efficient_sharding
+                or config.memory_efficient_replicated_load
+                or not config.gemm_quantization_spec.is_pure("none")
+            ):
+                raise ValueError("Startup LoRA fusion requires eager, unquantized loading without FSDP or PipeFusion.")
         _validate_attention_head_dims(self, config)
         for key in ModelCapabilities.__annotations__.keys():
             config_value = getattr(

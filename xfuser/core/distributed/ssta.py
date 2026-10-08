@@ -9,6 +9,9 @@
 from dataclasses import dataclass
 import math
 import torch
+import torch.distributed as dist
+import torch.distributed._functional_collectives as ft_c
+from xfuser.model_executor.layers.usp import _maybe_wait
 from einops import rearrange
 
 # ── Dataclasses ──────────────────────────────────────────────
@@ -53,6 +56,10 @@ class MaskConfig:
     topk: int
     b: int
     sparse_text_to_image: bool
+    # Under Ulysses each rank holds only some of the heads. A mask shared
+    # within the head dimension must average over all of them, so the
+    # per-rank sums are all-reduced over this group (None: all heads are local).
+    head_group: "dist.ProcessGroup | None" = None
 
 
 # ── GPU-resident STA mask cache ──────────────────────────────────────────────
@@ -201,6 +208,15 @@ def _block_pool(x, block_shape, adaptive_pool=None):
 # ── MOBA mask ────────────────────────────────────────────────────────────────
 
 
+def _head_mean(x, head_group=None):
+    """Mean over dim 1 (heads), including the heads that the other ranks of head_group hold."""
+    group_size = 1 if head_group is None else dist.get_world_size(head_group)
+    if group_size == 1:
+        return x.mean(dim=1, keepdim=True)
+    total = _maybe_wait(ft_c.all_reduce(x.sum(dim=1, keepdim=True), "sum", head_group))
+    return total / (x.size(1) * group_size)
+
+
 def _create_moba_3d_mask(
     q,
     k,
@@ -218,6 +234,7 @@ def _create_moba_3d_mask(
     adaptive_pool=None,
     sampling_type=None,
     sparse_text_to_image=False,
+    head_group=None,
 ):
     seq_len = q.size(2)
     block_size = math.prod(tile_thw)
@@ -230,8 +247,8 @@ def _create_moba_3d_mask(
     k_block_means = k_block_means.to(torch.float32)
 
     if mask_share_within_head:
-        q = q.mean(dim=1, keepdim=True)
-        k_block_means = k_block_means.mean(dim=1, keepdim=True)
+        q = _head_mean(q, head_group)
+        k_block_means = _head_mean(k_block_means, head_group)
 
     if sampling_type == "importance":
         top_block_indices = _importance_sampling(q, k_block_means, topk, threshold, similarity_weight=similarity_weight)
@@ -262,7 +279,7 @@ def _create_moba_3d_mask(
             tq = text_q.reshape(text_q.size(0), text_q.size(1), text_block_num, block_size, text_q.size(-1))
             tq_avg = tq.mean(dim=-2).to(torch.float32)  # (1, H, text_block_num, D)
             if mask_share_within_head:
-                tq_avg = tq_avg.mean(dim=1, keepdim=True)
+                tq_avg = _head_mean(tq_avg, head_group)
             # k_block_means is already computed above — reuse it
             text_topk_idx = _importance_sampling(
                 tq_avg, k_block_means, topk, threshold, similarity_weight=similarity_weight
@@ -298,6 +315,7 @@ def _create_ssta_3d_mask(
     adaptive_pool=None,
     sampling_type=None,
     sparse_text_to_image=False,
+    head_group=None,
 ):
     sta_3d_mask = _get_sta_mask_gpu(
         canvas_thw, tile_thw, kernel_thw, text_block_num, q.device, sparse_text_to_image=sparse_text_to_image
@@ -318,6 +336,7 @@ def _create_ssta_3d_mask(
         adaptive_pool=adaptive_pool,
         sampling_type=sampling_type,
         sparse_text_to_image=sparse_text_to_image,
+        head_group=head_group,
     )
 
     ssta_3d_mask = torch.logical_or(sta_3d_mask.unsqueeze(0), moba_3d_mask)
@@ -370,6 +389,7 @@ def _setup_ssta(
     adaptive_pool=None,
     text_valid_lens=None,
     sparse_text_to_image=False,
+    head_group=None,
 ):
     if text_len > 0:
         image_q = all_q[:, :, :-text_len, :]
@@ -524,6 +544,7 @@ def _setup_ssta(
         topk=topk,
         b=b,
         sparse_text_to_image=sparse_text_to_image,
+        head_group=head_group,
     )
 
     return q, k, v, mask_config, ssta_state
@@ -595,14 +616,13 @@ def _get_ssta_mask(mask_config):
             adaptive_pool=mask_config.adaptive_pool,
             sampling_type=mask_config.sampling_type,
             sparse_text_to_image=mask_config.sparse_text_to_image,
+            head_group=mask_config.head_group,
         )
         mask_list.append(bm)
 
-    block_mask = torch.stack(mask_list, dim=0)
-    if mask_config.mask_share_within_head:
-        block_mask = block_mask.unsqueeze(1)  # [b, 1, s_block, s_block]
-
-    return block_mask
+    # [b, H, s_block, s_block], or [b, 1, s_block, s_block] when the mask is
+    # shared within the head dimension (each sample's mask keeps a head dim of 1).
+    return torch.stack(mask_list, dim=0)
 
 
 def _get_moba_mask(mask_config):
@@ -628,6 +648,7 @@ def _get_moba_mask(mask_config):
             adaptive_pool=mask_config.adaptive_pool,
             sampling_type=mask_config.sampling_type,
             sparse_text_to_image=mask_config.sparse_text_to_image,
+            head_group=mask_config.head_group,
         )
         mask_list.append(block_mask)
     block_mask = torch.stack(mask_list, dim=0)
@@ -714,6 +735,14 @@ def setup_ssta(query, key, value, attn_kwargs):
         key = _deinterleave(key, sp_size, encoder_sequence_length)
         value = _deinterleave(value, sp_size, encoder_sequence_length)
 
+    # After the Ulysses all-to-all this rank holds H / sp_size heads of the full
+    # sequence; a mask shared within the head dimension averages over all H.
+    head_group = None
+    if attn_mask_share_within_head and sp_size > 1:
+        from xfuser.core.distributed.parallel_state import get_sp_group
+
+        head_group = get_sp_group().ulysses_group
+
     q, k, v, mask_config, ssta_state = _setup_ssta(
         query,
         key,
@@ -731,6 +760,7 @@ def setup_ssta(query, key, value, attn_kwargs):
         mask_share_within_head=attn_mask_share_within_head,
         text_valid_lens=text_valid_lens,
         sparse_text_to_image=sparse_text_to_image,
+        head_group=head_group,
     )
 
     return q, k, v, mask_config, ssta_state

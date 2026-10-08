@@ -1072,10 +1072,13 @@ def test_masked_varlen_accepts_a_pack_only_when_a_mask_comes_with_it():
 def test_a_masked_pack_reaches_the_varlen_and_mask_applying_backends_only():
     """Krea-2 and LTX-2 send both the mask and the packing. Before SDPA could
     serve that through the mask, every such call on SDPA raised; the aten
-    flash, efficient and cuDNN rows pass no mask and must still refuse it."""
+    flash, efficient and cuDNN rows pass no mask and must still refuse it.
+
+    Half precision, so that the dtype half of cuDNN's row -- it serves no
+    float32 call -- does not stand in for the mask and packing under test."""
     from xfuser.core.attention import registry
 
-    q = torch.zeros(1, 4, 8, 128)
+    q = torch.zeros(1, 4, 8, 128, dtype=torch.bfloat16)
     call = _masked_pack()
     accepting = {backend.name for backend, spec in registry.REGISTRY.items() if spec.rejects(q, q, q, call) is None}
     expected = VARLEN_CAPABLE | MASK_APPLYING

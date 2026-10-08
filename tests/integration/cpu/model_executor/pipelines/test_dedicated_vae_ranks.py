@@ -57,9 +57,15 @@ def _worker(rank, world_size, init_method, result_queue):
         from diffusers.image_processor import VaeImageProcessor
 
         dist.init_process_group(backend="gloo", init_method=init_method, rank=rank, world_size=world_size)
+        from xfuser import envs
         from xfuser.core.distributed import parallel_state
         from xfuser.model_executor.pipelines import base_pipeline
 
+        # A ROCm xDiT puts AITER's GroupNorm in torch.nn.GroupNorm when it is imported, and
+        # DistVAE finds the norms to shard by their torch type. The runner restores torch's
+        # while it validates the VAE config, before anything builds a VAE; this worker stands
+        # in for the runner, so it owes the decoder the same precondition. A no-op elsewhere.
+        envs.restore_torch_group_norm_for_distvae()
         parallel_state.init_vae_group(_DIT_SIZE, _VAE_SIZE, "gloo")
         latents = _latents(torch)
         if rank < _DIT_SIZE:

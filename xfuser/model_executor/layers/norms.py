@@ -38,7 +38,11 @@ class _AITERRMSNorm(torch.nn.Module):
             self.weight = weight
             self._use_ones = False
         else:
-            self.register_buffer("_ones_weight", torch.ones(dim))
+            # Not persistent: a constant derived from dim, not learned state. In a
+            # state_dict it would be a key no stock checkpoint carries, and the swap
+            # below runs in __init__, so a strict load of stock weights into a model
+            # xDiT built on an AITER box would fail on the missing key.
+            self.register_buffer("_ones_weight", torch.ones(dim), persistent=False)
             self._use_ones = True
         self.eps = eps
 
@@ -69,11 +73,7 @@ def _replace_rms_norms_with_aiter(model: torch.nn.Module) -> None:
                 if child_module.weight is not None:
                     dim = child_module.weight.shape[0]
                 elif hasattr(child_module, "dim"):
-                    dim = (
-                        int(child_module.dim[0])
-                        if hasattr(child_module.dim, "__len__")
-                        else int(child_module.dim)
-                    )
+                    dim = int(child_module.dim[0]) if hasattr(child_module.dim, "__len__") else int(child_module.dim)
                 else:
                     continue
                 replacements.append(

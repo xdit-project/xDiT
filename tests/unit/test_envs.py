@@ -3,6 +3,9 @@ import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+import torch
+
 from xfuser import envs
 from xfuser.compat import declared_floor
 
@@ -104,6 +107,31 @@ class TestFlashAttnFloor(unittest.TestCase):
 
     def test_release_with_tuple_window_size_is_not_used(self):
         self.assertFalse(self._flash_attn_usable("2.6.3"))
+
+
+class TestAiterGroupNormFallback(unittest.TestCase):
+    """The ROCm setup puts AITER's GroupNorm in torch.nn.GroupNorm for every module built
+    afterwards, CPU-only ones included, and the HIP kernel behind AITER's forward aborts the
+    process on a CPU tensor rather than raising. Stand in for AITER's class: the wrapper reads
+    nothing of a module but the device of what it is handed."""
+
+    class _FakeAiterGroupNorm:
+        def forward(self, x, use_torch=False):
+            return use_torch
+
+    def _group_norm(self):
+        return envs._aiter_group_norm_with_cpu_fallback(self._FakeAiterGroupNorm)()
+
+    def test_a_cpu_tensor_takes_the_torch_path(self):
+        self.assertTrue(self._group_norm().forward(torch.zeros(1, 2, 2, 2)))
+
+    def test_an_accelerator_tensor_reaches_the_aiter_kernel(self):
+        on_device = types.SimpleNamespace(device=torch.device("cuda", 0))
+        self.assertFalse(self._group_norm().forward(on_device))
+
+    def test_an_explicit_use_torch_still_wins_on_the_accelerator(self):
+        on_device = types.SimpleNamespace(device=torch.device("cuda", 0))
+        self.assertTrue(self._group_norm().forward(on_device, use_torch=True))
 
 
 if __name__ == "__main__":

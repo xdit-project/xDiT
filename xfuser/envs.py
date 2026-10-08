@@ -400,10 +400,26 @@ def restore_torch_group_norm_for_distvae() -> bool:
     DistVAE discovers norms to shard by their torch type. This must run before a VAE intended
     for sharding is built, while xDiT is still validating its environment.
     """
-    if torch.nn.GroupNorm.__module__ != "aiter.ops.groupnorm":
+    if torch.nn.GroupNorm is _TORCH_GROUPNORM:
         return False
     torch.nn.GroupNorm = _TORCH_GROUPNORM
     return True
+
+
+def _aiter_group_norm_with_cpu_fallback(aiter_group_norm):
+    """AITER's GroupNorm, deferring to torch for tensors that are not on the accelerator.
+
+    The swap below is global, so every GroupNorm built afterwards is AITER's, including the
+    ones a module runs on CPU: a VAE assembled before it is moved to the device, the CPU test
+    suites. AITER's forward goes straight to a HIP kernel, which aborts the process on a CPU
+    tensor rather than raising, so the class xDiT installs takes the torch path there.
+    """
+
+    class GroupNorm(aiter_group_norm):
+        def forward(self, x, use_torch=False):
+            return super().forward(x, use_torch=use_torch or x.device.type != "cuda")
+
+    return GroupNorm
 
 
 def _setup_rocm_libraries():
@@ -411,7 +427,7 @@ def _setup_rocm_libraries():
         try:
             from aiter.ops.groupnorm import GroupNorm
 
-            torch.nn.GroupNorm = GroupNorm
+            torch.nn.GroupNorm = _aiter_group_norm_with_cpu_fallback(GroupNorm)
             logger.info("Using AITER GroupNorm as torch.nn.GroupNorm")
         except ImportError:
             logger.warning(

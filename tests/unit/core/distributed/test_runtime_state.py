@@ -20,6 +20,7 @@ def state(monkeypatch):
     state.runtime_config = RuntimeConfig(warmup_steps=4)
     state.input_config = InputConfig(height=512, width=512, num_frames=9, batch_size=1)
     state.ready = True
+    state.split_latents_by_rows = True
     return state
 
 

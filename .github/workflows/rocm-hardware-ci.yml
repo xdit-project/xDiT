@@ -1,4 +1,3 @@
-
 # Manually requests AMD hardware validation and mirrors the correlated remote result.
 name: ROCm Hardware CI
 run-name: "ROCm HW CI [origin:${{ github.actor == 'github-actions[bot]' && inputs.original_run_id || github.run_id }}]"

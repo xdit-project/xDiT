@@ -135,6 +135,7 @@ def test_routes_packed_a2a_input_and_rccl_output():
 
     assert result is final_output
     input_a2a.assert_called_once()
+    assert input_a2a.call_args.kwargs["valid_kv_len"] == 13
     packed_attention.assert_called_once()
     output_a2a.assert_called_once_with(attention_output)
     packed_args = packed_attention.call_args.args

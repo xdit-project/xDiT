@@ -89,14 +89,8 @@ def _is_bcast_src(group) -> bool:
 def _tensor_layout(module) -> tuple[tuple[str, str], ...]:
     """Ordered parameter/buffer names, preserving aliases on both builders."""
     return tuple(
-        [
-            ("parameter", name)
-            for name, _ in module.named_parameters(recurse=True, remove_duplicate=False)
-        ]
-        + [
-            ("buffer", name)
-            for name, _ in module.named_buffers(recurse=True, remove_duplicate=False)
-        ]
+        [("parameter", name) for name, _ in module.named_parameters(recurse=True, remove_duplicate=False)]
+        + [("buffer", name) for name, _ in module.named_buffers(recurse=True, remove_duplicate=False)]
     )
 
 
@@ -135,17 +129,9 @@ def _tensor_layout_contract(module) -> tuple[tuple, ...]:
     return tuple(entries)
 
 
-def _collective_assert_same_layout(
-    local_layout, group, device, reference_layout=None
-) -> None:
+def _collective_assert_same_layout(local_layout, group, device, reference_layout=None) -> None:
     """Collectively reject any ordered layout mismatch before data broadcasts begin."""
-    box = [
-        (
-            (reference_layout if reference_layout is not None else local_layout)
-            if group.rank_in_group == 0
-            else None
-        )
-    ]
+    box = [((reference_layout if reference_layout is not None else local_layout) if group.rank_in_group == 0 else None)]
     group.broadcast_object_list(box, src=0)
     reference = box[0]
     local_mismatch = int(local_layout != reference)
@@ -190,9 +176,7 @@ def _collective_source_call(group, is_src, operation, context, src: int = 0):
     status = box[0]
     if status is not None:
         error_type, message = status
-        raise RuntimeError(
-            f"{context} failed on rank{src}: {error_type}: {message}"
-        ) from source_error
+        raise RuntimeError(f"{context} failed on rank{src}: {error_type}: {message}") from source_error
     return result
 
 
@@ -228,11 +212,7 @@ def _warm_shard_depth() -> int:
 
 def _collective_build_call(group, operation, context):
     """Run a build locally, then make every participating rank agree on any failure."""
-    if (
-        group is None
-        or group.world_size <= 1
-        or not hasattr(group, "broadcast_object_list")
-    ):
+    if group is None or group.world_size <= 1 or not hasattr(group, "broadcast_object_list"):
         return operation()
 
     result = None
@@ -259,19 +239,14 @@ def _collective_build_call(group, operation, context):
     for rank, failure in enumerate(failures):
         if failure is not None:
             error_type, message = failure
-            raise RuntimeError(
-                f"{context} failed on rank {rank}: {error_type}: {message}"
-            )
+            raise RuntimeError(f"{context} failed on rank {rank}: {error_type}: {message}")
     return result
 
 
 def _collective_reconcile_tensor_specs(module, names, group, device, src: int = 0):
     """Make peer tensor storage match the reading rank's shape/dtype before positional broadcasts."""
     spec = (
-        [
-            (name, tuple(rgetattr(module, name).shape), rgetattr(module, name).dtype)
-            for name in names
-        ]
+        [(name, tuple(rgetattr(module, name).shape), rgetattr(module, name).dtype) for name in names]
         if group.rank_in_group == src
         else None
     )
@@ -294,23 +269,15 @@ def _collective_reconcile_tensor_specs(module, names, group, device, src: int = 
                     elif local_name in owner._buffers:
                         owner._buffers[local_name] = replacement
                     else:
-                        raise RuntimeError(
-                            f"{name} is not a registered parameter or buffer"
-                        )
+                        raise RuntimeError(f"{name} is not a registered parameter or buffer")
 
-    _collective_build_call(
-        group, reconcile, context="transformer tensor-spec reconciliation"
-    )
+    _collective_build_call(group, reconcile, context="transformer tensor-spec reconciliation")
 
 
-def _collective_reconcile_replicated_tensor_specs(
-    module, group, device
-) -> tuple[tuple, ...]:
+def _collective_reconcile_replicated_tensor_specs(module, group, device) -> tuple[tuple, ...]:
     """Rebuild peer storage and aliases from rank0's authoritative contract."""
 
-    source_contract = (
-        _tensor_layout_contract(module) if group.rank_in_group == 0 else None
-    )
+    source_contract = _tensor_layout_contract(module) if group.rank_in_group == 0 else None
     box = [source_contract]
     group.broadcast_object_list(box, src=0)
     source_contract = box[0]
@@ -403,20 +370,14 @@ class ModelLoader:
         # load both read them, and must not reach different answers.
         self._te_routes = None
 
-    def checkpoint_request(
-        self, subfolder: str | None = None, **kwargs
-    ) -> CheckpointRequest:
+    def checkpoint_request(self, subfolder: str | None = None, **kwargs) -> CheckpointRequest:
         """Build the run's checkpoint identity, preserving explicit caller choices."""
         from huggingface_hub.constants import HF_HUB_OFFLINE
 
-        defaults = dict(
-            getattr(type(self.model), "checkpoint_request_defaults", {}) or {}
-        )
+        defaults = dict(getattr(type(self.model), "checkpoint_request_defaults", {}) or {})
         defaults.setdefault("local_files_only", HF_HUB_OFFLINE)
         defaults.update(kwargs)
-        return CheckpointRequest(
-            self.model.settings.model_name, subfolder=subfolder, **defaults
-        )
+        return CheckpointRequest(self.model.settings.model_name, subfolder=subfolder, **defaults)
 
     def preflight(self, *, world_size: int) -> None:
         """Resolve and validate all load decisions before model allocation."""
@@ -426,9 +387,7 @@ class ModelLoader:
         mode = select_effective_materialization_mode(config, world_size=world_size)
         requested_format, backend = select_runtime_quantization(
             config,
-            aiter_fp8_active=bool(
-                config.use_fp8_gemms and _use_aiter_fp8_rdna4()
-            ),
+            aiter_fp8_active=bool(config.use_fp8_gemms and _use_aiter_fp8_rdna4()),
             cuda_active=_is_cuda(),
         )
         assert_offload_is_compatible_with_format(
@@ -462,9 +421,7 @@ class ModelLoader:
         load path is on."""
         config = self.model.config
         enabled = (
-            select_effective_materialization_mode(
-                config, world_size=get_world_group().world_size
-            )
+            select_effective_materialization_mode(config, world_size=get_world_group().world_size)
             is MaterializationMode.FSDP_META
         )
         if enabled:
@@ -498,9 +455,7 @@ class ModelLoader:
         if not config.memory_efficient_replicated_load:
             return False
         world_size = get_world_group().world_size
-        effective_mode = select_effective_materialization_mode(
-            config, world_size=world_size
-        )
+        effective_mode = select_effective_materialization_mode(config, world_size=world_size)
         if effective_mode is not MaterializationMode.REPLICATED_META:
             splits_weights_per_rank = (
                 config.fully_shard_degree > 1
@@ -558,10 +513,7 @@ class ModelLoader:
             wrap_attrs=wrap_attrs,
             world_size=get_world_group().world_size,
             standard_loader=(
-                bool(
-                    declaration.routes
-                    & LoadRoute.LOCAL_BLOCKWISE
-                )
+                bool(declaration.routes & LoadRoute.LOCAL_BLOCKWISE)
                 and component_name in declaration.local_meta_transformers
             ),
             offload_requested=offload_requested,
@@ -598,12 +550,14 @@ class ModelLoader:
 
             place_pipeline_components(self)
 
-    def fill_eager_transformers(self) -> None:
+    def fill_eager_transformers(self, component_names=None) -> None:
         """Fill all component-level eager blockwise plans before device placement."""
 
         local_rank = get_world_group().local_rank
         device = f"cuda:{local_rank}"
         for name, component in self.model.pipe.components.items():
+            if component_names is not None and name not in component_names:
+                continue
             if component not in self._local_blockwise_transformers:
                 continue
             strategy = self.model.settings.fsdp_strategy[name]
@@ -617,7 +571,7 @@ class ModelLoader:
             log(
                 f"Blockwise-filled {name} locally. "
                 f"host {host_mem_gb()} GB, "
-                f"VRAM {torch.cuda.memory_allocated()/1e9:.2f}GB"
+                f"VRAM {torch.cuda.memory_allocated() / 1e9:.2f}GB"
             )
 
     def build_meta_transformer(
@@ -645,17 +599,10 @@ class ModelLoader:
         declaration = self.load_declaration
         routes = declaration.routes
         local_custom_load = (
-            weight_source is not None
-            and bool(routes & LoadRoute.LOCAL_BLOCKWISE)
-            and get_world_group().world_size == 1
+            weight_source is not None and bool(routes & LoadRoute.LOCAL_BLOCKWISE) and get_world_group().world_size == 1
         )
-        if not (
-            routes & LoadRoute.STANDARD_COLLECTIVES
-        ) and not local_custom_load:
-            raise UnsupportedLoadContract(
-                f"{type(self.model).__name__} does not declare standard "
-                "collective loading"
-            )
+        if not (routes & LoadRoute.STANDARD_COLLECTIVES) and not local_custom_load:
+            raise UnsupportedLoadContract(f"{type(self.model).__name__} does not declare standard collective loading")
         component_name = request.subfolder or "transformer"
         if component_name not in declaration.all_meta_transformers:
             raise UnsupportedLoadContract(
@@ -672,9 +619,7 @@ class ModelLoader:
         def build():
             from accelerate import init_empty_weights
 
-            config = wrapper_cls.load_config(
-                request.model_name_or_path, **request.config_kwargs()
-            )
+            config = wrapper_cls.load_config(request.model_name_or_path, **request.config_kwargs())
             with init_empty_weights():
                 model = wrapper_cls.from_config(config, **(init_kwargs or {}))
             # Match the checkpoint dtype before disk fill and quantization.
@@ -683,9 +628,7 @@ class ModelLoader:
             # ends with eval(), and only that path normally reaches inference.
             return model.eval()
 
-        model = _collective_build_call(
-            get_world_group(), build, context=f"meta transformer '{component_name}'"
-        )
+        model = _collective_build_call(get_world_group(), build, context=f"meta transformer '{component_name}'")
         self._blockwise_sources[model] = weight_source or request
         return model
 
@@ -725,7 +668,6 @@ class ModelLoader:
         # (symmetrically, so agreed_is_meta would not catch it either).
         try:
             request = self.checkpoint_request()
-            model_name = request.model_name_or_path
             resolved = resolve_transformers_component(
                 DiffusionPipeline,
                 component_name,
@@ -735,10 +677,7 @@ class ModelLoader:
                 return None
             cls, config = resolved
         except (OSError, ImportError, AttributeError) as e:
-            log(
-                f"Meta-init of component '{component_name}' failed "
-                f"({type(e).__name__}: {e}); using normal load."
-            )
+            log(f"Meta-init of component '{component_name}' failed ({type(e).__name__}: {e}); using normal load.")
             return None
 
         with init_empty_weights():
@@ -858,9 +797,7 @@ class ModelLoader:
                 manifest = None
                 refusal = "no wrap_attrs declared, so it has no blocks to fill one at a time"
             else:
-                manifest, refusal = resolve_transformers_manifest(
-                    component, self.checkpoint_request(name)
-                )
+                manifest, refusal = resolve_transformers_manifest(component, self.checkpoint_request(name))
             routes[name] = (
                 component,
                 manifest,
@@ -890,11 +827,7 @@ class ModelLoader:
         if world is None or world.world_size <= 1:
             return refusal
         local = 0 if refusal is None else 1
-        n_refused = int(
-            world.all_reduce(
-                torch.tensor([local], device=f"cuda:{world.local_rank}")
-            ).item()
-        )
+        n_refused = int(world.all_reduce(torch.tensor([local], device=f"cuda:{world.local_rank}")).item())
         if n_refused == 0:
             return None
         if refusal is not None:
@@ -931,9 +864,7 @@ class ModelLoader:
                 kwargs[name] = meta
             return kwargs, None
 
-        return _collective_build_call(
-            world, build, context="replicated text-encoder meta construction"
-        )
+        return _collective_build_call(world, build, context="replicated text-encoder meta construction")
 
     def broadcast_fill_replicated(self, offload: bool = False) -> None:
         """Fill every replicated big component with rank0's real weights via GPU->GPU broadcast,
@@ -971,9 +902,7 @@ class ModelLoader:
                         f"skipping broadcast fill, keeping real weights."
                     )
                     continue
-                self._fill_transformer_replicated(
-                    component, name, strategy[name], device, world
-                )
+                self._fill_transformer_replicated(component, name, strategy[name], device, world)
             else:
                 if name not in self.load_declaration.meta_text_encoders:
                     continue
@@ -985,13 +914,11 @@ class ModelLoader:
                         f"skipping broadcast fill, keeping real weights."
                     )
                     continue
-                self._fill_te_replicated(
-                    component, device, world, set_module_tensor_to_device
-                )
+                self._fill_te_replicated(component, device, world, set_module_tensor_to_device)
             torch.cuda.empty_cache()
             log(
                 f"Broadcast-filled {name} from rank0 (replicated). "
-                f"host {host_mem_gb()} GB, VRAM {torch.cuda.memory_allocated()/1e9:.2f}GB"
+                f"host {host_mem_gb()} GB, VRAM {torch.cuda.memory_allocated() / 1e9:.2f}GB"
             )
 
     def _is_meta_denoiser(self, name: str) -> bool:
@@ -1046,9 +973,7 @@ class ModelLoader:
             )
         return n_meta == group.world_size
 
-    def _fill_transformer_replicated(
-        self, component, name, strategy, device, world
-    ) -> None:
+    def _fill_transformer_replicated(self, component, name, strategy, device, world) -> None:
         """Per-block rank0-disk-read + world broadcast + symmetric per-block fp8 quantize (no shard)."""
         from .shard import build_block_quantize_fn
 
@@ -1145,9 +1070,7 @@ class ModelLoader:
                 torch.cuda.empty_cache()
         finalize(component)
 
-    def _fill_te_replicated(
-        self, component, device, world, set_module_tensor_to_device
-    ) -> None:
+    def _fill_te_replicated(self, component, device, world, set_module_tensor_to_device) -> None:
         """Materialize peer meta to real-empty on device, then broadcast every param and buffer from
         world-rank0. Layouts already match (rank0 fp8-streamed, peers meta fp8-swapped), so nothing
         is re-quantized.
@@ -1177,9 +1100,7 @@ class ModelLoader:
         remove_duplicate=False exposes every tied name. Materialization preserves each rank's alias
         groups, and the final contract rejects any rank whose tie structure differs from rank0.
         """
-        source_contract = _collective_reconcile_replicated_tensor_specs(
-            component, world, device
-        )
+        source_contract = _collective_reconcile_replicated_tensor_specs(component, world, device)
         layout = _tensor_layout(component)
         param_names = [name for kind, name in layout if kind == "parameter"]
         buffer_names = [name for kind, name in layout if kind == "buffer"]
@@ -1200,20 +1121,12 @@ class ModelLoader:
                         value=torch.empty(t.shape, dtype=t.dtype, device=device),
                     )
                 elif t.device.type != "cuda":
-                    set_module_tensor_to_device(
-                        component, name, device, value=t.to(device)
-                    )
+                    set_module_tensor_to_device(component, name, device, value=t.to(device))
                 materialized = rgetattr(component, name)
                 for kind, alias_name, *_ in entries[1:]:
                     parent_name, _, local_name = alias_name.rpartition(".")
-                    owner = (
-                        component.get_submodule(parent_name)
-                        if parent_name
-                        else component
-                    )
-                    registry = (
-                        owner._parameters if kind == "parameter" else owner._buffers
-                    )
+                    owner = component.get_submodule(parent_name) if parent_name else component
+                    registry = owner._parameters if kind == "parameter" else owner._buffers
                     registry[local_name] = materialized
 
         _collective_build_call(
@@ -1233,23 +1146,14 @@ class ModelLoader:
         # before the loop and agree the result, because raising from inside the loop would abort the
         # peer while rank0 blocks in broadcast, trading a silent corruption for a silent hang.
         strided = [
-            name
-            for name in ordered
-            if world.rank_in_group != 0
-            and not rgetattr(component, name).data.is_contiguous()
+            name for name in ordered if world.rank_in_group != 0 and not rgetattr(component, name).data.is_contiguous()
         ]
-        n_bad = int(
-            world.all_reduce(torch.tensor([len(strided)], device=device)).item()
-        )
+        n_bad = int(world.all_reduce(torch.tensor([len(strided)], device=device)).item())
         if n_bad:
             raise RuntimeError(
                 f"replicated broadcast-load: {n_bad} peer destination(s) are not contiguous and "
                 f"cannot receive the broadcast in place"
-                + (
-                    f"; on this rank: {strided[:3]}"
-                    if strided
-                    else " (offenders on other ranks)"
-                )
+                + (f"; on this rank: {strided[:3]}" if strided else " (offenders on other ranks)")
             )
         for name in ordered:
             tensor = rgetattr(component, name).data
@@ -1324,16 +1228,10 @@ class ModelLoader:
         )
 
         for t in targets:
-            _swap_linears_to_fp8(
-                module.get_submodule(t), preshuffle=False, add_scale_buffer=True
-            )
+            _swap_linears_to_fp8(module.get_submodule(t), preshuffle=False, add_scale_buffer=True)
         fp8 = _fp8_dtype()
         for m in module.modules():
-            if (
-                isinstance(m, xFuserFP8BlockScaleLinear)
-                and m.weight is not None
-                and m.weight.is_meta
-            ):
+            if isinstance(m, xFuserFP8BlockScaleLinear) and m.weight is not None and m.weight.is_meta:
                 m.weight = nn.Parameter(m.weight.to(fp8), requires_grad=False)
                 # Normalize to rank0's post-load layout: fp8 in `weight_fp8` (param) + `weight_scale`
                 # (buffer) + a plain-attr `weight` sentinel. rank0 builds the real component via the
@@ -1349,9 +1247,7 @@ class ModelLoader:
         source is fp8-sized, not bf16-sized, on rank0.
         """
         request = self.checkpoint_request(component_name)
-        quantization_config = getattr(
-            self.model, "_text_encoder_quantization_configs", {}
-        ).get(component_name)
+        quantization_config = getattr(self.model, "_text_encoder_quantization_configs", {}).get(component_name)
         from .text_encoder_adapter import load_transformers_component
 
         return load_transformers_component(
@@ -1361,17 +1257,13 @@ class ModelLoader:
             quantization_config=quantization_config,
         )
 
-    def _broadcast_load_component(
-        self, component, component_name: str, offload: bool
-    ) -> None:
+    def _broadcast_load_component(self, component, component_name: str, offload: bool) -> None:
         from torch.distributed.checkpoint.state_dict import (
             set_model_state_dict,
             StateDictOptions,
         )
 
-        wrap_attrs = self.model.settings.fsdp_strategy[component_name].get(
-            "wrap_attrs", []
-        )
+        wrap_attrs = self.model.settings.fsdp_strategy[component_name].get("wrap_attrs", [])
         group = get_fs_group()
         is_src = _is_bcast_src(group)
         full_sd: dict = {}
@@ -1410,23 +1302,11 @@ class ModelLoader:
                 for idx, block in enumerate(rgetattr(component, attr)):
                     bp = f"{prefix}{idx}."
                     # from_pretrained has full paths; block.state_dict uses block-relative keys.
-                    block_sd = (
-                        {
-                            k[len(bp) :]: v
-                            for k, v in full_sd.items()
-                            if k.startswith(bp)
-                        }
-                        if is_src
-                        else {}
-                    )
+                    block_sd = {k[len(bp) :]: v for k, v in full_sd.items() if k.startswith(bp)} if is_src else {}
                     set_model_state_dict(block, block_sd, options=opts)
 
             # Non-block params/buffers: embeddings, norms, lm_head.
-            tail_sd = (
-                {k: v for k, v in full_sd.items() if not k.startswith(block_prefixes)}
-                if is_src
-                else {}
-            )
+            tail_sd = {k: v for k, v in full_sd.items() if not k.startswith(block_prefixes)} if is_src else {}
             set_model_state_dict(component, tail_sd, options=opts)
         finally:
             del full_sd, src
@@ -1673,9 +1553,7 @@ class _BlockwiseDiskFiller:
                 # that total too: it is a component of the read, not a sibling of it.
                 with self._timed("warm"):
                     self._await_or_warm(path)
-            h = self._stack.enter_context(
-                safe_open(path, framework="pt", device=self._read_device())
-            )
+            h = self._stack.enter_context(safe_open(path, framework="pt", device=self._read_device()))
             self._handle_cache[path] = h
             if depth > 1:
                 self._prefetch_after(path)
@@ -1716,9 +1594,7 @@ class _BlockwiseDiskFiller:
             return
         self._join_prefetch()
         streamed.add(nxt)
-        self._prefetch_thread = threading.Thread(
-            target=warm_file_page_cache, args=(nxt,), daemon=True
-        )
+        self._prefetch_thread = threading.Thread(target=warm_file_page_cache, args=(nxt,), daemon=True)
         self._prefetch_thread.start()
 
     def _streamed_shards(self) -> set:
@@ -1781,9 +1657,7 @@ class _BlockwiseDiskFiller:
         path = self.weight_map.get(key)
         if path is None:
             if required:
-                raise RuntimeError(
-                    f"missing checkpoint weight for {key} in {self.subfolder}"
-                )
+                raise RuntimeError(f"missing checkpoint weight for {key} in {self.subfolder}")
             return
         set_module_tensor_to_device(
             module,
@@ -1804,11 +1678,7 @@ class _BlockwiseDiskFiller:
 
     def _require_checkpoint_keys(self, keys, src: int = 0):
         """Collectively reject missing persistent tensors before any rank enters data broadcast."""
-        missing = (
-            [key for key in keys if key not in self.weight_map]
-            if self._is_reader(src)
-            else None
-        )
+        missing = [key for key in keys if key not in self.weight_map] if self._is_reader(src) else None
         if self.group is not None:
             box = [missing]
             self.group.broadcast_object_list(box, src=src)
@@ -1816,9 +1686,7 @@ class _BlockwiseDiskFiller:
         if missing:
             preview = ", ".join(missing[:3])
             suffix = f" (+{len(missing) - 3} more)" if len(missing) > 3 else ""
-            raise RuntimeError(
-                f"missing checkpoint tensors in {self.subfolder}: {preview}{suffix}"
-            )
+            raise RuntimeError(f"missing checkpoint tensors in {self.subfolder}: {preview}{suffix}")
 
     def _broadcast(self, module, src: int = 0):
         if self.group is None:
@@ -1827,12 +1695,7 @@ class _BlockwiseDiskFiller:
         # across ranks (meta -> to_empty), so named_* iteration order matches. remove_duplicate=False
         # so tied weights emit the same name count on every rank regardless of per-rank tie state.
         self._broadcast_tensors(
-            [
-                p.data
-                for _, p in module.named_parameters(
-                    recurse=True, remove_duplicate=False
-                )
-            ]
+            [p.data for _, p in module.named_parameters(recurse=True, remove_duplicate=False)]
             + [b.data for _, b in _persistent_named_buffers(module)],
             src=src,
         )
@@ -1908,9 +1771,7 @@ class _BlockwiseDiskFiller:
                 try:
                     self._fill(module, local_name, key, required=True)
                 except Exception as error:
-                    raise RuntimeError(
-                        f"reading checkpoint tensor {key}: {type(error).__name__}: {error}"
-                    ) from error
+                    raise RuntimeError(f"reading checkpoint tensor {key}: {type(error).__name__}: {error}") from error
 
         self._source_call(
             read_all,
@@ -1920,7 +1781,6 @@ class _BlockwiseDiskFiller:
 
     def fill_block(self, block, i):
         """Fill + broadcast one wrapped block, excluding only non-persistent buffers."""
-        device = getattr(self, "device", "cpu")
         fqn = self._id2fqn.get(id(block))
         if fqn is None:
             raise RuntimeError(f"block {i} not found in wrap_attrs index (id mismatch)")
@@ -1951,7 +1811,7 @@ class _BlockwiseDiskFiller:
         if i % 8 == 0:
             log(
                 f"  self-fill {self.subfolder} block {i}: host cur/anon/file "
-                f"{host_mem_gb()} GB, VRAM {torch.cuda.memory_allocated()/1e9:.2f}GB"
+                f"{host_mem_gb()} GB, VRAM {torch.cuda.memory_allocated() / 1e9:.2f}GB"
             )
 
     def finalize(self, comp):
@@ -1984,14 +1844,8 @@ class _BlockwiseDiskFiller:
             for name, _ in _persistent_named_buffers(comp)
             if not self._ckpt_key(comp, name).startswith(self._block_prefixes)
         ]
-        tail_layout = tuple(
-            [("parameter", name) for name in tail]
-            + [("buffer", name) for name in all_tail_bufs]
-        )
         self._assert_same_layout(comp)
-        self._require_checkpoint_keys(
-            [self._ckpt_key(comp, name) for name in tail + tail_bufs]
-        )
+        self._require_checkpoint_keys([self._ckpt_key(comp, name) for name in tail + tail_bufs])
         target_type = torch.device(self.device).type
         for name in tail + all_tail_bufs:
             t = rgetattr(comp, name)
@@ -2006,9 +1860,7 @@ class _BlockwiseDiskFiller:
                 # Non-persistent buffers (e.g. Wan rope freqs_cos/freqs_sin) are created real on
                 # CPU by init_empty_weights (include_buffers=False), not meta. Their values are
                 # correct and identical across ranks, so move them on-device without broadcasting.
-                set_module_tensor_to_device(
-                    comp, name, self.device, value=t.to(self.device)
-                )
+                set_module_tensor_to_device(comp, name, self.device, value=t.to(self.device))
         with self._timed("read"):
             self._read_tensors(
                 comp,
@@ -2018,19 +1870,14 @@ class _BlockwiseDiskFiller:
             self._reconcile_tensor_specs(comp, tail + tail_bufs)
         if self.group is not None:
             with self._timed("broadcast"):
-                self._broadcast_tensors(
-                    [rgetattr(comp, name).data for name in tail + tail_bufs]
-                )
+                self._broadcast_tensors([rgetattr(comp, name).data for name in tail + tail_bufs])
         self._retire_keys([self._ckpt_key(comp, name) for name in tail + tail_bufs])
         if self.strict:
             unused = sorted(set(self.weight_map) - self._used_keys)
             if unused:
                 preview = ", ".join(unused[:3])
                 suffix = f" (+{len(unused) - 3} more)" if len(unused) > 3 else ""
-                raise RuntimeError(
-                    f"unexpected checkpoint tensors in {self.subfolder}: "
-                    f"{preview}{suffix}"
-                )
+                raise RuntimeError(f"unexpected checkpoint tensors in {self.subfolder}: {preview}{suffix}")
         self._retie_weights(comp)
         self._release_handles()
         # Before the drop, not after: a prefetch still streaming would put back the cache this is

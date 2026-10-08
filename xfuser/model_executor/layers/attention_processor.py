@@ -55,7 +55,6 @@ logger = init_logger(__name__)
 env_info = PACKAGES_CHECKER.get_packages_info()
 HAS_AITER = env_info["has_aiter"]
 HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
-HAS_FLASH_ATTN = env_info["has_flash_attn"]
 
 
 def _joint_sp_padding_attention_kwargs(query, encoder_query):
@@ -69,10 +68,6 @@ def _joint_sp_padding_attention_kwargs(query, encoder_query):
     ulysses_size = get_ulysses_parallel_world_size()
     local_sequence = query.shape[1] + encoder_query.shape[1]
     return {"valid_kv_len": ulysses_size * local_sequence - pad}
-
-
-if HAS_LONG_CTX_ATTN:
-    from yunchang.kernels import AttnType
 
 
 def is_v100():
@@ -1089,6 +1084,7 @@ class xFuserSanaAttnProcessor2_0(SanaAttnProcessor2_0):
 
         query = attn.to_q(hidden_states)
 
+        is_cross_attention = encoder_hidden_states is not None
         if encoder_hidden_states is None:
             encoder_hidden_states = hidden_states
 
@@ -1114,6 +1110,17 @@ class xFuserSanaAttnProcessor2_0(SanaAttnProcessor2_0):
         # )
         if get_runtime_state().split_text_embed_in_sp:
             raise NotImplementedError("Currently SANA not support split_text_embed_in_sp!")
+        elif is_cross_attention:
+            # Every rank holds the whole prompt, so its image rows attend to it
+            # locally, with the prompt's padding masked as in diffusers.
+            hidden_states = F.scaled_dot_product_attention(
+                query.transpose(1, 2),
+                key.transpose(1, 2),
+                value.transpose(1, 2),
+                attn_mask=attention_mask,
+                dropout_p=0.0,
+                is_causal=False,
+            ).transpose(1, 2)
         else:
             query = query.transpose(1, 2)
             key = key.transpose(1, 2)
@@ -1145,16 +1152,9 @@ class xFuserSanaLinearAttnProcessor2_0(SanaLinearAttnProcessor2_0):
         if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
             from xfuser.core.long_ctx_attention import xFuserSanaLinearLongContextAttention
 
-            if HAS_FLASH_ATTN:
-                self.hybrid_seq_parallel_attn = xFuserSanaLinearLongContextAttention(
-                    use_kv_cache=self.use_long_ctx_attn_kvcache,
-                    attn_type=AttnType.FA,
-                )
-            else:
-                self.hybrid_seq_parallel_attn = xFuserSanaLinearLongContextAttention(
-                    use_kv_cache=self.use_long_ctx_attn_kvcache,
-                    attn_type=AttnType.TORCH,
-                )
+            self.hybrid_seq_parallel_attn = xFuserSanaLinearLongContextAttention(
+                use_kv_cache=self.use_long_ctx_attn_kvcache,
+            )
 
         if get_fast_attn_enable():
             self.fast_attn = xFuserFastAttention()

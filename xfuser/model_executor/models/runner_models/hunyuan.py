@@ -1,5 +1,6 @@
 import torch
 import copy
+from typing import Optional
 import json
 import numpy as np
 from safetensors.torch import load_file
@@ -144,6 +145,10 @@ class xFuserHunyuanvideoModel(xFuserModel):
         )
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
+    def _get_compile_warmup_steps(self, input_args: dict) -> Optional[int]:
+        # A per-step attention schedule needs a full warmup to trigger every backend path.
+        return None if get_runtime_state().has_attention_schedule() else 2
+
     def _compile_model(self, input_args: dict) -> None:
         """Compile the model using torch.compile"""
         # Install Inductor post-grad pass that defeats a scheduler bug in the
@@ -151,13 +156,17 @@ class xFuserHunyuanvideoModel(xFuserModel):
         # is pattern-matched on the FX graph and is a no-op for configurations
         # that don't produce the bad pattern (non-sage backends, symmetric SP).
         install_inductor_passes()
+        if self.config.cache_method:
+            # The step cache patches transformer.forward, so compile its blocks instead.
+            super()._compile_model(input_args)
+            return
         super()._enable_compute_comm_overlap()
         self.pipe.transformer.compile()
 
         compile_args = copy.deepcopy(input_args)
-        # If a per-step attention schedule is active, do a full warmup to trigger all backend paths.
-        if not get_runtime_state().has_attention_schedule():
-            compile_args["num_inference_steps"] = 2  # Reduce steps for warmup
+        warmup_steps = self._get_compile_warmup_steps(input_args)
+        if warmup_steps is not None:
+            compile_args["num_inference_steps"] = warmup_steps
         self._run_timed_pipe(compile_args)
 
 
@@ -199,6 +208,8 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         fps=24,
         fp8_gemm_module_list=["transformer.transformer_blocks"],
         mod_value=16,
+        # Blocks that _compile_model compiles one by one under a step cache.
+        fsdp_strategy={"transformer": {"wrap_attrs": ["transformer_blocks"]}},
         valid_tasks=["i2v", "t2v"],
         step_cache_config={
             "dbcache": DBCacheSettings(
@@ -260,7 +271,12 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         if self.config.task == "i2v":
             image = input_args["input_images"][0]
             if input_args.get("resize_input_images", False):
-                image = resize_and_crop_image(image, input_args["width"], input_args["height"], self.settings.mod_value)
+                image = resize_and_crop_image(
+                    image,
+                    target_height=input_args["height"],
+                    target_width=input_args["width"],
+                    mod_value=self.settings.mod_value,
+                )
             input_args["image"] = image
         return input_args
 
@@ -280,13 +296,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         # that don't produce the bad pattern (e.g., symmetric SP, non-sage
         # backends, models without the post-A2A joint cat).
         install_inductor_passes()
-        super()._enable_compute_comm_overlap()
-        self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
-
-        # two steps to warmup the torch compiler
-        compile_args = copy.deepcopy(input_args)
-        compile_args["num_inference_steps"] = 2
-        self._run_timed_pipe(compile_args)
+        super()._compile_model(input_args)
 
 
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled")

@@ -1,22 +1,22 @@
-"""xFuser pipeline wrappers for FLUX.2 dev and klein, with PipeFusion support.
+"""xFuser pipeline wrapper for FLUX.2 dev, with PipeFusion support.
 
 Modeled on pipeline_flux.py. The denoising loop is replaced by the sync/async
 patch-level pipeline (_sync_pipeline / _async_pipeline) inherited from the
 Flux1 implementation, adapted to Flux2's transformer signature (guidance
 embedding instead of pooled projections, modulation parameters).
 
-Both variants live here because the PipeFusion logic is identical. Note that this couples
-their availability: Flux2KleinPipeline landed in diffusers 0.37 and Flux2Pipeline in 0.36,
-so binding both here means neither wrapper is exported on 0.36, and FLUX.2 dev falls back
-to its non-PipeFusion path there. Importing this module is what tells the package whether
-either is available; see xfuser.compat.optional_exporter.
+The klein wrapper shares this PipeFusion logic but lives in pipeline_flux2_klein.py:
+Flux2Pipeline landed in diffusers 0.36 and Flux2KleinPipeline in 0.37, and importing a
+module is what tells the package whether its wrappers are available (see
+xfuser.compat.optional_exporter). Binding both here would hide FLUX.2 dev PipeFusion on
+0.36, the release FLUX.2 dev declares as its floor.
 """
 
 from typing import Callable, Dict, List, Optional
 
 import numpy as np
 import torch
-from diffusers import Flux2KleinPipeline, Flux2Pipeline
+from diffusers import Flux2Pipeline
 from diffusers.pipelines.flux2.pipeline_flux2 import (
     Flux2PipelineOutput,
     retrieve_timesteps,
@@ -88,6 +88,7 @@ class xFuserFlux2PipelineBase(xFuserPipelineBaseWrapper):
             width=input_config.width,
             prompt=prompt,
             num_inference_steps=steps,
+            guidance_scale=input_config.guidance_scale,
             max_sequence_length=input_config.max_sequence_length,
             generator=torch.Generator(device="cuda").manual_seed(42),
             output_type=input_config.output_type,
@@ -116,7 +117,7 @@ class xFuserFlux2PipelineBase(xFuserPipelineBaseWrapper):
         callback_on_step_end: Optional[Callable] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         max_sequence_length: int = 512,
-        text_encoder_out_layers: tuple = (10, 20, 30),
+        text_encoder_out_layers: Optional[tuple] = None,
         caption_upsample_temperature: float = None,
         **kwargs,
     ):
@@ -135,6 +136,15 @@ class xFuserFlux2PipelineBase(xFuserPipelineBaseWrapper):
         if "guidance_scale" in inspect.signature(self.check_inputs).parameters:
             _check_inputs_kwargs["guidance_scale"] = guidance_scale
         self.check_inputs(**_check_inputs_kwargs)
+        # Undistilled klein (base) checkpoints apply classifier-free guidance in
+        # diffusers; this loop has no unconditional branch, so refuse rather than
+        # silently return an unguided image.
+        if guidance_scale > 1 and not getattr(self.config, "is_distilled", True):
+            raise NotImplementedError(
+                "This FLUX.2 klein checkpoint is not step-distilled and needs classifier-free guidance "
+                f"(guidance_scale={guidance_scale}), which xDiT's parallel FLUX.2 loop does not implement. "
+                "Pass guidance_scale<=1, or run without parallelism."
+            )
 
         self._guidance_scale = guidance_scale
         self._attention_kwargs = attention_kwargs
@@ -171,13 +181,18 @@ class xFuserFlux2PipelineBase(xFuserPipelineBaseWrapper):
                 temperature=caption_upsample_temperature,
                 device=device,
             )
+        # dev and klein read different text-encoder layers, so unless the caller picks
+        # them, keep the default of the diffusers pipeline this wrapper binds.
+        encode_kwargs = {}
+        if text_encoder_out_layers is not None:
+            encode_kwargs["text_encoder_out_layers"] = text_encoder_out_layers
         prompt_embeds, text_ids = self.encode_prompt(
             prompt=prompt,
             prompt_embeds=prompt_embeds,
             device=device,
             num_images_per_prompt=num_images_per_prompt,
             max_sequence_length=max_sequence_length,
-            text_encoder_out_layers=text_encoder_out_layers,
+            **encode_kwargs,
         )
 
         # 4. prepare latents
@@ -483,9 +498,9 @@ class xFuserFlux2PipelineBase(xFuserPipelineBaseWrapper):
                     patch_latents[patch_idx] = self._scheduler_step(
                         patch_latents[patch_idx], last_patch_latents[patch_idx], t
                     )
-                    if latents.dtype != latents_dtype:
+                    if patch_latents[patch_idx].dtype != latents_dtype:
                         if torch.backends.mps.is_available():
-                            latents = latents.to(latents_dtype)
+                            patch_latents[patch_idx] = patch_latents[patch_idx].to(latents_dtype)
                     if i != len(timesteps) - 1:
                         get_pp_group().pipeline_isend(patch_latents[patch_idx], segment_idx=patch_idx)
                 else:
@@ -506,6 +521,16 @@ class xFuserFlux2PipelineBase(xFuserPipelineBaseWrapper):
                         get_pp_group().recv_next()
 
                 get_runtime_state().next_patch()
+
+            self._async_pipeline_step_end(
+                callback_on_step_end,
+                callback_on_step_end_tensor_inputs,
+                i + num_pipeline_warmup_steps,
+                t,
+                patch_latents,
+                patch_dim=-2,
+                step_tensors={"prompt_embeds": prompt_embeds},
+            )
 
             if i == len(timesteps) - 1 or (
                 (i + num_pipeline_warmup_steps + 1) > num_warmup_steps
@@ -559,10 +584,3 @@ class xFuserFlux2PipelineBase(xFuserPipelineBaseWrapper):
 @xFuserPipelineWrapperRegister.register(Flux2Pipeline)
 class xFuserFlux2Pipeline(xFuserFlux2PipelineBase):
     _diffusers_cls = Flux2Pipeline
-
-
-@xFuserPipelineWrapperRegister.register(Flux2KleinPipeline)
-class xFuserFlux2KleinPipeline(xFuserFlux2PipelineBase):
-    """Klein differs only in the diffusers class it binds; the PipeFusion logic is shared."""
-
-    _diffusers_cls = Flux2KleinPipeline

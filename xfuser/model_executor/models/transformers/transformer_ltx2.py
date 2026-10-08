@@ -16,20 +16,18 @@ from xfuser.core.distributed import (
 )
 from xfuser.model_executor.layers.attention_mask import (
     AttentionMaskWithMeta,
+    MaskMetaCache,
     make_attn_mask_with_meta,
 )
 from xfuser.model_executor.layers.norms import _replace_rms_norms_with_aiter
 from xfuser.model_executor.layers.usp import USP, attention
 
 
-def _get_mask_meta(cache: dict, mask: torch.Tensor | None) -> object | None:
+def _get_mask_meta(cache: MaskMetaCache, mask: torch.Tensor | None) -> object | None:
     """Convert a 2-D key-padding mask (1=valid, 0=pad) to AttentionMaskWithMeta, cached per tensor."""
     if mask is None or mask.ndim != 2:
         return mask
-    key = (mask.data_ptr(), tuple(mask.shape))
-    if key not in cache:
-        cache[key] = make_attn_mask_with_meta(mask)
-    return cache[key]
+    return cache.get(mask, make_attn_mask_with_meta)
 
 
 class xFuserLTX2PerturbedAttnProcessor:
@@ -57,7 +55,9 @@ class xFuserLTX2PerturbedAttnProcessor:
         if self.gather_kv:
             encoder_hidden_states = get_sp_group().all_gather(encoder_hidden_states, dim=1)
             key_rotary_emb = [x.contiguous() for x in key_rotary_emb]
-            key_rotary_emb = [get_sp_group().all_gather(x, dim=2) for x in key_rotary_emb]
+            # Tokens sit second to last in both RoPE layouts: interleaved
+            # cos/sin are [B, S, D], split ones [B, H, S, D // 2].
+            key_rotary_emb = [get_sp_group().all_gather(x, dim=-2) for x in key_rotary_emb]
 
         if isinstance(attention_mask, AttentionMaskWithMeta):
             attn_kw = {
@@ -159,7 +159,9 @@ class xFuserLTX2AudioVideoAttnProcessor:
         if self.gather_kv:
             encoder_hidden_states = get_sp_group().all_gather(encoder_hidden_states, dim=1)
             key_rotary_emb = [x.contiguous() for x in key_rotary_emb]
-            key_rotary_emb = [get_sp_group().all_gather(x, dim=2) for x in key_rotary_emb]
+            # Tokens sit second to last in both RoPE layouts: interleaved
+            # cos/sin are [B, S, D], split ones [B, H, S, D // 2].
+            key_rotary_emb = [get_sp_group().all_gather(x, dim=-2) for x in key_rotary_emb]
 
         if isinstance(attention_mask, AttentionMaskWithMeta):
             attn_kw = {
@@ -322,8 +324,8 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
             use_keyframes_abs_pos_embedding=use_keyframes_abs_pos_embedding,
         )
 
-        self._enc_mask_cache: dict = {}
-        self._audio_enc_mask_cache: dict = {}
+        self._enc_mask_cache = MaskMetaCache()
+        self._audio_enc_mask_cache = MaskMetaCache()
 
         # If AITER is available, replace diffusers RMSNorm (slow float32 cast)
         # with AITER RMSNorm.

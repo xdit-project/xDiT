@@ -1,11 +1,11 @@
-# Example for parallelize new models with USP
+# Example for parallelize new models with CFG parallel and USP
 # run with
-#     torchrun --nproc_per_node=<ulysses_degree x ring-degree> \
-#          adding_cogvideox.py <cogvideox-checkpoint-path> \
-#          <ulysses_degree> <ring-degree>
+#     torchrun --nproc_per_node=<2 x ring_degree x ulysses_degree> \
+#          adding_model_cfg_usp.py <cogvideox-checkpoint-path> \
+#          <ring_degree> <ulysses_degree>
 # E.g.,
-#     torchrun --nproc_per_node=2 \
-#          adding_cogvideox.py <cogvideox-checkpoint-path> \
+#     torchrun --nproc_per_node=4 \
+#          adding_model_cfg_usp.py <cogvideox-checkpoint-path> \
 #          2 1
 import sys
 import functools
@@ -17,9 +17,11 @@ import torch
 from diffusers import DiffusionPipeline, CogVideoXPipeline
 
 import torch.distributed as dist
+from xfuser import xFuserArgs
 from xfuser.core.distributed import (
     init_distributed_environment,
     initialize_model_parallel,
+    initialize_runtime_state,
     get_world_group,
     get_classifier_free_guidance_world_size,
     get_classifier_free_guidance_rank,
@@ -208,6 +210,15 @@ if __name__ == "__main__":
         ulysses_degree=int(sys.argv[3]),
         classifier_free_guidance_degree=2,
     )
+    # USP reads the attention backend from xDiT's runtime state, so describe
+    # the same parallel layout to it.
+    engine_config, _ = xFuserArgs(
+        model=sys.argv[1],
+        ring_degree=int(sys.argv[2]),
+        ulysses_degree=int(sys.argv[3]),
+        use_cfg_parallel=True,
+    ).create_config()
+    initialize_runtime_state(engine_config=engine_config)
     pipe = CogVideoXPipeline.from_pretrained(
         pretrained_model_name_or_path=sys.argv[1],
         torch_dtype=torch.bfloat16,

@@ -270,6 +270,7 @@ class xFuserArgs:
     dataset_path: Optional[str] = None
     use_fsdp: bool = False
     fully_shard_degree: int = 1
+    fully_shard_components: Optional[List[str]] = None
     reshard_after_forward: bool = True
     memory_efficient_sharding: bool = False
     memory_efficient_replicated_load: bool = False
@@ -292,6 +293,12 @@ class xFuserArgs:
     spargeattn_simthreshold: float = 0.3
     spargeattn_cdfthreshold: float = 0.92
     use_spargeattn_head_balance: bool = False
+    # Sol-Attn
+    sol_attn_tau: float = 0.2
+    sol_attn_thresh_type: str = "exact"
+    sol_attn_kv_splits: str = "auto"
+    sol_attn_sink_tokens: int = 0
+    sol_attn_sink_start: Optional[int] = None
     # AITER CK-Tile VSA attention
     vsa_block_size: int = 128
     vsa_top_k: int = 1
@@ -312,6 +319,12 @@ class xFuserArgs:
         )
         if self.profile_with_stack and not self.profile:
             logger.warning("--profile_with_stack has no effect without --profile; no profiles will be outputted.")
+        if self.fully_shard_components is not None:
+            self.fully_shard_components = list(dict.fromkeys(self.fully_shard_components))
+            if not self.fully_shard_components:
+                raise ValueError("--fully_shard_components requires at least one component")
+            if self.fully_shard_degree <= 1:
+                raise ValueError("--fully_shard_components requires --fully_shard_degree greater than 1")
         self._resolve_gemm_quantization()
         if self.cache_method is None:
             if self.use_fbcache:
@@ -838,6 +851,16 @@ class xFuserArgs:
         )
         parser.add_argument("--fully_shard_degree", type=int, default=1, help="Fully sharding (sharding) degree.")
         parser.add_argument(
+            "--fully_shard_components",
+            nargs="+",
+            default=None,
+            help=(
+                "Only FSDP-wrap these pipeline components (for example "
+                "'text_encoder'). By default every component named by the "
+                "model's FSDP strategy is sharded."
+            ),
+        )
+        parser.add_argument(
             "--no_reshard_after_forward",
             dest="reshard_after_forward",
             action="store_false",
@@ -1210,6 +1233,38 @@ class xFuserArgs:
             "effect with ulysses_degree>1 and a Sparge attention backend.",
         )
         parser.add_argument(
+            "--sol_attn_tau",
+            type=float,
+            default=0.2,
+            help="Sol-Attn routing temperature. Higher values keep fewer KV blocks exact.",
+        )
+        parser.add_argument(
+            "--sol_attn_thresh_type",
+            type=str,
+            default="exact",
+            choices=["diag", "exact"],
+            help="Sol-Attn routing threshold. 'diag' uses the diagonal covariance; 'exact' uses the full covariance.",
+        )
+        parser.add_argument(
+            "--sol_attn_kv_splits",
+            type=str,
+            default="auto",
+            choices=["auto", "1", "2", "4"],
+            help="KV splits for the SM90 Sol-Attn kernel. 'auto' uses 4 on SM90 CuTe when the sequence is at least 65536 tokens.",
+        )
+        parser.add_argument(
+            "--sol_attn_sink_tokens",
+            type=int,
+            default=0,
+            help="Number of tokens whose KV blocks stay exact for every query. 0 disables the sink.",
+        )
+        parser.add_argument(
+            "--sol_attn_sink_start",
+            type=int,
+            default=None,
+            help="First token of the exact KV sink. Omit to place the sink on the token suffix.",
+        )
+        parser.add_argument(
             "--vsa_block_size",
             type=int,
             default=128,
@@ -1332,6 +1387,15 @@ class xFuserArgs:
             self.fully_shard_degree > 1 or self.memory_efficient_sharding or self.memory_efficient_replicated_load
         ):
             raise ValueError("A6W4 GEMMs currently support eager loading only.")
+        if not spec.is_tiered and (
+            self.fp8_precision_override_prefix_patterns is not None
+            or self.fp8_precision_override_suffix_patterns is not None
+        ):
+            raise ValueError(
+                "Precision override patterns require a tiered GEMM quantization profile, "
+                "such as --gemm_quantization low=fp4,high=fp8. "
+                "Use a tiered profile or drop the patterns."
+            )
         if self.use_fp8_text_encoder and "fp8" not in spec.formats:
             raise ValueError("--use_fp8_text_encoder requires a gemm_quantization profile containing FP8.")
         has_advanced_targets = (
@@ -1412,15 +1476,6 @@ class xFuserArgs:
                 "--group_offload_low_cpu_mem only affects group CPU offload; pass --enable_group_cpu_offload too."
             )
 
-        if (
-            self.fp8_precision_override_prefix_patterns is not None
-            or self.fp8_precision_override_suffix_patterns is not None
-        ) and not self.use_fp4_gemms:
-            raise ValueError(
-                "FP8 precision override patterns require --use_fp4_gemms: "
-                "overrides apply when quantizing linear layers for FP4 GEMMs."
-            )
-
         model_config = ModelConfig(
             model=self.model,
             download_dir=self.download_dir,
@@ -1443,6 +1498,11 @@ class xFuserArgs:
             spargeattn_simthreshold=self.spargeattn_simthreshold,
             spargeattn_cdfthreshold=self.spargeattn_cdfthreshold,
             use_spargeattn_head_balance=self.use_spargeattn_head_balance,
+            sol_attn_tau=self.sol_attn_tau,
+            sol_attn_thresh_type=self.sol_attn_thresh_type,
+            sol_attn_kv_splits=self.sol_attn_kv_splits,
+            sol_attn_sink_tokens=self.sol_attn_sink_tokens,
+            sol_attn_sink_start=self.sol_attn_sink_start,
             vsa_block_size=self.vsa_block_size,
             vsa_top_k=self.vsa_top_k,
             vsa_top_k_ratio=self.vsa_top_k_ratio,

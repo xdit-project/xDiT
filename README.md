@@ -115,11 +115,14 @@ The following open-sourced DiT Models are released with xDiT in day 1.
 | [🎬 CogVideoX](https://huggingface.co/THUDM/CogVideoX-2b) | ✔️ | ✔️ | ❎ | ❎ | ❎ | [Report](./docs/performance/cogvideo.md) |
 | [🎬 Latte](https://huggingface.co/maxin-cn/Latte-1) | ❎ | ✔️ | ❎ | ❎ | ❎ | [Report](./docs/performance/latte.md) |
 | [🎬 Wan2.1](https://huggingface.co/Wan-AI/Wan2.1-T2V-14B-Diffusers) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
+| [🎬 Wan2.1-T2V-1.3B](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🎬 Wan2.2](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B-Diffusers) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🎬 Wan2.2-Distilled (LightX2V 4-step)](https://huggingface.co/lightx2v/Wan2.2-Distill-Models) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
+| [🎬 SkyReels-V2](https://huggingface.co/Skywork/SkyReels-V2-T2V-14B-540P-Diffusers) (T2V, I2V) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🎬 CausalWan2.2](https://huggingface.co/FastVideo/CausalWan2.2-I2V-A14B-Preview-Diffusers) | ❎ | ❎ | ❎ | ❎ | ✔️ | NA |
 | [🎬 LTX-2](https://huggingface.co/Lightricks/LTX-2) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🎬 LTX-2.5](https://huggingface.co/Lightricks/LTX-2.5) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
+| [🎬 LTX-Video 0.9.7](https://huggingface.co/Lightricks/LTX-Video-0.9.7-dev) | ✔️ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers) | ✔️ | ✔️ | ✔️ | ❎ | ❎ | [Report](./docs/performance/hunyuandit.md) |
 | [🟡 Lumina-Image-2.0](https://huggingface.co/Alpha-VLLM/Lumina-Image-2.0) | ✔️ | ✔️ | ❎ | ❎ | ❎ | NA |
 | [🔴 Z-Image Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
@@ -127,6 +130,7 @@ The following open-sourced DiT Models are released with xDiT in day 1.
 | [🟠 Flux 2](https://huggingface.co/black-forest-labs/FLUX.2-dev) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🟠 Flux](https://huggingface.co/black-forest-labs/FLUX.1-schnell) | NA | ✔️ | ✔️ | ❎ | ✔️ | [Report](./docs/performance/flux.md) |
 | [🟠 Flux Kontext](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) | ❎ | ✔️ |  ❎ | ❎ | ✔️ | NA |
+| [🟠 Chroma1-HD](https://huggingface.co/lodestones/Chroma1-HD) | ✔️ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🟢 Qwen Image](https://huggingface.co/Qwen/Qwen-Image-2512) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🟢 Qwen Image-Edit](https://huggingface.co/Qwen/Qwen-Image-Edit-2511) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🟢 Krea2-Raw](https://huggingface.co/krea/Krea-2-Raw) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
@@ -200,7 +204,15 @@ Note that we use two self-maintained packages:
 1. [yunchang](https://github.com/feifeibear/long-context-attention)
 2. [DistVAE](https://github.com/xdit-project/DistVAE)
 
-The [flash_attn](https://github.com/Dao-AILab/flash-attention) used for yunchang should be >= 2.6.0
+The [flash_attn](https://github.com/Dao-AILab/flash-attention) used for yunchang should be >= 2.7.0
+
+On Ascend NPU, ring attention needs `yunchang.ring.utils.update_npu_out`, which is not in any PyPI release of yunchang (checked up to 0.6.4). Install a yunchang commit that provides it:
+
+```
+pip install "yunchang @ git+https://github.com/feifeibear/long-context-attention.git@56118e0"
+```
+
+Later yunchang commits renamed that helper with a different signature and are not yet supported on NPU. CUDA and ROCm users can use the PyPI release.
 
 ### 3. Docker
 
@@ -289,6 +301,7 @@ Several different attention backends are supported:
 | [AITER Sparge](https://github.com/rocm/aiter) | aiter_sparge |
 | [AITER Sparge V2](https://github.com/rocm/aiter) | aiter_sparge_v2 |
 | [Flex Block Sparge](https://github.com/xdit-project/xDiT) | flex_block_sparge |
+| [Sol-Attn](https://github.com/NVlabs/Sana/tree/sol-engine/techniques/sparse_backends) | sol_attn |
 | [AITER MLA](https://github.com/rocm/aiter) | aiter_mla |
 | [AITER FlyDSL](https://github.com/rocm/aiter) | aiter_flydsl |
 | [AITER FlyDSL FP8](https://github.com/rocm/aiter) | aiter_flydsl_fp8 |
@@ -296,6 +309,12 @@ Several different attention backends are supported:
 xDiT comes with `flash_attn` as an optional install requirement, as it currently supports the largest variety of different GPU architectures.
 However, newer implementations generally offer better performance. If available for you, we highly recommend using `cuDNN`, `FAv3`, `FAv3 FP8` (on _hopper_ GPUs) or `FAv4`, `Transformer engine FP8` (on _blackwell_ GPUs).
 On recent AMD GPUs (MI300X or newer) it is generally recommended to use `AITER` in all cases to get the best possible performance. Note that when using `AITER FP8` as the attention backend with `torch.compile`, it is important to use a version of `AITER` from Jan 16, 2026 or later. Older versions may trigger a bug related to the fake tensors, resulting in a runtime error.
+
+Sol-Attn is an optional package and must be installed separately:
+
+```bash
+pip install "git+https://github.com/NVlabs/Sana.git@sol-engine#subdirectory=techniques/sparse_backends"
+```
 
 The dedicated `aiter_bf16`, `aiter_bf16fp8`, `aiter_mxfp8`, `aiter_f8f6`, `aiter_mxfp6`, `aiter_f6f4`, `aiter_mxfp4`, and `aiter_f4f4` ASM backends require gfx950 and head dimension 128. `aiter_bf16` selects the BF16 Q/K/V MHA v4 kernel, `aiter_bf16fp8` selects BF16 Q/K with per-tensor FP8 V, while `aiter` continues to use MHA v3. `aiter_mxfp8` requires an AITER build with either the generic MHA v4 scale-mode API or the legacy `aiter.ops.mha_v4.mha_v4_mxfp8` entrypoint. F4F4/F6F4 pad only the packed FP4 V storage for partial final 128-token tiles; the logical attention sequence length is unchanged.
 
@@ -335,6 +354,7 @@ Below is a list of validated diffusers version requirements. If the model is not
 | [Wan2.1](https://huggingface.co/Wan-AI/Wan2.1-T2V-14B-Diffusers) | >= 0.35.2 |
 | [Wan2.2](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B-Diffusers) | >= 0.35.2 |
 | [Wan2.2-Distilled (LightX2V)](https://huggingface.co/lightx2v/Wan2.2-Distill-Models) | >= 0.35.2 |
+| [SkyReels-V2](https://huggingface.co/Skywork/SkyReels-V2-T2V-14B-540P-Diffusers) | >= 0.36.0 |
 
 <h2 id="dev-guide">📚  Develop Guide</h2>
 
@@ -421,7 +441,7 @@ pip install onediff
 pip install -U nexfort
 ```
 
-For usage instructions, refer to the [example/run.sh](./examples/run.sh). Simply append `--use_torch_compile` or `--use_onediff` to your command. Note that these options are mutually exclusive, and their performance varies across different scenarios.
+For usage instructions, refer to the [examples/run.sh](./examples/run.sh). Simply append `--use_torch_compile` or `--use_onediff` to your command. Note that these options are mutually exclusive, and their performance varies across different scenarios.
 
 <h4 id="cache_acceleration">Cache Acceleration</h4>
 

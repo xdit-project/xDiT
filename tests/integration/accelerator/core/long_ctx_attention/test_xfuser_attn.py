@@ -112,4 +112,4 @@ def _xfuser_worker(rank, world_size, init_method, case):
 @pytest.mark.parametrize("case", ["layer", "rear"])
 def test_xfuser_long_context_attention(case, accelerator_ranks):
     pytest.importorskip("flash_attn")
-    accelerator_ranks(_xfuser_worker, world_size=_WORLD_SIZE, timeout=300, init_filename=f"xfuser-{case}", args=(case,))
+    accelerator_ranks(_xfuser_worker, world_size=_WORLD_SIZE, init_filename=f"xfuser-{case}", args=(case,))

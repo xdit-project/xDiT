@@ -21,7 +21,6 @@ from xfuser.core.distributed import (
 from xfuser.core.utils.runner_utils import log
 from xfuser.core.utils.video_utils import encode_video_with_audio
 from xfuser.model_executor.models.runner_models.base_model import (
-    DIFFUSERS_FROM_SOURCE,
     DefaultInputValues,
     DiffusionOutput,
     ModelCapabilities,
@@ -319,8 +318,8 @@ class MiniMaxH3DiffusionOutput(DiffusionOutput):
 @register_model("MiniMaxAI/MiniMax-H3")
 @register_model("MiniMax-H3")
 class xFuserMiniMaxH3Model(xFuserModel):
-    # Native MiniMax-H3 is on Diffusers main from f53d552, but not in a release yet.
-    min_diffusers_version = DIFFUSERS_FROM_SOURCE
+    # diffusers 0.40.0 is the first release with native MiniMax-H3.
+    min_diffusers_version = "0.40.0"
 
     default_input_values = DefaultInputValues(
         height=768,

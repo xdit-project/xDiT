@@ -919,9 +919,10 @@ class xFuserSanaSprintPipeline(xFuserPipelineBaseWrapper):
         return denoised / self.scheduler.config.sigma_data
 
     def _backbone_forward(self, latents, prompt_embeds, prompt_attention_mask, guidance, t):
-        # broadcast to batch dimension in a way that
-
-        timestep = t.expand(latents.shape[0]).to(prompt_embeds.dtype)
+        # Keep the timestep and the SCM input scaling in float32 like diffusers does;
+        # only the transformer inputs take the transformer's dtype.
+        transformer_dtype = self.transformer.dtype
+        timestep = t.expand(latents.shape[0])
         latents_model_input = latents / self.scheduler.config.sigma_data
 
         scm_timestep = torch.sin(timestep) / (torch.cos(timestep) + torch.sin(timestep))
@@ -930,12 +931,11 @@ class xFuserSanaSprintPipeline(xFuserPipelineBaseWrapper):
         latent_model_input = latents_model_input * torch.sqrt(
             scm_timestep_expanded**2 + (1 - scm_timestep_expanded) ** 2
         )
-        latent_model_input = latent_model_input.to(prompt_embeds.dtype)
 
         # predict noise model_output
         noise_pred = self.transformer(
-            latent_model_input,
-            encoder_hidden_states=prompt_embeds,
+            latent_model_input.to(dtype=transformer_dtype),
+            encoder_hidden_states=prompt_embeds.to(dtype=transformer_dtype),
             encoder_attention_mask=prompt_attention_mask,
             guidance=guidance,
             timestep=scm_timestep,

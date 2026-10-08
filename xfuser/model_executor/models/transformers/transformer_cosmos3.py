@@ -135,6 +135,15 @@ def _make_xfuser_cosmos3_transformer_wrapper():
         Cosmos3OmniTransformer,
     )
 
+    try:
+        from diffusers.models.transformers.transformer_cosmos3 import (
+            Cosmos3OmniTransformerOutput,
+        )
+    except ImportError:
+        # diffusers 0.39: the stock forward has no return_dict and always
+        # returns a tuple, so the wrapper does too.
+        Cosmos3OmniTransformerOutput = None
+
     class _AutoCastWrapper(torch.nn.Module):
         """Wraps a module to auto-cast inputs to match parameter dtype."""
 
@@ -205,6 +214,7 @@ def _make_xfuser_cosmos3_transformer_wrapper():
             action_timesteps=None,
             action_noisy_frame_indexes=None,
             action_domain_ids=None,
+            return_dict: bool = True,
         ):
             try:
                 get_runtime_state().increment_step_counter()
@@ -219,6 +229,7 @@ def _make_xfuser_cosmos3_transformer_wrapper():
                 # Our xFuserCosmos3AttnProcessor handles the attention
                 # correctly with USP (which falls through to direct attention
                 # when sp_size == 1).
+                return_kwargs = {} if Cosmos3OmniTransformerOutput is None else {"return_dict": return_dict}
                 return Cosmos3OmniTransformer.forward(
                     self,
                     input_ids=input_ids,
@@ -245,6 +256,7 @@ def _make_xfuser_cosmos3_transformer_wrapper():
                     action_timesteps=action_timesteps,
                     action_noisy_frame_indexes=action_noisy_frame_indexes,
                     action_domain_ids=action_domain_ids,
+                    **return_kwargs,
                 )
 
             # SP path: chunk gen_seq across ranks so MLPs/norms run on 1/P
@@ -377,7 +389,9 @@ def _make_xfuser_cosmos3_transformer_wrapper():
                     action_noisy_frame_indexes,
                 )
 
-            return preds_vision, preds_sound, preds_action
+            if not return_dict or Cosmos3OmniTransformerOutput is None:
+                return preds_vision, preds_sound, preds_action
+            return Cosmos3OmniTransformerOutput(sample=preds_vision, sound=preds_sound, action=preds_action)
 
     return xFuserCosmos3OmniTransformerWrapper
 

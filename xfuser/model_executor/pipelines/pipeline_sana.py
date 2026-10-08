@@ -829,17 +829,6 @@ class xFuserSanaPipeline(xFuserPipelineBaseWrapper):
                         patch_latents[patch_idx], t, last_patch_latents[patch_idx], return_dict=False
                     )[0]
 
-                    if callback_on_step_end is not None:
-                        # TODO Check callback_on_step_end
-                        callback_kwargs = {}
-                        for k in callback_on_step_end_tensor_inputs:
-                            callback_kwargs[k] = locals()[k]
-                        callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
-
-                        latents = callback_outputs.pop("latents", latents)
-                        prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
-                        negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
-
                     if i < len(timesteps) - 1:
                         get_pp_group().pipeline_isend(
                             patch_latents[patch_idx].to(prompt_embeds.dtype), segment_idx=patch_idx
@@ -859,6 +848,16 @@ class xFuserSanaPipeline(xFuserPipelineBaseWrapper):
                         get_pp_group().recv_next()
 
                 get_runtime_state().next_patch()
+
+            self._async_pipeline_step_end(
+                callback_on_step_end,
+                callback_on_step_end_tensor_inputs,
+                i + num_pipeline_warmup_steps,
+                t,
+                patch_latents,
+                patch_dim=2,
+                step_tensors={"prompt_embeds": prompt_embeds, "negative_prompt_embeds": negative_prompt_embeds},
+            )
 
             if i == len(timesteps) - 1 or (
                 (i + num_pipeline_warmup_steps + 1) > num_warmup_steps

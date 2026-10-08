@@ -30,6 +30,7 @@ from xfuser.core.attention.backends import (
     nvte,
     sage,
     sdpa,
+    sol_attn,
     vsa_h3,
 )
 
@@ -45,6 +46,7 @@ MODULES = [
     flex,
     vsa_h3,
     sage,
+    sol_attn,
     nvte,
     npu,
 ]

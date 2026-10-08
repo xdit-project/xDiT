@@ -267,8 +267,8 @@ def _keep_recording_outputs(component: torch.nn.Module) -> None:
 
     Absence of the registry is not an error: it means the installed transformers does not resolve
     recording this way, in which case there is nothing to carry over. The end-to-end behaviour is
-    pinned by tests/core/test_sharded_text_encoder_outputs.py, so a reworked mechanism fails there
-    rather than silently costing a caller its hidden states.
+    pinned by tests/integration/accelerator/model_executor/loading/test_sharded_text_encoder_outputs.py,
+    so a reworked mechanism fails there rather than silently costing a caller its hidden states.
     """
     try:
         from transformers.modeling_utils import (  # noqa: PLC0415

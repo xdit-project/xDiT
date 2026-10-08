@@ -61,6 +61,7 @@ from xfuser.model_executor.layers.fused_qk_rope_flydsl import (
     flydsl_fused_qk_norm_rope,
     _HAS_FLYDSL,
 )
+from xfuser.model_executor.layers.flux2 import run_pipelined_forward
 from xfuser.model_executor.models.transformers.register import (
     xFuserTransformerWrappersRegister,
 )
@@ -505,15 +506,31 @@ class xFuserFlux2Transformer2DWrapper(Flux2Transformer2DModel):
         img_ids = torch.chunk(img_ids, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
         txt_ids = torch.chunk(txt_ids, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
 
-        output = super().forward(
-            hidden_states,
-            encoder_hidden_states,
-            *args,
-            timestep=timestep,
-            img_ids=img_ids,
-            txt_ids=txt_ids,
-            **kwargs,
-        )
+        # Pipelined stacks: one fused kernel per block boundary instead of a
+        # closing residual and an opening norm on their own.  Returns None for
+        # anything it does not model (the reference-image KV cache paths, a
+        # per-block compile), and then upstream's forward runs untouched.
+        output = None
+        if not args:
+            output = run_pipelined_forward(
+                self,
+                hidden_states,
+                encoder_hidden_states,
+                timestep=timestep,
+                img_ids=img_ids,
+                txt_ids=txt_ids,
+                **kwargs,
+            )
+        if output is None:
+            output = super().forward(
+                hidden_states,
+                encoder_hidden_states,
+                *args,
+                timestep=timestep,
+                img_ids=img_ids,
+                txt_ids=txt_ids,
+                **kwargs,
+            )
 
         return_dict = not isinstance(output, tuple)
         sample = output[0]

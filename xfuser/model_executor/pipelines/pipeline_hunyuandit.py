@@ -271,7 +271,11 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
         )
         if get_pipeline_parallel_rank() >= get_pipeline_parallel_world_size() // 2:
             num_blocks_per_stage = len(self.transformer.blocks)
-            get_runtime_state()._reset_recv_skip_buffer(num_blocks_per_stage)
+            get_runtime_state()._reset_recv_skip_buffer(
+                num_blocks_per_stage,
+                num_images_per_prompt=num_images_per_prompt,
+                classifier_free_guidance=self.do_classifier_free_guidance,
+            )
         #! ---------------------------------------- ADDED ABOVE ----------------------------------------
 
         # 3. Encode input prompt
@@ -873,6 +877,8 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
                 elif get_classifier_free_guidance_world_size() == 2:
                     noise_pred_uncond, noise_pred_text = get_cfg_group().all_gather(noise_pred, separate_tensors=True)
                 latents = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+            else:
+                latents = noise_pred
 
             if self.do_classifier_free_guidance and guidance_rescale > 0.0:
                 # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf

@@ -70,16 +70,6 @@ class xFuserChromaModel(xFuserModel):
         },
     )
 
-    def _validate_config(self, config) -> None:
-        super()._validate_config(config)
-        ulysses_degree = config.ulysses_degree or 1
-        if self.attention_heads % ulysses_degree != 0:
-            raise ValueError(
-                f"Chroma1-HD has {self.attention_heads} attention heads, so "
-                f"--ulysses_degree must divide {self.attention_heads}, got "
-                f"{ulysses_degree}."
-            )
-
     def _load_model(self) -> DiffusionPipeline:
         from xfuser.model_executor.models.transformers.transformer_chroma import (
             xFuserChromaTransformer2DWrapper,

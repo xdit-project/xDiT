@@ -1,12 +1,11 @@
 import torch
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from xfuser import xFuserStableDiffusion3Pipeline, xFuserArgs
+from xfuser import xFuserStableDiffusion3Pipeline
 from xfuser.model_executor.cache import (
     DBCachePreset,
     CacheDitAdapterConfig,
     DBCacheSettings,
 )
-from xfuser import xFuserStableDiffusion3Pipeline
 from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
     register_model,
@@ -20,10 +19,14 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadRoute,
 )
 
+
 @register_model("stabilityai/stable-diffusion-3.5-large")
 @register_model("stable-diffusion-3.5-large")
 @register_model("SD3.5")
 class xFuserStableDiffusionModel(xFuserModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 38
+
     # The composition wrapper has no config-only transformer construction seam.
     load_support = LoadSupport(
         meta_transformers=(),
@@ -69,7 +72,12 @@ class xFuserStableDiffusionModel(xFuserModel):
                 adapter=CacheDitAdapterConfig(
                     blocks=(("transformer_blocks", "Pattern_1"),),
                 ),
-                preset=DBCachePreset(Fn_compute_blocks=2, residual_diff_threshold=0.08, scm_policy="fast", enable_encoder_calibrator=False),
+                preset=DBCachePreset(
+                    Fn_compute_blocks=2,
+                    residual_diff_threshold=0.08,
+                    scm_policy="fast",
+                    enable_encoder_calibrator=False,
+                ),
             ),
         },
         fp8_text_encoder_module_list=["text_encoder_3.encoder.block"],

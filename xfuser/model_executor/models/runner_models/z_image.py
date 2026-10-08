@@ -157,6 +157,22 @@ class xFuserZImageModel(xFuserModel):
         },
     )
 
+    def _get_compiled_pipe_components(self) -> list[str]:
+        """Compile the text encoder alongside the transformer.
+
+        Run eager it is ~4800 kernel launches per call and ~44 ms of the ~880 ms
+        this model spends on the GPU -- almost none of it arithmetic.  Its
+        RMSNorms alone come out as a mean/pow/rsqrt/mul/mul quintet per norm,
+        each a few microseconds of launch for a couple of MB of data.  Letting
+        Inductor fuse it takes that to ~1700 launches and ~28 ms.
+
+        Safe to compile because the shape is pinned: ``ZImagePipeline`` tokenizes
+        with ``padding="max_length"``, so the encoder sees the same sequence
+        length whatever the prompt is, and nothing here re-triggers compilation
+        between requests.
+        """
+        return ["transformer", "text_encoder"]
+
     def _customize_settings(self, config) -> None:
         """Exclude context_refiner from INT8 quant when sequence parallelism is active.
 
@@ -247,6 +263,22 @@ class xFuserZImageTurboModel(xFuserModel):
         fp8_text_encoder_module_list=["text_encoder.layers"],
         int8_gemm_module_list=["transformer.layers", "transformer.noise_refiner", "transformer.context_refiner"],
     )
+
+    def _get_compiled_pipe_components(self) -> list[str]:
+        """Compile the text encoder alongside the transformer.
+
+        Run eager it is ~4800 kernel launches per call and ~44 ms of the ~880 ms
+        this model spends on the GPU -- almost none of it arithmetic.  Its
+        RMSNorms alone come out as a mean/pow/rsqrt/mul/mul quintet per norm,
+        each a few microseconds of launch for a couple of MB of data.  Letting
+        Inductor fuse it takes that to ~1700 launches and ~28 ms.
+
+        Safe to compile because the shape is pinned: ``ZImagePipeline`` tokenizes
+        with ``padding="max_length"``, so the encoder sees the same sequence
+        length whatever the prompt is, and nothing here re-triggers compilation
+        between requests.
+        """
+        return ["transformer", "text_encoder"]
 
     def _customize_settings(self, config) -> None:
         """Exclude context_refiner from INT8 quant when sequence parallelism is active.

@@ -1,5 +1,6 @@
 import torch
 import copy
+import dataclasses
 from typing import Optional
 import json
 import numpy as np
@@ -37,6 +38,9 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
 @register_model("tencent/HunyuanVideo")
 @register_model("HunyuanVideo")
 class xFuserHunyuanvideoModel(xFuserModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 24
+
     # HunyuanVideoPipeline and HunyuanVideoTransformer3DModel both exist at the 0.33
     # install floor, so there is nothing extra to ask for here.
     min_diffusers_version = None
@@ -175,8 +179,11 @@ class xFuserHunyuanvideoModel(xFuserModel):
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v")
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v")
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v")
-@register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v")
+@register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v")
 class xFuserHunyuanvideo15Model(xFuserModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 16
+
     min_diffusers_version = "0.36.0"
 
     # The 1.5 wrapper's config-only construction and checkpoint layout are unverified.
@@ -224,10 +231,18 @@ class xFuserHunyuanvideo15Model(xFuserModel):
 
     def _customize_settings(self, config: xFuserArgs) -> None:
         super()._customize_settings(config)
-        if config.task == "i2v":  # TODO: different model for 480p
-            self.settings.model_name = "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v"
-        else:
-            self.settings.model_name = "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v"
+        # Registered checkpoint IDs encode their task; output dimensions do not select weights.
+        checkpoint_task = config.model.rsplit("_", 1)[-1]
+        if checkpoint_task not in ("i2v", "t2v"):
+            task = "i2v" if config.task == "i2v" else "t2v"
+            self.settings.model_name = f"hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_{task}"
+            return
+        if config.task and config.task != checkpoint_task:
+            raise ValueError(f"{config.model} is a {checkpoint_task} checkpoint and cannot run --task {config.task}.")
+        self.settings.model_name = config.model
+        if "-480p_" in config.model:
+            # The 16:9 size Diffusers picks for the 480p checkpoints' 640 target size.
+            self.default_input_values = dataclasses.replace(self.default_input_values, height=480, width=848)
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import HunyuanVideo15Pipeline, HunyuanVideo15ImageToVideoPipeline
@@ -240,7 +255,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         transformer = xFuserHunyuanVideo15Transformer3DWrapper.from_pretrained(
             self.settings.model_name,
             torch_dtype=torch.bfloat16,
-            subfolder="transformer",
+            **self.loader.checkpoint_request("transformer").from_pretrained_kwargs(),
         )
         pipe = pipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
@@ -402,6 +417,7 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
             self.pipe_name,
             subfolder="transformer",
             torch_dtype=torch.bfloat16,
+            local_files_only=self.loader.checkpoint_request().local_files_only,
         )
         distilled_state = distilled_transformer.state_dict()
 

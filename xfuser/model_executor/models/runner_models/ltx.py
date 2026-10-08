@@ -47,6 +47,9 @@ DEFAULT_NEGATIVE_PROMPT = (
 @register_model("dg845/LTX-2.3-Diffusers")
 @register_model("LTX-2.3")
 class xFuserLTX23VideoModel(xFuserModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 32
+
     min_diffusers_version = "0.37.0"
 
     default_input_values = DefaultInputValues(
@@ -261,6 +264,9 @@ class xFuserLTX23VideoModel(xFuserModel):
 @register_model("Lightricks/LTX-2")
 @register_model("LTX-2")
 class xFuserLTX2VideoModel(xFuserModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 32
+
     min_diffusers_version = "0.37.0"
 
     default_input_values = DefaultInputValues(
@@ -339,8 +345,8 @@ class xFuserLTX2VideoModel(xFuserModel):
         )
         latent_upsampler = LTX2LatentUpsamplerModel.from_pretrained(
             self.settings.model_name,
-            subfolder="latent_upsampler",
             torch_dtype=torch.bfloat16,
+            **self.loader.checkpoint_request("latent_upsampler").from_pretrained_kwargs(),
         )
         upsample_pipe = LTX2LatentUpsamplePipeline(vae=pipe.vae, latent_upsampler=latent_upsampler)
 
@@ -437,6 +443,9 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
     parameters from LTX-2 package constants.py.
     """
 
+    # From the registered checkpoint's transformer config.
+    attention_heads = 32
+
     _TRANSFORMER_SUBFOLDER: str = "transformer"
     _DISTILLED: bool = True
     # Guidance defaults for the distilled path (no CFG / STG / modality boost).
@@ -484,7 +493,7 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
         transformer = transformer_cls.from_pretrained(
             self.settings.model_name,
             torch_dtype=torch.bfloat16,
-            subfolder=self._TRANSFORMER_SUBFOLDER,
+            **self.loader.checkpoint_request(self._TRANSFORMER_SUBFOLDER).from_pretrained_kwargs(),
         )
 
         pipe_cls = LTX2ImageToVideoPipeline if self.config.task == "i2v" else LTX2Pipeline
@@ -505,8 +514,8 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
         if self._DISTILLED:
             latent_upsampler = LTX2LatentUpsamplerModel.from_pretrained(
                 self.settings.model_name,
-                subfolder="latent_upsampler",
                 torch_dtype=torch.bfloat16,
+                **self.loader.checkpoint_request("latent_upsampler").from_pretrained_kwargs(),
             )
             self.upsample_pipe = LTX2LatentUpsamplePipeline(vae=pipe.vae, latent_upsampler=latent_upsampler)
 
@@ -522,8 +531,8 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
 
         diff_decoder = xFuserLTX2VideoDiffusionDecoderWrapper.from_pretrained(
             self.settings.model_name,
-            subfolder="diffusion_decoder",
             torch_dtype=torch.bfloat16,
+            **self.loader.checkpoint_request("diffusion_decoder").from_pretrained_kwargs(),
         )
         try:
             from diffusers.models.autoencoders.ltx2_diffusion_decoder import (

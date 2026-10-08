@@ -950,6 +950,17 @@ def test_minimax_h3_patches_shared_qwen_encoder_helper(monkeypatch):
     assert encoders._xfuser_broadcast_patched
 
 
+def _attach_online_loader(model, monkeypatch):
+    """Give a bare runner the checkpoint identity its loader would build online."""
+    from xfuser.model_executor.models.runner_models.loading.meta_load import (
+        ModelLoader,
+    )
+
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_OFFLINE", False)
+    model.loader = object.__new__(ModelLoader)
+    model.loader.model = model
+
+
 class _FakeMiniMaxPipe:
     def __init__(self):
         self.text_encoder = SimpleNamespace(lm_head=object())
@@ -1017,6 +1028,8 @@ def test_minimax_h3_loads_task_workflow(
     model.config = SimpleNamespace(task=task, text_encoder_tp_degree=1)
     model._parallelize_text_encoder = lambda text_encoder: None
 
+    _attach_online_loader(model, monkeypatch)
+
     actual = model._load_model()
 
     assert actual is pipe
@@ -1073,6 +1086,8 @@ def test_fasth3_loads_published_checkpoint(monkeypatch):
     model.config = SimpleNamespace(task="t2va", text_encoder_tp_degree=1)
     model._parallelize_text_encoder = lambda text_encoder: None
 
+    _attach_online_loader(model, monkeypatch)
+
     actual = model._load_model()
 
     assert actual is pipe
@@ -1083,6 +1098,7 @@ def test_fasth3_loads_published_checkpoint(monkeypatch):
             {
                 "subfolder": "transformer",
                 "dtype": torch.bfloat16,
+                "local_files_only": False,
                 "enable_fasth3_vsa": True,
                 "attention_backend": None,
             },
@@ -1142,6 +1158,8 @@ def test_fasth3_dense_loads_published_checkpoint(monkeypatch):
     )
     model._parallelize_text_encoder = lambda text_encoder: None
 
+    _attach_online_loader(model, monkeypatch)
+
     actual = model._load_model()
 
     assert actual is pipe
@@ -1152,6 +1170,7 @@ def test_fasth3_dense_loads_published_checkpoint(monkeypatch):
             {
                 "subfolder": "transformer",
                 "dtype": torch.bfloat16,
+                "local_files_only": False,
                 "enable_fasth3_vsa": False,
                 "attention_backend": AttentionBackendType.AITER,
             },
@@ -1195,6 +1214,8 @@ def test_minimax_h3_ref2va_loads_workflow(monkeypatch):
     model = object.__new__(xFuserMiniMaxH3Ref2VAModel)
     model.config = SimpleNamespace(text_encoder_tp_degree=1)
     model._parallelize_text_encoder = lambda text_encoder: None
+
+    _attach_online_loader(model, monkeypatch)
 
     actual = model._load_model()
 

@@ -157,6 +157,17 @@ class CachedTransformerBlocks(torch.nn.Module, ABC):
         self.accumulated_rel_l1_distance = torch.zeros_like(self.accumulated_rel_l1_distance)
         self.use_cache = torch.zeros_like(self.use_cache)
 
+    def start_request(self, num_steps: int) -> None:
+        """Forget the previous request and count ``num_steps`` steps from zero."""
+        self.reset_cache_state()
+        self.num_steps = num_steps
+        # Invalidate the cache key without passing None to tensor-only stores
+        # or discarding an adapter's persistent backing buffer.
+        self.cache_context.modulated_inputs = None
+
+    def _on_uncompared_step(self) -> None:
+        """Called for a step that has nothing to compare against and always computes."""
+
     def process_blocks(self, start_idx: int, hidden: torch.Tensor, encoder: torch.Tensor, *args, **kwargs):
         for block in self.transformer_blocks[start_idx:]:
             hidden, encoder = block(hidden, encoder, *args, **kwargs)
@@ -196,11 +207,11 @@ class CachedTransformerBlocks(torch.nn.Module, ABC):
             self._store_modulated_inputs(modulated)
             prev_modulated = None
 
-        self.use_cache = (
-            self.are_two_tensor_similar(prev_modulated, modulated, self.rel_l1_thresh)
-            if prev_modulated is not None
-            else torch.tensor(False, dtype=torch.bool)
-        )
+        if prev_modulated is not None:
+            self.use_cache = self.are_two_tensor_similar(prev_modulated, modulated, self.rel_l1_thresh)
+        else:
+            self._on_uncompared_step()
+            self.use_cache = torch.tensor(False, dtype=torch.bool)
 
         self.callback_handler.trigger_event("on_forward_remaining_begin", self)
         if self.use_cache:
@@ -308,9 +319,17 @@ class TeaCachedTransformerBlocks(CachedTransformerBlocks):
             new_accum,
             torch.zeros_like(new_accum),
         )
-        self.cnt = torch.where(cnt + 1 < self.num_steps, cnt + 1, torch.zeros(1, dtype=cnt.dtype, device=device))
+        self._advance_step()
 
         return self.use_cache
+
+    def _on_uncompared_step(self) -> None:
+        # The first step of a request computes, but it still counts, so the
+        # forced compute at cnt == num_steps - 1 lands on the last step.
+        self._advance_step()
+
+    def _advance_step(self) -> None:
+        self.cnt = torch.where(self.cnt + 1 < self.num_steps, self.cnt + 1, torch.zeros_like(self.cnt))
 
     def get_modulated_inputs(self, hidden_states, encoder_hidden_states, *args, **kwargs):
         inp = hidden_states.clone()
@@ -319,3 +338,10 @@ class TeaCachedTransformerBlocks(CachedTransformerBlocks):
         prev_modulated = self.cache_context.modulated_inputs
         self.cache_context.modulated_inputs = modulated
         return modulated, prev_modulated, hidden_states, encoder_hidden_states
+
+
+def restart_step_caches(module: Module, num_steps: int) -> None:
+    """Start a new request of ``num_steps`` steps in every step cache under ``module``."""
+    for submodule in module.modules():
+        if isinstance(submodule, CachedTransformerBlocks):
+            submodule.start_request(num_steps)

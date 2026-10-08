@@ -328,6 +328,9 @@ class MiniMaxH3DiffusionOutput(DiffusionOutput):
 @register_model("MiniMaxAI/MiniMax-H3")
 @register_model("MiniMax-H3")
 class xFuserMiniMaxH3Model(xFuserModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 56
+
     # diffusers 0.40.0 is the first release with native MiniMax-H3.
     min_diffusers_version = "0.40.0"
 
@@ -483,8 +486,8 @@ class xFuserMiniMaxH3Model(xFuserModel):
         )
         transformer = xFuserMiniMaxH3Transformer3DWrapper.from_pretrained(
             self.settings.model_name,
-            subfolder="transformer",
             dtype=torch.bfloat16,
+            **self.loader.checkpoint_request("transformer").from_pretrained_kwargs(),
             enable_fasth3_vsa=self._enable_fasth3_vsa,
             attention_backend=_parse_attention_backend(
                 getattr(self.config, "attention_backend", None),
@@ -853,8 +856,8 @@ class xFuserMiniMaxH3Ref2VAModel(xFuserMiniMaxH3Model):
         )
         transformer = xFuserMiniMaxH3Transformer3DWrapper.from_pretrained(
             self.settings.model_name,
-            subfolder="transformer_ref",
             dtype=torch.bfloat16,
+            **self.loader.checkpoint_request("transformer_ref").from_pretrained_kwargs(),
             attention_backend=_parse_attention_backend(
                 getattr(self.config, "attention_backend", None),
                 "attention backend",

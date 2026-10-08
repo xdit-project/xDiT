@@ -560,8 +560,10 @@ class xFuserPixArtSigmaPipeline(xFuserPipelineBaseWrapper):
         t: Union[float, torch.Tensor],
         guidance_scale: float,
     ):
+        do_classifier_free_guidance = guidance_scale > 1.0
         if is_pipeline_first_stage():
-            latents = torch.cat([latents] * (2 // get_classifier_free_guidance_world_size()))
+            if do_classifier_free_guidance:
+                latents = torch.cat([latents] * (2 // get_classifier_free_guidance_world_size()))
             latents = self.scheduler.scale_model_input(latents, t)
 
         current_timestep = t
@@ -590,11 +592,14 @@ class xFuserPixArtSigmaPipeline(xFuserPipelineBaseWrapper):
 
         # classifier free guidance
         if is_pipeline_last_stage():
-            if get_classifier_free_guidance_world_size() == 1:
-                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-            elif get_classifier_free_guidance_world_size() == 2:
-                noise_pred_uncond, noise_pred_text = get_cfg_group().all_gather(noise_pred, separate_tensors=True)
-            latents = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+            if not do_classifier_free_guidance:
+                latents = noise_pred
+            else:
+                if get_classifier_free_guidance_world_size() == 1:
+                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                elif get_classifier_free_guidance_world_size() == 2:
+                    noise_pred_uncond, noise_pred_text = get_cfg_group().all_gather(noise_pred, separate_tensors=True)
+                latents = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
             if self.transformer.config.out_channels // 2 == self.transformer.config.in_channels:
                 latents = latents.chunk(2, dim=1)[0]

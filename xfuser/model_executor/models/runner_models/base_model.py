@@ -769,6 +769,50 @@ class xFuserModel(abc.ABC):
         component.register_forward_pre_hook(_mark, with_kwargs=True, prepend=True)
         component._xfuser_marks_cudagraph_steps = True
 
+    def _compile_vae_decoder(self, mode: str = "default") -> None:
+        """Compile the VAE decoder, after taking AITER's GroupNorm back out of it.
+
+        Two separate things, but neither pays off without the other.
+
+        ``torch.compile(vae)`` would be a no-op: pipelines call ``vae.decode``,
+        not ``vae.forward``, so the compiled wrapper is never entered.  The
+        decoder submodule is the thing whose ``forward`` actually runs.
+
+        And compiling it alone only gets part of the win, because xDiT swaps
+        ``torch.nn.GroupNorm`` for AITER's globally at import.  AITER's is much
+        the faster of the two run eagerly, but it is an opaque custom op and so
+        also a fusion barrier: the SiLU, the convolution bias and the residual
+        add on either side of it each stay their own pass over a full-resolution
+        activation.  Handing those back to Inductor beats the
+        faster-but-unfusable kernel -- but only once there is a compiler to hand
+        them to, so the restore is scoped to the decoder and coupled to the
+        compile, and must not outlive it.
+
+        ``mode`` defaults to "default" rather than the caller's compile mode on
+        purpose: under CUDA Graphs the decoded image would live in the graph's
+        buffer pool and be valid only until the next replay.
+        """
+        vae = getattr(self.pipe, "vae", None)
+        decoder = getattr(vae, "decoder", None)
+        if decoder is None:
+            return
+        from xfuser.envs import _TORCH_GROUPNORM
+
+        for parent in decoder.modules():
+            for child_name, child in list(parent.named_children()):
+                if type(child).__module__ != "aiter.ops.groupnorm":
+                    continue
+                if not getattr(child, "affine", False) or child.weight is None:
+                    continue  # non-affine AITER GroupNorm already defers to torch
+                replacement = _TORCH_GROUPNORM(
+                    child.num_groups, child.weight.shape[0], eps=child.eps, affine=True
+                ).to(device=child.weight.device, dtype=child.weight.dtype)
+                replacement.weight = child.weight
+                replacement.bias = child.bias
+                setattr(parent, child_name, replacement)
+
+        vae.decoder = torch.compile(decoder, mode=mode)
+
     def _get_compiled_pipe_components(self) -> List[str]:
         return ["transformer"]
 

@@ -476,6 +476,45 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         step_cache_config={"fbcache": None},
     )
 
+    def _compile_model(self, input_args: dict) -> None:
+        """Compile the text encoder and VAE decoder as well as the transformer.
+
+        Both run eagerly by default and both are launch-bound rather than
+        arithmetic-bound: at 1024x1024 the text encoder is ~2200 kernels and
+        ~23 ms of the ~347 ms this model spends on the GPU, the decoder another
+        ~30 ms.  Letting Inductor fuse them is worth ~8 ms together.
+
+        Safe to compile because the shapes are pinned: the pipeline tokenizes
+        with ``padding="max_length"`` at ``tokenizer_max_length``, so the encoder
+        sees the same sequence length whatever the prompt is.
+
+        Both take mode="default" rather than this model's "reduce-overhead"
+        because CUDA Graphs are worth nothing here: measured across all four
+        combinations, every one lands inside 2 ms of the others, which is this
+        benchmark's run-to-run spread.  Neither stage is launch-bound once the
+        GPU is saturated -- the text encoder's ~2200 kernels average ~10 us
+        apiece, comfortably longer than the launch they would be hiding.
+
+        So "default" is not paying for safety, it is the same speed.  Which
+        settles it, because the risk on the other side is real: a graph's
+        outputs live in its buffer pool and are only valid until the next
+        replay, and the transformer replays many times between one text encode
+        and the decode that follows it.  That hazard did not show up in testing
+        (output stayed deterministic run to run, and nothing raised), but
+        compiling the VAE decoder this way did move the decoded image by ~47 dB
+        PSNR for no reason that was chased down.  Zero upside, unexplained
+        output change, and a failure mode the base class carries explicit
+        machinery for: take the boring mode.
+        """
+        if not self.config.use_parallel_vae:
+            # Parallel VAE shards the decoder across ranks and owns its
+            # execution; leave that path alone.
+            self._compile_vae_decoder()
+        text_encoder = getattr(self.pipe, "text_encoder", None)
+        if text_encoder is not None:
+            self.pipe.text_encoder = torch.compile(text_encoder, mode="default")
+        super()._compile_model(input_args)
+
     def _get_compile_mode(self) -> str:
         # CUDA graphs incompatible with cross-step caching, and
         # cause pathological re-captures on RDNA4.

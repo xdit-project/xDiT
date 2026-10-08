@@ -32,6 +32,9 @@ if TYPE_CHECKING:
 
 @register_model("CausalWan")
 class xFuserCausalWanModel(xFuserModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 40
+
     min_diffusers_version = "0.35.2"
 
     # Its manual single-file fallback has no collective-safe key discovery.
@@ -122,7 +125,7 @@ class xFuserCausalWanModel(xFuserModel):
             return xFuserCausalWanTransformer3DWrapper.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,
-                subfolder=subfolder,
+                **self.loader.checkpoint_request(subfolder).from_pretrained_kwargs(),
             )
         except (OSError, ValueError, RuntimeError):
             from safetensors.torch import load_file

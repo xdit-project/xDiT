@@ -322,12 +322,6 @@ class xFuserIdeogram4Model(xFuserModel):
         },
     )
 
-    def _validate_config(self, config) -> None:
-        super()._validate_config(config)
-        heads = self.attention_heads
-        if heads % config.ulysses_degree != 0:
-            raise ValueError(f"Ideogram 4 has {heads} attention heads, so --ulysses_degree must divide {heads}.")
-
     def _validate_args(self, input_args: dict) -> None:
         super()._validate_args(input_args)
         height = input_args["height"]
@@ -432,13 +426,13 @@ class xFuserIdeogram4Model(xFuserModel):
         else:
             transformer = transformer_class.from_pretrained(
                 model_id,
-                subfolder="transformer",
                 torch_dtype=torch.bfloat16,
+                **self.loader.checkpoint_request("transformer").from_pretrained_kwargs(),
             )
             unconditional_transformer = transformer_class.from_pretrained(
                 model_id,
-                subfolder="unconditional_transformer",
                 torch_dtype=torch.bfloat16,
+                **self.loader.checkpoint_request("unconditional_transformer").from_pretrained_kwargs(),
             )
             text_encoder = None
 

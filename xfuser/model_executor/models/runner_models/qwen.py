@@ -27,6 +27,9 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
 @register_model("Qwen-Image-Edit-2509")
 @register_model("Qwen-Image-Edit")
 class xFuserQwenImageEditModel(xFuserModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 24
+
     min_diffusers_version = "0.37.0"
 
     load_support = LoadSupport(
@@ -150,6 +153,9 @@ class xFuserQwenImageEditModel(xFuserModel):
 @register_model("Qwen-Image-2512")
 @register_model("Qwen-Image")
 class xFuserQwenImageModel(xFuserModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 24
+
     min_diffusers_version = "0.37.0"
 
     load_support = LoadSupport(

@@ -79,32 +79,62 @@ except Exception:  # pragma: no cover - only exercised where flydsl is absent
     _HAS_FLYDSL = False
 
 
-# HW grid Y is a 16-bit field on AMD HIP; cap blocks/launch and chunk tokens in
-# Python (a folded launch would run tail blocks past the token count -- flydsl's
-# ``if cond: return`` does not early-exit a kernel body -- and fault).  Z-Image
-# runs a few thousand tokens so this loop is single-trip in practice; it is here
-# so a long-sequence caller degrades in performance rather than faulting.
-MAX_GRID_Y = 65535
+# The grid is 1-D over (token, head) pairs and HW grid X is a 32-bit field on
+# AMD HIP (Y and Z are the 16-bit ones), so the Python chunking loop below is
+# single-trip for anything a diffusion model will run.  It is kept so a caller
+# with an absurd sequence length degrades in performance rather than faulting:
+# a folded launch would run tail blocks past the pair count, and flydsl's
+# ``if cond: return`` does not early-exit a kernel body.
+MAX_GRID_X = 2**31 - 1
 
-# A lane's freqs load is fp32 and buffer ops top out at 128 bits, so VEC <= 4.
+# A single buffer op tops out at 128 bits.  That caps the *freqs* read -- the
+# table is fp32, so it is gathered in <= 4-wide chunks -- but NOT ``VEC``: q, k
+# and the output are bf16, so one lane still moves a full 128-bit (8-element)
+# fragment per op.  Decoupling the two is what lets ``VEC`` reach 8.
 MAX_VEC_F32 = 4
+MAX_VEC_BF16 = 8
+
+# Threads per block for the packed tiling.  Kept a multiple of the wave size so
+# every wave is full, and (via ``wave_size % LANES_PER_HEAD == 0``) a multiple of
+# LANES_PER_HEAD so a head's lane group never straddles a wave boundary -- the
+# sum-of-squares butterfly stays a pure ``shuffle_xor`` with no LDS and no
+# barrier even though the block spans several waves.
+TARGET_BLOCK_THREADS = 256
 
 
-def _pick_block(d: int, wave_size: int) -> Optional[Tuple[int, int]]:
-    """Return ``(BLOCK_THREADS, VEC)`` for head_dim ``d``, or None if unsupported.
+def _pick_tiling(d: int, wave_size: int) -> Optional[Tuple[int, int, int, int]]:
+    """``(BLOCK_THREADS, VEC, LANES_PER_HEAD, PAIRS_PER_BLOCK)`` for head_dim ``d``.
 
-    Prefer the widest wave (few lanes, more work each) while keeping VEC even
-    (GPT-J pairs stay lane-local), VEC <= 4 (128-bit fp32 freqs load) and
-    BLOCK_THREADS no larger than the hardware wave (single wave, so the
-    sum-of-squares reduction is a pure shuffle_xor butterfly with no LDS).
+    One ``(token, head)`` pair is owned by ``LANES_PER_HEAD = d // VEC`` lanes,
+    and a block packs ``PAIRS_PER_BLOCK`` pairs so it can be a full, wide
+    workgroup regardless of how few lanes one head needs.  That is the whole
+    point of the shape: the previous geometry pinned one block to one pair, so
+    ``d = 128`` gave 64 lanes x ``VEC = 2`` -- a 4-byte load per lane, a quarter
+    of a 128-bit buffer op, spread over a very large grid of tiny blocks.  Here
+    ``VEC = 8`` makes every access a full 128-bit op and 16 pairs share a
+    256-thread block, which is ~4x the bytes in flight per wave.
+
+    Constraints:
+      * ``VEC`` even and ``VEC | d`` -- a GPT-J pair ``(2k, 2k+1)`` stays inside
+        one lane, so the rotation is register-local;
+      * ``VEC <= 8`` -- bf16 q/k/out in one 128-bit buffer op;
+      * ``LANES_PER_HEAD`` a power of two and ``<= wave_size`` -- the reduction
+        is a ``shuffle_xor`` butterfly over the head's lane group;
+      * ``wave_size % LANES_PER_HEAD == 0`` -- that group sits inside one wave.
+
+    Returns None when no such tiling exists (head dims that are not a power of
+    two times an even ``VEC``); the caller then runs the unfused reference.
     """
-    bt = wave_size
-    while bt >= 2:
-        if d % bt == 0:
-            vec = d // bt
-            if vec >= 2 and vec % 2 == 0 and vec <= MAX_VEC_F32:
-                return bt, vec
-        bt //= 2
+    for vec in (MAX_VEC_BF16, 4, 2):
+        if vec % 2 or d % vec:
+            continue
+        lph = d // vec
+        if lph < 1 or lph > wave_size or (lph & (lph - 1)):
+            continue  # must be a power of two for the butterfly
+        if wave_size % lph:
+            continue  # a head's lanes would straddle two waves
+        bt = max(wave_size, (TARGET_BLOCK_THREADS // wave_size) * wave_size)
+        return bt, vec, lph, bt // lph
     return None
 
 
@@ -117,6 +147,8 @@ if _HAS_FLYDSL:
         D: int,
         VEC: int,
         BLOCK_THREADS: int,
+        LANES_PER_HEAD: int,
+        PAIRS_PER_BLOCK: int,
         eps: float,
         NORM_Q: bool,
         NORM_K: bool,
@@ -129,12 +161,22 @@ if _HAS_FLYDSL:
         Shape/flag constants are captured by closure (not module globals) so
         launchers for different configs coexist in the lru cache.
         """
-        LOG2_BT = int(math.log2(BLOCK_THREADS))
+        LOG2_LPH = int(math.log2(LANES_PER_HEAD))
         PAIRS = VEC // 2
         INV_D = 1.0 / D
         HD = H * D
 
-        _kname = f"zimage_fused_qk_norm_rope_H{H}_D{D}_v{VEC}_flydsl"
+        # The fp32 freqs row is read in <= 4-wide (<= 128-bit) chunks so it never
+        # throttles the bf16 VEC.  Precompute the chunking as Python constants:
+        # a runtime ``while`` here would be captured as a device scf.while.
+        FREQ_CHUNKS = []
+        _off = 0
+        while _off < VEC:
+            _n = min(MAX_VEC_F32, VEC - _off)
+            FREQ_CHUNKS.append((_off, _n))
+            _off += _n
+
+        _kname = f"zimage_fused_qk_norm_rope_H{H}_D{D}_v{VEC}_p{PAIRS_PER_BLOCK}_flydsl"
 
         @flyc.kernel(name=_kname)
         def kernel(
@@ -145,22 +187,30 @@ if _HAS_FLYDSL:
             wk: fx.Tensor,     # [D] bf16 (dummy when not HAS_WK)
             fc: fx.Tensor,     # [fc_rows, D] fp32, interleaved (cos, sin) pairs
             fc_rows: Int32,
-            tok_base: Int32,   # global token index of this chunk's row 0
+            pair_base: Int32,  # global (token, head) pair index of this chunk's slot 0
             k_out_off: Int32,  # = T*H*D, row offset of k's output block
             q_rs: Int32,       # q_in row stride in elements (H*D if contiguous)
             k_rs: Int32,       # k_in row stride in elements
         ):
             fm_fast = FastMathFlags.fast
 
-            head = fx.Int32(fx.block_idx.x)
-            tok = fx.Int32(fx.block_idx.y)
             tid = fx.Int32(fx.thread_idx.x)
 
-            # Token index is global (chunk row 0 + block row) so the tensors are
-            # passed whole and chunking only moves ``tok_base`` and grid Y -- no
-            # per-chunk tensor slicing, which would break the flat k_out_off.
-            gtok = fx.Int32(tok_base) + tok
-            lane = tid * VEC          # channel offset within the head
+            # The grid is 1-D over ``(token, head)`` pairs, PAIRS_PER_BLOCK of
+            # them per block.  ``head`` is the fast-varying component, so the
+            # H consecutive blocks-worth of work for one token stay adjacent and
+            # share its freqs row in cache -- the same locality the old
+            # (head, token) 2-D grid had.  Pair index is global (chunk slot 0 +
+            # block offset) so the tensors are passed whole and chunking only
+            # moves ``pair_base``: no per-chunk tensor slicing, which would break
+            # the flat k_out_off.
+            slot = tid // LANES_PER_HEAD   # which pair inside this block
+            lih = tid % LANES_PER_HEAD     # this lane's rank within the head
+            gid = fx.Int32(pair_base) + fx.Int32(fx.block_idx.x) * PAIRS_PER_BLOCK + slot
+            gtok = gid // H
+            head = gid % H
+
+            lane = lih * VEC          # channel offset within the head
             hoff = head * D + lane
 
             q_off = gtok * fx.Int32(q_rs) + hoff
@@ -182,16 +232,27 @@ if _HAS_FLYDSL:
             wk_ = GTensor(wk, dtype=T.bf16, shape=(-1,))
             fc_ = GTensor(fc, dtype=T.f32, shape=(-1,))
 
-            # One fp32 load of the lane's slice of the interleaved table, shared
+            # The lane's slice of the interleaved table, gathered once and shared
             # by q and k.  Element 2*kk is cos of pair kk, 2*kk+1 is its sin --
             # see the module docstring for why this needs no de-interleave pass.
-            cs = fx.Vector(fc_.load(coff, vec_size=VEC)).to(fx.Float32)
+            # fp32 reads are chunked to <= 128 bits each so the bf16 q/k path
+            # keeps the full VEC width (see FREQ_CHUNKS).
+            cs = []
+            for _ci in range_constexpr(len(FREQ_CHUNKS)):
+                _o, _n = FREQ_CHUNKS[_ci]
+                _part = fx.Vector(fc_.load(coff + _o, vec_size=_n)).to(fx.Float32)
+                for _i in range_constexpr(_n):
+                    cs.append(_part[_i])
 
             def wave_reduce_add(x):
+                # Butterfly over this head's LANES_PER_HEAD lanes only.  The
+                # group is a power of two and sits inside one wave, so the
+                # shuffle width confines the exchange to it and the other pairs
+                # packed into the block reduce independently and concurrently.
                 w = fx.Float32(x)
-                for sh_exp in range_constexpr(LOG2_BT):
-                    off = BLOCK_THREADS // (2 << sh_exp)
-                    w = w.addf(w.shuffle_xor(off, BLOCK_THREADS), fastmath=fm_fast)
+                for sh_exp in range_constexpr(LOG2_LPH):
+                    off = LANES_PER_HEAD // (2 << sh_exp)
+                    w = w.addf(w.shuffle_xor(off, LANES_PER_HEAD), fastmath=fm_fast)
                 return w
 
             def round_bf16(vals):
@@ -253,24 +314,24 @@ if _HAS_FLYDSL:
             wk: fx.Tensor,
             fc: fx.Tensor,
             fc_rows: fx.Int32,
-            tok_base: fx.Int32,
+            pair_base: fx.Int32,
             k_out_off: fx.Int32,
             q_rs: fx.Int32,
             k_rs: fx.Int32,
-            n_tokens: fx.Int32,
+            n_blocks: fx.Int32,
             stream: fx.Stream = fx.Stream(None),
         ):
             k = kernel(
-                q_in, k_in, out, wq, wk, fc, fc_rows, tok_base, k_out_off, q_rs, k_rs
+                q_in, k_in, out, wq, wk, fc, fc_rows, pair_base, k_out_off, q_rs, k_rs
             )
-            # ``n_tokens`` is a runtime Int32.  Pass it to the grid raw and let
+            # ``n_blocks`` is a runtime Int32.  Pass it to the grid raw and let
             # ``KernelLauncher.launch`` cast each dim to index (via
             # ``_to_index_value``) inside its own MLIR location/context.  Doing
-            # ``arith.index_cast(T.index, n_tokens)`` here instead faults under
+            # ``arith.index_cast(T.index, n_blocks)`` here instead faults under
             # torch.compile: on a dynamo-resumed frame no MLIR context is active
             # at launcher-trace time ("An MLIR function requires a Context").
             k.launch(
-                grid=(H, n_tokens, 1),
+                grid=(n_blocks, 1, 1),
                 block=(BLOCK_THREADS, 1, 1),
                 stream=stream,
             )
@@ -312,16 +373,30 @@ if _HAS_FLYDSL:
         has_wk = wk is not None
 
         wave_size = get_device_wave_size(q)
-        block = _pick_block(d, wave_size) if wave_size is not None else None
-        if block is None:
+        tiling = _pick_tiling(d, wave_size) if wave_size is not None else None
+        if tiling is None:
             raise RuntimeError("unsupported Z-Image FlyDSL QK norm/RoPE tiling")
-        bt, vec = block
+        bt, vec, lph, ppb = tiling
+
+        # A block covers PAIRS_PER_BLOCK whole pairs, and flydsl's
+        # ``if cond: return`` does not early-exit a kernel body, so a partial
+        # trailing block would read and write past the tensors.  Shrink the pack
+        # factor (and with it the block) to a divisor of the pair count instead
+        # of masking: the pack is a power of two, so this is exact, and for the
+        # shapes Z-Image actually runs (H * B * S, with S padded to a multiple of
+        # 32) the first candidate already divides.
+        n_pairs = t_tok * heads
+        while ppb > 1 and n_pairs % ppb:
+            ppb //= 2
+        bt = ppb * lph
 
         launcher = _build_kernel(
             H=heads,
             D=d,
             VEC=vec,
             BLOCK_THREADS=bt,
+            LANES_PER_HEAD=lph,
+            PAIRS_PER_BLOCK=ppb,
             eps=eps,
             NORM_Q=norm_q,
             NORM_K=norm_k,
@@ -349,8 +424,13 @@ if _HAS_FLYDSL:
         stream = torch.cuda.current_stream(q.device)
         # q/k rows may be strided; pass the runtime row strides so the kernel
         # reads them in place instead of paying a .contiguous() copy here.
-        for start in range(0, t_tok, MAX_GRID_Y):
-            n = min(MAX_GRID_Y, t_tok - start)
+        # The grid is 1-D over pair-blocks now, and HW grid X is a 32-bit field
+        # (unlike Y/Z, which are 16-bit), so this loop is single-trip for any
+        # sequence length a diffusion model will ever see.  It stays as the
+        # safety net the old grid-Y chunking provided.
+        n_blocks_total = n_pairs // ppb
+        for start_blk in range(0, n_blocks_total, MAX_GRID_X):
+            n = min(MAX_GRID_X, n_blocks_total - start_blk)
             _run_compiled(
                 launcher,
                 q,
@@ -360,7 +440,7 @@ if _HAS_FLYDSL:
                 wk_arg,
                 fc,
                 fc.shape[0],
-                start,
+                start_blk * ppb,
                 t_tok * hd,
                 q.stride(0),
                 k.stride(0),
@@ -475,7 +555,7 @@ def flydsl_fused_qk_norm_rope(
 
     b, s, h, d = query.shape
     wave_size = get_device_wave_size(query)
-    if wave_size is None or _pick_block(d, wave_size) is None:
+    if wave_size is None or _pick_tiling(d, wave_size) is None:
         return _ref()
 
     # The reference does complex(x) * freqs_cis, so the table must be complex

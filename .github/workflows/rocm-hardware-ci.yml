@@ -1,0 +1,157 @@
+
+# Manually requests AMD hardware validation and mirrors the correlated remote result.
+name: ROCm Hardware CI
+run-name: "ROCm HW CI [origin:${{ github.actor == 'github-actions[bot]' && inputs.original_run_id || github.run_id }}]"
+
+on:
+  workflow_dispatch:
+    inputs:
+      benchmarks:
+        description: 'Comma-separated benchmark names to run'
+        required: true
+      architectures:
+        description: 'Comma-separated GPU architectures to test'
+        required: true
+      amd_ref:
+        description: 'AMD-AGI branch or release tag used as the image build context'
+        required: false
+        default: 'main'
+      original_run_id:
+        description: 'Automatic retry only; leave empty'
+        required: false
+        default: ''
+      continuation_count:
+        description: 'Automatic retry only; leave empty'
+        required: false
+        default: ''
+
+env:
+  PARTNER_REPO: AMD-AGI/diffusion-models-inference
+  PARTNER_WORKFLOW: xdit-hardware-compat.yml
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  wait:
+    runs-on: ubuntu-latest
+    # Five minutes under the hosted-runner limit; this job may automatically retry up to 3 times.
+    timeout-minutes: 355
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SELF_WORKFLOW: rocm-hardware-ci.yml
+      ORIGINAL_RUN_ID: ${{ github.actor == 'github-actions[bot]' && inputs.original_run_id || github.run_id }}
+      CONTINUATION_COUNT: ${{ github.actor == 'github-actions[bot]' && inputs.continuation_count || '0' }}
+      BENCHMARKS: ${{ inputs.benchmarks }}
+      ARCHITECTURES: ${{ inputs.architectures }}
+      AMD_REF: ${{ inputs.amd_ref }}
+    steps:
+      - name: Validate request
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$ORIGINAL_RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo "::error::Invalid original run ID: ${ORIGINAL_RUN_ID}"
+            exit 1
+          fi
+          if [[ ! "$CONTINUATION_COUNT" =~ ^[0-9]+$ ]] || [ "$CONTINUATION_COUNT" -gt 3 ]; then
+            echo "::error::Invalid continuation count: ${CONTINUATION_COUNT}"
+            exit 1
+          fi
+          if [[ -z "$BENCHMARKS" || "$BENCHMARKS" == *$'\n'* || "$BENCHMARKS" == *$'\r'* ]]; then
+            echo "::error::Benchmarks must be a non-empty single-line value."
+            exit 1
+          fi
+          if [[ -z "$ARCHITECTURES" || "$ARCHITECTURES" == *$'\n'* || "$ARCHITECTURES" == *$'\r'* ]]; then
+            echo "::error::Architectures must be a non-empty single-line value."
+            exit 1
+          fi
+          if [[ ! "$AMD_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] ||
+             ! git check-ref-format "refs/heads/${AMD_REF}" >/dev/null 2>&1; then
+            echo "::error::Invalid AMD ref: '${AMD_REF}'"
+            exit 1
+          fi
+
+          echo "WAIT_DEADLINE=$(( $(date +%s) + 21000 ))" >> "$GITHUB_ENV"
+
+      - name: Publish request metadata
+        if: github.actor != 'github-actions[bot]'
+        run: |
+          mkdir -p request
+          jq -n \
+            --arg benchmarks "$BENCHMARKS" \
+            --arg architectures "$ARCHITECTURES" \
+            --arg amd_ref "$AMD_REF" \
+            '{benchmarks: $benchmarks, architectures: $architectures, amd_ref: $amd_ref}' > request/request.json
+
+      - name: Upload request metadata
+        if: github.actor != 'github-actions[bot]'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rocm-hardware-request
+          path: request/request.json
+          retention-days: 2
+          overwrite: true
+
+      - name: Preflight — confirm cross-repo read access
+        run: |
+          if ! gh api "repos/${PARTNER_REPO}/actions/workflows/${PARTNER_WORKFLOW}/runs?per_page=1" >/dev/null 2>&1; then
+            echo "::error::Cannot read ${PARTNER_REPO} Actions API. If GITHUB_TOKEN lacks cross-repo"
+            echo "::error::access, add a read-only PAT as a secret and set GH_TOKEN to it."
+            exit 1
+          fi
+
+      - name: Wait for the hardware run
+        run: |
+          set -euo pipefail
+          marker="[xdit-run:${ORIGINAL_RUN_ID}]"
+          api_failures=0
+
+          while [ "$(date +%s)" -lt "$WAIT_DEADLINE" ]; do
+            if ! runs=$(gh api "repos/${PARTNER_REPO}/actions/workflows/${PARTNER_WORKFLOW}/runs?per_page=100"); then
+              api_failures=$(( api_failures + 1 ))
+              echo "::warning::Partner Actions API request failed (${api_failures}/5)."
+              if [ "$api_failures" -ge 5 ]; then
+                echo "::error::Partner Actions API failed 5 consecutive times."
+                exit 1
+              fi
+              sleep 60
+              continue
+            fi
+            api_failures=0
+            run=$(printf '%s' "$runs" | jq -c --arg m "$marker" \
+              '[.workflow_runs[] | select((.display_title // "") | contains($m))] | first // empty')
+
+            if [ -n "$run" ]; then
+              status=$(echo "$run" | jq -r '.status')
+              url=$(echo "$run" | jq -r '.html_url')
+              if [ "$status" = "completed" ]; then
+                conclusion=$(echo "$run" | jq -r '.conclusion')
+                {
+                  echo "### ROCm hardware CI: ${conclusion}"
+                  echo ""
+                  echo "[Full run details](${url})"
+                } >> "$GITHUB_STEP_SUMMARY"
+                echo "concluded: ${conclusion} (${url})"
+                [ "$conclusion" = "success" ] && exit 0 || exit 1
+              fi
+              echo "hardware run ${status}: ${url}"
+            fi
+            sleep 60
+          done
+
+          if [ "$CONTINUATION_COUNT" -ge 3 ]; then
+            echo "::error::Hardware run did not complete after 3 automatic retries."
+            exit 1
+          fi
+          next_continuation=$(( CONTINUATION_COUNT + 1 ))
+
+          gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${SELF_WORKFLOW}/dispatches" \
+            -f ref="${GITHUB_REF_NAME}" \
+            -f 'inputs[benchmarks]='"$BENCHMARKS" \
+            -f 'inputs[architectures]='"$ARCHITECTURES" \
+            -f 'inputs[amd_ref]='"$AMD_REF" \
+            -f 'inputs[original_run_id]='"$ORIGINAL_RUN_ID" \
+            -f 'inputs[continuation_count]='"$next_continuation"
+          echo "retrying original run ${ORIGINAL_RUN_ID} (${next_continuation}/3)"

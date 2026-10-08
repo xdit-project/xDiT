@@ -28,6 +28,25 @@ from xfuser.core.distributed import (
 )
 
 logger = init_logger(__name__)
+env_info = envs.PACKAGES_CHECKER.get_packages_info()
+
+
+def _resolve_attn_type(attn_type):
+    """Pick the default kernel for this machine, or fail early if a requested FlashAttention is missing."""
+    if attn_type is None:
+        if envs._is_npu():
+            return AttnType.NPU
+        if env_info["has_flash_attn"]:
+            return AttnType.FA
+        logger.warning("flash-attn is not available; xFuserLongContextAttention uses AttnType.TORCH_FLASH.")
+        return AttnType.TORCH_FLASH
+    required = {AttnType.FA: ("has_flash_attn", "flash-attn"), AttnType.FA3: ("has_flash_attn_3", "FlashAttention-3")}
+    if attn_type in required and not env_info[required[attn_type][0]]:
+        raise ImportError(
+            f"xFuserLongContextAttention was asked for {attn_type}, but {required[attn_type][1]} is not "
+            "available here. Leave attn_type unset to use a kernel that is."
+        )
+    return attn_type
 
 
 class xFuserLongContextAttention(LongContextAttention):
@@ -54,14 +73,11 @@ class xFuserLongContextAttention(LongContextAttention):
             ring_impl_type: str = "basic", the ring implementation type, currently only support "basic"
             use_pack_qkv: bool = False, whether to use pack qkv in the input
             use_kv_cache: bool = False, whether to use kv cache in the attention layer, which is applied in PipeFusion.
-            attn_type: AttnType = AttnType.FA, the attention type supported inside long context attention, including "TORCH", "FA", "FA3", "SAGE_FP16", "SAGE_FP8"
+            attn_type: AttnType = None, the attention type supported inside long context attention, including "FA", "FA3", "TORCH_FLASH", "SAGE_FP16", "SAGE_FP8", "NPU". None picks NPU on Ascend, else FA when flash-attn is available, else TORCH_FLASH.
             attn_processor: nn.Module = None, the attention processor can be passed in to replace the attention processor if attn_type is do not support it.
         """
 
-        # A workaround to allow running xDiT without having yunchang installed
-        # while still supporting AttnType.FA as the default value for legacy reasons
-        if attn_type is None:
-            attn_type = AttnType.FA
+        attn_type = _resolve_attn_type(attn_type)
 
         super().__init__(
             scatter_idx=scatter_idx,

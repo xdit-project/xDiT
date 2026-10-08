@@ -92,7 +92,7 @@ def test_sequence_parallel_patch_update_replaces_only_that_patch(monkeypatch):
     updated = manager.update_and_get_kv_cache(_ulysses_gathered(new, ulysses_degree, [1]), layer)
 
     expected = torch.cat([old[0][0], old[1][0], new[0][1], new[1][1]], dim=1)
-    assert torch.equal(updated.flatten().sort().values, expected.flatten().sort().values)
+    assert torch.equal(updated, expected)
     assert layer._xdit_kv_cache is updated
 
 

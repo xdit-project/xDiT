@@ -594,7 +594,7 @@ class xFuserSanaPipeline(xFuserPipelineBaseWrapper):
         t: torch.Tensor,
         return_dict=False,
     ):
-        if is_pipeline_first_stage():
+        if is_pipeline_first_stage() and self.do_classifier_free_guidance:
             latent_model_input = torch.cat([latents] * (2 // get_classifier_free_guidance_world_size()))
         else:
             latent_model_input = latents

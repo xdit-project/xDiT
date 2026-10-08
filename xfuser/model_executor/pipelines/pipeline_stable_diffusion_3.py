@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+from functools import wraps
 from typing import Any, Dict, List, Callable, Optional, Union
 
 import torch
@@ -22,6 +23,7 @@ from diffusers.pipelines.stable_diffusion_3.pipeline_output import (
     StableDiffusion3PipelineOutput,
 )
 from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3 import (
+    calculate_shift,
     retrieve_timesteps,
 )
 
@@ -49,6 +51,23 @@ if is_torch_xla_available():
     XLA_AVAILABLE = True
 else:
     XLA_AVAILABLE = False
+
+
+def _naive_forward_unless_timesteps(func):
+    """Hand the call to diffusers when no parallelism is enabled.
+
+    Diffusers' StableDiffusion3Pipeline takes ``sigmas`` but no ``timesteps``;
+    xDiT's own loop accepts both, so a call with ``timesteps`` stays on it.
+    """
+
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):
+        if self.use_naive_forward() and kwargs.get("timesteps") is None:
+            kwargs.pop("timesteps", None)
+            return self._naive_forward(*args, **kwargs)
+        return func(self, *args, **kwargs)
+
+    return wrapper
 
 
 @xFuserPipelineWrapperRegister.register(StableDiffusion3Pipeline)
@@ -112,7 +131,7 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
 
     @torch.no_grad()
     @xFuserPipelineBaseWrapper.enable_data_parallel
-    @xFuserPipelineBaseWrapper.check_to_use_naive_forward
+    @_naive_forward_unless_timesteps
     def __call__(
         self,
         prompt: Union[str, List[str]] = None,
@@ -121,7 +140,7 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
         height: Optional[int] = None,
         width: Optional[int] = None,
         num_inference_steps: int = 28,
-        timesteps: List[int] = None,
+        sigmas: Optional[List[float]] = None,
         guidance_scale: float = 7.0,
         negative_prompt: Optional[Union[str, List[str]]] = None,
         negative_prompt_2: Optional[Union[str, List[str]]] = None,
@@ -133,13 +152,21 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
         negative_prompt_embeds: Optional[torch.FloatTensor] = None,
         pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
         negative_pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
+        ip_adapter_image: Optional[Any] = None,
+        ip_adapter_image_embeds: Optional[torch.Tensor] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
         joint_attention_kwargs: Optional[Dict[str, Any]] = None,
         clip_skip: Optional[int] = None,
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
-        **kwargs,
+        max_sequence_length: int = 256,
+        skip_guidance_layers: Optional[List[int]] = None,
+        skip_layer_guidance_scale: float = 2.8,
+        skip_layer_guidance_stop: float = 0.2,
+        skip_layer_guidance_start: float = 0.01,
+        mu: Optional[float] = None,
+        timesteps: Optional[List[int]] = None,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -161,10 +188,10 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
             num_inference_steps (`int`, *optional*, defaults to 50):
                 The number of denoising steps. More denoising steps usually lead to a higher quality image at the
                 expense of slower inference.
-            timesteps (`List[int]`, *optional*):
-                Custom timesteps to use for the denoising process with schedulers which support a `timesteps` argument
-                in their `set_timesteps` method. If not defined, the default behavior when `num_inference_steps` is
-                passed will be used. Must be in descending order.
+            sigmas (`List[float]`, *optional*):
+                Custom sigmas to use for the denoising process with schedulers which support a `sigmas` argument in
+                their `set_timesteps` method. If not defined, the default behavior when `num_inference_steps` is passed
+                will be used.
             guidance_scale (`float`, *optional*, defaults to 5.0):
                 Guidance scale as defined in [Classifier-Free Diffusion Guidance](https://arxiv.org/abs/2207.12598).
                 `guidance_scale` is defined as `w` of equation 2. of [Imagen
@@ -223,6 +250,14 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
                 The list of tensor inputs for the `callback_on_step_end` function. The tensors specified in the list
                 will be passed as `callback_kwargs` argument. You will only be able to include variables listed in the
                 `._callback_tensor_inputs` attribute of your pipeline class.
+            max_sequence_length (`int` defaults to 256): Maximum sequence length to use with the `prompt`.
+            skip_guidance_layers (`List[int]`, *optional*):
+                Layers to skip for skip-layer guidance. Only supported without xDiT parallelism, where the call is
+                handed to diffusers; the parallel path raises if it is set.
+            mu (`float`, *optional*): `mu` value used for `dynamic_shifting`.
+            timesteps (`List[int]`, *optional*):
+                Custom timesteps for schedulers whose `set_timesteps` accepts them. Diffusers' pipeline has no such
+                argument, so a call that passes it always runs xDiT's denoising loop.
 
         Examples:
 
@@ -250,7 +285,15 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
             pooled_prompt_embeds=pooled_prompt_embeds,
             negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
             callback_on_step_end_tensor_inputs=callback_on_step_end_tensor_inputs,
+            max_sequence_length=max_sequence_length,
         )
+        if ip_adapter_image is not None or ip_adapter_image_embeds is not None:
+            raise NotImplementedError("xDiT's parallel StableDiffusion3 pipeline does not support IP-Adapter inputs.")
+        if skip_guidance_layers is not None and guidance_scale > 1:
+            raise NotImplementedError(
+                "xDiT's parallel StableDiffusion3 pipeline does not support skip-layer guidance "
+                "(`skip_guidance_layers`); run without xDiT parallelism to use it."
+            )
 
         self._guidance_scale = guidance_scale
         self._clip_skip = clip_skip
@@ -266,6 +309,34 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
             batch_size = prompt_embeds.shape[0]
 
         device = self._execution_device
+
+        # 3. Prepare timesteps first: the runtime state below needs their final count, which custom sigmas or
+        # timesteps can change. As in diffusers, `mu` comes from the latent size.
+        scheduler_kwargs = {}
+        if self.scheduler.config.get("use_dynamic_shifting", None) and mu is None:
+            patch_size = self.transformer.config.patch_size
+            latent_height = int(height) // self.vae_scale_factor
+            latent_width = int(width) // self.vae_scale_factor
+            image_seq_len = (latent_height // patch_size) * (latent_width // patch_size)
+            mu = calculate_shift(
+                image_seq_len,
+                self.scheduler.config.get("base_image_seq_len", 256),
+                self.scheduler.config.get("max_image_seq_len", 4096),
+                self.scheduler.config.get("base_shift", 0.5),
+                self.scheduler.config.get("max_shift", 1.16),
+            )
+        if mu is not None:
+            scheduler_kwargs["mu"] = mu
+        timesteps, num_inference_steps = retrieve_timesteps(
+            self.scheduler,
+            num_inference_steps,
+            device,
+            timesteps,
+            sigmas,
+            **scheduler_kwargs,
+        )
+        num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
+        self._num_timesteps = len(timesteps)
 
         #! ---------------------------------------- ADDED BELOW ----------------------------------------
         # * set runtime state input parameters
@@ -298,6 +369,10 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
             device=device,
             clip_skip=self.clip_skip,
             num_images_per_prompt=num_images_per_prompt,
+            max_sequence_length=max_sequence_length,
+            lora_scale=(
+                self.joint_attention_kwargs.get("scale", None) if self.joint_attention_kwargs is not None else None
+            ),
         )
 
         if self.do_classifier_free_guidance:
@@ -317,12 +392,7 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
             # pooled_prompt_embeds = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0)
         #! ---------------------------------------- MODIFIED ABOVE ----------------------------------------
 
-        # 4. Prepare timesteps
-        timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
-        num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
-        self._num_timesteps = len(timesteps)
-
-        # 5. Prepare latent variables
+        # 4. Prepare latent variables
         num_channels_latents = self.transformer.config.in_channels
         latents = self.prepare_latents(
             batch_size * num_images_per_prompt,
@@ -335,7 +405,7 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
             latents,
         )
 
-        # 6. Denoising loop
+        # 5. Denoising loop
         num_pipeline_warmup_steps = get_runtime_state().runtime_config.warmup_steps
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             if get_pipeline_parallel_world_size() > 1 and len(timesteps) > num_pipeline_warmup_steps:

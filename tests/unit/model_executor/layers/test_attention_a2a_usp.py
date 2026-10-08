@@ -93,9 +93,11 @@ def test_routes_packed_a2a_input_and_rccl_output():
         mock.patch.object(usp, "get_ulysses_parallel_rank", return_value=0),
         mock.patch.object(usp, "get_ring_parallel_world_size", return_value=1),
         mock.patch.object(
-            usp.PROCESS_GROUP,
-            "ULYSSES_PG",
-            SimpleNamespace(group_name="test"),
+            usp,
+            "PROCESS_GROUP",
+            SimpleNamespace(
+                ULYSSES_PG=SimpleNamespace(group_name="test"),
+            ),
         ),
         mock.patch.object(usp, "get_runtime_state", return_value=_runtime_state()),
         mock.patch.object(usp, "_ulysses_extra_inputs", return_value=[]),

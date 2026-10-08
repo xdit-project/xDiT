@@ -93,11 +93,7 @@ if _HAS_FLYDSL:
         for stage in range(len(values).bit_length() - 1):
             shift = 1 << stage
             result = [
-                (
-                    result[i ^ shift] - result[i]
-                    if i & shift
-                    else result[i] + result[i ^ shift]
-                )
+                (result[i ^ shift] - result[i] if i & shift else result[i] + result[i ^ shift])
                 for i in range(len(values))
             ]
         for stage in range((head_dim // len(values)).bit_length() - 1):
@@ -155,16 +151,16 @@ if _HAS_FLYDSL:
 
         @flyc.kernel(name=_kname)
         def kernel(
-            q_in: fx.Tensor,   # [S, H*D] bf16, rows strided by q_rs, cols stride 1
-            k_in: fx.Tensor,   # [S, H*D] bf16, rows strided by k_rs, cols stride 1
-            out: fx.Tensor,    # [2*S, H*D] bf16: q rows [0,S), k rows [S,2S)
-            wq: fx.Tensor,     # [H*D] bf16 (norm_q.weight, across-heads)
-            wk: fx.Tensor,     # [H*D] bf16 (norm_k.weight)
-            cos: fx.Tensor,    # [S, D] cos_dt (diffusers full-D repeat_interleave)
-            sin: fx.Tensor,    # [S, D] cos_dt
+            q_in: fx.Tensor,  # [S, H*D] bf16, rows strided by q_rs, cols stride 1
+            k_in: fx.Tensor,  # [S, H*D] bf16, rows strided by k_rs, cols stride 1
+            out: fx.Tensor,  # [2*S, H*D] bf16: q rows [0,S), k rows [S,2S)
+            wq: fx.Tensor,  # [H*D] bf16 (norm_q.weight, across-heads)
+            wk: fx.Tensor,  # [H*D] bf16 (norm_k.weight)
+            cos: fx.Tensor,  # [S, D] cos_dt (diffusers full-D repeat_interleave)
+            sin: fx.Tensor,  # [S, D] cos_dt
             k_out_off: fx.Int32,  # = S*H*D, the row offset of k's output block
-            q_rs: fx.Int32,    # q_in row stride in elements (H*D if contiguous)
-            k_rs: fx.Int32,    # k_in row stride in elements
+            q_rs: fx.Int32,  # q_in row stride in elements (H*D if contiguous)
+            k_rs: fx.Int32,  # k_in row stride in elements
         ):
             fm_fast = FastMathFlags.fast
             # Resolve cos/sin element type inside the body: T.* needs the live
@@ -189,7 +185,7 @@ if _HAS_FLYDSL:
             # projection with row stride 3*H*D) -- read with the runtime row
             # stride instead of forcing a contiguous copy in the caller.  The
             # freshly-allocated output is always contiguous (row stride H*D).
-            out_row_base = tok * HD       # this token's row in the [.., H*D] out
+            out_row_base = tok * HD  # this token's row in the [.., H*D] out
             # Head-offset of this lane's VEC block: (tid*VEC) % D.  Every tile is
             # head-aligned ((BLOCK*VEC) % D == 0), so this is the same for all
             # tiles and its cos/sin is loaded once (see _load_freq).
@@ -233,9 +229,7 @@ if _HAS_FLYDSL:
                     # registers between pass 1 and pass 2, and holding it bf16
                     # halves the tile-cache VGPR footprint vs fp32 (lifting
                     # occupancy), while re-upcasting in pass 2 is bit-exact.
-                    xt = fx.Vector(
-                        g_in.load(in_row_base + base_c + tid * VEC, vec_size=VEC)
-                    )
+                    xt = fx.Vector(g_in.load(in_row_base + base_c + tid * VEC, vec_size=VEC))
                     tiles.append(xt)
                     xf = xt.to(fx.Float32)
                     x2 = xf * xf
@@ -248,9 +242,7 @@ if _HAS_FLYDSL:
                 # interleaved RoPE on lane-local pairs -> single round at store.
                 for c in range_constexpr(N_TILES):
                     base_c = c * TILE
-                    w = fx.Vector(
-                        g_w.load(base_c + tid * VEC, vec_size=VEC)
-                    ).to(fx.Float32)
+                    w = fx.Vector(g_w.load(base_c + tid * VEC, vec_size=VEC)).to(fx.Float32)
                     xf = tiles[c].to(fx.Float32)  # re-upcast the cached bf16 tile
                     scaled = [xf[i] * rstd * w[i] for i in range_constexpr(VEC)]
                     outs = [None] * VEC
@@ -259,17 +251,13 @@ if _HAS_FLYDSL:
                         o = scaled[2 * kk + 1]
                         outs[2 * kk] = e * cos_f[2 * kk] - o * sin_f[2 * kk]
                         outs[2 * kk + 1] = o * cos_f[2 * kk + 1] + e * sin_f[2 * kk + 1]
-                    out_v = fx.Vector.from_elements(
-                        [o.ir_value() for o in outs], dtype=fx.Float32
-                    )
+                    out_v = fx.Vector.from_elements([o.ir_value() for o in outs], dtype=fx.Float32)
                     if const_expr(apply_hadamard):
                         # Preserve the previous two-kernel numerical boundary:
                         # norm/RoPE rounds to BF16 before the FP32 Hadamard, then
                         # the final BF16 store is consumed by Attention A2A.
                         rounded = out_v.truncf(T.vec(VEC, T.bf16)).to(fx.Float32)
-                        out_v = _hadamard_head(
-                            [rounded[i] for i in range_constexpr(VEC)], tid, D
-                        )
+                        out_v = _hadamard_head([rounded[i] for i in range_constexpr(VEC)], tid, D)
                     out_.store(
                         out_row_off + base_c + tid * VEC,
                         out_v.truncf(T.vec(VEC, T.bf16)),
@@ -315,12 +303,12 @@ if _HAS_FLYDSL:
 
     @torch.library.custom_op("xfuser::wan_flydsl_qk_norm_rope", mutates_args=())
     def _wan_flydsl_qk_norm_rope_launch(
-        q: torch.Tensor,     # [S, H*D] bf16, rows may be strided (last dim == 1)
-        k: torch.Tensor,     # [S, H*D] bf16, rows may be strided (last dim == 1)
-        wq: torch.Tensor,    # [H*D] bf16
-        wk: torch.Tensor,    # [H*D] bf16
-        cos: torch.Tensor,   # [S, D]
-        sin: torch.Tensor,   # [S, D]
+        q: torch.Tensor,  # [S, H*D] bf16, rows may be strided (last dim == 1)
+        k: torch.Tensor,  # [S, H*D] bf16, rows may be strided (last dim == 1)
+        wq: torch.Tensor,  # [H*D] bf16
+        wk: torch.Tensor,  # [H*D] bf16
+        cos: torch.Tensor,  # [S, D]
+        sin: torch.Tensor,  # [S, D]
         heads: int,
         eps: float,
         single_role: bool,
@@ -390,9 +378,7 @@ if _HAS_FLYDSL:
         return out
 
     @_wan_flydsl_qk_norm_rope_launch.register_fake
-    def _wan_flydsl_qk_norm_rope_launch_fake(
-        q, k, wq, wk, cos, sin, heads, eps, single_role, apply_hadamard
-    ):
+    def _wan_flydsl_qk_norm_rope_launch_fake(q, k, wq, wk, cos, sin, heads, eps, single_role, apply_hadamard):
         S, HD = q.shape
         D = HD // heads
         return q.new_empty((1 if single_role else 2, S, heads, D))
@@ -423,12 +409,8 @@ if _HAS_FLYDSL:
             row = tok * HD
             for tile_idx in range_constexpr(N_TILES):
                 offset = row + tile_idx * TILE + tid * VEC
-                values = fx.Vector(
-                    source_.load(offset, vec_size=VEC)
-                ).to(fx.Float32)
-                rotated = _hadamard_head(
-                    [values[i] for i in range_constexpr(VEC)], tid, D
-                )
+                values = fx.Vector(source_.load(offset, vec_size=VEC)).to(fx.Float32)
+                rotated = _hadamard_head([values[i] for i in range_constexpr(VEC)], tid, D)
                 output_.store(offset, rotated.truncf(T.vec(VEC, T.bf16)))
 
         @flyc.jit
@@ -519,13 +501,7 @@ def wan_flydsl_hadamard(x: torch.Tensor) -> torch.Tensor:
     """Apply normalized per-head Hadamard in a separate FlyDSL launch."""
     if not _HAS_FLYDSL:
         raise RuntimeError("pre-transport Hadamard requires FlyDSL")
-    if (
-        x.device.type != "cuda"
-        or x.dtype != torch.bfloat16
-        or x.dim() != 4
-        or x.shape[0] != 1
-        or not x.is_contiguous()
-    ):
+    if x.device.type != "cuda" or x.dtype != torch.bfloat16 or x.dim() != 4 or x.shape[0] != 1 or not x.is_contiguous():
         raise ValueError("Wan Hadamard expects contiguous CUDA BF16 [1, S, H, D]")
     D = x.shape[-1]
     if D <= 0 or (D & (D - 1)) != 0:
@@ -554,14 +530,11 @@ def fused_qk_norm_rope(
     in both tuple positions; it is used by projection/A2A interleaving. Optional
     Hadamard is fused after the BF16 norm/RoPE boundary and before the final store.
     """
+
     def _ref():
         if apply_hadamard:
-            raise RuntimeError(
-                "pre-transport Hadamard requires the Wan FlyDSL preprocessing path"
-            )
-        return _reference(
-            query, key, norm_q, norm_k, freqs_cos, freqs_sin, heads
-        )
+            raise RuntimeError("pre-transport Hadamard requires the Wan FlyDSL preprocessing path")
+        return _reference(query, key, norm_q, norm_k, freqs_cos, freqs_sin, heads)
 
     if not _HAS_FLYDSL:
         return _ref()
@@ -577,9 +550,7 @@ def fused_qk_norm_rope(
         return _ref()
     if query.shape[0] != 1:
         return _ref()
-    if not isinstance(norm_q, torch.nn.RMSNorm) or not isinstance(
-        norm_k, torch.nn.RMSNorm
-    ):
+    if not isinstance(norm_q, torch.nn.RMSNorm) or not isinstance(norm_k, torch.nn.RMSNorm):
         return _ref()
     wq = getattr(norm_q, "weight", None)
     wk = getattr(norm_k, "weight", None)
@@ -596,9 +567,7 @@ def fused_qk_norm_rope(
         return _ref()
     if apply_hadamard and (D <= 0 or (D & (D - 1)) != 0):
         return _ref()
-    if tuple(norm_q.normalized_shape) != (HD,) or tuple(
-        norm_k.normalized_shape
-    ) != (HD,):
+    if tuple(norm_q.normalized_shape) != (HD,) or tuple(norm_k.normalized_shape) != (HD,):
         return _ref()
     eps_q, eps_k = norm_q.eps, norm_k.eps
     if eps_q is None or eps_k is None or eps_q != eps_k:

@@ -59,9 +59,7 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
         # attention_kwargs is the shared, mutable dict used by sparse backends
         # (SSTA / sparge) to receive layout info like `thw`. Cross-attention and
         # the I2V image-context sub-call below are dense, so they don't read it.
-        self.attention_kwargs = (
-            attention_kwargs if attention_kwargs is not None else {}
-        )
+        self.attention_kwargs = attention_kwargs if attention_kwargs is not None else {}
 
     def _get_qkv_projections(
         self, attn: "WanAttention", hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor
@@ -126,19 +124,10 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
             and get_ring_parallel_world_size() == 1
             and not get_runtime_state().runtime_config.use_spargeattn_head_balance
         )
-        interleave = (
-            a2a_preprocessing
-            and use_fused_a2a_interleave()
-            and not attn.fused_projections
-        )
+        interleave = a2a_preprocessing and use_fused_a2a_interleave() and not attn.fused_projections
         hadamard_placement = get_fused_a2a_hadamard_placement()
-        relocate_hadamard = (
-            a2a_preprocessing
-            and hadamard_placement in ("preprocess", "epilogue")
-        )
-        attention_a2a_valid_kv_len = self.attention_kwargs.get(
-            "valid_kv_len"
-        )
+        relocate_hadamard = a2a_preprocessing and hadamard_placement in ("preprocess", "epilogue")
+        attention_a2a_valid_kv_len = self.attention_kwargs.get("valid_kv_len")
         attention_a2a_pending = None
         if interleave:
             # Project and preprocess one role at a time so the public Q/K/V
@@ -189,9 +178,7 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
                 attention_a2a_valid_kv_len,
             )
         else:
-            query, key, value = self._get_qkv_projections(
-                attn, hidden_states, encoder_hidden_states
-            )
+            query, key, value = self._get_qkv_projections(attn, hidden_states, encoder_hidden_states)
 
         # Collapse norm_q -> norm_k -> apply_rotary_emb(q) -> apply_rotary_emb(k)
         # into a single FlyDSL kernel: inductor cannot fuse RoPE into the norm
@@ -210,9 +197,7 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
                 rotary_emb[0],
                 rotary_emb[1],
                 attn.heads,
-                apply_hadamard=(
-                    relocate_hadamard and hadamard_placement == "preprocess"
-                ),
+                apply_hadamard=(relocate_hadamard and hadamard_placement == "preprocess"),
             )
             if relocate_hadamard and hadamard_placement == "epilogue":
                 query = wan_flydsl_hadamard(query)
@@ -248,9 +233,7 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
         }
         if self.attention_function is USP:
             attention_call_kwargs.update(
-                attention_a2a_enabled=(
-                    get_fused_a2a_mode() > 0 and not self.is_cross_attention
-                ),
+                attention_a2a_enabled=(get_fused_a2a_mode() > 0 and not self.is_cross_attention),
                 attention_a2a_pending=attention_a2a_pending,
             )
 

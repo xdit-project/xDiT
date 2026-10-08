@@ -1174,11 +1174,7 @@ def _fake_packed_raw_outputs(
         s,
         world_size,
     )
-    kv_sequence = (
-        sequence
-        if direct_valid_kv_len is None
-        else direct_valid_kv_len
-    )
+    kv_sequence = sequence if direct_valid_kv_len is None else direct_valid_kv_len
     heads = shape[2]
     q_numel = b * sequence * heads * d
     kv_numel = b * kv_sequence * heads * d

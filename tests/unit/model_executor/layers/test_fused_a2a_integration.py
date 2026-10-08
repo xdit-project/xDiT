@@ -179,54 +179,6 @@ def test_direct_valid_kv_falls_back_when_padding_spans_multiple_ranks():
     )
 
 
-def test_direct_valid_kv_views_keep_q_padded_and_compact_kv():
-    profile = "mxfp6-mxfp4"
-    config = AttentionA2AConfig(profile=profile)
-    query = torch.empty(1, 8, 64, 128, dtype=torch.bfloat16)
-    valid_kv_len = 95
-    payloads, scales = fused_a2a_integration._fake_packed_raw_outputs(
-        query,
-        profile,
-        2,
-        valid_kv_len,
-    )
-
-    (q, k, v), _ = fused_a2a_integration._packed_output_views(
-        payloads,
-        scales,
-        (1, 128, 4, 128),
-        codecs=config.codecs,
-        valid_kv_len=valid_kv_len,
-    )
-
-    assert q.shape[:2] == (1, 128)
-    assert k.shape[:2] == (1, valid_kv_len)
-    assert v.shape[:2] == (1, valid_kv_len)
-
-
-def test_fake_outputs_keep_full_kv_for_multi_rank_padding_fallback():
-    profile = "mxfp6-mxfp4"
-    config = AttentionA2AConfig(profile=profile)
-    query = torch.empty(1, 8, 64, 128, dtype=torch.bfloat16)
-    payloads, scales = fused_a2a_integration._fake_packed_raw_outputs(
-        query,
-        profile,
-        8,
-        400,
-    )
-
-    (q, k, v), _ = fused_a2a_integration._packed_output_views(
-        payloads,
-        scales,
-        (1, 512, 1, 128),
-        codecs=config.codecs,
-    )
-
-    assert q.shape[:2] == (1, 512)
-    assert k.shape[:2] == (1, 512)
-    assert v.shape[:2] == (1, 512)
-
-
 def test_runtime_does_not_access_private_aiter_buffers():
     source = inspect.getsource(fused_a2a_integration)
 

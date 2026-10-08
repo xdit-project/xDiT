@@ -758,14 +758,8 @@ class xFuserModel(abc.ABC):
                     f"Model {self.settings.model_name} requires eager, unquantized loading for startup LoRA fusion."
                 )
         _validate_attention_head_dims(self, config)
-        if (
-            config.attention_a2a != "none"
-            and not self.capabilities.supports_attention_a2a
-        ):
-            raise ValueError(
-                f"Model {self.settings.model_name} does not support "
-                "--attention_a2a."
-            )
+        if config.attention_a2a != "none" and not self.capabilities.supports_attention_a2a:
+            raise ValueError(f"Model {self.settings.model_name} does not support --attention_a2a.")
         for key in ModelCapabilities.__annotations__.keys():
             config_value = getattr(
                 config, key, None

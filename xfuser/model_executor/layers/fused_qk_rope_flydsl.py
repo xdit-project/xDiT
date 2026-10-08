@@ -42,7 +42,6 @@ result, only the speed.
 # params (cos_rows / tok_off / q_rs / k_rs), forcing a fresh JIT per value.
 
 import math
-import os
 from functools import lru_cache
 from typing import Optional, Tuple
 
@@ -77,27 +76,54 @@ except Exception:  # pragma: no cover - only exercised where flydsl is absent
 
 
 # HW grid Y is a 16-bit field on AMD HIP; cap blocks/launch and chunk tokens in
-# Python (a folded launch would run tail blocks with tok >= T -- flydsl's
+# Python (a folded launch would run tail blocks past the pair count -- flydsl's
 # ``if cond: return`` does not early-exit a kernel body -- and fault).
-MAX_GRID_Y = 65535
+MAX_GRID_X = 2**31 - 1
 
 
-def _pick_block(d: int, wave_size: int) -> Optional[Tuple[int, int]]:
-    """Return ``(BLOCK_THREADS, VEC)`` for head_dim ``d`` or None if unsupported.
+# A single buffer op tops out at 128 bits.  q/k/out are bf16, so one lane moves
+# 8 of them per op; an fp32 cos/sin table only allows 4, and is therefore read in
+# chunks rather than being allowed to cap VEC.
+MAX_VEC_BF16 = 8
+MAX_VEC_F32 = 4
 
-    Prefer the widest wave (few lanes, more work each) while keeping VEC even
-    (GPT-J pairs stay lane-local) and BLOCK_THREADS no larger than the hardware
-    wave, so the sum-of-squares reduction is a pure shuffle_xor butterfly.
+# Threads per block for the packed tiling.  A multiple of the wave size (full
+# waves) and -- via ``wave_size % LANES_PER_HEAD == 0`` -- of LANES_PER_HEAD, so
+# a head's lane group never straddles a wave and its butterfly stays a pure
+# shuffle_xor with no LDS even though the block spans several waves.
+TARGET_BLOCK_THREADS = 256
+
+
+def _pick_tiling(d: int, wave_size: int) -> Optional[Tuple[int, int, int, int]]:
+    """``(BLOCK_THREADS, VEC, LANES_PER_HEAD, PAIRS_PER_BLOCK)`` for head_dim ``d``.
+
+    One ``(token, head)`` pair is owned by ``LANES_PER_HEAD = d // VEC`` lanes,
+    and a block packs ``PAIRS_PER_BLOCK`` of them so it is a full, wide workgroup
+    however few lanes one head needs.  That is the point of the shape: pinning
+    one block to one pair made the head dim decide the lane count, so the
+    ``d = 128`` every FLUX/Qwen checkpoint uses gave 64 lanes x ``VEC = 2`` -- a
+    4-byte load per lane, a quarter of a buffer op, over a very large grid of
+    tiny blocks.  ``VEC = 8`` makes every access a full 128-bit op and 16 pairs
+    share a 256-thread block.
+
+    Constraints: ``VEC`` even and dividing ``d`` (a GPT-J pair ``(2k, 2k+1)``
+    stays inside one lane); ``VEC <= 8``; ``LANES_PER_HEAD`` a power of two no
+    wider than a wave, and dividing it.  None when no such tiling exists; the
+    caller then runs the unfused reference.  The power-of-two requirement is new
+    but costs no head dim the old chooser served: it always halved down from the
+    wave size, so its lane count was a power of two too.
     """
-    bt = wave_size
-    while bt >= 2:
-        if d % bt == 0:
-            vec = d // bt
-            if vec >= 2 and vec % 2 == 0:
-                return bt, vec
-        bt //= 2
+    for vec in (MAX_VEC_BF16, 6, 4, 2):  # even widths, widest first
+        if vec % 2 or d % vec:
+            continue
+        lph = d // vec
+        if lph < 1 or lph > wave_size or (lph & (lph - 1)):
+            continue
+        if wave_size % lph:
+            continue
+        bt = max(wave_size, (TARGET_BLOCK_THREADS // wave_size) * wave_size)
+        return bt, vec, lph, bt // lph
     return None
-
 
 
 if _HAS_FLYDSL:
@@ -109,6 +135,8 @@ if _HAS_FLYDSL:
         D: int,
         VEC: int,
         BLOCK_THREADS: int,
+        LANES_PER_HEAD: int,
+        PAIRS_PER_BLOCK: int,
         eps: float,
         cos_is_f32: bool,
         NORM_Q: bool,
@@ -124,41 +152,55 @@ if _HAS_FLYDSL:
         Shape/flag constants are captured by closure (not module globals) so
         launchers for different configs coexist in the lru cache.
         """
-        LOG2_BT = int(math.log2(BLOCK_THREADS))
+        LOG2_LPH = int(math.log2(LANES_PER_HEAD))
+        # An fp32 cos/sin row is read in <= 4-wide (<= 128-bit) chunks so it
+        # never throttles the bf16 q/k VEC.  Precomputed as Python constants: a
+        # runtime ``while`` here would be captured as a device scf.while.
+        FREQ_CHUNK = MAX_VEC_F32 if cos_is_f32 else VEC
+        FREQ_CHUNKS = []
+        _off = 0
+        while _off < VEC:
+            _n = min(FREQ_CHUNK, VEC - _off)
+            FREQ_CHUNKS.append((_off, _n))
+            _off += _n
         PAIRS = VEC // 2
         INV_D = 1.0 / D
         HD = H * D
 
         # CONTIG must be in the symbol name: the two addressing variants are
         # separate compilations and would otherwise share an MLIR symbol.
-        _kname = (
-            f"fused_qk_norm_rope_H{H}_D{D}_v{VEC}"
-            f"{'_c' if CONTIG else '_s'}_flydsl"
-        )
+        _kname = f"fused_qk_norm_rope_H{H}_D{D}_v{VEC}_p{PAIRS_PER_BLOCK}{'_c' if CONTIG else '_s'}_flydsl"
 
         @flyc.kernel(name=_kname)
         def kernel(
-            q_in: fx.Tensor,   # [T, H, D] bf16, row stride q_rs, (H, D) packed
-            k_in: fx.Tensor,   # [T, H, D] bf16, row stride k_rs, (H, D) packed
+            q_in: fx.Tensor,  # [T, H, D] bf16, row stride q_rs, (H, D) packed
+            k_in: fx.Tensor,  # [T, H, D] bf16, row stride k_rs, (H, D) packed
             q_out: fx.Tensor,  # [T, H, D] bf16, contiguous
             k_out: fx.Tensor,  # [T, H, D] bf16, contiguous
-            wq: fx.Tensor,      # [D] bf16 (dummy when not HAS_WQ)
-            wk: fx.Tensor,      # [D] bf16 (dummy when not HAS_WK)
-            cos: fx.Tensor,     # [cos_rows, D] cos_dt
-            sin: fx.Tensor,     # [cos_rows, D] cos_dt
+            wq: fx.Tensor,  # [D] bf16 (dummy when not HAS_WQ)
+            wk: fx.Tensor,  # [D] bf16 (dummy when not HAS_WK)
+            cos: fx.Tensor,  # [cos_rows, D] cos_dt
+            sin: fx.Tensor,  # [cos_rows, D] cos_dt
             cos_rows: Int32,
-            tok_off: Int32,     # global token index of this chunk's row 0
-            q_rs: Int32,        # q_in row stride in elements (H*D if contiguous)
-            k_rs: Int32,        # k_in row stride in elements
+            tok_off: Int32,  # global token index of this chunk's row 0
+            q_rs: Int32,  # q_in row stride in elements (H*D if contiguous)
+            k_rs: Int32,  # k_in row stride in elements
         ):
             fm_fast = FastMathFlags.fast
             # Resolve element types inside the kernel body: T.* needs a live MLIR
             # context (established by @flyc.kernel), so it cannot be a closure const.
             cos_dt = T.f32 if cos_is_f32 else T.bf16
 
-            head = fx.Int32(fx.block_idx.x)
-            tok = fx.Int32(fx.block_idx.y)
             tid = fx.Int32(fx.thread_idx.x)
+            # 1-D grid over (token, head) pairs, PAIRS_PER_BLOCK per block, with
+            # ``head`` fast-varying so one token's H pairs stay adjacent and
+            # share its cos/sin row in cache -- the locality the old (head, tok)
+            # 2-D grid had.
+            slot = tid // LANES_PER_HEAD  # which pair inside this block
+            lih = tid % LANES_PER_HEAD  # this lane's rank within the head
+            gid = fx.Int32(tok_off) + fx.Int32(fx.block_idx.x) * PAIRS_PER_BLOCK + slot
+            tok = gid // H
+            head = gid % H
 
             # ``tok`` is chunk-local; ``gtok`` is the global token row.  Folding
             # the chunk offset in here rather than slicing the tensors in Python
@@ -172,8 +214,8 @@ if _HAS_FLYDSL:
             # into a single output allocation get materialized by cudagraph
             # trees, and that copy is baked into every replay: measured a
             # consistent 1-3% loss on contiguous shapes, which showed up e2e.
-            gtok = fx.Int32(tok_off) + tok
-            hoff = head * D + tid * VEC
+            gtok = tok
+            hoff = head * D + lih * VEC
             if const_expr(CONTIG):
                 # Row stride is exactly H*D, so all four addresses coincide and
                 # H*D is a compile-time constant the backend can strength-reduce
@@ -189,8 +231,8 @@ if _HAS_FLYDSL:
                 k_base = gtok * fx.Int32(k_rs) + hoff
                 out_base = gtok * HD + hoff
             row = gtok % fx.Int32(cos_rows)
-            coff = row * D + tid * VEC
-            woff = tid * VEC
+            coff = row * D + lih * VEC
+            woff = lih * VEC
 
             qin_ = GTensor(q_in, dtype=T.bf16, shape=(-1,))
             kin_ = GTensor(k_in, dtype=T.bf16, shape=(-1,))
@@ -203,22 +245,33 @@ if _HAS_FLYDSL:
 
             # cos/sin loaded once, shared by q and k (full-D table, indexed per
             # lane).
-            cos_f = fx.Vector(cos_.load(coff, vec_size=VEC)).to(fx.Float32)
-            sin_f = fx.Vector(sin_.load(coff, vec_size=VEC)).to(fx.Float32)
+            def _load_freq(g):
+                vals = []
+                for _ci in range_constexpr(len(FREQ_CHUNKS)):
+                    _o, _n = FREQ_CHUNKS[_ci]
+                    part = fx.Vector(g.load(coff + _o, vec_size=_n)).to(fx.Float32)
+                    for _i in range_constexpr(_n):
+                        vals.append(part[_i])
+                return vals
+
+            cos_f = _load_freq(cos_)
+            sin_f = _load_freq(sin_)
 
             def wave_reduce_add(x):
+                # Butterfly over this head's lane group only.  The group is a
+                # power of two inside one wave, so the shuffle width confines the
+                # exchange to it and the other pairs packed into the block reduce
+                # independently and concurrently.
                 w = fx.Float32(x)
-                for sh_exp in range_constexpr(LOG2_BT):
-                    off = BLOCK_THREADS // (2 << sh_exp)
-                    w = w.addf(w.shuffle_xor(off, BLOCK_THREADS), fastmath=fm_fast)
+                for sh_exp in range_constexpr(LOG2_LPH):
+                    off = LANES_PER_HEAD // (2 << sh_exp)
+                    w = w.addf(w.shuffle_xor(off, LANES_PER_HEAD), fastmath=fm_fast)
                 return w
 
             def round_bf16(vals):
                 # round-trip fp32 -> bf16 -> fp32 to replay diffusers' RMSNorm
                 # intermediate rounding on the whole VEC-wide fragment.
-                fv = fx.Vector.from_elements(
-                    [v.ir_value() for v in vals], dtype=fx.Float32
-                )
+                fv = fx.Vector.from_elements([v.ir_value() for v in vals], dtype=fx.Float32)
                 bf = fv.truncf(T.vec(VEC, T.bf16))
                 ff = fx.Vector(bf).to(fx.Float32)
                 return [ff[i] for i in range_constexpr(VEC)]
@@ -253,9 +306,7 @@ if _HAS_FLYDSL:
                     outs[2 * kk] = e * cos_f[2 * kk] - o * sin_f[2 * kk]
                     outs[2 * kk + 1] = o * cos_f[2 * kk + 1] + e * sin_f[2 * kk + 1]
 
-                out_v = fx.Vector.from_elements(
-                    [o.ir_value() for o in outs], dtype=fx.Float32
-                )
+                out_v = fx.Vector.from_elements([o.ir_value() for o in outs], dtype=fx.Float32)
                 g_out.store(out_base, out_v.truncf(T.vec(VEC, T.bf16)))
 
             process(qin_, q_base, qout_, out_base, wq_, NORM_Q, HAS_WQ)
@@ -275,7 +326,7 @@ if _HAS_FLYDSL:
             tok_off: fx.Int32,
             q_rs: fx.Int32,
             k_rs: fx.Int32,
-            n_tokens: fx.Int32,
+            n_blocks: fx.Int32,
             stream: fx.Stream = fx.Stream(None),
         ):
             k = kernel(
@@ -292,14 +343,14 @@ if _HAS_FLYDSL:
                 q_rs,
                 k_rs,
             )
-            # ``n_tokens`` is a runtime Int32.  Pass it to the grid raw and let
+            # ``n_blocks`` is a runtime Int32.  Pass it to the grid raw and let
             # ``KernelLauncher.launch`` cast each dim to index (via
             # ``_to_index_value``) inside its own MLIR location/context.  Doing
-            # ``arith.index_cast(T.index, n_tokens)`` here instead faults under
+            # ``arith.index_cast(T.index, n_blocks)`` here instead faults under
             # torch.compile: on a dynamo-resumed frame no MLIR context is active
             # at launcher-trace time ("An MLIR function requires a Context").
             k.launch(
-                grid=(H, n_tokens, 1),
+                grid=(n_blocks, 1, 1),
                 block=(BLOCK_THREADS, 1, 1),
                 stream=stream,
             )
@@ -312,16 +363,18 @@ if _HAS_FLYDSL:
 
     @torch.library.custom_op("xfuser::flydsl_qk_norm_rope", mutates_args=())
     def _flydsl_qk_norm_rope_launch(
-        q: torch.Tensor,       # [B, S, H, D] bf16, (H, D) packed, any row stride
-        k: torch.Tensor,       # [B, S, H, D] bf16, (H, D) packed, any row stride
+        q: torch.Tensor,  # [B, S, H, D] bf16, (H, D) packed, any row stride
+        k: torch.Tensor,  # [B, S, H, D] bf16, (H, D) packed, any row stride
         wq: Optional[torch.Tensor],  # [D] bf16 or None (weightless RMSNorm)
         wk: Optional[torch.Tensor],
-        cos: torch.Tensor,     # [cos_rows, D]
-        sin: torch.Tensor,     # [cos_rows, D]
+        cos: torch.Tensor,  # [cos_rows, D]
+        sin: torch.Tensor,  # [cos_rows, D]
         cos_rows: int,
         eps: float,
         vec: int,
         block_threads: int,
+        lanes_per_head: int,
+        pairs_per_block: int,
         norm_q: bool,
         norm_k: bool,
         round_after_norm: bool,
@@ -383,6 +436,8 @@ if _HAS_FLYDSL:
             D=d,
             VEC=vec,
             BLOCK_THREADS=block_threads,
+            LANES_PER_HEAD=lanes_per_head,
+            PAIRS_PER_BLOCK=pairs_per_block,
             eps=eps,
             cos_is_f32=(cos.dtype == torch.float32),
             NORM_Q=norm_q,
@@ -408,12 +463,15 @@ if _HAS_FLYDSL:
 
         # ``tok_off`` is folded into the kernel's addressing, so chunks no longer
         # need sliced views of q/k/out -- whole tensors go in once per launch.
-        # Grid Y is a 16-bit field on AMD HIP, hence the chunking at all; T is
-        # under MAX_GRID_Y for every shape these models actually run.
+        # The grid is 1-D now and grid X is a 32-bit field on AMD HIP (Y and Z
+        # are the 16-bit ones), so this loop is single-trip for any shape these
+        # models run; it stays as the safety net the grid-Y chunking provided.
+        n_pairs = t_tok * h
         stream = torch.cuda.current_stream()
         with torch.cuda.device(q.device.index):
-            for start in range(0, t_tok, MAX_GRID_Y):
-                n = min(MAX_GRID_Y, t_tok - start)
+            for start_blk in range(0, n_pairs // pairs_per_block, MAX_GRID_X):
+                n = min(MAX_GRID_X, n_pairs // pairs_per_block - start_blk)
+                start = start_blk * pairs_per_block
                 _run_compiled(
                     launcher,
                     q,
@@ -446,6 +504,8 @@ if _HAS_FLYDSL:
         eps,
         vec,
         block_threads,
+        lanes_per_head,
+        pairs_per_block,
         norm_q,
         norm_k,
         round_after_norm,
@@ -469,7 +529,7 @@ def _supported(query, key, cos) -> bool:
         return False
     d = query.shape[-1]
     wave_size = get_device_wave_size(query)
-    if wave_size is None or _pick_block(d, wave_size) is None:
+    if wave_size is None or _pick_tiling(d, wave_size) is None:
         return False
     if not isinstance(cos, torch.Tensor) or cos.shape[-1] != d:
         return False
@@ -510,9 +570,7 @@ def _norm_schedule(m) -> Optional[Tuple[bool, bool]]:
     return None
 
 
-def _as_token_view(
-    x: torch.Tensor, b: int, s: int, h: int, d: int, vec: int
-) -> torch.Tensor:
+def _as_token_view(x: torch.Tensor, b: int, s: int, h: int, d: int, vec: int) -> torch.Tensor:
     """``[B, S, H, D]`` -> ``[B*S, H, D]``, without copying when it is legal.
 
     The kernel indexes rows by a runtime stride, so an arbitrary row stride is
@@ -521,12 +579,7 @@ def _as_token_view(
     remaining condition (``stride(0) == S * stride(1)``, so B and S can flatten)
     for free -- ``as_strided`` would skip that check and happily alias.
     """
-    if (
-        x.stride(-1) == 1
-        and x.stride(-2) == d
-        and x.stride(1) % vec == 0
-        and x.storage_offset() % vec == 0
-    ):
+    if x.stride(-1) == 1 and x.stride(-2) == d and x.stride(1) % vec == 0 and x.storage_offset() % vec == 0:
         try:
             return x.view(b * s, h, d)
         except RuntimeError:
@@ -573,11 +626,7 @@ def flydsl_fused_qk_norm_rope(
     anything outside the supported envelope so the result is identical either
     way.
     """
-    if (
-        rotary_emb is None
-        or not isinstance(rotary_emb, (tuple, list))
-        or len(rotary_emb) != 2
-    ):
+    if rotary_emb is None or not isinstance(rotary_emb, (tuple, list)) or len(rotary_emb) != 2:
         return _reference(query, key, norm_q, norm_k, rotary_emb)
     sched_q = _norm_schedule(norm_q)
     sched_k = _norm_schedule(norm_k)
@@ -607,10 +656,17 @@ def flydsl_fused_qk_norm_rope(
     wave_size = get_device_wave_size(query)
     if wave_size is None:
         return _reference(query, key, norm_q, norm_k, rotary_emb)
-    block_vec = _pick_block(d, wave_size)
-    if block_vec is None:  # already checked in _supported, belt & suspenders
+    tiling = _pick_tiling(d, wave_size)
+    if tiling is None:  # already checked in _supported, belt & suspenders
         return _reference(query, key, norm_q, norm_k, rotary_emb)
-    block_threads, vec = block_vec
+    block_threads, vec, lanes_per_head, pairs_per_block = tiling
+    # A block covers whole pairs, so shrink the pack factor to a divisor of the
+    # pair count rather than letting a partial trailing block run off the end.
+    # The pack is a power of two, so this is exact.
+    n_pairs = b * s * h
+    while pairs_per_block > 1 and n_pairs % pairs_per_block:
+        pairs_per_block //= 2
+    block_threads = pairs_per_block * lanes_per_head
 
     # Buffer loads scale the element offset by the element size in i32, so for
     # bf16 the addressable range is 2**30 elements, not 2**31.  This is the
@@ -661,6 +717,8 @@ def flydsl_fused_qk_norm_rope(
         eps,
         vec,
         block_threads,
+        lanes_per_head,
+        pairs_per_block,
         norm_q is not None,
         norm_k is not None,
         round_after_norm,

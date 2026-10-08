@@ -76,6 +76,9 @@ def _patch_text_encoder_linear_for_rocm(text_encoder: "torch.nn.Module") -> None
 class _Krea2BaseModel(xFuserModel):
     """Shared base for the Krea-2-Raw and Krea-2-Turbo runner models."""
 
+    # From the registered checkpoint's transformer config.
+    attention_heads = 48
+
     # diffusers 0.39.0 is the first release with Krea2Transformer2DModel.
     min_diffusers_version = "0.39.0"
 

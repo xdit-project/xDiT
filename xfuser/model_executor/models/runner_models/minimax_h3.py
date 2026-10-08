@@ -473,8 +473,8 @@ class xFuserMiniMaxH3Model(xFuserModel):
         )
         transformer = xFuserMiniMaxH3Transformer3DWrapper.from_pretrained(
             self.settings.model_name,
-            subfolder="transformer",
             dtype=torch.bfloat16,
+            **self.loader.checkpoint_request("transformer").from_pretrained_kwargs(),
             enable_fasth3_vsa=self._enable_fasth3_vsa,
             attention_backend=_parse_attention_backend(
                 getattr(self.config, "attention_backend", None),
@@ -848,8 +848,8 @@ class xFuserMiniMaxH3Ref2VAModel(xFuserMiniMaxH3Model):
         )
         transformer = xFuserMiniMaxH3Transformer3DWrapper.from_pretrained(
             self.settings.model_name,
-            subfolder="transformer_ref",
             dtype=torch.bfloat16,
+            **self.loader.checkpoint_request("transformer_ref").from_pretrained_kwargs(),
             attention_backend=_parse_attention_backend(
                 getattr(self.config, "attention_backend", None),
                 "attention backend",

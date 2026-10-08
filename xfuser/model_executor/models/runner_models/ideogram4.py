@@ -432,13 +432,13 @@ class xFuserIdeogram4Model(xFuserModel):
         else:
             transformer = transformer_class.from_pretrained(
                 model_id,
-                subfolder="transformer",
                 torch_dtype=torch.bfloat16,
+                **self.loader.checkpoint_request("transformer").from_pretrained_kwargs(),
             )
             unconditional_transformer = transformer_class.from_pretrained(
                 model_id,
-                subfolder="unconditional_transformer",
                 torch_dtype=torch.bfloat16,
+                **self.loader.checkpoint_request("unconditional_transformer").from_pretrained_kwargs(),
             )
             text_encoder = None
 

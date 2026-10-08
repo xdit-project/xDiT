@@ -122,7 +122,7 @@ class xFuserCausalWanModel(xFuserModel):
             return xFuserCausalWanTransformer3DWrapper.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,
-                subfolder=subfolder,
+                **self.loader.checkpoint_request(subfolder).from_pretrained_kwargs(),
             )
         except (OSError, ValueError, RuntimeError):
             from safetensors.torch import load_file

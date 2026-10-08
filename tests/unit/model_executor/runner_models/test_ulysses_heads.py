@@ -17,6 +17,8 @@ def _single_process(monkeypatch):
 def _build(name, degree):
     model_class = MODEL_REGISTRY[name]
     tasks = model_class.settings.valid_tasks
+    checkpoint_task = name.rsplit("_", 1)[-1]
+    task = checkpoint_task if checkpoint_task in tasks else (tasks[0] if tasks else None)
     return model_class(
         xFuserArgs(
             model=name,
@@ -24,7 +26,7 @@ def _build(name, degree):
             attention_backend="FLEX_BLOCK_ATTN"
             if model_class.capabilities.supports_sparse_attention_backends
             else "SDPA",
-            task=tasks[0] if tasks else None,
+            task=task,
         )
     )
 

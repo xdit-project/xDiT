@@ -1,4 +1,5 @@
 import torch
+import torch.distributed as dist
 import os
 import gc
 import logging
@@ -28,6 +29,30 @@ from xfuser.core.distributed import (
 )
 from xfuser.core.utils.runner_utils import log, is_last_process
 from xfuser import xFuserArgs
+
+
+def _has_output_payload(output: DiffusionOutput | None) -> bool:
+    return bool(output and (output.images or output.videos))
+
+
+def _select_output_owner(output: DiffusionOutput | None) -> int:
+    """Select one rank that actually owns output, falling back to the last rank."""
+    if not dist.is_available() or not dist.is_initialized():
+        return 0
+
+    rank = dist.get_rank()
+    if dist.get_world_size() == 1:
+        return rank
+
+    device = torch.device("cuda", torch.cuda.current_device()) if dist.get_backend() == "nccl" else torch.device("cpu")
+    candidate = torch.tensor(
+        [rank if _has_output_payload(output) else -1],
+        dtype=torch.int64,
+        device=device,
+    )
+    dist.all_reduce(candidate, op=dist.ReduceOp.MAX)
+    owner = int(candidate.item())
+    return owner if owner >= 0 else dist.get_world_size() - 1
 
 
 class xFuserModelRunner:
@@ -103,9 +128,12 @@ class xFuserModelRunner:
             self.model.save_profile(profile)
 
         if save_once: # By default, we save output/timing only from one process
-            if not is_last_process():
+            if dist.is_available() and dist.is_initialized():
+                if dist.get_rank() != _select_output_owner(output):
+                    return
+            elif not is_last_process():
                 return
-        if output:
+        if _has_output_payload(output):
             self.model.save_output(output) # Handle different output types
         if timings:
             self.model.save_timings(timings)

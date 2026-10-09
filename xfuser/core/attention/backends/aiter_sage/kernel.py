@@ -98,9 +98,32 @@ def _rotation(query) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _same_strides(a, b) -> bool:
+    # Size-1 dimensions are never stepped through, so their strides are arbitrary.
+    return all(sa == sb for sa, sb, n in zip(a.stride(), b.stride(), a.shape) if n > 1)
+
+
+def _v1_readable_kv(key, value):
+    """K/V in a layout AITER's v1 quantization reads correctly.
+
+    WORKAROUND for an AITER bug; remove once ``sage_quant`` (aiter
+    ops/triton/quant/sage_attention_quant_wrappers.py) is fixed. It takes K's
+    strides, then replaces K by the smoothed ``K - mean(K)`` and reads that new
+    tensor -- and V -- through the strides it took. That is right only while the
+    subtraction keeps K's layout (contiguous BHSD, or BSHD viewed as BHSD) and V
+    shares it. USP's trailing-pad trim hands K/V as sequence slices, which is
+    neither, and the kernel returns garbage or faults. Layouts that already work
+    are returned as they are, so their results do not change.
+    """
+    if _same_strides(key, value) and (key.is_contiguous() or key.transpose(1, 2).is_contiguous()):
+        return key, value
+    return key.contiguous(), value.contiguous()
+
+
 def sage(query, key, value, call: AttnCall):
     """No mask. The only cell that can join a ring, and only then is there an
     LSE to merge."""
+    key, value = _v1_readable_kv(key, value)
     if call.ring_world_size > 1:
         return SAGE_V1(query, key, value, layout="bhsd", return_lse=True, smooth_k=True)
     return SAGE_V1(query, key, value, layout="bhsd"), None
@@ -110,6 +133,7 @@ def sparse_sage(query, key, value, call: AttnCall):
     """Tile-based static mask, supplied by the model's sparse config."""
     config = _ssta_config(CONFIG_V1)
     q, k, v, block_lut, state = _ssta_mask(query, key, value, call)
+    k, v = _v1_readable_kv(k, v)
     output = SAGE_V1(q, k, v, layout="bhsd", config=config, block_lut=block_lut)
     return _untile(output, state, call), None
 
@@ -118,6 +142,7 @@ def sparge(query, key, value, call: AttnCall):
     """Data-dependent mask computed from Q/K."""
     config = CONFIG_V1()
     q, k, v, block_lut, state = _sparge_mask(query, key, value, call, config)
+    k, v = _v1_readable_kv(k, v)
     output = SAGE_V1(q, k, v, layout="bhsd", config=config, block_lut=block_lut)
     return restore_sparge_output(output, state), None
 
@@ -162,6 +187,9 @@ def sparge_v2(query, key, value, call: AttnCall):
     query, key, value = make_contiguous(query, key, value)
     config = CONFIG_V2()
     q, k, v, block_lut, state = _sparge_mask(query, key, value, call, config)
+    # v2 wants contiguous inputs, and stripping the SP pad without a reorder or
+    # an alignment pad hands back sequence slices. A no-op for every other layout.
+    q, k, v = make_contiguous(q, k, v)
     output = SAGE_V2(
         q,
         k,

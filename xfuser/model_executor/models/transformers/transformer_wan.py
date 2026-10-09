@@ -192,6 +192,23 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
         return query, key, value
 
 
+def _zero_sp_pad_rows_hook(sp_pad):
+    """Forward hook keeping the SP pad rows of a block's output at zero.
+
+    The pad rows never reach real tokens once USP drops their keys, but what a
+    block writes there still enters statistics taken over the whole hidden state,
+    such as the step cache's residual difference. A hook rather than a line in
+    forward's loop, so it also runs when a step cache iterates the blocks itself.
+    """
+
+    def hook(module, args, output):
+        rows = sp_pad["local_rows"]
+        if rows:
+            output[:, -rows:] = 0
+
+    return hook
+
+
 class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
     def __init__(
         self,
@@ -232,8 +249,16 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
             pos_embed_seq_len,
         )
         self.attention_kwargs = attention_kwargs
+        # Self-attention also needs the SP pad length, published per forward. A
+        # model built without attention_kwargs gets a dict holding only that, so
+        # the layout options it never had (`thw`) stay unpublished. The key is
+        # always present because torch.compile guards on the dict's key set.
+        # Cross-attention is not given this dict: its keys are the text, which
+        # carries no SP pad.
+        self._self_attn_kwargs = attention_kwargs if attention_kwargs is not None else {}
+        self._self_attn_kwargs.setdefault("valid_kv_len", None)
         for block in self.blocks:
-            block.attn1.processor = xFuserWanAttnProcessor(attention_kwargs=self.attention_kwargs)
+            block.attn1.processor = xFuserWanAttnProcessor(attention_kwargs=self._self_attn_kwargs)
             block.attn2.processor = xFuserWanAttnProcessor(
                 use_ulysses_parallel_attention=False, is_cross_attention=True
             )
@@ -248,6 +273,10 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
             )
         # attn2 is cross-attention over the text encoder: no Ulysses collective.
         register_fp8_comms_eligible_modules(self, [block.attn1 for block in self.blocks])
+        # Pad rows of this rank's chunk, set per forward; 0 leaves the blocks untouched.
+        self._sp_pad = {"local_rows": 0}
+        for block in self.blocks:
+            block.register_forward_hook(_zero_sp_pad_rows_hook(self._sp_pad))
 
     def _update_vsa_attention_kwargs(self, timestep: torch.LongTensor) -> None:
         """Publish the current AITER VSA schedule values to its backend."""
@@ -350,7 +379,14 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
 
         # Part of sequence parallel: given the resolution, we may need to pad the sequence length to match this prior to chunking
         pad_amount = (sp_world_size - (hidden_states.shape[1] % sp_world_size)) % sp_world_size
+        # The pad rows' keys get a zero logit (the RoPE tables are zero-padded too)
+        # and would act as an attention sink; USP drops them given the real length.
+        self._self_attn_kwargs["valid_kv_len"] = hidden_states.shape[1] if pad_amount else None
+        seq_len = hidden_states.shape[1]
         hidden_states = self._chunk_and_pad_sequence(hidden_states, sp_world_rank, sp_world_size, pad_amount, dim=1)
+        local_len = hidden_states.shape[1]
+        # The pad trails the global sequence, so only the last ranks' chunks hold any.
+        self._sp_pad["local_rows"] = min(local_len, max(0, (sp_world_rank + 1) * local_len - seq_len))
 
         if ts_seq_len is not None:  # (wan2.2 ti2v)
             temb = self._chunk_and_pad_sequence(temb, sp_world_rank, sp_world_size, pad_amount, dim=1)

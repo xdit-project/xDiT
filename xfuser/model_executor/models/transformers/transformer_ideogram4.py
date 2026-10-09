@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 
 from xfuser.core.distributed import (
+    get_ring_parallel_world_size,
     get_sequence_parallel_rank,
     get_sequence_parallel_world_size,
 )
@@ -27,9 +28,12 @@ def _make_xfuser_ideogram4_attention_processor():
 
     @xFuserAttentionProcessorRegister.register(Ideogram4AttnProcessor)
     class xFuserIdeogram4AttnProcessor(Ideogram4AttnProcessor):
-        def __init__(self) -> None:
+        def __init__(self, attention_kwargs: dict | None = None) -> None:
             super().__init__()
             self.attention_function = USP
+            # Shared with the transformer, which sets ``valid_kv_len`` when the
+            # sequence is zero-padded to split evenly across ranks.
+            self.attention_kwargs = attention_kwargs
 
         def __call__(
             self,
@@ -64,6 +68,7 @@ def _make_xfuser_ideogram4_attention_processor():
                 query.transpose(1, 2),
                 key.transpose(1, 2),
                 value.transpose(1, 2),
+                attention_kwargs=self.attention_kwargs,
             ).transpose(1, 2)
             hidden_states = hidden_states.flatten(2, 3).type_as(query)
             return attn.to_out[0](hidden_states)
@@ -84,8 +89,10 @@ def _make_xfuser_ideogram4_transformer_wrapper():
 
     class xFuserIdeogram4Transformer2DWrapper(Ideogram4Transformer2DModel):
         def _install_xfuser_processors(self) -> None:
+            # The key is always present because torch.compile guards on the key set.
+            self._usp_attention_kwargs = {"valid_kv_len": None}
             for layer in self.layers:
-                layer.attention.set_processor(processor_class())
+                layer.attention.set_processor(processor_class(attention_kwargs=self._usp_attention_kwargs))
 
         @classmethod
         def from_pretrained(cls, *args, **kwargs):
@@ -139,9 +146,7 @@ def _make_xfuser_ideogram4_transformer_wrapper():
                 and torch.equal(image_counts, image_counts[:1].expand_as(image_counts))
                 and torch.equal(pad_counts, pad_counts[:1].expand_as(pad_counts))
             ):
-                raise ValueError(
-                    "Ideogram 4 xDiT requires prompts in the same batch to have equal token lengths."
-                )
+                raise ValueError("Ideogram 4 xDiT requires prompts in the same batch to have equal token lengths.")
 
             layout = (
                 int(pad_counts[0].item()),
@@ -168,13 +173,9 @@ def _make_xfuser_ideogram4_transformer_wrapper():
 
             batch_size, _, in_channels = hidden_states.shape
             if in_channels != self.in_channels:
-                raise ValueError(
-                    f"Expected last dim {self.in_channels}, got {in_channels}."
-                )
+                raise ValueError(f"Expected last dim {self.in_channels}, got {in_channels}.")
 
-            num_pad_tokens, num_text_tokens, num_image_tokens = (
-                self._get_sequence_layout(indicator)
-            )
+            num_pad_tokens, num_text_tokens, num_image_tokens = self._get_sequence_layout(indicator)
             text_start = num_pad_tokens
             image_start = text_start + num_text_tokens
 
@@ -224,6 +225,18 @@ def _make_xfuser_ideogram4_transformer_wrapper():
 
             sequence_length = num_text_tokens + num_image_tokens
             pad_amount = (sp_size - sequence_length % sp_size) % sp_size
+            if pad_amount and get_ring_parallel_world_size() > 1:
+                # Ring attention sees one chunk of keys per step, so the padded
+                # keys cannot be dropped and would leak into every real token.
+                raise ValueError(
+                    f"Ideogram 4 with ring attention needs the text + image token count "
+                    f"({sequence_length}) to be divisible by the sequence-parallel degree "
+                    f"({sp_size}); change the prompt or resolution, or use Ulysses "
+                    "parallelism only."
+                )
+            # Diffusers attends only within the real tokens; publishing the real
+            # length lets USP drop the padded keys after the Ulysses exchange.
+            self._usp_attention_kwargs["valid_kv_len"] = sequence_length if pad_amount else None
             hidden_states = chunk_and_pad_sequence(
                 hidden_states,
                 sp_rank,

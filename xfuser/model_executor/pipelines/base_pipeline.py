@@ -597,11 +597,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         enabled: bool = True,
     ) -> bool:
         """Validate async-only options before synchronous warmup can send P2P data."""
-        run_async = (
-            enabled
-            and get_pipeline_parallel_world_size() > 1
-            and num_timesteps > pipeline_warmup_steps
-        )
+        run_async = enabled and get_pipeline_parallel_world_size() > 1 and num_timesteps > pipeline_warmup_steps
         if run_async:
             self._validate_pipefusion_async_callback(callback_on_step_end)
         return run_async

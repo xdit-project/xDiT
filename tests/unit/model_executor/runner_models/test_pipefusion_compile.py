@@ -181,12 +181,8 @@ def test_pipefusion_compile_replay_failure_is_raised_collectively(monkeypatch):
         cache_method=None,
     )
     model.pipe = SimpleNamespace(transformer=transformer)
-    model.settings = SimpleNamespace(
-        fsdp_strategy={"transformer": {"wrap_attrs": ["transformer_blocks"]}}
-    )
-    model.engine_config = SimpleNamespace(
-        runtime_config=SimpleNamespace(warmup_steps=1)
-    )
+    model.settings = SimpleNamespace(fsdp_strategy={"transformer": {"wrap_attrs": ["transformer_blocks"]}})
+    model.engine_config = SimpleNamespace(runtime_config=SimpleNamespace(warmup_steps=1))
     model._enable_compute_comm_overlap = lambda: None
     model._get_compile_mode = lambda: "default"
     model._get_compile_dynamic = lambda _input_args=None: False

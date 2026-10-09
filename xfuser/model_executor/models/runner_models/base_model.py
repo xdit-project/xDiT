@@ -1074,13 +1074,9 @@ class xFuserModel(abc.ABC):
                 self._reset_pipefusion_compile_state(capture.components)
                 capture.clear()
                 details = "; ".join(
-                    f"rank {rank}: {failure}"
-                    for rank, failure in enumerate(failures)
-                    if failure is not None
+                    f"rank {rank}: {failure}" for rank, failure in enumerate(failures) if failure is not None
                 )
-                raise RuntimeError(
-                    f"PipeFusion rank-local compile replay failed collectively: {details}"
-                )
+                raise RuntimeError(f"PipeFusion rank-local compile replay failed collectively: {details}")
             log("Concurrent PipeFusion compile replay completed.", log_from_all_processes=True)
             self._reset_pipefusion_compile_state(capture.components)
             capture.clear()

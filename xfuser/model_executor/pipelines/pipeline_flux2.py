@@ -298,9 +298,7 @@ class xFuserFlux2PipelineBase(xFuserPipelineBaseWrapper):
             num_timesteps=len(timesteps),
             pipeline_warmup_steps=num_pipeline_warmup_steps,
             callback_on_step_end=callback_on_step_end,
-            enabled=not (
-                image_latents is not None and not reference_patch_pipeline
-            ),
+            enabled=not (image_latents is not None and not reference_patch_pipeline),
         )
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             if image_latents is not None and not reference_patch_pipeline:

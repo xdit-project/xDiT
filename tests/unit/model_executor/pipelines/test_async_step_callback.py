@@ -71,9 +71,7 @@ def test_async_callback_is_rejected_before_warmup_selection(monkeypatch):
     )
 
     pipeline = SimpleNamespace(
-        _validate_pipefusion_async_callback=(
-            xFuserPipelineBaseWrapper._validate_pipefusion_async_callback
-        )
+        _validate_pipefusion_async_callback=(xFuserPipelineBaseWrapper._validate_pipefusion_async_callback)
     )
     with pytest.raises(NotImplementedError, match="cannot be applied consistently"):
         xFuserPipelineBaseWrapper._pipefusion_async_enabled(

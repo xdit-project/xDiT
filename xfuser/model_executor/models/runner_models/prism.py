@@ -3,7 +3,9 @@ from types import SimpleNamespace
 
 import torch
 
+from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.core.distributed import get_world_group
+from xfuser.core.distributed.runtime_state import select_default_attention_backend
 from xfuser.core.utils.runner_utils import log
 from xfuser.core.utils.video_utils import encode_video_with_audio
 from xfuser.model_executor.models.runner_models.base_model import (
@@ -99,6 +101,17 @@ class xFuserPrismModel(xFuserModel):
             if (pairs[:, 0] < boundary).any():
                 return steps
         return None
+
+    def _apply_default_attention_backend(self, config) -> None:
+        super()._apply_default_attention_backend(config)
+        # TRITON_BSA serves only the video self-attention; without a cross-attention
+        # backend every other call would take its dense fallback. Name the platform's
+        # dense backend instead, the one xDiT picks when none is given.
+        selected = config.attention_backend
+        if selected is not None and selected.upper() == AttentionBackendType.TRITON_BSA.name:
+            if config.cross_attention_backend is None:
+                config.cross_attention_backend = select_default_attention_backend().name
+                log(f"--cross_attention_backend not set, using {config.cross_attention_backend} beside TRITON_BSA")
 
     def _validate_config(self, config) -> None:
         super()._validate_config(config)

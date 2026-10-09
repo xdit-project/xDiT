@@ -69,6 +69,26 @@ def test_block_sparse_attention_runs_beside_a_dense_cross_attention_backend():
     _model(attention_backend="TRITON_BSA", cross_attention_backend="AITER", ulysses_degree=8)
 
 
+def test_block_sparse_attention_gets_the_platform_dense_backend_for_other_calls(monkeypatch):
+    from xfuser.core.attention.spec import AttentionBackendType
+    from xfuser.model_executor.models.runner_models import prism
+
+    monkeypatch.setattr(prism, "select_default_attention_backend", lambda: AttentionBackendType.FLASH_3)
+    config = xFuserArgs(model="Prism", attention_backend="TRITON_BSA")
+    xFuserPrismModel(config)
+    assert config.cross_attention_backend == "FLASH_3"
+
+
+def test_a_named_cross_attention_backend_is_kept_beside_block_sparse_attention(monkeypatch):
+    from xfuser.core.attention.spec import AttentionBackendType
+    from xfuser.model_executor.models.runner_models import prism
+
+    monkeypatch.setattr(prism, "select_default_attention_backend", lambda: AttentionBackendType.FLASH_3)
+    config = xFuserArgs(model="Prism", attention_backend="TRITON_BSA", cross_attention_backend="SDPA")
+    xFuserPrismModel(config)
+    assert config.cross_attention_backend == "SDPA"
+
+
 @pytest.mark.parametrize("config", [{"bsa_sparsity": 1.0}, {"bsa_sparsity": -0.1}, {"bsa_cdf_threshold": 1.5}])
 def test_block_sparse_settings_must_lie_in_the_unit_interval(config):
     with pytest.raises(ValueError, match=r"must lie in \[0, 1\)"):

@@ -137,6 +137,7 @@ The following open-sourced DiT Models are released with xDiT in day 1.
 | [🟢 Krea2-Turbo](https://huggingface.co/krea/Krea-2-Turbo) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🟢 Ideogram 4](https://huggingface.co/ideogram-ai/ideogram-4-fp8) | ✔️ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🎬 MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
+| [🎬 Prism (preview-alpha)](https://huggingface.co/FrancisRing/Prism) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🎬 FastH3 Preview v1](https://huggingface.co/FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🎬 FastH3 Preview v1 (Dense)](https://huggingface.co/FastVideo/FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🎬 FastH3 V2](https://huggingface.co/FastVideo/FastVideo-FastH3-8-Step-V2) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |

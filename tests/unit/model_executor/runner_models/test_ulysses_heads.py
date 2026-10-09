@@ -81,6 +81,7 @@ def test_registered_model_accepts_supported_ulysses_before_loading(name):
         ("Qwen-Image-Edit", 24, 3, 16),
         ("Qwen-Image-Edit-2509", 24, 3, 16),
         ("Qwen-Image-Edit-2511", 24, 3, 16),
+        ("Prism", 40, 8, 3),
     ],
 )
 def test_ulysses_degrees_follow_each_checkpoint_head_layout(name, heads, accepted, refused):

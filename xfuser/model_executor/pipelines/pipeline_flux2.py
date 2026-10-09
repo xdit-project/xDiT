@@ -294,6 +294,14 @@ class xFuserFlux2PipelineBase(xFuserPipelineBaseWrapper):
 
         # 6. Denoising loop -> sync/async patch pipeline
         num_pipeline_warmup_steps = get_runtime_state().runtime_config.warmup_steps
+        run_async = self._pipefusion_async_enabled(
+            num_timesteps=len(timesteps),
+            pipeline_warmup_steps=num_pipeline_warmup_steps,
+            callback_on_step_end=callback_on_step_end,
+            enabled=not (
+                image_latents is not None and not reference_patch_pipeline
+            ),
+        )
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             if image_latents is not None and not reference_patch_pipeline:
                 latents = self._sync_pipeline(
@@ -311,7 +319,7 @@ class xFuserFlux2PipelineBase(xFuserPipelineBaseWrapper):
                     image_latents=image_latents,
                     image_latent_ids=image_latent_ids,
                 )
-            elif get_pipeline_parallel_world_size() > 1 and len(timesteps) > num_pipeline_warmup_steps:
+            elif run_async:
                 latents = self._sync_pipeline(
                     latents=latents,
                     prompt_embeds=prompt_embeds,
@@ -597,7 +605,7 @@ class xFuserFlux2PipelineBase(xFuserPipelineBaseWrapper):
             initial_condition=prompt_embeds,
             first_stage=is_pipeline_first_stage(),
             last_stage=is_pipeline_last_stage(),
-            condition_reuse=False,
+            condition_reuse=True,
             forward_patch_fn=PipeFusionPatchForward(
                 self._backbone_forward,
                 static_kwargs={

@@ -588,6 +588,24 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
                 "interruption state cannot be applied consistently across stages."
             )
 
+    def _pipefusion_async_enabled(
+        self,
+        *,
+        num_timesteps: int,
+        pipeline_warmup_steps: int,
+        callback_on_step_end,
+        enabled: bool = True,
+    ) -> bool:
+        """Validate async-only options before synchronous warmup can send P2P data."""
+        run_async = (
+            enabled
+            and get_pipeline_parallel_world_size() > 1
+            and num_timesteps > pipeline_warmup_steps
+        )
+        if run_async:
+            self._validate_pipefusion_async_callback(callback_on_step_end)
+        return run_async
+
     def _pipefusion_update_patch(self, _work, timestep, noise_pred, previous):
         """Apply a scheduler step while preserving the model output dtype."""
         output_dtype = noise_pred.dtype
@@ -703,7 +721,8 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         from xfuser.core.cache_manager.cache_manager import get_cache_manager
 
         get_cache_manager().clear()
-        torch.cuda.empty_cache()
+        if get_pipeline_parallel_world_size() > 1:
+            torch.cuda.empty_cache()
 
     def gather_latents_for_vae(self, latents: torch.Tensor):
         """gather latents from dp last group"""
@@ -810,9 +829,10 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         get_world_group().broadcast(input_shape, src=src)
 
         # broadcast latents
-        dtype = get_runtime_state().runtime_config.dtype
-        if rank == src and latents.dtype != dtype:
-            latents = latents.to(dtype)
+        dtype = get_world_group().broadcast_object(
+            latents.dtype if rank == src else None,
+            src=src,
+        )
         if rank != src:
             latents = torch.zeros(torch.Size(input_shape), dtype=dtype, device=device)
         get_world_group().broadcast(latents, src=src)

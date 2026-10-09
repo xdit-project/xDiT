@@ -166,7 +166,11 @@ def test_runner_managed_parallel_vae_skips_legacy_pipeline_conversion():
     assert wrapper.converted is False
 
 
-def test_vae_decode_releases_transformer_cache_first():
+@pytest.mark.parametrize(("pp_size", "expected_empty_cache_calls"), [(1, 0), (2, 1)])
+def test_vae_decode_releases_transformer_cache_first(
+    pp_size,
+    expected_empty_cache_calls,
+):
     cache_manager = mock.Mock()
 
     with (
@@ -174,9 +178,13 @@ def test_vae_decode_releases_transformer_cache_first():
             "xfuser.core.cache_manager.cache_manager.get_cache_manager",
             return_value=cache_manager,
         ),
+        mock.patch(
+            "xfuser.model_executor.pipelines.base_pipeline.get_pipeline_parallel_world_size",
+            return_value=pp_size,
+        ),
         mock.patch.object(torch.cuda, "empty_cache") as empty_cache,
     ):
         xFuserPipelineBaseWrapper._release_transformer_kv_cache()
 
     cache_manager.clear.assert_called_once_with()
-    empty_cache.assert_called_once_with()
+    assert empty_cache.call_count == expected_empty_cache_calls

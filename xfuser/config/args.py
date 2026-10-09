@@ -332,6 +332,11 @@ class xFuserArgs:
         )
         if self.warmup_steps < 0:
             raise ValueError("--warmup_steps must be greater than or equal to 0")
+        if self.pipefusion_parallel_degree > 1 and self.warmup_steps < 1:
+            raise ValueError(
+                "--warmup_steps must be at least 1 with PipeFusion so KV caches "
+                "are initialized before asynchronous patch updates"
+            )
         if self.num_pipeline_patch is not None and self.num_pipeline_patch < 1:
             raise ValueError("--num_pipeline_patch must be greater than 0")
         if self.attn_layer_num_for_pp is not None:

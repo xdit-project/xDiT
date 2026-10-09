@@ -27,7 +27,7 @@ def test_pipefusion_rejects_step_caching_until_patch_histories_are_supported():
     ("kwargs", "message"),
     [
         ({"num_pipeline_patch": 0}, "num_pipeline_patch"),
-        ({"warmup_steps": -1}, "warmup_steps"),
+        ({"warmup_steps": 0}, "at least 1"),
         ({"attn_layer_num_for_pp": [4]}, "one entry per"),
         ({"attn_layer_num_for_pp": [4, 0]}, "greater than 0"),
     ],

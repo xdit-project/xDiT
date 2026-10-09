@@ -300,9 +300,14 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             guidance = None
 
         num_pipeline_warmup_steps = get_runtime_state().runtime_config.warmup_steps
+        run_async = self._pipefusion_async_enabled(
+            num_timesteps=len(timesteps),
+            pipeline_warmup_steps=num_pipeline_warmup_steps,
+            callback_on_step_end=callback_on_step_end,
+        )
         # 6. Denoising loop
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            if get_pipeline_parallel_world_size() > 1 and len(timesteps) > num_pipeline_warmup_steps:
+            if run_async:
                 # raise RuntimeError("Async pipeline not supported in flux")
                 latents = self._sync_pipeline(
                     latents=latents,

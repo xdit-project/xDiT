@@ -413,8 +413,13 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
 
         # 5. Denoising loop
         num_pipeline_warmup_steps = get_runtime_state().runtime_config.warmup_steps
+        run_async = self._pipefusion_async_enabled(
+            num_timesteps=len(timesteps),
+            pipeline_warmup_steps=num_pipeline_warmup_steps,
+            callback_on_step_end=callback_on_step_end,
+        )
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            if get_pipeline_parallel_world_size() > 1 and len(timesteps) > num_pipeline_warmup_steps:
+            if run_async:
                 # * warmup stage
                 latents = self._sync_pipeline(
                     latents=latents,

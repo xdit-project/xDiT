@@ -178,7 +178,7 @@ def load_transformer(
         requested_fsdp_components is None or component_name in requested_fsdp_components
     )
     replicated_meta = False if fsdp_meta else loader.replicated_broadcast_load()
-    pipeline_stage_meta = uses_pipeline_stage_meta(model.config)
+    pipeline_stage_meta = uses_pipeline_stage_meta(getattr(model, "config", None))
     if fsdp_meta or replicated_meta or pipeline_stage_meta:
         if adapter is not None:
             record_blockwise_ownership(

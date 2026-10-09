@@ -250,7 +250,11 @@ def _splits_weights(config) -> bool:
 
 def uses_pipeline_stage_meta(config) -> bool:
     """Whether PipeFusion builds only its local transformer stage on meta."""
-    return config.memory_efficient_replicated_load and config.pipefusion_parallel_degree > 1
+    return bool(
+        config is not None
+        and getattr(config, "memory_efficient_replicated_load", False)
+        and getattr(config, "pipefusion_parallel_degree", 1) > 1
+    )
 
 
 def select_effective_materialization_mode(

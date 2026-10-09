@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 import xfuser.model_executor.models.runner_models.base_model as base_model_module
@@ -137,6 +138,10 @@ def test_pipefusion_captures_before_wrap_and_replays_before_validation(monkeypat
         def barrier(self):
             events.append("barrier")
 
+        def all_gather_object(self, value):
+            events.append("status")
+            return [value]
+
     monkeypatch.setattr(base_model_module, "runtime_state_is_initialized", lambda: True)
     monkeypatch.setattr(base_model_module, "get_runtime_state", lambda: state)
     monkeypatch.setattr(base_model_module, "get_model_replica_group", lambda: _Replica())
@@ -153,6 +158,76 @@ def test_pipefusion_captures_before_wrap_and_replays_before_validation(monkeypat
     assert events.index("compile") < events.index("synchronize")
     assert events.index("synchronize") < events.index("validation")
     assert events.count("stage") == 4  # two eager captures and two local replays
+
+
+def test_pipefusion_compile_replay_failure_is_raised_collectively(monkeypatch):
+    events = []
+    state = SimpleNamespace(
+        patch_mode=False,
+        pipeline_patch_idx=0,
+        pp_patches_height=[1],
+        pp_patches_start_idx_local=[0, 1],
+        pp_patches_start_end_idx_global=[[0, 1]],
+        pp_patches_token_num=[1],
+        pp_patches_token_start_idx_local=[0, 1],
+        pp_patches_token_start_end_idx_global=[[0, 1]],
+    )
+    transformer = _Stage(events)
+    model = object.__new__(_Runner)
+    model.config = SimpleNamespace(
+        pipefusion_parallel_degree=2,
+        fully_shard_degree=1,
+        fully_shard_components=None,
+        cache_method=None,
+    )
+    model.pipe = SimpleNamespace(transformer=transformer)
+    model.settings = SimpleNamespace(
+        fsdp_strategy={"transformer": {"wrap_attrs": ["transformer_blocks"]}}
+    )
+    model.engine_config = SimpleNamespace(
+        runtime_config=SimpleNamespace(warmup_steps=1)
+    )
+    model._enable_compute_comm_overlap = lambda: None
+    model._get_compile_mode = lambda: "default"
+    model._get_compile_dynamic = lambda _input_args=None: False
+    model._get_compiled_pipe_components = lambda: ["transformer"]
+    model._get_compile_warmup_steps = lambda _input_args: 2
+    model._local_onload_device = lambda: torch.device("cpu")
+    model._reset_pipefusion_compile_state = lambda _components: events.append("reset")
+    model._run_compile_warmup = lambda _input_args: events.append("validation")
+
+    def eager_capture(_input_args):
+        transformer(torch.ones(1, 2))
+
+    model._run_timed_pipe = eager_capture
+
+    class _Replica:
+        def barrier(self):
+            pass
+
+        def all_gather_object(self, value):
+            assert value is None
+            return ["RuntimeError: compile failed", value]
+
+    monkeypatch.setattr(base_model_module, "runtime_state_is_initialized", lambda: True)
+    monkeypatch.setattr(base_model_module, "get_runtime_state", lambda: state)
+    monkeypatch.setattr(base_model_module, "get_model_replica_group", lambda: _Replica())
+    monkeypatch.setattr(
+        torch,
+        "compile",
+        lambda candidate, **_kwargs: candidate,
+    )
+    monkeypatch.setattr(
+        base_model_module.PipeFusionCompileCapture,
+        "replay",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+
+    with pytest.raises(RuntimeError, match="rank 0: RuntimeError: compile failed"):
+        model._compile_model({"num_inference_steps": 4})
+
+    assert events == ["stage", "reset", "reset"]
 
 
 def test_pipefusion_raises_recompile_limit_for_patch_specializations(monkeypatch):

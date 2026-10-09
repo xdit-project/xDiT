@@ -1063,9 +1063,24 @@ class xFuserModel(abc.ABC):
                 f"Compiling {len(capture.calls)} captured PipeFusion stage signature(s) locally...",
                 log_from_all_processes=True,
             )
-            capture.replay(self._local_onload_device())
-            torch.cuda.synchronize()
-            replica.barrier()
+            local_error = None
+            try:
+                capture.replay(self._local_onload_device())
+                torch.cuda.synchronize()
+            except Exception as error:
+                local_error = f"{type(error).__name__}: {error}"
+            failures = replica.all_gather_object(local_error)
+            if any(failure is not None for failure in failures):
+                self._reset_pipefusion_compile_state(capture.components)
+                capture.clear()
+                details = "; ".join(
+                    f"rank {rank}: {failure}"
+                    for rank, failure in enumerate(failures)
+                    if failure is not None
+                )
+                raise RuntimeError(
+                    f"PipeFusion rank-local compile replay failed collectively: {details}"
+                )
             log("Concurrent PipeFusion compile replay completed.", log_from_all_processes=True)
             self._reset_pipefusion_compile_state(capture.components)
             capture.clear()

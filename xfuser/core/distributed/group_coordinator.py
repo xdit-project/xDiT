@@ -314,6 +314,18 @@ class GroupCoordinator:
             torch.distributed.broadcast_object_list(recv, src=self.ranks[src], group=self.cpu_group)
             return recv[0]
 
+    def all_gather_object(self, obj: Any) -> List[Any]:
+        """Gather one Python object from every rank over the CPU process group."""
+        if self.world_size == 1:
+            return [obj]
+        gathered = [None] * self.world_size
+        torch.distributed.all_gather_object(
+            gathered,
+            obj,
+            group=self.cpu_group,
+        )
+        return gathered
+
     def broadcast_object_list(self, obj_list: List[Any], src: int = 0, group: Optional[ProcessGroup] = None):
         """Broadcast the input object list.
         NOTE: `src` is the local rank of the source rank.

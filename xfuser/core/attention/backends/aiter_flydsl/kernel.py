@@ -11,6 +11,7 @@ from xfuser.logger import init_logger, log_once
 from xfuser.core.attention.backends.sdpa.kernel import sdpa_flash
 from xfuser.core.attention.numerics.layout import from_bshd, to_bshd
 from xfuser.core.attention.spec import AttnCall
+from .selection import fp8_eligible, fp8_min_seq
 
 logger = init_logger(__name__)
 
@@ -23,16 +24,6 @@ logger = init_logger(__name__)
 # e2e) so it holds fp8 Q/K/V alongside the live bf16 Q/K/V -> higher peak VRAM;
 # pick AITER_FLYDSL when tight.
 # ---------------------------------------------------------------------------
-
-
-def _fp8_min_seq(head_dim: int, num_heads: int) -> int:
-    """fp8 wins only above a sequence crossover (quant pre-pass cost vs K/V HBM
-    bytes saved), which depends on (head_dim, num_heads). Measured on gfx1201:
-    D64/H38 and D128/H<=32 flip at S~2560; D128 high head-count (wan H40) at
-    S~3584. Below: fp8 loses 7-18%; above: wins <4%."""
-    if head_dim >= 128 and num_heads > 32:
-        return 3584
-    return 2560
 
 
 def _fp8_attn(query, key, value, is_causal):
@@ -73,23 +64,30 @@ def _flydsl_attn_fake(query: torch.Tensor, key: torch.Tensor, value: torch.Tenso
 def _flydsl_attn_fp8_kernel(
     query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, is_causal: bool
 ) -> torch.Tensor:
-    # fp8 only for bf16 self-attn above the crossover; else the bf16 kernel.
+    # Use fp8 only for shapes with a measured end-to-end crossover.
     B, S_real, H, D = query.shape
-    is_cross = key.shape[1] != S_real
-    min_seq = _fp8_min_seq(D, H)
-    use_fp8 = query.dtype == torch.bfloat16 and not is_cross and S_real >= min_seq
+    key_length = key.shape[1]
+    is_cross = key_length != S_real
+    min_seq = fp8_min_seq(D, H, is_cross=key_length > S_real)
+    use_fp8 = fp8_eligible(query.dtype, S_real, key_length, H, D)
     if use_fp8:
         msg = (
-            f"flydsl attn [B{B} S{S_real} H{H} D{D}] -> fp8 (S>={min_seq}) "
+            f"flydsl attn [B{B} Sq{S_real} Sk{key_length} H{H} D{D}] "
+            f"-> fp8 (Sq>={min_seq}) "
             "(fp8 pre-pass adds a transient QKV copy -> higher peak VRAM)"
         )
-    elif query.dtype == torch.bfloat16 and not is_cross:
-        msg = f"flydsl attn [B{B} S{S_real} H{H} D{D}] -> bf16 (S<{min_seq})"
+    elif query.dtype == torch.bfloat16 and key_length >= S_real:
+        reason = "no measured FP8 crossover" if min_seq is None else f"Sq<{min_seq}"
+        msg = (
+            f"flydsl attn [B{B} Sq{S_real} Sk{key_length} H{H} D{D}] "
+            f"-> bf16 ({reason})"
+        )
     else:
         msg = (
-            f"flydsl attn [B{B} S{S_real} H{H} D{D}] -> bf16 (not fp8-eligible: dtype={query.dtype}, cross={is_cross})"
+            f"flydsl attn [B{B} Sq{S_real} Sk{key_length} H{H} D{D}] "
+            f"-> bf16 (not fp8-eligible: dtype={query.dtype}, cross={is_cross})"
         )
-    log_once(logger, (B, S_real, H, D, is_cross, query.dtype), msg)
+    log_once(logger, (B, S_real, key_length, H, D, query.dtype), msg)
     if use_fp8:
         return _fp8_attn(query, key, value, is_causal)
     return flydsl_flash_attn_func(query, key, value, causal=is_causal, waves_per_eu=2, daz=True)

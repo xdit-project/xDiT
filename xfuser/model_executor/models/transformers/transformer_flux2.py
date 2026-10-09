@@ -544,6 +544,33 @@ class xFuserFlux2Transformer2DModelWrapper(xFuserTransformerBaseWrapper):
         )
         register_fp8_comms_eligible_modules(self, flux_attn_modules(self))
 
+    def pipefusion_compile_capture_forward(
+        self,
+        hidden_states,
+        encoder_hidden_states=None,
+        *args,
+        return_dict=True,
+        **kwargs,
+    ):
+        """Propagate only FLUX.2 stage shapes during compile-signature capture."""
+        if is_pipeline_first_stage():
+            hidden_states = hidden_states.new_zeros(
+                (*hidden_states.shape[:-1], self.x_embedder.out_features)
+            )
+            encoder_hidden_states = encoder_hidden_states.new_zeros(
+                (*encoder_hidden_states.shape[:-1], self.context_embedder.out_features)
+            )
+        if is_pipeline_last_stage():
+            hidden_states = hidden_states.new_zeros(
+                (*hidden_states.shape[:-1], self.proj_out.out_features)
+            )
+            output = (hidden_states, None)
+        else:
+            output = (hidden_states, encoder_hidden_states)
+        if not return_dict:
+            return (output,)
+        return Flux2Transformer2DModelOutput(sample=output)
+
     def forward(
         self,
         hidden_states: torch.Tensor,

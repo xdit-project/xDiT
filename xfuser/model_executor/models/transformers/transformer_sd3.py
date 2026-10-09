@@ -51,6 +51,11 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
         ]
         register_fp8_comms_eligible_modules(self, sd3_attn_modules(self))
 
+    def reset_pipefusion_state(self) -> None:
+        self.encoder_hidden_states_cache = [
+            None for _ in range(len(self.transformer_blocks))
+        ]
+
     def forward(
         self,
         hidden_states: torch.FloatTensor,

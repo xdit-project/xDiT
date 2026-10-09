@@ -23,6 +23,7 @@ from diffusers.models.embeddings import apply_rotary_emb
 from xfuser.core.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
     is_pipeline_first_stage,
+    is_pipeline_last_stage,
 )
 from xfuser.core.distributed import (
     get_classifier_free_guidance_world_size,
@@ -416,6 +417,33 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
         self.encoder_hidden_states_cache = [None for _ in range(len(self.transformer_blocks))]
         register_fp8_comms_eligible_modules(self, flux_attn_modules(self))
 
+    def pipefusion_compile_capture_forward(
+        self,
+        hidden_states,
+        encoder_hidden_states=None,
+        *args,
+        return_dict=True,
+        **kwargs,
+    ):
+        """Propagate only FLUX stage shapes during compile-signature capture."""
+        if is_pipeline_first_stage():
+            hidden_states = hidden_states.new_zeros(
+                (*hidden_states.shape[:-1], self.x_embedder.out_features)
+            )
+            encoder_hidden_states = encoder_hidden_states.new_zeros(
+                (*encoder_hidden_states.shape[:-1], self.context_embedder.out_features)
+            )
+        if is_pipeline_last_stage():
+            hidden_states = hidden_states.new_zeros(
+                (*hidden_states.shape[:-1], self.proj_out.out_features)
+            )
+            output = (hidden_states, None)
+        else:
+            output = (hidden_states, encoder_hidden_states)
+        if not return_dict:
+            return (output,)
+        return Transformer2DModelOutput(sample=output)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -582,7 +610,9 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
         encoder_hidden_states = hidden_states[:, : encoder_hidden_states.shape[1], ...]
         hidden_states = hidden_states[:, encoder_hidden_states.shape[1] :, ...]
 
-        if self.stage_info.after_flags["single_transformer_blocks"]:
+        # The true last stage owns output projection even when its assigned
+        # block lists are empty (for example, PP degree greater than block count).
+        if is_pipeline_last_stage():
             hidden_states = self.norm_out(hidden_states, temb)
             output = self.proj_out(hidden_states), None
         else:

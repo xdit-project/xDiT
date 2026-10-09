@@ -91,9 +91,17 @@ class xFuserTransformerBaseWrapper(xFuserModelBaseWrapper, metaclass=ABCMeta):
         )
         pp_rank = get_pipeline_parallel_rank()
         pp_world_size = get_pipeline_parallel_world_size()
+        if pp_world_size > 1:
+            transformer._xfuser_pipeline_stage_partial = True
         blocks_list = {
             block_name: getattr(transformer, block_name) for block_name in blocks_name
         }
+        for block_name, blocks in blocks_list.items():
+            for block_index, block in enumerate(blocks):
+                # Stage slicing renumbers retained ModuleLists. Keep the
+                # checkpoint path so blockwise/meta loaders stream the original
+                # global layer and quantize it before placement.
+                block._xfuser_checkpoint_fqn = f"{block_name}.{block_index}"
         num_blocks_list = [len(blocks) for blocks in blocks_list.values()]
         self.blocks_idx = {
             name: [sum(num_blocks_list[:i]), sum(num_blocks_list[: i + 1])]
@@ -108,6 +116,12 @@ class xFuserTransformerBaseWrapper(xFuserModelBaseWrapper, metaclass=ABCMeta):
             stage_block_end_idx = sum(attn_layer_num_for_pp[: pp_rank + 1])
 
         else:
+            if pp_rank == 0:
+                logger.warning(
+                    "PipeFusion stage split is using the naive equal-block "
+                    "fallback. Block runtime can vary substantially; benchmark "
+                    "and set --attn_layer_num_for_pp explicitly for production."
+                )
             num_blocks_per_stage = (
                 sum(num_blocks_list) + pp_world_size - 1
             ) // pp_world_size

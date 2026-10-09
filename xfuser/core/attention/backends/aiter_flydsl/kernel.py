@@ -78,10 +78,7 @@ def _flydsl_attn_fp8_kernel(
         )
     elif query.dtype == torch.bfloat16 and key_length >= S_real:
         reason = "no measured FP8 crossover" if min_seq is None else f"Sq<{min_seq}"
-        msg = (
-            f"flydsl attn [B{B} Sq{S_real} Sk{key_length} H{H} D{D}] "
-            f"-> bf16 ({reason})"
-        )
+        msg = f"flydsl attn [B{B} Sq{S_real} Sk{key_length} H{H} D{D}] -> bf16 ({reason})"
     else:
         msg = (
             f"flydsl attn [B{B} Sq{S_real} Sk{key_length} H{H} D{D}] "

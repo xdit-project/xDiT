@@ -28,9 +28,7 @@ DMI_RDNA4_SHAPE_CLASSES = (
 
 
 def _bf16_attention(query, key, value):
-    return flydsl_flash_attn_func(
-        query, key, value, causal=False, waves_per_eu=2, daz=True
-    )
+    return flydsl_flash_attn_func(query, key, value, causal=False, waves_per_eu=2, daz=True)
 
 
 def _fp8_attention(query, key, value):
@@ -88,11 +86,7 @@ def main():
     args = parser.parse_args()
     if (args.heads is None) != (args.head_dim is None):
         parser.error("--heads and --head-dim must be supplied together")
-    shape_classes = (
-        ((args.heads, args.head_dim),)
-        if args.heads is not None
-        else DMI_RDNA4_SHAPE_CLASSES
-    )
+    shape_classes = ((args.heads, args.head_dim),) if args.heads is not None else DMI_RDNA4_SHAPE_CLASSES
 
     torch.manual_seed(0)
     print("Sq,Sk,H,D,bf16_ms,fp8_ms,fp8_speedup")
@@ -113,8 +107,7 @@ def main():
                 bf16_ms = _measure(_bf16_attention, query, key, value, args.iterations)
                 fp8_ms = _measure(_fp8_attention, query, key, value, args.iterations)
                 print(
-                    f"{query_length},{key_length},{heads},{head_dim},"
-                    f"{bf16_ms:.4f},{fp8_ms:.4f},{bf16_ms / fp8_ms:.4f}"
+                    f"{query_length},{key_length},{heads},{head_dim},{bf16_ms:.4f},{fp8_ms:.4f},{bf16_ms / fp8_ms:.4f}"
                 )
 
 

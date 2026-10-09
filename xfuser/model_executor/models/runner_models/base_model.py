@@ -217,6 +217,7 @@ class ModelCapabilities:
     supports_step_caching: bool = False
     supports_lora: bool = False
     use_fp8_comms: bool = False
+    supports_attention_a2a: bool = False
     use_hybrid_attn_schedule: bool = False
     use_hybrid_gemm_schedule: bool = False
     cross_attention_backend: bool = False
@@ -661,6 +662,8 @@ class xFuserModel(abc.ABC):
             ):
                 raise ValueError("Startup LoRA fusion requires eager, unquantized loading without FSDP or PipeFusion.")
         _validate_attention_head_dims(self, config)
+        if config.attention_a2a != "none" and not self.capabilities.supports_attention_a2a:
+            raise ValueError(f"Model {self.settings.model_name} does not support --attention_a2a.")
         for key in ModelCapabilities.__annotations__.keys():
             config_value = getattr(
                 config, key, None

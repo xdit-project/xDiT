@@ -6,6 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from xfuser.config.attention_a2a import AttentionA2AConfig
 from xfuser.core.attention import registry
 from xfuser.core.attention.spec import (
     AttentionBackendType,
@@ -59,6 +60,56 @@ def _as_type(backend):
     return backend if isinstance(backend, AttentionBackendType) else AttentionBackendType[backend]
 
 
+@pytest.mark.parametrize(
+    "profile",
+    (
+        "e4m3-e4m3",
+        "int8-e4m3",
+        "mxfp8-e4m3",
+        "e4m3-mxfp6",
+        "mxfp6-e4m3",
+        "mxfp6-mxfp6",
+        "mxfp6-mxfp4",
+        "mxfp4-mxfp4",
+    ),
+)
+def test_attention_a2a_profile_matches_aiter_mha_v4_contract(profile):
+    from aiter.ops.mha_v4 import (
+        AttentionFormat,
+        AttentionPack,
+        AttentionScaleMode,
+        _resolve_raw_recipe,
+    )
+
+    config = AttentionA2AConfig(profile=profile)
+    native_fp8 = AttentionFormat.FP8_E4M3
+    formats = {
+        "int8": AttentionFormat.INT8,
+        "e4m3": native_fp8,
+        "mxfp8": native_fp8,
+        "mxfp4": AttentionFormat.MXFP4,
+        "mxfp6": AttentionFormat.MXFP6,
+    }
+    scale_modes = {
+        "f32_per_tensor": AttentionScaleMode.F32_PER_TENSOR,
+        "f32_per_channel": AttentionScaleMode.F32_PER_CHANNEL,
+        "e8m0_per_1x32": AttentionScaleMode.E8M0_PER_1X32,
+    }
+    qk_codec, _, v_codec = config.consumer_codecs
+    qk_format, v_format = formats[qk_codec], formats[v_codec]
+    expected_scales = tuple(scale_modes[mode] for mode in config.scale_modes)
+    plan = _resolve_raw_recipe(
+        qk_format,
+        qk_format,
+        v_format,
+        *expected_scales,
+        sparse=False,
+    )
+
+    assert plan.scale_modes == expected_scales
+    assert plan.v_pack == (AttentionPack.V_FOR_FP6_P if config.v_pack == "fp6_p" else AttentionPack.DEFAULT)
+
+
 def test_bf16_rows_route_to_mha_v4_while_aiter_stays_on_mha_v3():
     """Which kernel a backend reaches is declared, not discovered: the BF16
     rows bind an MHA v4 launcher, AITER binds the v3 flash entry point."""
@@ -104,9 +155,14 @@ def _require_mha_v4_aiter(backend_name, supported_arches=("gfx950",)):
 
     kernel_dir = Path(aiter.__file__).resolve().parent.parent / "hsa" / arch / "fmha_v4_fwd"
     kernel_name = backend_name.removeprefix("AITER_").lower()
-    candidates = [kernel_dir / f"fwd_hd128_{kernel_name}.co"]
+    kernel_names = [kernel_name]
+    if backend_name == "AITER_F6F6":
+        # AITER's all-MXFP6 contract shares the generic MXFP6 code object;
+        # the V format selects MXFP6 rather than FP8 at launch.
+        kernel_names.append("mxfp6")
+    candidates = [kernel_dir / f"fwd_hd128_{name}.co" for name in kernel_names]
     if arch == "gfx942":
-        candidates.append(kernel_dir / "MI300" / f"fwd_hd128_{kernel_name}.co")
+        candidates.extend(kernel_dir / "MI300" / f"fwd_hd128_{name}.co" for name in kernel_names)
     if not any(path.exists() for path in candidates):
         pytest.skip(f"AITER does not include the {arch} {kernel_name} FMHA kernel.")
 
@@ -152,6 +208,7 @@ def _xfail_broken_mxfp4_v(backend_name, sequence_length):
         "AITER_BF16FP8",
         "AITER_MXFP8",
         "AITER_F8F6",
+        "AITER_F6F6",
         "AITER_F6F4",
         "AITER_MXFP4",
         "AITER_F4F4",
@@ -188,6 +245,7 @@ def test_aiter_mixed_attention_matches_sdpa(backend_name, sequence_length):
         "AITER_BF16FP8",
         "AITER_MXFP8",
         "AITER_F8F6",
+        "AITER_F6F6",
         "AITER_F6F4",
         "AITER_MXFP4",
         "AITER_F4F4",
@@ -268,6 +326,7 @@ def test_aiter_mxfp8_gqa_compiles_and_matches_sdpa():
         "AITER_BF16FP8",
         "AITER_MXFP8",
         "AITER_F8F6",
+        "AITER_F6F6",
         "AITER_F6F4",
         "AITER_MXFP4",
         "AITER_F4F4",
@@ -297,6 +356,7 @@ def test_aiter_mixed_attention_unequal_sequence_lengths(backend_name):
         "AITER_MXFP8",
         "AITER_F8F6",
         "AITER_MXFP6",
+        "AITER_F6F6",
         "AITER_MXFP4",
     ],
 )
@@ -435,6 +495,7 @@ def test_mha_v4_refuses_several_packed_sequences():
         "AITER_BF16FP8",
         "AITER_MXFP8",
         "AITER_F8F6",
+        "AITER_F6F6",
         "AITER_F6F4",
         "AITER_MXFP4",
         "AITER_F4F4",

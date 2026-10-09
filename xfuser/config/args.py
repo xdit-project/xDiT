@@ -12,6 +12,11 @@ import torch.distributed
 
 from xfuser.logger import init_logger
 from xfuser.core.distributed import init_distributed_environment
+from xfuser.config.attention_a2a import (
+    ATTENTION_A2A_HADAMARD_PLACEMENTS,
+    ATTENTION_A2A_PROFILES,
+    AttentionA2AConfig,
+)
 from xfuser.config.gemm import (
     GemmQuantizationSpec,
     load_gemm_config,
@@ -157,6 +162,31 @@ def _add_gemm_profile_args(parser) -> None:
     )
 
 
+def _add_attention_a2a_args(parser) -> None:
+    parser.add_argument(
+        "--attention_a2a",
+        choices=ATTENTION_A2A_PROFILES,
+        default="none",
+        help=(
+            "AITER Attention A2A input-hop profile. Explicit profiles require "
+            "and validate a matching --attention_backend; auto infers the "
+            "profile from the active backend, including hybrid schedules. "
+            "When Tier-2 async lowering is unavailable, xDiT uses the Tier-1 "
+            "ordered path; if neither path is supported, initialization fails "
+            "and this option must be disabled."
+        ),
+    )
+    parser.add_argument(
+        "--attention_a2a_hadamard",
+        choices=ATTENTION_A2A_HADAMARD_PLACEMENTS,
+        default="auto",
+        help=(
+            "Q/K Hadamard placement for Attention A2A. 'auto' uses the recipe "
+            "default (none for INT8, preprocess for the MX/FP8 profiles)."
+        ),
+    )
+
+
 @dataclass
 class xFuserArgs:
     """Arguments for xFuser engine."""
@@ -251,6 +281,8 @@ class xFuserArgs:
     use_fp8_comms: bool = False
     fp8_comms_scale: Optional[float] = None
     fp8_comms_safety_factor: float = DEFAULT_FP8_COMMS_SAFETY_FACTOR
+    attention_a2a: str = "none"
+    attention_a2a_hadamard: str = "auto"
     gemm_high_precision_targets: str = "model"
     gemm_high_precision_module_patterns: Optional[str] = None
     gemm_high_precision_prefix_patterns: Optional[str] = None
@@ -325,6 +357,7 @@ class xFuserArgs:
         self.determinism_check_report_ranks = _normalize_determinism_check_report_ranks(
             self.determinism_check_report_ranks
         )
+        self._resolve_attention_a2a()
         if self.profile_with_stack and not self.profile:
             logger.warning("--profile_with_stack has no effect without --profile; no profiles will be outputted.")
         if self.fully_shard_components is not None:
@@ -349,6 +382,61 @@ class xFuserArgs:
                     stacklevel=2,
                 )
                 self.cache_method = "teacache"
+
+    def _resolve_attention_a2a(self) -> None:
+        config = AttentionA2AConfig(
+            profile=self.attention_a2a,
+            hadamard=self.attention_a2a_hadamard,
+        )
+        self.attention_a2a = config.profile
+        self.attention_a2a_hadamard = config.hadamard
+        if not config.enabled:
+            return
+        if self.use_hybrid_attn_schedule:
+            if not config.is_auto:
+                raise ValueError(
+                    "hybrid attention requires --attention_a2a auto so the A2A "
+                    "recipe can follow each scheduled attention backend"
+                )
+            scheduled = []
+            if self.hybrid_attn_schedule:
+                scheduled.extend(self.hybrid_attn_schedule.split(","))
+            else:
+                scheduled.extend(
+                    backend
+                    for backend in (
+                        self.hybrid_attn_low_precision_backend,
+                        self.hybrid_attn_high_precision_backend,
+                    )
+                    if backend is not None
+                )
+            for backend in scheduled:
+                config.resolve_for_backend(backend)
+        elif config.is_auto:
+            if self.attention_backend is None:
+                raise ValueError(
+                    "--attention_a2a auto requires --attention_backend outside a hybrid attention schedule"
+                )
+            config.resolve_for_backend(self.attention_backend)
+        elif self.attention_backend is None:
+            raise ValueError(
+                f"--attention_a2a {config.profile} requires an explicit --attention_backend {config.attention_backend}"
+            )
+        else:
+            config.resolve_for_backend(self.attention_backend)
+        if self.use_fp8_comms:
+            raise ValueError("--attention_a2a and --use_fp8_comms are mutually exclusive")
+        if self.ulysses_degree not in (2, 4, 8):
+            raise ValueError("--attention_a2a requires --ulysses_degree 2, 4, or 8")
+        effective_batch = (
+            self.batch_size if self.batch_size is not None else len(self.prompt) if isinstance(self.prompt, list) else 1
+        )
+        if effective_batch != 1:
+            raise ValueError("--attention_a2a currently requires batch size 1")
+        if self.ring_degree != 1:
+            raise ValueError("--attention_a2a does not support ring parallelism")
+        if self.use_spargeattn_head_balance:
+            raise ValueError("--attention_a2a does not support Sparge head balancing")
 
     @property
     def gemm_quantization_spec(self) -> GemmQuantizationSpec:
@@ -519,6 +607,7 @@ class xFuserArgs:
             default=None,
             help="Attention backend to use. If not specified, the best available backend will be selected automatically.",
         )
+        _add_attention_a2a_args(runtime_group)
         # Parallel arguments
         parallel_group = parser.add_argument_group("Parallel Processing Options")
         runtime_group.add_argument(
@@ -828,6 +917,7 @@ class xFuserArgs:
             default=None,
             help="Attention backend to use for cross-attention. If not specified, falls back to --attention_backend.",
         )
+        _add_attention_a2a_args(parser)
         parser.add_argument(
             "--use_cfg_parallel",
             action="store_true",
@@ -1530,6 +1620,10 @@ class xFuserArgs:
             use_fp8_comms=self.use_fp8_comms,
             fp8_comms_scale=self.fp8_comms_scale,
             fp8_comms_safety_factor=self.fp8_comms_safety_factor,
+            attention_a2a=AttentionA2AConfig(
+                profile=self.attention_a2a,
+                hadamard=self.attention_a2a_hadamard,
+            ),
         )
 
         parallel_config = ParallelConfig(

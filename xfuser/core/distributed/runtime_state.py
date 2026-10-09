@@ -98,6 +98,14 @@ class RuntimeState(metaclass=ABCMeta):
         self._check_distributed_env(config.parallel_config)
         attention_backend = self._select_attention_backend(config)
         self.set_attention_backend(attention_backend)
+        from xfuser.model_executor.layers.fused_a2a_integration import (
+            configure_attention_a2a,
+        )
+
+        configure_attention_a2a(
+            self.runtime_config.attention_a2a,
+            self.attention_backend,
+        )
         cross_attention_backend = self._select_cross_attention_backend(config)
         self.set_cross_attention_backend(cross_attention_backend)
         self.fp8_comms = Fp8CommsState.from_config(config)
@@ -127,6 +135,11 @@ class RuntimeState(metaclass=ABCMeta):
             )
 
     def destroy_distributed_env(self):
+        from xfuser.model_executor.layers.fused_a2a_integration import (
+            shutdown_attention_a2a,
+        )
+
+        shutdown_attention_a2a()
         if model_parallel_is_initialized():
             destroy_model_parallel()
         destroy_distributed_environment()
@@ -460,6 +473,11 @@ class DiTRuntimeState(RuntimeState):
         current_step = self.step_counter
         if self.attention_schedule is not None:
             self.attention_backend = self.attention_schedule.get_backend(current_step)
+            from xfuser.model_executor.layers.fused_a2a_integration import (
+                activate_attention_a2a_backend,
+            )
+
+            activate_attention_a2a_backend(self.attention_backend)
         if self.gemm_schedule is not None:
             self.use_high_precision_gemm = self.gemm_schedule.is_high_precision(current_step)
 
@@ -479,6 +497,8 @@ class DiTRuntimeState(RuntimeState):
         """
         for backend in set(attention_schedule.backends):
             self._check_if_backend_compatible_with_current_configuration(backend)
+            if self.runtime_config.attention_a2a.enabled:
+                self.runtime_config.attention_a2a.resolve_for_backend(backend)
         self.attention_schedule = attention_schedule
         self.schedule_total_steps = torch.tensor(total_steps, dtype=torch.int)
         self.step_counter = torch.tensor(0, dtype=torch.int)

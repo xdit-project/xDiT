@@ -3,13 +3,17 @@ present and its enums can be translated once here rather than per call."""
 
 import torch
 
+from aiter import dtypes
 from aiter.ops.mha_v4 import (
     AttentionFormat,
+    AttentionPack,
     AttentionScaleMode,
     mha_v4,
+    mha_v4_packed,
     native_fp8_format,
 )
 
+from xfuser.config.attention_a2a import AttentionA2AConfig
 from xfuser.core.attention.numerics.layout import (
     from_bshd,
     make_contiguous,
@@ -29,6 +33,19 @@ from .spec import Fmt, MhaV4Format, Scale
 FORMAT = {f: getattr(AttentionFormat, f.name) for f in Fmt if f is not Fmt.NATIVE_FP8}
 FORMAT[Fmt.NATIVE_FP8] = native_fp8_format()
 SCALE = {s: getattr(AttentionScaleMode, s.name) for s in Scale}
+_PACKED_FORMAT = {
+    "bf16": AttentionFormat.BF16,
+    "int8": AttentionFormat.INT8,
+    "e4m3": FORMAT[Fmt.NATIVE_FP8],
+    "mxfp8": FORMAT[Fmt.NATIVE_FP8],
+    "mxfp4": AttentionFormat.MXFP4,
+    "mxfp6": AttentionFormat.MXFP6,
+}
+_PACKED_SCALE = {
+    "f32_per_tensor": AttentionScaleMode.F32_PER_TENSOR,
+    "f32_per_channel": AttentionScaleMode.F32_PER_CHANNEL,
+    "e8m0_per_1x32": AttentionScaleMode.E8M0_PER_1X32,
+}
 
 
 def _read_kv_tile() -> int:
@@ -66,6 +83,56 @@ def _launch(q, k, v, fmt: MhaV4Format, block_mask=None, seqlens_k=None, return_l
     qk = FORMAT[fmt.qk]
     result = mha_v4(q, k, v, qk, qk, FORMAT[fmt.v], block_mask=block_mask, **kwargs)
     return result if return_lse else (result, None)
+
+
+def mha_v4_attention_a2a_packed(
+    q,
+    k,
+    v,
+    q_scale,
+    k_scale,
+    v_scale,
+    profile: str,
+    softmax_scale: float,
+):
+    """Launch MHA v4 over Attention A2A's pre-quantized public buffers.
+
+    This deliberately remains a normal Python function. Inductor traces through
+    the static recipe selection and tensor views down to AITER's kernel custom
+    op, matching the pre-quantized path on main.
+    """
+    config = AttentionA2AConfig(profile=profile)
+    qk_codec, _, v_codec = config.consumer_codecs
+    qk_format = _PACKED_FORMAT[qk_codec]
+    v_format = _PACKED_FORMAT[v_codec]
+
+    if qk_codec == "int8":
+        q = q.view(torch.int8)
+        k = k.view(torch.int8)
+    elif qk_codec in ("e4m3", "mxfp8"):
+        q = q.view(dtypes.fp8)
+        k = k.view(dtypes.fp8)
+    if v_codec in ("e4m3", "mxfp8"):
+        v = v.view(dtypes.fp8)
+
+    q_scale_mode, k_scale_mode, v_scale_mode = tuple(_PACKED_SCALE[mode] for mode in config.scale_modes)
+    v_pack = AttentionPack.V_FOR_FP6_P if config.v_pack == "fp6_p" else AttentionPack.DEFAULT
+    return mha_v4_packed(
+        q,
+        k,
+        v,
+        q_scale,
+        k_scale,
+        v_scale,
+        qk_format,
+        qk_format,
+        v_format,
+        q_scale_mode,
+        k_scale_mode,
+        v_scale_mode,
+        v_pack=v_pack,
+        softmax_scale=softmax_scale,
+    )
 
 
 def _shorten_keys(key, value, call: AttnCall, fmt: MhaV4Format):

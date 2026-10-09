@@ -191,6 +191,61 @@ For startup adapter fusion on FLUX.1-dev, see [LoRA support and limitations](lor
 | `--group_offload_low_cpu_mem` | With `--enable_group_cpu_offload`, pin each tensor as it is offloaded rather than pre-pinning whole components. Keeps host RAM flat at the cost of some of the streaming speedup | False |
 | `--attention_backend` | Attention backend selection | None |
 
+### Quantized Attention A2A
+
+Wan2.2 T2V can replace the Ulysses input RCCL all-to-all with AITER's
+intranode Attention A2A transport. The output hop remains RCCL.
+
+```bash
+xdit \
+    --model Wan-AI/Wan2.2-T2V-A14B-Diffusers \
+    --ulysses_degree 8 \
+    --attention_backend aiter_fp8 \
+    --attention_a2a auto \
+    --use_torch_compile \
+    --prompt "A motorcycle cruising along a coastal highway"
+```
+
+`--attention_a2a auto` selects the transport recipe from the dense attention
+backend. Explicit profiles are also available:
+
+- `aiter_fp8` uses `e4m3-e4m3`.
+- `aiter_i8fp8` uses `int8-e4m3`.
+- `aiter_mxfp8` uses `mxfp8-e4m3`.
+- `aiter_f8f6` uses `e4m3-mxfp6`.
+- `aiter_mxfp6` uses `mxfp6-e4m3`.
+- `aiter_f6f6` uses `mxfp6-mxfp6`.
+- `aiter_f6f4` uses `mxfp6-mxfp4`.
+- `aiter_mxfp4` and `aiter_f4f4` use `mxfp4-mxfp4`.
+
+`--attention_a2a_hadamard auto` applies each recipe's validated placement.
+It can be overridden with `preprocess`, `transport`, `epilogue`, or `none`.
+
+For `aiter_f6f6`, `aiter_f6f4`, `aiter_mxfp4`, and `aiter_f4f4`, xDiT
+passes the unpadded K/V length to AITER so it emits compact packed K/V
+directly while retaining padded Q when padding is confined to the final rank's
+input shard. Profiles with sequence-wide K or V scales, and shapes whose
+padding spans multiple rank shards, use xDiT's existing post-transport
+trimming fallback.
+
+The feature requires AITER's public `AttentionA2AIntraNodeOp` per-role packed
+result API, MORI SHMEM, batch size one, intranode Ulysses degree 2, 4, or 8,
+head dimension 128, and no ring parallelism or Sparge head balancing. MX
+profiles require gfx950. Initialization collectively checks every rank for
+these requirements before symmetric allocation; MORI is not imported when the
+feature is disabled.
+
+On compatible Torch builds xDiT uses the Tier-2 asynchronous Inductor
+collective/wait lowering. If that private contract is unavailable it falls
+back to the Tier-1 ordered custom-op path. If neither path is supported,
+initialization fails and the run must disable the feature with
+`--attention_a2a none`.
+
+FP6-P profiles currently pad each rank's transport input to a multiple of 64.
+This is an empirical mitigation for a known AITER MHA-v4 race, not a transport
+correctness guarantee, and should be revisited when the upstream race is
+fixed.
+
 ### Loading and Quantization Contract
 
 The quantization flags select model-declared linear-layer targets; they do not quantize every pipeline component. Unless noted below, the VAE and untargeted text encoders retain the pipeline dtype.

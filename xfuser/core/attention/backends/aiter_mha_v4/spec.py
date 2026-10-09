@@ -93,6 +93,7 @@ class MhaV4Format:
     qk_scale: Optional[Scale] = None
     v_scale: Optional[Scale] = None
     dense: bool = True  # False = sparge variant only
+    dense_on: Requirement = GFX950_OR_GFX942
 
     @property
     def is_mxfp8(self) -> bool:
@@ -112,6 +113,7 @@ FORMATS = [
     MhaV4Format("I8FP8",     Fmt.INT8,        Fmt.NATIVE_FP8,  GFX950_OR_GFX942),
     MhaV4Format("F8F6",      Fmt.NATIVE_FP8,  Fmt.MXFP6,       GFX950),
     MhaV4Format("MXFP6",     Fmt.MXFP6,       Fmt.NATIVE_FP8,  GFX950),
+    MhaV4Format("F6F6",      Fmt.MXFP6,       Fmt.MXFP6, dense_on=GFX950),
     MhaV4Format("F6F4",      Fmt.MXFP6,       Fmt.MXFP4,       GFX950),
     # MXFP4 Q/K with FP8 V is not a row AITER has; it rejects the combination.
     MhaV4Format("MXFP4",     Fmt.MXFP4,       Fmt.MXFP4,       GFX950),
@@ -160,7 +162,7 @@ def _dense_spec(fmt: MhaV4Format) -> Spec:
         # LSE -- on a ring run that would hand the merge a partial from the
         # 128-wide blocks and nothing from the rest.
         fallback=AttentionBackendType.AITER,
-        requires=SYMBOL(_MHA_V4) & GFX950_OR_GFX942 & _scale_modes(fmt),
+        requires=SYMBOL(_MHA_V4) & fmt.dense_on & _scale_modes(fmt),
     )
 
 

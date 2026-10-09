@@ -54,6 +54,8 @@ class xFuserPrismModel(xFuserModel):
     min_diffusers_version = "0.33.0"
     checkpoint_subfolder = "preview_alpha"
     attention_head_dims = frozenset({128})
+    # Ulysses splits the video tower's heads; the 12 audio heads are zero-padded instead.
+    attention_heads = _VIDEO_HEADS
 
     capabilities = ModelCapabilities(
         ulysses_degree=True,
@@ -100,13 +102,6 @@ class xFuserPrismModel(xFuserModel):
 
     def _validate_config(self, config) -> None:
         super()._validate_config(config)
-        ulysses_degree = config.ulysses_degree or 1
-        if _VIDEO_HEADS % ulysses_degree:
-            valid = [d for d in range(1, _VIDEO_HEADS + 1) if _VIDEO_HEADS % d == 0]
-            raise ValueError(
-                f"Prism's video tower has {_VIDEO_HEADS} attention heads, which Ulysses splits across ranks: "
-                f"--ulysses_degree must divide {_VIDEO_HEADS} (one of {valid}), got {ulysses_degree}."
-            )
         if config.enable_model_cpu_offload or config.enable_sequential_cpu_offload or config.enable_group_cpu_offload:
             raise ValueError("Prism does not support CPU offloading.")
         if config.batch_size is not None or config.dataset_path is not None:

@@ -88,6 +88,9 @@ def _build_attention_kwargs(config: "xFuserArgs") -> dict:
 class xFuserWanModel(xFuserModel):
     """Common lifecycle hooks for Wan runners."""
 
+    # Every 14B and A14B Wan transformer; runners for other sizes override it.
+    attention_heads = 40
+
     def prepare_run(self, input_args: dict) -> None:
         super().prepare_run(input_args)
         get_runtime_state().reset_vsa_schedule_state(int(input_args["num_inference_steps"]))
@@ -512,8 +515,8 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
             transformer = xFuserWanTransformer3DWrapper.from_pretrained(
                 pretrained_model_name_or_path=self._BASE_MODEL,
                 torch_dtype=torch.bfloat16,
-                subfolder=component_name,
                 low_cpu_mem_usage=True,
+                **self.loader.checkpoint_request(component_name).from_pretrained_kwargs(),
                 **init_kwargs,
             )
             _load_distilled_weights(transformer, path)
@@ -767,18 +770,6 @@ class xFuserWan21T2V1_3BModel(xFuserWan21T2VModel):
         # 30 blocks of this checkpoint.
         self.settings.fp8_precision_overrides = tuple(f"{i}." for i in (*range(10), *range(20, 30)))
 
-    def _validate_config(self, config: xFuserArgs) -> None:
-        super()._validate_config(config)
-        heads = self.attention_heads
-        ulysses_degree = config.ulysses_degree or 1
-        if heads % ulysses_degree != 0:
-            divisors = ", ".join(str(d) for d in range(1, heads + 1) if heads % d == 0)
-            raise ValueError(
-                f"Wan2.1-T2V-1.3B has {heads} attention heads, so --ulysses_degree must "
-                f"divide {heads} ({divisors}); got {ulysses_degree}. Use --ring_degree "
-                f"to scale sequence parallelism further."
-            )
-
 
 @register_model("Wan-AI/Wan2.2-T2V-A14B-Diffusers")
 @register_model("Wan2.2-T2V")
@@ -887,6 +878,8 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
 @register_model("Wan-AI/Wan2.2-TI2V-5B-Diffusers")
 @register_model("Wan2.2-TI2V")
 class xFuserWan22TI2VModel(xFuserWan21T2VModel):
+    attention_heads = 24
+
     load_support = LoadSupport(
         meta_transformers=("transformer",),
         meta_text_encoders=("text_encoder",),
@@ -1103,6 +1096,7 @@ class xFuserWan21VACEModel(xFuserWanModel):
         else:
             self.settings.model_name = "Wan-AI/Wan2.1-VACE-1.3B-diffusers"
             self.settings.output_name = "wan.2.1_vace_1.3b"
+            self.attention_heads = 12
         # Only cache `blocks`; vace_blocks have a different forward pattern not supported by cache-dit.
         self.settings.step_cache_config = {
             "dbcache": DBCacheSettings(
@@ -1129,8 +1123,16 @@ class xFuserWan21VACEModel(xFuserWanModel):
             quantization_config=te_quant,
             **te_kwargs,
         )
-        pipe.scheduler.flow_shift = 5.0  # 5.0 for 720p, 3.0 for 480p
         return pipe
+
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        # The checkpoints' scheduler carries the 480p shift, 3.0; Wan samples 720p with 5.0.
+        flow_shift = input_args.get("flow_shift")
+        if flow_shift is None and input_args["height"] * input_args["width"] >= 720 * 1280:
+            flow_shift = 5.0
+        if flow_shift is not None:
+            self.pipe.scheduler.config.flow_shift = flow_shift
 
     def _prepare_video_and_mask(
         self, first_img: Image, last_img: Image, height: int, width: int, num_frames: int

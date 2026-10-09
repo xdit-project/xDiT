@@ -341,6 +341,9 @@ class DiTRuntimeState(RuntimeState):
     max_condition_sequence_length: int
     split_text_embed_in_sp: bool
     text_embed_sp_pad: int
+    # Class-level default so states built without __init__ (as some tests do) can still
+    # call set_input_parameters.
+    split_latents_by_rows: bool = True
 
     def __init__(self, pipeline: DiffusionPipeline, config: EngineConfig):
         self.attention_schedule: Optional[AttentionSchedule] = None
@@ -352,7 +355,6 @@ class DiTRuntimeState(RuntimeState):
         self._vsa_denoising_step = -1
         self._vsa_last_timestep: Optional[float] = None
         self._vsa_num_steps: Optional[int] = None
-        self.split_latents_by_rows = True
         super().__init__(config)
         self.patch_mode = False
         self.pipeline_patch_idx = 0
@@ -924,9 +926,10 @@ class DiTRuntimeState(RuntimeState):
         get_pp_group().reset_buffer()
         get_pp_group().set_config(dtype=self.runtime_config.dtype)
 
-    def _reset_recv_skip_buffer(self, num_blocks_per_stage):
-        batch_size = self.input_config.batch_size
-        batch_size = batch_size * (2 // self.parallel_config.cfg_degree)
+    def _reset_recv_skip_buffer(self, num_blocks_per_stage, num_images_per_prompt=1, classifier_free_guidance=True):
+        batch_size = self.input_config.batch_size * num_images_per_prompt
+        if classifier_free_guidance:
+            batch_size = batch_size * (2 // self.parallel_config.cfg_degree)
         hidden_dim = self.backbone_inner_dim
         num_patches_tokens = [end - start for start, end in self.pp_patches_token_start_end_idx_global]
         patches_shape = [[num_blocks_per_stage, batch_size, tokens, hidden_dim] for tokens in num_patches_tokens]

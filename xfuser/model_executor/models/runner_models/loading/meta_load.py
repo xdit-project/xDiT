@@ -1932,6 +1932,8 @@ class _BlockwiseDiskFiller:
                 for block in rgetattr(comp, attr[:-1]):
                     if hasattr(block, "_xfuser_checkpoint_fqn"):
                         delattr(block, "_xfuser_checkpoint_fqn")
+                    if hasattr(block, "_xfuser_checkpoint_block_index"):
+                        delattr(block, "_xfuser_checkpoint_block_index")
         self._release_handles()
         # Before the drop, not after: a prefetch still streaming would put back the cache this is
         # about to release. Joining here rather than in _release_handles is what keeps the prefetch

@@ -320,6 +320,13 @@ class xFuserFP8BlockScaleLinear(nn.Module):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         original_shape = input.shape
         x = input.reshape(-1, self.in_features)
+        if x.dtype not in (torch.bfloat16, torch.float16):
+            compute_dtype = (
+                self._compute_dtype
+                if self._compute_dtype in (torch.bfloat16, torch.float16)
+                else torch.bfloat16
+            )
+            x = x.to(compute_dtype)
         weight_fp8, weight_scale = self._gemm_operands(x)
         if self.preshuffle:
             k_padded = ((self.in_features + _FP8_BLOCK - 1) // _FP8_BLOCK) * _FP8_BLOCK

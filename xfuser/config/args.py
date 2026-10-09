@@ -330,6 +330,19 @@ class xFuserArgs:
         self.determinism_check_report_ranks = _normalize_determinism_check_report_ranks(
             self.determinism_check_report_ranks
         )
+        if self.warmup_steps < 0:
+            raise ValueError("--warmup_steps must be greater than or equal to 0")
+        if self.num_pipeline_patch is not None and self.num_pipeline_patch < 1:
+            raise ValueError("--num_pipeline_patch must be greater than 0")
+        if self.attn_layer_num_for_pp is not None:
+            if len(self.attn_layer_num_for_pp) != self.pipefusion_parallel_degree:
+                raise ValueError(
+                    "--attn_layer_num_for_pp must contain one entry per PipeFusion stage"
+                )
+            if any(layer_count < 1 for layer_count in self.attn_layer_num_for_pp):
+                raise ValueError(
+                    "--attn_layer_num_for_pp entries must be greater than 0"
+                )
         if self.profile_with_stack and not self.profile:
             logger.warning("--profile_with_stack has no effect without --profile; no profiles will be outputted.")
         if self.fully_shard_components is not None:
@@ -338,6 +351,16 @@ class xFuserArgs:
                 raise ValueError("--fully_shard_components requires at least one component")
             if self.fully_shard_degree <= 1:
                 raise ValueError("--fully_shard_components requires --fully_shard_degree greater than 1")
+        if (
+            self.pipefusion_parallel_degree > 1
+            and self.fully_shard_degree > 1
+            and self.fully_shard_components is None
+        ):
+            raise ValueError(
+                "Full-transformer FSDP cannot be combined with PipeFusion because pipeline stages "
+                "own different transformer blocks. Select replicated components explicitly with "
+                "--fully_shard_components."
+            )
         self._resolve_gemm_quantization()
         if self.cache_method is None:
             if self.use_fbcache:
@@ -354,6 +377,11 @@ class xFuserArgs:
                     stacklevel=2,
                 )
                 self.cache_method = "teacache"
+        if self.pipefusion_parallel_degree > 1 and self.cache_method is not None:
+            raise ValueError(
+                "Step caching is not supported with PipeFusion yet; it requires per-patch histories "
+                "and synchronized cache decisions."
+            )
 
     @property
     def gemm_quantization_spec(self) -> GemmQuantizationSpec:
@@ -856,6 +884,25 @@ class xFuserArgs:
             type=int,
             default=1,
             help="Pipefusion parallel degree. Indicates the number of pipeline stages.",
+        )
+        parser.add_argument(
+            "--num_pipeline_patch",
+            type=int,
+            default=None,
+            help="Number of patches used by the PipeFusion schedule. Defaults to the pipeline degree.",
+        )
+        parser.add_argument(
+            "--attn_layer_num_for_pp",
+            default=None,
+            nargs="*",
+            type=int,
+            help="Number of transformer layers assigned to each PipeFusion stage.",
+        )
+        parser.add_argument(
+            "--warmup_steps",
+            type=int,
+            default=1,
+            help="Number of synchronous denoising steps before the asynchronous PipeFusion schedule.",
         )
         parser.add_argument(
             "--tensor_parallel_degree",

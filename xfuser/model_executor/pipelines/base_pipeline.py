@@ -1,7 +1,7 @@
 from abc import ABCMeta, abstractmethod
 from functools import wraps
 from xfuser.compat import version_at_least
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import sys
 import torch
 import torch.distributed
@@ -24,6 +24,7 @@ from xfuser.core.distributed import (
     get_pipeline_parallel_world_size,
     get_classifier_free_guidance_world_size,
     get_classifier_free_guidance_rank,
+    get_sp_group,
     is_pipeline_first_stage,
     is_pipeline_last_stage,
     get_pp_group,
@@ -45,6 +46,7 @@ from xfuser.core.fast_attention import (
     fast_attention_compression,
 )
 from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
+from xfuser.model_executor.pipefusion import pipefusion_should_update_progress
 
 from xfuser.envs import PACKAGES_CHECKER
 
@@ -197,7 +199,10 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         if vae is not None and engine_config.runtime_config.use_parallel_vae:
             if engine_config.parallel_config.vae_parallel_size > 0:
                 pipeline.vae.to("cpu")  # VAE is not executed in the current worker
-            elif not self.use_naive_forward():
+            elif (
+                not self.use_naive_forward()
+                and not engine_config.runtime_config.runner_managed_parallel_vae
+            ):
                 pipeline.vae = self._convert_vae(vae)
 
         super().__init__(module=pipeline)
@@ -448,9 +453,10 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
                     cache_config=cache_config,
                 )
         self.original_transformer = transformer
-        if enable_torch_compile or enable_onediff:
+        defer_torch_compile = self.engine_config.runtime_config.runner_managed_torch_compile
+        if (enable_torch_compile and not defer_torch_compile) or enable_onediff:
             if getattr(transformer, "forward") is not None:
-                if enable_torch_compile:
+                if enable_torch_compile and not defer_torch_compile:
                     if "flash_attn" in sys.modules:
                         import flash_attn
 
@@ -540,63 +546,121 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         num_timesteps: int,
         latents: torch.Tensor,
         num_pipeline_warmup_steps: int,
+        *,
+        split_sizes: Optional[Sequence[int]] = None,
+        split_dim: int = 2,
+        recv_segments: Tuple[str, ...] = (),
+        queue_receives: bool = True,
+        appended_latents: Optional[torch.Tensor] = None,
     ):
-        get_runtime_state().set_patched_mode(patch_mode=True)
+        state = get_runtime_state()
+        state.set_patched_mode(patch_mode=True)
+        split_sizes = split_sizes or state.pp_patches_height
 
         if is_pipeline_first_stage():
             # get latents computed in warmup stage
             # ignore latents after the last timestep
             latents = get_pp_group().pipeline_recv() if num_pipeline_warmup_steps > 0 else latents
-            patch_latents = list(latents.split(get_runtime_state().pp_patches_height, dim=2))
+            if appended_latents is not None:
+                latents = torch.cat((latents, appended_latents.to(latents)), dim=split_dim)
+            patch_latents = list(latents.split(split_sizes, dim=split_dim))
         elif is_pipeline_last_stage():
-            patch_latents = list(latents.split(get_runtime_state().pp_patches_height, dim=2))
+            if appended_latents is not None:
+                latents = torch.cat((latents, appended_latents.to(latents)), dim=split_dim)
+            patch_latents = list(latents.split(split_sizes, dim=split_dim))
         else:
-            patch_latents = [None for _ in range(get_runtime_state().num_pipeline_patch)]
+            patch_latents = [None for _ in range(state.num_pipeline_patch)]
 
-        recv_timesteps = num_timesteps - 1 if is_pipeline_first_stage() else num_timesteps
-        for _ in range(recv_timesteps):
-            for patch_idx in range(get_runtime_state().num_pipeline_patch):
-                get_pp_group().add_pipeline_recv_task(patch_idx)
+        if queue_receives:
+            recv_timesteps = num_timesteps - 1 if is_pipeline_first_stage() else num_timesteps
+            for _ in range(recv_timesteps):
+                if not is_pipeline_first_stage():
+                    for segment in recv_segments:
+                        get_pp_group().add_pipeline_recv_task(0, segment)
+                for patch_idx in range(state.num_pipeline_patch):
+                    get_pp_group().add_pipeline_recv_task(patch_idx)
 
         return patch_latents
 
-    def _async_pipeline_step_end(
-        self,
-        callback_on_step_end: Optional[Callable],
-        callback_on_step_end_tensor_inputs: List[str],
-        step: int,
-        t: torch.Tensor,
-        patch_latents: List[torch.Tensor],
-        *,
-        patch_dim: int,
-        step_tensors: Dict[str, torch.Tensor],
-    ) -> None:
-        """Run ``callback_on_step_end`` once per PipeFusion async step.
+    @staticmethod
+    def _validate_pipefusion_async_callback(callback_on_step_end) -> None:
+        if callback_on_step_end is not None:
+            raise NotImplementedError(
+                "callback_on_step_end is not supported during asynchronous "
+                "PipeFusion denoising because callback replacement and "
+                "interruption state cannot be applied consistently across stages."
+            )
 
-        Only the last pipeline stage holds denoised latents. By the end of a step it
-        has already sent every patch on to the next step, so the callback sees the
-        step's latents but cannot replace them. ``step_tensors`` holds the other
-        callback tensor inputs this pipeline's async loop can provide.
-        """
-        if callback_on_step_end is None or not is_pipeline_last_stage():
-            return
-        step_tensors = {**step_tensors, "latents": torch.cat(patch_latents, dim=patch_dim)}
-        missing = [k for k in callback_on_step_end_tensor_inputs if k not in step_tensors]
-        if missing:
-            raise ValueError(
-                f"callback_on_step_end_tensor_inputs {missing} are not available in the PipeFusion "
-                f"loop; available: {sorted(step_tensors)}"
-            )
-        callback_kwargs = {k: step_tensors[k] for k in callback_on_step_end_tensor_inputs}
-        callback_outputs = callback_on_step_end(self, step, t, callback_kwargs)
-        replaced = [
-            k for k, v in (callback_outputs or {}).items() if k in callback_kwargs and v is not callback_kwargs[k]
-        ]
-        if replaced:
-            logger.warning(
-                f"callback_on_step_end returned new {replaced}, which PipeFusion "
-                "cannot apply after a step has been sent; the values are ignored."
-            )
+    def _pipefusion_update_patch(self, _work, timestep, noise_pred, previous):
+        """Apply a scheduler step while preserving the model output dtype."""
+        output_dtype = noise_pred.dtype
+        updated = self._scheduler_step(noise_pred, previous, timestep)
+        if updated.dtype != output_dtype and torch.backends.mps.is_available():
+            updated = updated.to(output_dtype)
+        return updated
+
+    def _pipefusion_end_step(
+        self,
+        step_index: int,
+        timestep,
+        *,
+        num_async_steps: int,
+        pipeline_warmup_steps: int,
+        num_warmup_steps: int,
+        progress_bar,
+        mark_step_fn=None,
+    ) -> None:
+        """Update progress and optional XLA state after an async step."""
+        if pipefusion_should_update_progress(
+            step_index,
+            num_async_steps=num_async_steps,
+            pipeline_warmup_steps=pipeline_warmup_steps,
+            num_warmup_steps=num_warmup_steps,
+            scheduler_order=self.scheduler.order,
+        ):
+            progress_bar.update()
+        if mark_step_fn is not None:
+            mark_step_fn()
+
+    def _pipefusion_finalize_token_patches(self, *, patch_latents, state, layout=None):
+        """Assemble token patches and restore sequence-parallel ordering."""
+        if not is_pipeline_last_stage():
+            return None
+        if layout is not None and layout.reference_token_counts:
+            generated = [
+                patch.narrow(layout.split_dim, 0, layout.token_counts[index])
+                for index, patch in enumerate(patch_latents)
+                if layout.token_counts[index] > 0
+            ]
+            result = torch.cat(generated, dim=layout.split_dim)
+        else:
+            result = torch.cat(patch_latents, dim=-2)
+        if get_sequence_parallel_world_size() <= 1:
+            return result
+
+        sp_latents = get_sp_group().all_gather(result, separate_tensors=True)
+        ordered = []
+        for patch_index in range(state.num_pipeline_patch):
+            start = state.pp_patches_token_start_idx_local[patch_index]
+            end = state.pp_patches_token_start_idx_local[patch_index + 1]
+            ordered.extend(latents[..., start:end, :] for latents in sp_latents)
+        return torch.cat(ordered, dim=-2)
+
+    def _pipefusion_finalize_spatial_patches(self, *, patch_latents, state):
+        """Assemble spatial patches and restore sequence-parallel ordering."""
+        if not is_pipeline_last_stage():
+            return None
+        result = torch.cat(patch_latents, dim=2)
+        if get_sequence_parallel_world_size() <= 1:
+            return result
+
+        sp_latents = get_sp_group().all_gather(result, separate_tensors=True)
+        ordered = []
+        for patch_index in range(state.num_pipeline_patch):
+            start = state.pp_patches_start_idx_local[patch_index]
+            end = state.pp_patches_start_idx_local[patch_index + 1]
+            ordered.extend(latents[..., start:end, :] for latents in sp_latents)
+        return torch.cat(ordered, dim=-2)
 
     def _process_cfg_split_batch(
         self,
@@ -636,12 +700,21 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         else:
             return is_dp_last_group()
 
+    @staticmethod
+    def _release_transformer_kv_cache() -> None:
+        """Release denoiser-only patch state before allocating VAE activations."""
+        from xfuser.core.cache_manager.cache_manager import get_cache_manager
+
+        get_cache_manager().clear()
+        torch.cuda.empty_cache()
+
     def gather_latents_for_vae(self, latents: torch.Tensor):
         """gather latents from dp last group"""
         # Only gather if we're using parallel VAE and not using naive forward
         if not (get_runtime_state().runtime_config.use_parallel_vae and not self.use_naive_forward()):
             return latents
 
+        self._release_transformer_kv_cache()
         rank = get_world_group().rank
         device = get_device(get_world_group().local_rank)
         dit_parallel_size = get_dit_world_size()
@@ -691,6 +764,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
     def gather_broadcast_latents(self, latents: torch.Tensor):
         """gather latents from dp last group and broacast final latents"""
 
+        self._release_transformer_kv_cache()
         # ---------gather latents from dp last group-----------
         rank = get_world_group().rank
         device = get_device(get_world_group().local_rank)
@@ -704,18 +778,23 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         torch.distributed.all_gather(dp_rank_list, torch.tensor([gather_rank], dtype=int, device=device))
 
         dp_rank_list = [int(dp_rank[0]) for dp_rank in dp_rank_list if int(dp_rank[0]) != -1]
-        dp_last_group = self._get_dp_last_group(dp_rank_list)
-
-        # gather latents from dp last group
-        if rank == dp_rank_list[-1]:
-            latents_list = [torch.zeros_like(latents) for _ in dp_rank_list]
-        else:
-            latents_list = None
-        if rank in dp_rank_list:
-            torch.distributed.gather(latents, latents_list, dst=dp_rank_list[-1], group=dp_last_group)
-
-        if rank == dp_rank_list[-1]:
-            latents = torch.cat(latents_list, dim=0)
+        # Pure PipeFusion has exactly one output owner, so gathering to itself
+        # creates a redundant communicator and an avoidable full latent copy.
+        if len(dp_rank_list) > 1:
+            dp_last_group = self._get_dp_last_group(dp_rank_list)
+            if rank == dp_rank_list[-1]:
+                latents_list = [torch.zeros_like(latents) for _ in dp_rank_list]
+            else:
+                latents_list = None
+            if rank in dp_rank_list:
+                torch.distributed.gather(
+                    latents,
+                    latents_list,
+                    dst=dp_rank_list[-1],
+                    group=dp_last_group,
+                )
+            if rank == dp_rank_list[-1]:
+                latents = torch.cat(latents_list, dim=0)
 
         # ------broadcast latents to all nodes---------
         src = dp_rank_list[-1]
@@ -734,8 +813,10 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         get_world_group().broadcast(input_shape, src=src)
 
         # broadcast latents
+        dtype = get_runtime_state().runtime_config.dtype
+        if rank == src and latents.dtype != dtype:
+            latents = latents.to(dtype)
         if rank != src:
-            dtype = get_runtime_state().runtime_config.dtype
             latents = torch.zeros(torch.Size(input_shape), dtype=dtype, device=device)
         get_world_group().broadcast(latents, src=src)
 

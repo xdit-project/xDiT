@@ -91,6 +91,21 @@ def test_a_registered_renaming_is_applied_to_the_checkpoint_key():
     assert manifest.checkpoint_keys["layers.0.weight"] == "blocks.0.weight"
 
 
+def test_registered_renamings_are_chained_in_framework_order():
+    """Nested models can need both their outer and inner Transformers renamings."""
+    manifest, refusal = resolve(
+        Encoder(),
+        discovery("encoder.blocks.0.weight", "encoder.blocks.1.weight", "scale"),
+        conversions=[
+            Renaming(r"^encoder", "model.encoder"),
+            Renaming(r"^model\.encoder\.blocks", "layers"),
+        ],
+    )
+
+    assert refusal is None
+    assert manifest.checkpoint_keys["layers.0.weight"] == "encoder.blocks.0.weight"
+
+
 def test_a_non_persistent_buffer_is_not_required_from_the_checkpoint():
     """Rotary caches and the like are recomputed on forward and never stored."""
     manifest, refusal = resolve(Encoder(), discovery(*LIVE_KEYS))

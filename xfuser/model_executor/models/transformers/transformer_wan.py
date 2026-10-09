@@ -195,10 +195,21 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
 def _zero_sp_pad_rows_hook(sp_pad):
     """Forward hook keeping the SP pad rows of a block's output at zero.
 
-    The pad rows never reach real tokens once USP drops their keys, but what a
-    block writes there still enters statistics taken over the whole hidden state,
-    such as the step cache's residual difference. A hook rather than a line in
-    forward's loop, so it also runs when a step cache iterates the blocks itself.
+    The pad rows never reach real tokens' attention once USP drops their keys,
+    but what a block writes there still enters statistics taken across the
+    rows of whole local tensors, which then apply to the real rows:
+    - FP8-comms calibration: pad rows set the per-tensor V scale in some layers
+      (measured up to 1.5x coarser for every real token);
+    - the step cache's residual difference;
+    - cross-attention kernels that share a quantization scale across query
+      rows: Sage (256-row Q blocks) and AITER FP8 (one Q scale per tensor).
+    The list spans features and backends, so the zeroing is not gated on them;
+    missing one would fail silently. It only runs on a rank holding pad rows,
+    and costs nothing measurable: under torch.compile it fuses into the block's
+    last pointwise op, eagerly it is ~5 us per block.
+
+    A hook rather than a line in forward's loop, so it also runs when a step
+    cache iterates the blocks itself.
     """
 
     def hook(module, args, output):

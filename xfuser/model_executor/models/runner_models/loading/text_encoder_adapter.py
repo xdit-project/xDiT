@@ -215,12 +215,11 @@ def _alias_of(component, names):
 
 
 def _renamed_live_name(checkpoint_key, conversions):
-    """Apply the first matching Transformers renaming, as its loader does."""
+    """Apply Transformers' registered renamings in order, as its loader does."""
+    renamed = checkpoint_key
     for conversion in conversions:
-        renamed, matched = conversion.rename_source_key(checkpoint_key)
-        if matched is not None:
-            return renamed
-    return checkpoint_key
+        renamed, _ = conversion.rename_source_key(renamed)
+    return renamed
 
 
 def _candidate_live_names(checkpoint_key, conversions, prefix):

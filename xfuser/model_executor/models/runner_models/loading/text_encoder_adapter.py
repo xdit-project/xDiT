@@ -37,7 +37,7 @@ def probe_transformers_streaming_loader(
     except (ImportError, ModuleNotFoundError, ValueError) as exc:
         return TransformersStreamingSupport(
             False,
-            f"{_TRANSFORMERS_STREAMING_REQUIREMENT}: " f"{type(exc).__name__}: {exc}",
+            f"{_TRANSFORMERS_STREAMING_REQUIREMENT}: {type(exc).__name__}: {exc}",
         )
     return TransformersStreamingSupport(
         available,
@@ -98,9 +98,7 @@ class TextEncoderFrameworkAdapter:
         aiter_config_factory=None,
     ) -> None:
         self._pipeline_config_factory = pipeline_config_factory or _pipeline_config
-        self._torchao_config_factory = (
-            torchao_config_factory or _torchao_text_encoder_config
-        )
+        self._torchao_config_factory = torchao_config_factory or _torchao_text_encoder_config
         self._aiter_config_factory = aiter_config_factory or _aiter_text_encoder_config
 
     def component_quantization_config(
@@ -134,17 +132,13 @@ class TextEncoderFrameworkAdapter:
             prior = getattr(existing, "quant_mapping", None)
             if prior is None:
                 raise ValueError(
-                    "existing pipeline quantization config is not granular; "
-                    "cannot merge component mappings safely"
+                    "existing pipeline quantization config is not granular; cannot merge component mappings safely"
                 )
             mapping.update(prior)
         overlap = mapping.keys() & additions.keys()
         if overlap:
             names = ", ".join(sorted(overlap))
-            raise ValueError(
-                "refusing to overwrite existing pipeline quantization "
-                f"config for: {names}"
-            )
+            raise ValueError(f"refusing to overwrite existing pipeline quantization config for: {names}")
         mapping.update(additions)
         return self._pipeline_config_factory(mapping)
 
@@ -289,25 +283,17 @@ def resolve_transformers_manifest(component, request, *, discover=None, conversi
 
     mapping: dict[str, str] = {}
     for checkpoint_key in checkpoint_paths:
-        hits = [
-            name
-            for name in _candidate_live_names(checkpoint_key, conversions, prefix)
-            if name in live
-        ]
+        hits = [name for name in _candidate_live_names(checkpoint_key, conversions, prefix) if name in live]
         if not hits:
             return None, (
                 f"checkpoint key {checkpoint_key!r} matches no tensor in the component, "
                 f"so its layout needs more than a renaming"
             )
         if len(hits) > 1:
-            return None, (
-                f"checkpoint key {checkpoint_key!r} matches several tensors ({', '.join(hits)})"
-            )
+            return None, (f"checkpoint key {checkpoint_key!r} matches several tensors ({', '.join(hits)})")
         claimed = mapping.get(hits[0])
         if claimed is not None:
-            return None, (
-                f"checkpoint keys {claimed!r} and {checkpoint_key!r} both map to {hits[0]!r}"
-            )
+            return None, (f"checkpoint keys {claimed!r} and {checkpoint_key!r} both map to {hits[0]!r}")
         mapping[hits[0]] = checkpoint_key
 
     for name, target in _declared_ties(component).items():
@@ -321,10 +307,7 @@ def resolve_transformers_manifest(component, request, *, discover=None, conversi
     if unmapped:
         preview = ", ".join(unmapped[:3])
         suffix = f" (+{len(unmapped) - 3} more)" if len(unmapped) > 3 else ""
-        return None, (
-            f"{len(unmapped)} tensor(s) have no checkpoint key and no declared tie: "
-            f"{preview}{suffix}"
-        )
+        return None, (f"{len(unmapped)} tensor(s) have no checkpoint key and no declared tie: {preview}{suffix}")
     return (
         CheckpointManifest(
             weight_map={name: checkpoint_paths[key] for name, key in mapping.items()},

@@ -116,6 +116,7 @@ Individual model classes that inherit from `xFuserModel`:
 | FastH3 Preview v1 (Dense) | `FastH3-Dense`, `FastVideo/FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree` |
 | FastH3 V2 | `FastVideo/FastVideo-FastH3-8-Step-V2` |
 | Qwen-Image | `Qwen-Image`, `Qwen/Qwen-Image`, `Qwen-Image-2512`, `Qwen/Qwen-Image-2512` |
+| Qwen-Image-2.1 | `Qwen-Image-2.1`, `Qwen/Qwen-Image-2.1` |
 | Qwen-Image-Edit | `Qwen-Image-Edit`, `Qwen/Qwen-Image-Edit`, `Qwen-Image-Edit-2509`, `Qwen/Qwen-Image-Edit-2509`, `Qwen-Image-Edit-2511`, `Qwen/Qwen-Image-Edit-2511` |
 | SkyReels-V2 T2V | `SkyReels-V2-T2V-14B`, `Skywork/SkyReels-V2-T2V-14B-540P-Diffusers` |
 | SkyReels-V2 I2V | `SkyReels-V2-I2V-14B`, `SkyReels-V2-I2V-1.3B`, `Skywork/SkyReels-V2-I2V-14B-540P-Diffusers`, `Skywork/SkyReels-V2-I2V-1.3B-540P-Diffusers` |

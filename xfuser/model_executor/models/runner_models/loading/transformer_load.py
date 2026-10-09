@@ -22,7 +22,7 @@ from .blockwise_ownership import (
     record_blockwise_ownership,
 )
 from .checkpoint import CheckpointManifest, CheckpointRequest
-from .contracts import UnsupportedLoadContract
+from .contracts import UnsupportedLoadContract, uses_pipeline_stage_meta
 
 
 def build_transformer_structure(wrapper_cls, request: CheckpointRequest, init_kwargs):
@@ -150,6 +150,7 @@ def load_transformer(
     stream_quant: bool = True,
     checkpoint_request: CheckpointRequest | None = None,
     weight_source: CheckpointManifest | None = None,
+    torch_dtype: torch.dtype = torch.bfloat16,
 ):
     """Load a transformer through whichever materialization the run asked for.
 
@@ -177,7 +178,8 @@ def load_transformer(
         requested_fsdp_components is None or component_name in requested_fsdp_components
     )
     replicated_meta = False if fsdp_meta else loader.replicated_broadcast_load()
-    if fsdp_meta or replicated_meta:
+    pipeline_stage_meta = uses_pipeline_stage_meta(model.config)
+    if fsdp_meta or replicated_meta or pipeline_stage_meta:
         if adapter is not None:
             record_blockwise_ownership(
                 ledger,
@@ -188,7 +190,13 @@ def load_transformer(
                 blockwise_transformer_descriptor(adapter, component_name, targets, wrap_attrs),
                 **_fp4_remainder(loader, component_name),
             )
-        return loader.build_meta_transformer(wrapper_cls, request, init_kwargs, **build_kwargs)
+        return loader.build_meta_transformer(
+            wrapper_cls,
+            request,
+            init_kwargs,
+            torch_dtype=torch_dtype,
+            **build_kwargs,
+        )
 
     quantization_config = None
     if adapter is not None:
@@ -211,7 +219,13 @@ def load_transformer(
                 blockwise_transformer_descriptor(adapter, component_name, targets, wrap_attrs, local=True),
                 **_fp4_remainder(loader, component_name),
             )
-            component = loader.build_meta_transformer(wrapper_cls, request, init_kwargs, **build_kwargs)
+            component = loader.build_meta_transformer(
+                wrapper_cls,
+                request,
+                init_kwargs,
+                torch_dtype=torch_dtype,
+                **build_kwargs,
+            )
             loader.mark_local_blockwise(component)
             return component
         if weight_source is not None:
@@ -227,7 +241,7 @@ def load_transformer(
         load_kwargs.setdefault("device_map", native_quantization_device_map(model, adapter))
     return wrapper_cls.from_pretrained(
         request.model_name_or_path,
-        torch_dtype=torch.bfloat16,
+        torch_dtype=torch_dtype,
         quantization_config=quantization_config,
         **load_kwargs,
         **(init_kwargs or {}),

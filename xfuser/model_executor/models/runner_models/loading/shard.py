@@ -37,6 +37,18 @@ def shard_pipeline_components(loader) -> None:
             f"strategy: {sorted(unknown)}. Available components: "
             f"{sorted(strategy_components)}"
         )
+    stage_local = {
+        name
+        for name, component in model.pipe.components.items()
+        if loader.is_pipeline_stage_blockwise(component)
+    }
+    invalid_stage_shards = sharded_components & stage_local
+    if invalid_stage_shards:
+        raise ValueError(
+            "PipeFusion stage-local components cannot also be FSDP-wrapped: "
+            f"{sorted(invalid_stage_shards)}. Use --fully_shard_components "
+            "to select only replicated components."
+        )
     if requested is None:
         loader.fill_eager_transformers()
     else:

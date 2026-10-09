@@ -123,3 +123,27 @@ def test_targeted_fsdp_fills_excluded_meta_components_before_placement(
     assert kwargs["meta_init"] is True
     assert model.pipe.text_encoder.startswith("fsdp(")
     assert model.pipe.transformer is transformer
+
+
+def test_pipefusion_stage_local_component_cannot_be_fsdp_wrapped(monkeypatch):
+    transformer = _Component()
+    transformer._xfuser_pipeline_stage_partial = True
+    model = SimpleNamespace(
+        config=SimpleNamespace(fully_shard_components=["transformer"]),
+        settings=SimpleNamespace(
+            fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}}
+        ),
+        pipe=SimpleNamespace(components={"transformer": transformer}),
+    )
+    loader = object.__new__(meta_load.ModelLoader)
+    loader.model = model
+    loader._local_blockwise_transformers = {}
+    monkeypatch.setattr(shard, "get_world_group", lambda: SimpleNamespace(local_rank=0))
+    monkeypatch.setattr(
+        shard,
+        "get_fs_group",
+        lambda: SimpleNamespace(local_rank=0, device_group=object()),
+    )
+
+    with pytest.raises(ValueError, match="stage-local components cannot also be FSDP-wrapped"):
+        shard.shard_pipeline_components(loader)

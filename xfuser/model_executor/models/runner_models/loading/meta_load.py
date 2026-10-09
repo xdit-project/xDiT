@@ -524,12 +524,45 @@ class ModelLoader:
             raise RuntimeError("local blockwise transformer was not built on meta")
         self._local_blockwise_transformers[component] = True
 
+    def mark_pipeline_stage_blockwise(self, stage_component, source_component) -> None:
+        """Transfer a meta transformer's checkpoint source to its PP stage."""
+        source = self._blockwise_sources.pop(source_component, None)
+        if source is None:
+            raise RuntimeError("pipeline stage transformer was not built on meta")
+        self._blockwise_sources[stage_component] = source
+        self._local_blockwise_transformers[stage_component] = True
+        stage_component._xfuser_pipeline_stage_partial = True
+
     def load_transformer(self, wrapper_cls, **kwargs):
         """Route one transformer's weights onto the device (see transformer_load)."""
 
         from .transformer_load import load_transformer
 
         return load_transformer(self, wrapper_cls, **kwargs)
+
+    def plan_pipefusion_components(
+        self,
+        transformer_cls,
+        *,
+        torch_dtype: torch.dtype = torch.bfloat16,
+    ):
+        """Plan a stage-local transformer and replicated text components."""
+        if self.model.config.pipefusion_parallel_degree <= 1:
+            raise RuntimeError("PipeFusion component planning requires pipeline parallelism")
+        transformer = None
+        if self.model.config.memory_efficient_replicated_load:
+            transformer = self.load_transformer(
+                transformer_cls,
+                torch_dtype=torch_dtype,
+            )
+        text_kwargs, quantization_config = self.plan_text_encoders()
+        pipeline_kwargs = {
+            "quantization_config": quantization_config,
+            **text_kwargs,
+        }
+        if transformer is not None:
+            pipeline_kwargs["transformer"] = transformer
+        return transformer, pipeline_kwargs
 
     def plan_text_encoders(self, existing_quantization_config=None):
         """Plan each declared text encoder's quantization and fill (see text_encoder_plan)."""
@@ -574,6 +607,11 @@ class ModelLoader:
                 f"VRAM {torch.cuda.memory_allocated() / 1e9:.2f}GB"
             )
 
+    def is_pipeline_stage_blockwise(self, component) -> bool:
+        return component in self._local_blockwise_transformers or bool(
+            getattr(component, "_xfuser_pipeline_stage_partial", False)
+        )
+
     def build_meta_transformer(
         self,
         wrapper_cls,
@@ -582,6 +620,7 @@ class ModelLoader:
         *,
         subfolder: str | None = None,
         weight_source: CheckpointManifest | None = None,
+        torch_dtype: torch.dtype = torch.bfloat16,
     ):
         """Build the (diffusers) transformer wrapper on meta from its config only (no weights).
 
@@ -623,7 +662,7 @@ class ModelLoader:
             with init_empty_weights():
                 model = wrapper_cls.from_config(config, **(init_kwargs or {}))
             # Match the checkpoint dtype before disk fill and quantization.
-            cast_preserving_fp32_modules(model, torch.bfloat16)
+            cast_preserving_fp32_modules(model, torch_dtype)
             # from_config leaves nn.Module's training default; from_pretrained
             # ends with eval(), and only that path normally reaches inference.
             return model.eval()
@@ -1416,7 +1455,11 @@ class _BlockwiseDiskFiller:
         self._id2fqn: dict[int, str] = {}
         for attr in wrap_attrs:
             for idx, mod in enumerate(rgetattr(component, attr)):
-                self._id2fqn[id(mod)] = f"{attr}.{idx}"
+                self._id2fqn[id(mod)] = getattr(
+                    mod,
+                    "_xfuser_checkpoint_fqn",
+                    f"{attr}.{idx}",
+                )
 
     @contextmanager
     def _timed(self, phase: str):
@@ -1872,13 +1915,23 @@ class _BlockwiseDiskFiller:
             with self._timed("broadcast"):
                 self._broadcast_tensors([rgetattr(comp, name).data for name in tail + tail_bufs])
         self._retire_keys([self._ckpt_key(comp, name) for name in tail + tail_bufs])
-        if self.strict:
+        if self.strict and not getattr(
+            comp,
+            "_xfuser_pipeline_stage_partial",
+            False,
+        ):
             unused = sorted(set(self.weight_map) - self._used_keys)
             if unused:
                 preview = ", ".join(unused[:3])
                 suffix = f" (+{len(unused) - 3} more)" if len(unused) > 3 else ""
                 raise RuntimeError(f"unexpected checkpoint tensors in {self.subfolder}: {preview}{suffix}")
         self._retie_weights(comp)
+        if getattr(comp, "_xfuser_pipeline_stage_partial", False):
+            delattr(comp, "_xfuser_pipeline_stage_partial")
+            for attr in self._block_prefixes:
+                for block in rgetattr(comp, attr[:-1]):
+                    if hasattr(block, "_xfuser_checkpoint_fqn"):
+                        delattr(block, "_xfuser_checkpoint_fqn")
         self._release_handles()
         # Before the drop, not after: a prefetch still streaming would put back the cache this is
         # about to release. Joining here rather than in _release_handles is what keeps the prefetch

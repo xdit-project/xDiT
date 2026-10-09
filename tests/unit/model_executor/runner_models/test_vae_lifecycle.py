@@ -99,7 +99,7 @@ def test_initialize_sets_up_every_parallel_vae_before_enabling_options(
 
         def _load_model_checked(self):
             assert self.engine.runtime_config.runner_managed_parallel_vae is True
-            assert self.engine.runtime_config.runner_managed_torch_compile is True
+            assert self.engine.runtime_config.runner_managed_torch_compile is False
             return Pipe(first)
 
         def _get_runtime_state_pipeline(self):

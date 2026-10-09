@@ -476,7 +476,9 @@ class xFuserModel(abc.ABC):
         # Deferring prevents legacy pipeline wrappers from wrapping the same
         # VAE decoder or transformer forward a second time.
         self.engine_config.runtime_config.runner_managed_parallel_vae = True
-        self.engine_config.runtime_config.runner_managed_torch_compile = True
+        self.engine_config.runtime_config.runner_managed_torch_compile = (
+            getattr(self.config, "pipefusion_parallel_degree", 1) > 1
+        )
         log("Loading model pipeline...")
         self.pipe = self._load_model_checked()
 
@@ -949,7 +951,8 @@ class xFuserModel(abc.ABC):
         self._enable_compute_comm_overlap()
 
         mode = self._get_compile_mode()
-        dynamic = self._get_compile_dynamic(input_args)
+        pp_degree = getattr(self.config, "pipefusion_parallel_degree", 1)
+        dynamic = self._get_compile_dynamic(input_args) if pp_degree > 1 else self._get_compile_dynamic()
         component_names = self._get_compiled_pipe_components()
         requested_shards = getattr(
             self.config,
@@ -970,7 +973,7 @@ class xFuserModel(abc.ABC):
             compile_args["num_inference_steps"] = warmup_steps
 
         capture = None
-        if self.config.pipefusion_parallel_degree > 1 and runtime_state_is_initialized():
+        if pp_degree > 1 and runtime_state_is_initialized():
             replay_components = {
                 name: getattr(self.pipe, name)
                 for name in component_names
@@ -1003,7 +1006,7 @@ class xFuserModel(abc.ABC):
                 continue
             compile_kwargs = {"mode": mode, "dynamic": dynamic}
             is_sharded = component_is_sharded(component_name)
-            if self.config.pipefusion_parallel_degree > 1 and not is_sharded:
+            if pp_degree > 1 and not is_sharded:
                 # Keep the stage wrapper eager: it owns PipeFusion's mutable KV
                 # state and stage-boundary behavior. Compile only the retained
                 # local blocks, as step caching does, to avoid tracing one huge
@@ -1023,11 +1026,7 @@ class xFuserModel(abc.ABC):
                     self._mark_cudagraph_steps(component)
                 if not compiled_any:
                     component.forward = torch.compile(component.forward, **compile_kwargs)
-            elif (
-                is_sharded
-                or (self.config.cache_method and self.config.pipefusion_parallel_degree == 1)
-                or self._prefer_blockwise_compile()
-            ):
+            elif is_sharded or (self.config.cache_method and pp_degree == 1) or self._prefer_blockwise_compile():
                 # Per-block compile: leaves transformer as original object so cache-dit's
                 # transformer.forward patch remains visible during compiled execution.
                 wrap_attrs = self.settings.fsdp_strategy.get(component_name, {}).get("wrap_attrs", [])

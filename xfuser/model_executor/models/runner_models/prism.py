@@ -25,10 +25,15 @@ _VIDEO_HEADS = 40
 # Block shape Prism's block-sparse attention was trained and sampled with.
 _BSA_CHUNK_THW = (4, 4, 4)
 
-# Prism's sampler default (hymm/sample/sample_mova_single.py), the Wan negative prompt.
+# The English translation of Prism's sampler default (hymm/sample/sample_mova_single.py),
+# the first 17 terms of the Wan runners' list. Prism samples with the Chinese original,
+# "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，
+# JPEG压缩残留，丑陋的，残缺的，多余的手指"; pass it with --negative_prompt to reproduce the
+# reference exactly. Side by side at 480x848, 205 frames, both gave the same video and audio.
 DEFAULT_NEGATIVE_PROMPT = (
-    "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，"
-    "整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指"
+    "bright colors, overexposed, static, blurred details, subtitles, style, artwork, painting, "
+    "picture, still, overall gray, worst quality, low quality, JPEG compression residue, ugly, "
+    "incomplete, extra fingers"
 )
 
 

@@ -1,8 +1,8 @@
 """Measure the end-to-end BF16/FP8 FlyDSL attention crossover on gfx1201.
 
 FP8 timings include Q/K/V quantization, matching the xDiT runtime path.
-By default the sweep covers every local head-count/head-dimension class in
-the DMI RDNA4 configs, including Ulysses-local shapes.
+By default the sweep covers the calibrated RDNA4 head-count/head-dimension
+classes, including Ulysses-local shapes.
 """
 
 import argparse
@@ -12,7 +12,7 @@ import torch
 from aiter.ops.flydsl import flydsl_flash_attn_func, flydsl_fp8_quant
 
 
-DMI_RDNA4_SHAPE_CLASSES = (
+RDNA4_SHAPE_CLASSES = (
     (6, 128),
     (8, 128),
     (12, 128),
@@ -86,7 +86,7 @@ def main():
     args = parser.parse_args()
     if (args.heads is None) != (args.head_dim is None):
         parser.error("--heads and --head-dim must be supplied together")
-    shape_classes = ((args.heads, args.head_dim),) if args.heads is not None else DMI_RDNA4_SHAPE_CLASSES
+    shape_classes = ((args.heads, args.head_dim),) if args.heads is not None else RDNA4_SHAPE_CLASSES
 
     torch.manual_seed(0)
     print("Sq,Sk,H,D,bf16_ms,fp8_ms,fp8_speedup")

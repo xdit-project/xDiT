@@ -6,7 +6,7 @@ from diffusers.models.embeddings import apply_rotary_emb
 from diffusers.models.attention_processor import Attention
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
-from xfuser.model_executor.layers.usp import USP
+from xfuser.model_executor.layers.usp import USP, SequenceParallelPadding
 from xfuser.core.distributed import (
     get_runtime_state,
     get_sequence_parallel_world_size,
@@ -16,8 +16,15 @@ from xfuser.core.distributed import (
 
 
 class xFuserHunyuanVideo15AttnProcessor:
-    def __init__(self, attention_kwargs: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self,
+        attention_kwargs: Optional[Dict[str, Any]] = None,
+        sp_padding: Optional[SequenceParallelPadding] = None,
+    ):
         self.attention_kwargs = attention_kwargs
+        # Shared with the transformer wrapper, which records how many image
+        # tokens it zero-padded for sequence parallelism.
+        self.sp_padding = sp_padding
 
     def __call__(
         self,
@@ -88,6 +95,11 @@ class xFuserHunyuanVideo15AttnProcessor:
                 query, encoder_query = query.split([num_query_tokens, num_encoder_hidden_states_tokens], dim=2)
                 key, encoder_key = key.split([num_query_tokens, num_encoder_hidden_states_tokens], dim=2)
                 value, encoder_value = value.split([num_query_tokens, num_encoder_hidden_states_tokens], dim=2)
+                # The image keys gathered by Ulysses end with the padding; the
+                # replicated text joins them afterwards as joint keys.
+                attention_kwargs = self.attention_kwargs
+                if self.sp_padding is not None:
+                    attention_kwargs = self.sp_padding.attention_kwargs(key.shape[2], attention_kwargs)
 
                 hidden_states = USP(
                     query,
@@ -99,7 +111,7 @@ class xFuserHunyuanVideo15AttnProcessor:
                     joint_key=encoder_key,
                     joint_value=encoder_value,
                     joint_strategy="rear",
-                    attention_kwargs=self.attention_kwargs,
+                    attention_kwargs=attention_kwargs,
                 )
         else:
             hidden_states = USP(
@@ -178,8 +190,11 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
             use_meanflow=use_meanflow,
         )
         self.attention_kwargs = attention_kwargs
+        self.sp_padding = SequenceParallelPadding()
         for block in self.transformer_blocks:
-            block.attn.processor = xFuserHunyuanVideo15AttnProcessor(attention_kwargs=attention_kwargs)
+            block.attn.processor = xFuserHunyuanVideo15AttnProcessor(
+                attention_kwargs=attention_kwargs, sp_padding=self.sp_padding
+            )
 
     def _chunk_and_pad_sequence(
         self, x: torch.Tensor, sp_world_rank: int, sp_world_size: int, pad_amount: int, dim: int
@@ -335,6 +350,7 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
 
         # sequence parallel
         hidden_states_pad_amount = (sp_world_size - (hidden_states.shape[1] % sp_world_size)) % sp_world_size
+        self.sp_padding.tokens = hidden_states_pad_amount
         hidden_states = self._chunk_and_pad_sequence(
             hidden_states, sp_world_rank, sp_world_size, hidden_states_pad_amount, dim=1
         )
@@ -347,7 +363,12 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
         encoder_hidden_states = encoder_hidden_states[:, any_valid, :]
         encoder_attention_mask = encoder_attention_mask.to(torch.bool)[:, any_valid]
 
-        if encoder_hidden_states.shape[1] % sp_world_size != 0:
+        # Each rank holds [image, text]. With padded image tokens, split text
+        # would leave the padding in the middle of the gathered keys, so the
+        # dense path replicates the text instead: the gathered image keys then
+        # end with the padding, which USP drops, and the text joins as joint keys.
+        image_padded_dense = hidden_states_pad_amount > 0 and self.attention_kwargs is None
+        if encoder_hidden_states.shape[1] % sp_world_size != 0 or image_padded_dense:
             if self.attention_kwargs is not None:
                 # Sparse models requires symmetric [image, text] layout in Q/K/V.
                 # Pad text to be divisible by sp_world_size so it can be chunked,

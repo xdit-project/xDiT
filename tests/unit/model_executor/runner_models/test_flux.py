@@ -48,3 +48,20 @@ def test_ulysses_runs_record_the_requested_size(monkeypatch, flux_runtime_state,
 
     assert output.images == ["image"]
     assert (state.input_config.height, state.input_config.width) == (size, size)
+
+
+@pytest.mark.parametrize("model_cls", [flux.xFuserFlux2Model, flux.xFuserFlux2Klein9BModel])
+def test_flux2_pipefusion_refuses_parallel_vae_before_loading(monkeypatch, model_cls):
+    # The FLUX.2 PipeFusion pipeline decodes on its last stage only, so a decoder
+    # sharded across every stage would wait forever for the other stages.
+    import xfuser.model_executor.pipelines.pipeline_flux2 as pipeline_flux2
+
+    def _load(*args, **kwargs):
+        raise AssertionError("weights must not be loaded")
+
+    monkeypatch.setattr(pipeline_flux2.xFuserFlux2Pipeline, "from_pretrained", _load)
+    model = object.__new__(model_cls)
+    model.config = SimpleNamespace(pipefusion_parallel_degree=2, use_parallel_vae=True)
+
+    with pytest.raises(ValueError, match="--use_parallel_vae is not supported with --pipefusion_parallel_degree"):
+        model._load_model()

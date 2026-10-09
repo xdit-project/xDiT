@@ -99,11 +99,24 @@ class xFuserFluxModel(xFuserModel):
 
     def _load_model(self) -> DiffusionPipeline:
         if self.config.pipefusion_parallel_degree > 1:
+            dtype = torch.bfloat16 if PACKAGES_CHECKER._on_rdna4() else torch.float16
+            self.engine_config.runtime_config.dtype = dtype
+            from diffusers.models.transformers.transformer_flux import (
+                FluxTransformer2DModel,
+            )
+
+            transformer, pipeline_kwargs = self.loader.plan_pipefusion_components(
+                FluxTransformer2DModel,
+                torch_dtype=dtype,
+            )
             pipe = xFuserFluxPipeline.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
-                torch_dtype=torch.float16,
+                torch_dtype=dtype,
                 engine_config=self.engine_config,
+                **pipeline_kwargs,
             )
+            if transformer is not None:
+                self.loader.mark_pipeline_stage_blockwise(pipe.transformer, transformer)
         else:
             from diffusers import FluxPipeline
             from xfuser.model_executor.models.transformers.transformer_flux import (
@@ -368,20 +381,38 @@ class xFuserFlux2Model(xFuserModel):
             return "default"
         return "reduce-overhead"
 
-    def _get_compile_dynamic(self) -> Optional[bool]:
+    def _get_compile_dynamic(self, input_args=None) -> Optional[bool]:
+        if (
+            self.config.pipefusion_parallel_degree > 1
+            and input_args
+            and input_args.get("input_images")
+        ):
+            return True
         return False
 
     def _load_model(self) -> DiffusionPipeline:
         if self.config.pipefusion_parallel_degree > 1:
+            dtype = torch.bfloat16 if PACKAGES_CHECKER._on_rdna4() else torch.float16
+            self.engine_config.runtime_config.dtype = dtype
+            from diffusers.models.transformers.transformer_flux2 import (
+                Flux2Transformer2DModel,
+            )
             from xfuser.model_executor.pipelines.pipeline_flux2 import (
                 xFuserFlux2Pipeline,
             )
 
+            transformer, pipeline_kwargs = self.loader.plan_pipefusion_components(
+                Flux2Transformer2DModel,
+                torch_dtype=dtype,
+            )
             pipe = xFuserFlux2Pipeline.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
-                torch_dtype=self.engine_config.runtime_config.dtype,
+                torch_dtype=dtype,
                 engine_config=self.engine_config,
+                **pipeline_kwargs,
             )
+            if transformer is not None:
+                self.loader.mark_pipeline_stage_blockwise(pipe.transformer, transformer)
         else:
             from xfuser.model_executor.models.transformers.transformer_flux2 import (
                 xFuserFlux2Transformer2DWrapper,
@@ -500,20 +531,38 @@ class xFuserFlux2Klein9BModel(xFuserModel):
             return "default"
         return "reduce-overhead"
 
-    def _get_compile_dynamic(self) -> Optional[bool]:
+    def _get_compile_dynamic(self, input_args=None) -> Optional[bool]:
+        if (
+            self.config.pipefusion_parallel_degree > 1
+            and input_args
+            and input_args.get("input_images")
+        ):
+            return True
         return False
 
     def _load_model(self) -> DiffusionPipeline:
         if self.config.pipefusion_parallel_degree > 1:
+            dtype = torch.bfloat16 if PACKAGES_CHECKER._on_rdna4() else torch.float16
+            self.engine_config.runtime_config.dtype = dtype
+            from diffusers.models.transformers.transformer_flux2 import (
+                Flux2Transformer2DModel,
+            )
             from xfuser.model_executor.pipelines.pipeline_flux2_klein import (
                 xFuserFlux2KleinPipeline,
             )
 
+            transformer, pipeline_kwargs = self.loader.plan_pipefusion_components(
+                Flux2Transformer2DModel,
+                torch_dtype=dtype,
+            )
             pipe = xFuserFlux2KleinPipeline.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
-                torch_dtype=self.engine_config.runtime_config.dtype,
+                torch_dtype=dtype,
                 engine_config=self.engine_config,
+                **pipeline_kwargs,
             )
+            if transformer is not None:
+                self.loader.mark_pipeline_stage_blockwise(pipe.transformer, transformer)
         else:
             from xfuser.model_executor.models.transformers.transformer_flux2 import (
                 xFuserFlux2Transformer2DWrapper,

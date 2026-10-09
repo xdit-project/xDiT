@@ -1,12 +1,14 @@
 from types import SimpleNamespace
 from unittest import mock
 
+import pytest
 import torch
 from torch import nn
 
 from xfuser.model_executor.models.runner_models import base_model
 from xfuser.model_executor.models.runner_models.base_model import xFuserModel
 from xfuser.model_executor.models.runner_models.vae_manager import VAEManager
+from xfuser.model_executor.pipelines.base_pipeline import xFuserPipelineBaseWrapper
 
 
 class TinyVAE(nn.Module):
@@ -63,7 +65,18 @@ def test_channels_last_conversion_preserves_decode_output_for_every_stage():
         assert vae.decoded[-1].is_contiguous(memory_format=torch.channels_last)
 
 
-def test_initialize_sets_up_every_parallel_vae_before_enabling_options(monkeypatch):
+@pytest.mark.parametrize(
+    ("vae_parallel_size", "expected_events"),
+    [
+        (0, ["post-load", "parallel", "options"]),
+        (2, ["post-load", "options"]),
+    ],
+)
+def test_initialize_sets_up_every_parallel_vae_before_enabling_options(
+    monkeypatch,
+    vae_parallel_size,
+    expected_events,
+):
     first, second = object(), object()
     events = []
 
@@ -72,17 +85,21 @@ def test_initialize_sets_up_every_parallel_vae_before_enabling_options(monkeypat
         _decoding_vaes = xFuserModel._decoding_vaes
 
         def __init__(self):
+            self.engine = SimpleNamespace(runtime_config=SimpleNamespace())
             self.config = SimpleNamespace(
                 use_parallel_vae=True,
+                vae_parallel_size=vae_parallel_size,
                 use_torch_compile=False,
                 cache_method=None,
-                create_config=lambda: (object(), None),
+                create_config=lambda: (self.engine, None),
             )
             self.loader = mock.Mock()
             self._vae_manager = mock.Mock()
             self._vae_manager.decoding_vaes.side_effect = lambda pipes: [pipe.vae for pipe in pipes]
 
         def _load_model_checked(self):
+            assert self.engine.runtime_config.runner_managed_parallel_vae is True
+            assert self.engine.runtime_config.runner_managed_torch_compile is True
             return Pipe(first)
 
         def _get_runtime_state_pipeline(self):
@@ -104,5 +121,62 @@ def test_initialize_sets_up_every_parallel_vae_before_enabling_options(monkeypat
 
     runner.initialize({})
 
-    assert events == ["post-load", "parallel", "options"]
-    runner._vae_manager.setup_parallel_vae.assert_called_once_with([first, second])
+    assert events == expected_events
+    if vae_parallel_size == 0:
+        runner._vae_manager.setup_parallel_vae.assert_called_once_with([first, second])
+    else:
+        runner._vae_manager.setup_parallel_vae.assert_not_called()
+
+
+def test_runner_managed_parallel_vae_skips_legacy_pipeline_conversion():
+    vae = object()
+
+    class Wrapper(xFuserPipelineBaseWrapper):
+        converted = False
+
+        def _init_runtime_state(self, **kwargs):
+            pass
+
+        def _init_fast_attn_state(self, **kwargs):
+            pass
+
+        def use_naive_forward(self):
+            return False
+
+        def _convert_vae(self, candidate):
+            self.converted = True
+            return candidate
+
+        def __call__(self):
+            pass
+
+    engine = SimpleNamespace(
+        runtime_config=SimpleNamespace(
+            use_parallel_vae=True,
+            runner_managed_parallel_vae=True,
+        ),
+        parallel_config=SimpleNamespace(vae_parallel_size=0),
+    )
+    wrapper = Wrapper(
+        SimpleNamespace(vae=vae, transformer=None, unet=None, scheduler=None),
+        engine,
+    )
+
+    assert wrapper.module.vae is vae
+    assert wrapper.converted is False
+
+
+def test_vae_decode_releases_transformer_cache_first():
+    cache_manager = mock.Mock()
+
+    with (
+        mock.patch(
+            "xfuser.core.cache_manager.cache_manager.get_cache_manager",
+            return_value=cache_manager,
+        ),
+        mock.patch.object(torch.cuda, "empty_cache") as empty_cache,
+    ):
+        xFuserPipelineBaseWrapper._release_transformer_kv_cache()
+
+    cache_manager.clear.assert_called_once_with()
+    empty_cache.assert_called_once_with()

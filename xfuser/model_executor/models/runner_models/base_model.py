@@ -32,6 +32,7 @@ from xfuser.model_executor.models.runner_models.vae_manager import (
 )
 
 from xfuser.model_executor.cache.presets import DBCacheSettings, ModelCacheConfig
+from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from xfuser.core.distributed import (
     get_world_group,
     get_model_replica_group,
@@ -40,6 +41,8 @@ from xfuser.core.distributed import (
     get_sequence_parallel_rank,
     get_classifier_free_guidance_rank,
     get_pipeline_parallel_world_size,
+    get_pp_group,
+    is_pipeline_first_stage,
     initialize_runtime_state,
     get_runtime_state,
     runtime_state_is_initialized,
@@ -61,6 +64,7 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
 from xfuser.model_executor.models.runner_models.loading.quantization_plan import (
     apply_fp8_override_cli_to_settings,
 )
+from xfuser.model_executor.pipefusion import PipeFusionCompileCapture
 
 packages_info = PACKAGES_CHECKER.get_packages_info()
 
@@ -467,6 +471,12 @@ class xFuserModel(abc.ABC):
 
         self.loader.preflight(world_size=get_world_group().world_size)
         self.engine_config, _ = self.config.create_config()
+        # The runner applies these optimizations after loading, when its
+        # model-specific managers can select the correct implementation.
+        # Deferring prevents legacy pipeline wrappers from wrapping the same
+        # VAE decoder or transformer forward a second time.
+        self.engine_config.runtime_config.runner_managed_parallel_vae = True
+        self.engine_config.runtime_config.runner_managed_torch_compile = True
         log("Loading model pipeline...")
         self.pipe = self._load_model_checked()
 
@@ -474,7 +484,7 @@ class xFuserModel(abc.ABC):
         initialize_runtime_state(self._get_runtime_state_pipeline(), self.engine_config)
 
         self._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
+        if self.config.use_parallel_vae and self.config.vae_parallel_size == 0:
             self._vae_manager.setup_parallel_vae(self._decoding_vaes())
         self._enable_options()
         fp8_comms = get_runtime_state().fp8_comms if runtime_state_is_initialized() else None
@@ -487,6 +497,24 @@ class xFuserModel(abc.ABC):
                 split_prompts_fn=self._split_prompts_for_dp,
                 batch_size=self.config.batch_size,
             )
+
+        pp_degree = getattr(self.config, "pipefusion_parallel_degree", 1)
+        if pp_degree > 1 and self.config.use_torch_compile:
+            # Materialize both directional P2P communicators before rank-local
+            # compilation can make the stages reach their first receive at
+            # different times.
+            group = get_pp_group()
+            token = torch.zeros(
+                1,
+                device=self._local_onload_device(),
+                dtype=self.engine_config.runtime_config.dtype,
+            )
+            if is_pipeline_first_stage():
+                group.pipeline_send(token, name="_xfuser_compile_prime", segment_idx=0)
+                group.pipeline_recv(idx=0, name="_xfuser_compile_prime")
+            else:
+                group.pipeline_recv(idx=0, name="_xfuser_compile_prime")
+                group.pipeline_send(token, name="_xfuser_compile_prime", segment_idx=0)
 
         # Compile and warm the original blocks before cache adapters replace or
         # patch them, keeping stateful cross-step cache logic out of traced graphs.
@@ -805,7 +833,7 @@ class xFuserModel(abc.ABC):
         # CUDA graphs are slow on RDNA4.
         return "default"  # TODO: Configurable
 
-    def _get_compile_dynamic(self) -> Optional[bool]:
+    def _get_compile_dynamic(self, input_args=None) -> Optional[bool]:
         return None  # torch default (auto)
 
     def _prefer_blockwise_compile(self) -> bool:
@@ -859,37 +887,150 @@ class xFuserModel(abc.ABC):
         # graphs at data-dependent times), so that collective deadlocks. For SPMD
         # runs the check is a cheap, useful guard, so only disable it under PP.
         if get_pipeline_parallel_world_size() > 1:
+            # KV cache updates specialize on full/patch mode and the Python patch
+            # index. The default limit of eight variants is too small for larger
+            # patch counts and silently falls back to eager execution.
+            required_recompile_limit = 2 * getattr(self.config, "num_pipeline_patch", 1) + 4
+            torch._dynamo.config.recompile_limit = max(
+                torch._dynamo.config.recompile_limit,
+                required_recompile_limit,
+            )
             _ado = getattr(torch._inductor.config, "aten_distributed_optimizations", None)
             if _ado is not None and hasattr(_ado, "spmd_check"):
                 _ado.spmd_check = False
 
-    def _compile_model(self, input_args: dict) -> None:
-        """Compile pipe components with torch.compile.
+    def _reset_pipefusion_compile_state(self, components) -> None:
+        """Remove state mutated by eager capture or rank-local compile replay."""
+        get_cache_manager().clear()
+        state = get_runtime_state()
+        state.set_patched_mode(False)
+        get_pp_group().reset_buffer()
+        for component in components.values():
+            reset = getattr(component, "reset_pipefusion_state", None)
+            if reset is not None:
+                reset()
 
-        When FSDP is active, compiles each FSDP-wrapped component's block lists
-        individually (read from fsdp_strategy wrap_attrs)
-        to avoid dynamo tracing through FSDP2 forward_pre_hooks and fragmenting
-        the graph at every block boundary.
+    def _compile_model(self, input_args: dict) -> None:
+        """Apply the runner's ``torch.compile`` policy and warm every graph.
+
+        The method first enables Inductor compute/communication overlap.
+        Pipeline runs disable Inductor's SPMD graph-consistency collective
+        (pipeline stages intentionally compile different graphs) and raise
+        Dynamo's recompile limit to cover full/patch and patch-index
+        specializations.
+
+        Compilation is deliberately runner-managed because pipeline wrapping,
+        FSDP, and step-cache adapters all change the safe graph boundary:
+
+        * A non-sharded PipeFusion stage keeps its outer component eager so P2P
+          boundaries and mutable patch/KV state remain visible. Before wrapping,
+          a short eager pipeline pass captures that rank's real full-sequence
+          and per-patch component calls. The block lists declared by
+          ``fsdp_strategy[*]["wrap_attrs"]`` are then compiled and the captured
+          calls are replayed locally on all pipeline ranks concurrently. A
+          barrier and state reset precede one normal end-to-end validation
+          warmup. If no block list is declared, only the stage's bound
+          ``forward`` is compiled.
+        * FSDP components compile those same declared block lists individually.
+          This avoids tracing through FSDP2 forward-pre-hooks and prevents a
+          graph break at every wrapped block.
+        * A step-cached, non-PipeFusion component is also compiled blockwise so
+          the adapter's transformer-forward patch remains outside the compiled
+          region. Requesting caching without declared block lists is an error.
+        * Other components are replaced by a whole-component compiled wrapper.
+
+        Every wrapper uses the compile mode and dynamic-shape policy selected by
+        the runner hooks. Blockwise CUDA-graph modes install an explicit step
+        marker. The warmup step count may be reduced by
+        ``_get_compile_warmup_steps``; ``None`` preserves the caller's full
+        cycle. This method runs before step-cache adapters are applied, so
+        compilation always sees the original blocks.
         """
         self._enable_compute_comm_overlap()
 
         mode = self._get_compile_mode()
-        dynamic = self._get_compile_dynamic()
-        for component_name in self._get_compiled_pipe_components():
-            component = getattr(self.pipe, component_name, None)
-            if component is None:
-                continue
-            requested_shards = getattr(
-                self.config,
-                "fully_shard_components",
-                None,
-            )
-            component_is_sharded = (
+        dynamic = self._get_compile_dynamic(input_args)
+        component_names = self._get_compiled_pipe_components()
+        requested_shards = getattr(
+            self.config,
+            "fully_shard_components",
+            None,
+        )
+
+        def component_is_sharded(component_name):
+            return (
                 self.config.fully_shard_degree > 1
                 and component_name in self.settings.fsdp_strategy
                 and (requested_shards is None or component_name in requested_shards)
             )
-            if component_is_sharded or self.config.cache_method or self._prefer_blockwise_compile():
+
+        compile_args = copy.deepcopy(input_args)
+        warmup_steps = self._get_compile_warmup_steps(input_args)
+        if warmup_steps is not None:
+            compile_args["num_inference_steps"] = warmup_steps
+
+        capture = None
+        if self.config.pipefusion_parallel_degree > 1 and runtime_state_is_initialized():
+            replay_components = {
+                name: getattr(self.pipe, name)
+                for name in component_names
+                if getattr(self.pipe, name, None) is not None and not component_is_sharded(name)
+            }
+            if replay_components:
+                log(
+                    "Capturing eager PipeFusion stage inputs for concurrent compile replay...",
+                    log_from_all_processes=True,
+                )
+                capture_args = copy.deepcopy(compile_args)
+                pipeline_warmup_steps = self.engine_config.runtime_config.warmup_steps
+                capture_args["num_inference_steps"] = max(
+                    2,
+                    pipeline_warmup_steps + 1,
+                )
+                capture = PipeFusionCompileCapture(replay_components, get_runtime_state())
+                with capture.hooks():
+                    self._run_timed_pipe(capture_args)
+                if capture.calls:
+                    log(
+                        f"Captured {len(capture.calls)} PipeFusion stage signature(s).",
+                        log_from_all_processes=True,
+                    )
+                    self._reset_pipefusion_compile_state(replay_components)
+
+        for component_name in component_names:
+            component = getattr(self.pipe, component_name, None)
+            if component is None:
+                continue
+            compile_kwargs = {"mode": mode, "dynamic": dynamic}
+            is_sharded = component_is_sharded(component_name)
+            if self.config.pipefusion_parallel_degree > 1 and not is_sharded:
+                # Keep the stage wrapper eager: it owns PipeFusion's mutable KV
+                # state and stage-boundary behavior. Compile only the retained
+                # local blocks, as step caching does, to avoid tracing one huge
+                # stage graph while downstream ranks wait in pipeline_recv().
+                wrap_attrs = self.settings.fsdp_strategy.get(component_name, {}).get("wrap_attrs", [])
+                compiled_any = False
+                for attr in wrap_attrs:
+                    try:
+                        block_list = rgetattr(component, attr)
+                    except AttributeError:
+                        block_list = None
+                    if block_list is not None:
+                        for i in range(len(block_list)):
+                            block_list[i] = torch.compile(block_list[i], **compile_kwargs)
+                        compiled_any = compiled_any or len(block_list) > 0
+                if compiled_any and mode in self.CUDAGRAPH_COMPILE_MODES:
+                    self._mark_cudagraph_steps(component)
+                if not compiled_any:
+                    component.forward = torch.compile(component.forward, **compile_kwargs)
+            elif (
+                is_sharded
+                or (
+                    self.config.cache_method
+                    and self.config.pipefusion_parallel_degree == 1
+                )
+                or self._prefer_blockwise_compile()
+            ):
                 # Per-block compile: leaves transformer as original object so cache-dit's
                 # transformer.forward patch remains visible during compiled execution.
                 wrap_attrs = self.settings.fsdp_strategy.get(component_name, {}).get("wrap_attrs", [])
@@ -901,7 +1042,7 @@ class xFuserModel(abc.ABC):
                         block_list = None
                     if block_list is not None:
                         for i in range(len(block_list)):
-                            block_list[i] = torch.compile(block_list[i], mode=mode, dynamic=dynamic)
+                            block_list[i] = torch.compile(block_list[i], **compile_kwargs)
                         compiled_any = True
                 if compiled_any and mode in self.CUDAGRAPH_COMPILE_MODES:
                     self._mark_cudagraph_steps(component)
@@ -915,13 +1056,23 @@ class xFuserModel(abc.ABC):
                         f"fsdp_strategy[{component_name!r}]['wrap_attrs'] of {type(self).__name__}."
                     )
                 if not compiled_any:
-                    setattr(self.pipe, component_name, torch.compile(component, mode=mode, dynamic=dynamic))
+                    setattr(self.pipe, component_name, torch.compile(component, **compile_kwargs))
             else:
-                setattr(self.pipe, component_name, torch.compile(component, mode=mode, dynamic=dynamic))
-        compile_args = copy.deepcopy(input_args)
-        warmup_steps = self._get_compile_warmup_steps(input_args)
-        if warmup_steps is not None:
-            compile_args["num_inference_steps"] = warmup_steps
+                setattr(self.pipe, component_name, torch.compile(component, **compile_kwargs))
+
+        if capture is not None and capture.calls:
+            replica = get_model_replica_group()
+            replica.barrier()
+            log(
+                f"Compiling {len(capture.calls)} captured PipeFusion stage signature(s) locally...",
+                log_from_all_processes=True,
+            )
+            capture.replay(self._local_onload_device())
+            torch.cuda.synchronize()
+            replica.barrier()
+            log("Concurrent PipeFusion compile replay completed.", log_from_all_processes=True)
+            self._reset_pipefusion_compile_state(capture.components)
+            capture.clear()
         self._run_compile_warmup(compile_args)
 
     def _save_determinism_check_failed_outputs(

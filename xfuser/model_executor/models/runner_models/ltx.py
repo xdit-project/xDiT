@@ -542,15 +542,26 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
             diff_decoder.set_attn_processor(LTX2VideoVaeNeighborhoodNattenProcessor())
             log("Diffusion decoder: using NATTEN attention processor.")
         except (ImportError, RuntimeError, FileNotFoundError):
-            # NATTEN is not available
-            # Fall back to tiled PyTorch SDPA
-            # Works on CUDA, ROCm and CPU. Ported from LTX-2 EagerSdpaAttention.
-            from xfuser.model_executor.layers.ltx2.na3d_eager_attn import (
-                LTX2VideoVaeEagerSdpaAttnProcessor,
-            )
+            # NATTEN unavailable — try AITER's Triton flash-NA3D kernel (ROCm gfx942/gfx950).
+            try:
+                from xfuser.model_executor.layers.ltx2.na3d_mfma_flash import (
+                    LTX2VideoVaeMfmaAttnProcessor,
+                )
 
-            diff_decoder.set_attn_processor(LTX2VideoVaeEagerSdpaAttnProcessor())
-            log("Diffusion decoder: NATTEN unavailable; using tiled PyTorch SDPA fallback.")
+                processor = LTX2VideoVaeMfmaAttnProcessor()
+                log("Diffusion decoder: using AITER Triton flash-NA3D attention processor.")
+            except (ImportError, RuntimeError) as e:
+                # Tiled PyTorch SDPA (works on CUDA, ROCm, CPU).
+                from xfuser.model_executor.layers.ltx2.na3d_eager_attn import (
+                    LTX2VideoVaeEagerSdpaAttnProcessor,
+                )
+
+                processor = LTX2VideoVaeEagerSdpaAttnProcessor()
+                log(
+                    f"Diffusion decoder: NATTEN and AITER flash-NA3D unavailable ({e}); "
+                    "using tiled PyTorch SDPA fallback."
+                )
+            diff_decoder.set_attn_processor(processor)
         self.decode_pipe = LTX2VideoDiffusionDecodePipeline(
             diffusion_decoder=diff_decoder,
             scheduler=pipe.scheduler,

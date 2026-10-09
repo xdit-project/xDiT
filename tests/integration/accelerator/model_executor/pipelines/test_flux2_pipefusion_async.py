@@ -96,9 +96,7 @@ def _worker(rank, world_size, init_method, parallel_vae=False, reference_image=F
 
     baseline = run() if reference_image else None
     image = (
-        Image.fromarray(
-            np.random.default_rng(3).integers(0, 256, size=(64, 64, 3), dtype=np.uint8)
-        )
+        Image.fromarray(np.random.default_rng(3).integers(0, 256, size=(64, 64, 3), dtype=np.uint8))
         if reference_image
         else None
     )

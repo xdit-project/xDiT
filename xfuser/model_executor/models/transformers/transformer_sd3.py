@@ -16,7 +16,6 @@ from diffusers.utils import (
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
 from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.logger import init_logger
-from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
 from xfuser.core.distributed import is_pipeline_first_stage, is_pipeline_last_stage
 from .register import xFuserTransformerWrappersRegister
 from .base_transformer import xFuserTransformerBaseWrapper
@@ -46,15 +45,11 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
             submodule_classes_to_wrap=[nn.Conv2d, PatchEmbed],
             submodule_name_to_wrap=["attn", "attn2"],
         )
-        self.encoder_hidden_states_cache = [
-            None for _ in range(len(self.transformer_blocks))
-        ]
+        self.encoder_hidden_states_cache = [None for _ in range(len(self.transformer_blocks))]
         register_fp8_comms_eligible_modules(self, sd3_attn_modules(self))
 
     def reset_pipefusion_state(self) -> None:
-        self.encoder_hidden_states_cache = [
-            None for _ in range(len(self.transformer_blocks))
-        ]
+        self.encoder_hidden_states_cache = [None for _ in range(len(self.transformer_blocks))]
 
     def forward(
         self,
@@ -109,9 +104,7 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
 
         # * only pp rank 0 needs pos_embed (patchify)
         if is_pipeline_first_stage():
-            hidden_states = self.pos_embed(
-                hidden_states
-            )  # takes care of adding positional embeddings too.
+            hidden_states = self.pos_embed(hidden_states)  # takes care of adding positional embeddings too.
 
         #! ORIGIN:
         # height, width = hidden_states.shape[-2:]
@@ -135,9 +128,7 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
 
                     return custom_forward
 
-                ckpt_kwargs: Dict[str, Any] = (
-                    {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
-                )
+                ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
                 hidden_states = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(block),
                     hidden_states,
@@ -147,10 +138,7 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
                 )
 
             else:
-                if (
-                    get_runtime_state().patch_mode
-                    and get_runtime_state().pipeline_patch_idx == 0
-                ):
+                if get_runtime_state().patch_mode and get_runtime_state().pipeline_patch_idx == 0:
                     self.encoder_hidden_states_cache[i] = encoder_hidden_states
                     encoder_hidden_states, hidden_states = block(
                         hidden_states=hidden_states,

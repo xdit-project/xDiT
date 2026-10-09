@@ -382,11 +382,7 @@ class xFuserFlux2Model(xFuserModel):
         return "reduce-overhead"
 
     def _get_compile_dynamic(self, input_args=None) -> Optional[bool]:
-        if (
-            self.config.pipefusion_parallel_degree > 1
-            and input_args
-            and input_args.get("input_images")
-        ):
+        if self.config.pipefusion_parallel_degree > 1 and input_args and input_args.get("input_images"):
             return True
         return False
 
@@ -532,11 +528,7 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         return "reduce-overhead"
 
     def _get_compile_dynamic(self, input_args=None) -> Optional[bool]:
-        if (
-            self.config.pipefusion_parallel_degree > 1
-            and input_args
-            and input_args.get("input_images")
-        ):
+        if self.config.pipefusion_parallel_degree > 1 and input_args and input_args.get("input_images"):
             return True
         return False
 

@@ -29,7 +29,10 @@ class _Stage(torch.nn.Module):
 
 def test_pipefusion_compiles_the_bound_stage_forward(monkeypatch):
     transformer = torch.nn.Linear(4, 4)
-    compiled_forward = lambda value: value
+
+    def compiled_forward(value):
+        return value
+
     model = object.__new__(_Runner)
     model.config = SimpleNamespace(
         pipefusion_parallel_degree=2,
@@ -55,9 +58,7 @@ def test_pipefusion_compiles_the_bound_stage_forward(monkeypatch):
 
 def test_pipefusion_compiles_stage_local_blocks_when_declared(monkeypatch):
     transformer = torch.nn.Module()
-    transformer.transformer_blocks = torch.nn.ModuleList(
-        [torch.nn.Linear(4, 4), torch.nn.Linear(4, 4)]
-    )
+    transformer.transformer_blocks = torch.nn.ModuleList([torch.nn.Linear(4, 4), torch.nn.Linear(4, 4)])
     original_forward = transformer.forward
     original_blocks = list(transformer.transformer_blocks)
     model = object.__new__(_Runner)
@@ -68,9 +69,7 @@ def test_pipefusion_compiles_stage_local_blocks_when_declared(monkeypatch):
         cache_method=None,
     )
     model.pipe = SimpleNamespace(transformer=transformer)
-    model.settings = SimpleNamespace(
-        fsdp_strategy={"transformer": {"wrap_attrs": ["transformer_blocks"]}}
-    )
+    model.settings = SimpleNamespace(fsdp_strategy={"transformer": {"wrap_attrs": ["transformer_blocks"]}})
     model._enable_compute_comm_overlap = lambda: None
     model._get_compile_mode = lambda: "default"
     model._get_compile_dynamic = lambda _input_args=None: False
@@ -113,12 +112,8 @@ def test_pipefusion_captures_before_wrap_and_replays_before_validation(monkeypat
         cache_method=None,
     )
     model.pipe = SimpleNamespace(transformer=transformer)
-    model.settings = SimpleNamespace(
-        fsdp_strategy={"transformer": {"wrap_attrs": ["transformer_blocks"]}}
-    )
-    model.engine_config = SimpleNamespace(
-        runtime_config=SimpleNamespace(warmup_steps=1)
-    )
+    model.settings = SimpleNamespace(fsdp_strategy={"transformer": {"wrap_attrs": ["transformer_blocks"]}})
+    model.engine_config = SimpleNamespace(runtime_config=SimpleNamespace(warmup_steps=1))
     model._enable_compute_comm_overlap = lambda: None
     model._get_compile_mode = lambda: "default"
     model._get_compile_dynamic = lambda _input_args=None: False

@@ -92,13 +92,7 @@ class PipeFusionRuntimeSnapshot:
 
     @classmethod
     def capture(cls, state) -> "PipeFusionRuntimeSnapshot":
-        return cls(
-            {
-                name: copy.deepcopy(getattr(state, name))
-                for name in _RUNTIME_FIELDS
-                if hasattr(state, name)
-            }
-        )
+        return cls({name: copy.deepcopy(getattr(state, name)) for name in _RUNTIME_FIELDS if hasattr(state, name)})
 
     @contextmanager
     def install(self, state) -> Iterator[None]:

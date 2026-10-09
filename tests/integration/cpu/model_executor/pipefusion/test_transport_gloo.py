@@ -78,10 +78,7 @@ def test_circular_transport_completes_without_hanging(tmp_path):
     context = torch.multiprocessing.get_context("spawn")
     result_queue = context.Queue()
     init_method = f"file://{tmp_path / 'init'}"
-    processes = [
-        context.Process(target=_worker, args=(rank, init_method, result_queue))
-        for rank in range(2)
-    ]
+    processes = [context.Process(target=_worker, args=(rank, init_method, result_queue)) for rank in range(2)]
     deadline = time.monotonic() + 180
     for process in processes:
         process.start()

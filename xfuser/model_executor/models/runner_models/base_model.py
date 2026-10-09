@@ -1025,10 +1025,7 @@ class xFuserModel(abc.ABC):
                     component.forward = torch.compile(component.forward, **compile_kwargs)
             elif (
                 is_sharded
-                or (
-                    self.config.cache_method
-                    and self.config.pipefusion_parallel_degree == 1
-                )
+                or (self.config.cache_method and self.config.pipefusion_parallel_degree == 1)
                 or self._prefer_blockwise_compile()
             ):
                 # Per-block compile: leaves transformer as original object so cache-dit's

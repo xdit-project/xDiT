@@ -354,10 +354,7 @@ def test_replicated_load_option_selects_stage_meta_with_pipefusion(contracts):
 
     contracts.assert_requested_materialization_is_honoured(config, world_size=2)
     assert contracts.uses_pipeline_stage_meta(config)
-    assert (
-        contracts.select_effective_materialization_mode(config, world_size=2)
-        is contracts.MaterializationMode.EAGER
-    )
+    assert contracts.select_effective_materialization_mode(config, world_size=2) is contracts.MaterializationMode.EAGER
 
 
 @pytest.mark.parametrize("world_size", [1, 8])

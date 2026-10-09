@@ -38,9 +38,7 @@ def shard_pipeline_components(loader) -> None:
             f"{sorted(strategy_components)}"
         )
     stage_local = {
-        name
-        for name, component in model.pipe.components.items()
-        if loader.is_pipeline_stage_blockwise(component)
+        name for name, component in model.pipe.components.items() if loader.is_pipeline_stage_blockwise(component)
     }
     invalid_stage_shards = sharded_components & stage_local
     if invalid_stage_shards:

@@ -130,9 +130,7 @@ def test_pipefusion_stage_local_component_cannot_be_fsdp_wrapped(monkeypatch):
     transformer._xfuser_pipeline_stage_partial = True
     model = SimpleNamespace(
         config=SimpleNamespace(fully_shard_components=["transformer"]),
-        settings=SimpleNamespace(
-            fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}}
-        ),
+        settings=SimpleNamespace(fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}}),
         pipe=SimpleNamespace(components={"transformer": transformer}),
     )
     loader = object.__new__(meta_load.ModelLoader)

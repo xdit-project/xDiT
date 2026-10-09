@@ -336,13 +336,9 @@ class xFuserArgs:
             raise ValueError("--num_pipeline_patch must be greater than 0")
         if self.attn_layer_num_for_pp is not None:
             if len(self.attn_layer_num_for_pp) != self.pipefusion_parallel_degree:
-                raise ValueError(
-                    "--attn_layer_num_for_pp must contain one entry per PipeFusion stage"
-                )
+                raise ValueError("--attn_layer_num_for_pp must contain one entry per PipeFusion stage")
             if any(layer_count < 1 for layer_count in self.attn_layer_num_for_pp):
-                raise ValueError(
-                    "--attn_layer_num_for_pp entries must be greater than 0"
-                )
+                raise ValueError("--attn_layer_num_for_pp entries must be greater than 0")
         if self.profile_with_stack and not self.profile:
             logger.warning("--profile_with_stack has no effect without --profile; no profiles will be outputted.")
         if self.fully_shard_components is not None:
@@ -351,11 +347,7 @@ class xFuserArgs:
                 raise ValueError("--fully_shard_components requires at least one component")
             if self.fully_shard_degree <= 1:
                 raise ValueError("--fully_shard_components requires --fully_shard_degree greater than 1")
-        if (
-            self.pipefusion_parallel_degree > 1
-            and self.fully_shard_degree > 1
-            and self.fully_shard_components is None
-        ):
+        if self.pipefusion_parallel_degree > 1 and self.fully_shard_degree > 1 and self.fully_shard_components is None:
             raise ValueError(
                 "Full-transformer FSDP cannot be combined with PipeFusion because pipeline stages "
                 "own different transformer blocks. Select replicated components explicitly with "

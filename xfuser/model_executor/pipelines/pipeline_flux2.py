@@ -377,19 +377,16 @@ class xFuserFlux2PipelineBase(xFuserPipelineBaseWrapper):
         def process_latents(latents):
             latents = self._unpack_latents_with_ids(latents, latent_ids)
             latents_bn_mean = self.vae.bn.running_mean.view(1, -1, 1, 1).to(latents.device, latents.dtype)
-            latents_bn_std = torch.sqrt(
-                self.vae.bn.running_var.view(1, -1, 1, 1) + self.vae.config.batch_norm_eps
-            ).to(latents.device, latents.dtype)
+            latents_bn_std = torch.sqrt(self.vae.bn.running_var.view(1, -1, 1, 1) + self.vae.config.batch_norm_eps).to(
+                latents.device, latents.dtype
+            )
             latents = latents * latents_bn_std + latents_bn_mean
             latents = self._unpatchify_latents(latents)
             return latents.to(dtype=next(self.vae.parameters()).dtype)
 
         if output_type != "latent":
             runtime_state = get_runtime_state()
-            if (
-                runtime_state.runtime_config.use_parallel_vae
-                and runtime_state.parallel_config.vae_parallel_size > 0
-            ):
+            if runtime_state.runtime_config.use_parallel_vae and runtime_state.parallel_config.vae_parallel_size > 0:
                 latents = self.gather_latents_for_vae(latents)
                 if latents is not None:
                     latents = process_latents(latents)

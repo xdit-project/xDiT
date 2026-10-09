@@ -1,7 +1,7 @@
 from abc import ABCMeta, abstractmethod
 from functools import wraps
 from xfuser.compat import version_at_least
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 import sys
 import torch
 import torch.distributed
@@ -199,10 +199,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         if vae is not None and engine_config.runtime_config.use_parallel_vae:
             if engine_config.parallel_config.vae_parallel_size > 0:
                 pipeline.vae.to("cpu")  # VAE is not executed in the current worker
-            elif (
-                not self.use_naive_forward()
-                and not engine_config.runtime_config.runner_managed_parallel_vae
-            ):
+            elif not self.use_naive_forward() and not engine_config.runtime_config.runner_managed_parallel_vae:
                 pipeline.vae = self._convert_vae(vae)
 
         super().__init__(module=pipeline)

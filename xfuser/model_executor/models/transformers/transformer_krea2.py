@@ -15,6 +15,7 @@ from xfuser.core.distributed import (
 )
 from xfuser.model_executor.layers.attention_mask import (
     AttentionMaskWithMeta,
+    MaskMetaCache,
     make_attn_mask_with_meta,
 )
 from xfuser.model_executor.layers.usp import USP
@@ -22,6 +23,23 @@ from xfuser.model_executor.models.transformers.transformers_utils import (
     chunk_and_pad_sequence,
     gather_and_unpad,
 )
+
+
+def _key_padding_meta(
+    encoder_attention_mask: torch.Tensor, text_len: int, image_len: int, pad_len: int
+) -> AttentionMaskWithMeta:
+    """Key-padding metadata over the joint [text, image, SP pad] sequence."""
+    B = encoder_attention_mask.shape[0]
+    combined = torch.cat(
+        [
+            encoder_attention_mask[:, :text_len],
+            encoder_attention_mask.new_ones(B, image_len),
+        ],
+        dim=1,
+    )
+    if pad_len > 0:
+        combined = torch.cat([combined, combined.new_zeros(B, pad_len)], dim=1)
+    return make_attn_mask_with_meta(combined)
 
 
 class xFuserKrea2AttnProcessor:
@@ -89,7 +107,7 @@ class xFuserKrea2Transformer2DWrapper(Krea2Transformer2DModel):
         super().__init__(*args, **kwargs)
         for block in self.transformer_blocks:
             block.attn.processor = xFuserKrea2AttnProcessor()
-        self._attn_mask_cache: tuple | None = None  # (data_ptr, shape, AttentionMaskWithMeta)
+        self._attn_mask_cache = MaskMetaCache()
 
     def forward(
         self,
@@ -111,9 +129,7 @@ class xFuserKrea2Transformer2DWrapper(Krea2Transformer2DModel):
         if encoder_attention_mask is not None:
             text_attn_mask = encoder_attention_mask[:, None, None, :]
 
-        text_projected = self.txt_in(
-            self.text_fusion(encoder_hidden_states, text_attn_mask)
-        )
+        text_projected = self.txt_in(self.text_fusion(encoder_hidden_states, text_attn_mask))
         image_projected = self.img_in(hidden_states)
 
         full_seq = torch.cat([text_projected, image_projected], dim=1)
@@ -126,29 +142,16 @@ class xFuserKrea2Transformer2DWrapper(Krea2Transformer2DModel):
         # is the same tensor object for the entire denoising loop.
         block_attn_mask = None
         if encoder_attention_mask is not None:
-            ptr, shape = encoder_attention_mask.data_ptr(), encoder_attention_mask.shape
-            if self._attn_mask_cache is not None and self._attn_mask_cache[:2] == (ptr, shape):
-                block_attn_mask = self._attn_mask_cache[2]
-            else:
-                B = hidden_states.shape[0]
-                combined = torch.cat(
-                    [
-                        encoder_attention_mask[:, : text_projected.shape[1]],
-                        encoder_attention_mask.new_ones(B, image_projected.shape[1]),
-                    ],
-                    dim=1,
-                )
-                if pad_len > 0:
-                    combined = torch.cat([combined, combined.new_zeros(B, pad_len)], dim=1)
-                block_attn_mask = make_attn_mask_with_meta(combined)
-                self._attn_mask_cache = (ptr, shape, block_attn_mask)
+            block_attn_mask = self._attn_mask_cache.get(
+                encoder_attention_mask,
+                _key_padding_meta,
+                text_projected.shape[1],
+                image_projected.shape[1],
+                pad_len,
+            )
 
-        local_seq = chunk_and_pad_sequence(
-            full_seq, sp_rank, sp_world_size, pad_len, dim=1
-        )
-        pos_ids_local = chunk_and_pad_sequence(
-            position_ids, sp_rank, sp_world_size, pad_len, dim=0
-        )
+        local_seq = chunk_and_pad_sequence(full_seq, sp_rank, sp_world_size, pad_len, dim=1)
+        pos_ids_local = chunk_and_pad_sequence(position_ids, sp_rank, sp_world_size, pad_len, dim=0)
 
         image_rotary_emb = self.rotary_emb(pos_ids_local)
 

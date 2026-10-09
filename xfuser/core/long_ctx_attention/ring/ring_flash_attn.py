@@ -1,10 +1,8 @@
-from typing import List
 import inspect
 import math
 import torch
 import torch.nn.functional as F
 
-from xfuser.core.long_ctx_attention import xFuserLongContextAttention
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
 import xfuser.envs as envs
 
@@ -75,20 +73,14 @@ def _call_fa3_forward(
             parameters = None
 
         accepts_kwargs = parameters is None or any(
-            parameter.kind is inspect.Parameter.VAR_KEYWORD
-            for parameter in parameters.values()
+            parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
         )
         unsupported = (
-            []
-            if accepts_kwargs or parameters is None
-            else [name for name in supplied if name not in parameters]
+            [] if accepts_kwargs or parameters is None else [name for name in supplied if name not in parameters]
         )
         if unsupported:
             names = ", ".join(unsupported)
-            raise TypeError(
-                "The selected FlashAttention-3 adapter does not support "
-                f"descaling arguments: {names}"
-            )
+            raise TypeError(f"The selected FlashAttention-3 adapter does not support descaling arguments: {names}")
         call_kwargs.update(supplied)
 
     return fn(q, key, value, **call_kwargs)
@@ -105,7 +97,7 @@ def xdit_ring_flash_attn_forward(
     window_size=(-1, -1),
     alibi_slopes=None,
     deterministic=False,
-    attn_type=AttnType.FA,
+    attn_type=None,
     attn_processor=None,
     attn_layer=None,
     joint_tensor_key=None,
@@ -115,9 +107,10 @@ def xdit_ring_flash_attn_forward(
     k_descale=None,
     v_descale=None,
 ):
+    if attn_type is None:
+        attn_type = AttnType.FA
     is_joint = False
-    if (joint_tensor_key is not None and 
-        joint_tensor_value is not None):
+    if joint_tensor_key is not None and joint_tensor_value is not None:
         supported_joint_strategy = ["front", "rear"]
         if joint_strategy not in supported_joint_strategy:
             raise ValueError(
@@ -125,13 +118,10 @@ def xdit_ring_flash_attn_forward(
             )
         else:
             is_joint = True
-    elif (joint_tensor_key is None and 
-        joint_tensor_value is None):
+    elif joint_tensor_key is None and joint_tensor_value is None:
         pass
     else:
-        raise ValueError(
-            f"joint_tensor_key and joint_tensor_value should be None or not None simultaneously."
-        )
+        raise ValueError("joint_tensor_key and joint_tensor_value should be None or not None simultaneously.")
 
     comm = RingComm(process_group)
 
@@ -173,7 +163,7 @@ def xdit_ring_flash_attn_forward(
 
         if not causal or step <= comm.rank:
             fn = select_flash_attn_impl(attn_type, stage="fwd-only", attn_processor=attn_processor)
-            if attn_type == AttnType.FA3: 
+            if attn_type == AttnType.FA3:
                 block_out, block_lse = _call_fa3_forward(
                     fn,
                     q,
@@ -288,16 +278,18 @@ class xFuserRingFlashAttnFunc(RingFlashAttnFunc):
         ctx.k_descale = k_descale
         ctx.v_descale = v_descale
         return out if not return_softmax else (out, softmax_lse, None)
-    
+
     @staticmethod
     def backward(ctx, dout, *args):
         from yunchang.ring.ring_flash_attn import ring_flash_attn_backward
-        
+
         q, k, v, out, softmax_lse = ctx.saved_tensors
         dq, dk, dv = ring_flash_attn_backward(
             ctx.group,
             dout,
-            q, k, v,
+            q,
+            k,
+            v,
             out,
             softmax_lse,
             softmax_scale=ctx.softmax_scale,
@@ -309,7 +301,7 @@ class xFuserRingFlashAttnFunc(RingFlashAttnFunc):
             deterministic=ctx.deterministic,
             attn_type=ctx.attn_type,
         )
-        
+
         # Return gradients: 3 tensor gradients + 17 None values for non-tensor params
         # Order matches forward parameters:
         # dq, dk, dv, (dropout_p, softmax_scale, causal, window_size,
@@ -318,12 +310,26 @@ class xFuserRingFlashAttnFunc(RingFlashAttnFunc):
         #              joint_tensor_value, joint_strategy, q_descale, k_descale,
         #              v_descale)
         return (
-            dq, dk, dv,        # Gradients for q, k, v
-            None, None, None, None,  # dropout_p, softmax_scale, causal, window_size
-            None, None, None, None,  # alibi_slopes, deterministic, return_softmax, group
-            None, None,              # attn_type, attn_processor
-            None, None, None, None, # attn_layer, joint_tensor_key, joint_tensor_value, joint_strategy
-            None, None, None,       # q_descale, k_descale, v_descale
+            dq,
+            dk,
+            dv,  # Gradients for q, k, v
+            None,
+            None,
+            None,
+            None,  # dropout_p, softmax_scale, causal, window_size
+            None,
+            None,
+            None,
+            None,  # alibi_slopes, deterministic, return_softmax, group
+            None,
+            None,  # attn_type, attn_processor
+            None,
+            None,
+            None,
+            None,  # attn_layer, joint_tensor_key, joint_tensor_value, joint_strategy
+            None,
+            None,
+            None,  # q_descale, k_descale, v_descale
         )
 
 
@@ -339,7 +345,7 @@ def xdit_ring_flash_attn_func(
     deterministic=False,
     return_attn_probs=False,
     group=None,
-    attn_type=AttnType.FA,
+    attn_type=None,
     attn_processor=None,
     attn_layer=None,
     joint_tensor_key=None,
@@ -349,6 +355,8 @@ def xdit_ring_flash_attn_func(
     k_descale=None,
     v_descale=None,
 ):
+    if attn_type is None:
+        attn_type = AttnType.FA
     return xFuserRingFlashAttnFunc.apply(
         q,
         k,
@@ -372,6 +380,7 @@ def xdit_ring_flash_attn_func(
         v_descale,
     )
 
+
 def xdit_sana_ring_flash_attn_forward(
     process_group,
     q: torch.Tensor,
@@ -379,7 +388,6 @@ def xdit_sana_ring_flash_attn_forward(
     v: torch.Tensor,
     attn_layer=None,
 ):
-
     comm = RingComm(process_group)
 
     out = None
@@ -395,7 +403,7 @@ def xdit_sana_ring_flash_attn_forward(
         )
         k = k.contiguous()
         v = v.contiguous()
-        
+
     q = F.relu(q).permute(0, 2, 3, 1).contiguous()
     k = F.relu(k).transpose(1, 2).contiguous()
     v = v.permute(0, 2, 3, 1).contiguous()
@@ -424,17 +432,17 @@ def xdit_sana_ring_flash_attn_forward(
     out = out.transpose(-2, -1)
     return out
 
+
 class xFuserSanaRingFlashAttnFunc(RingFlashAttnFunc):
     @staticmethod
     def forward(
         ctx,
         q,
         k,
-        v, 
-        attn_layer, 
-        group, 
+        v,
+        attn_layer,
+        group,
     ):
-
         if attn_layer is None:
             k = k.contiguous()
             v = v.contiguous()
@@ -445,22 +453,22 @@ class xFuserSanaRingFlashAttnFunc(RingFlashAttnFunc):
             v,
             attn_layer=attn_layer,
         )
-        
+
         ctx.group = group
         return out
 
-def xdit_sana_ring_flash_attn_func(
-        q:torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        group=None,
-        attn_layer=None,
-    ) -> torch.Tensor:
 
+def xdit_sana_ring_flash_attn_func(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    group=None,
+    attn_layer=None,
+) -> torch.Tensor:
     return xFuserSanaRingFlashAttnFunc.apply(
         q,
         k,
-        v, 
-        attn_layer, 
-        group, 
+        v,
+        attn_layer,
+        group,
     )

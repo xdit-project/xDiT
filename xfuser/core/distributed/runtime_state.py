@@ -37,9 +37,16 @@ from xfuser.logger import init_logger, warn_once
 from .parallel_state import (
     destroy_distributed_environment,
     destroy_model_parallel,
+    get_classifier_free_guidance_world_size,
+    get_data_parallel_world_size,
+    get_dit_world_size,
+    get_fully_shard_world_size,
+    get_pipeline_parallel_world_size,
     get_pp_group,
+    get_ring_parallel_world_size,
     get_sequence_parallel_rank,
     get_sequence_parallel_world_size,
+    get_tensor_model_parallel_world_size,
     init_distributed_environment,
     initialize_model_parallel,
     model_parallel_is_initialized,
@@ -210,9 +217,9 @@ class RuntimeState(metaclass=ABCMeta):
         Select the best attention backend for the current environment.
         """
         if engine_config and engine_config.runtime_config.attention_backend:
-            backend = AttentionBackendType[engine_config.runtime_config.attention_backend.upper()]
+            return AttentionBackendType[engine_config.runtime_config.attention_backend.upper()]
 
-        elif envs._is_hip():
+        if envs._is_hip():
             if env_info["has_aiter"] and PACKAGES_CHECKER._on_rdna4():
                 backend = AttentionBackendType.AITER_FLYDSL
             elif env_info["has_aiter"]:
@@ -235,6 +242,16 @@ class RuntimeState(metaclass=ABCMeta):
         else:
             backend = AttentionBackendType.SDPA
 
+        # The choice above reads what torch and the installed packages were
+        # built with, not what this host can run (a CUDA wheel on a CPU-only
+        # host, say). Fall back to SDPA rather than refuse to start, and say so.
+        unavailable = attention_registry.find(backend).unavailable()
+        if unavailable is not None:
+            logger.warning(
+                f"Automatically selected attention backend {backend.name} is unavailable: {unavailable}. "
+                "Falling back to SDPA; set attention_backend to choose a backend explicitly."
+            )
+            backend = AttentionBackendType.SDPA
         return backend
 
     def _check_if_backend_compatible_with_current_configuration(self, attention_backend: AttentionBackendType):
@@ -324,6 +341,9 @@ class DiTRuntimeState(RuntimeState):
     max_condition_sequence_length: int
     split_text_embed_in_sp: bool
     text_embed_sp_pad: int
+    # Class-level default so states built without __init__ (as some tests do) can still
+    # call set_input_parameters.
+    split_latents_by_rows: bool = True
 
     def __init__(self, pipeline: DiffusionPipeline, config: EngineConfig):
         self.attention_schedule: Optional[AttentionSchedule] = None
@@ -493,13 +513,21 @@ class DiTRuntimeState(RuntimeState):
         seed: Optional[int] = None,
         max_condition_sequence_length: Optional[int] = None,
         split_text_embed_in_sp: bool = True,
+        split_latents_by_rows: bool = True,
     ):
+        """Record the request's input parameters.
+
+        ``split_latents_by_rows`` says whether the caller splits the latents
+        across sequence-parallel ranks (and PipeFusion patches) by latent row,
+        using the patch metadata computed here, as the xFuser pipelines do.
+        That needs the latent row count to be divisible by the sequence
+        parallel degree. Callers whose transformer shards (and pads) the token
+        sequence itself pass ``False``, so any height is accepted.
+        """
         self.input_config.num_inference_steps = num_inference_steps or self.input_config.num_inference_steps
         self.max_condition_sequence_length = max_condition_sequence_length
         self.split_text_embed_in_sp = split_text_embed_in_sp
         self.text_embed_sp_pad = 0
-        if self.runtime_config.warmup_steps > self.input_config.num_inference_steps:
-            self.runtime_config.warmup_steps = self.input_config.num_inference_steps
         if seed is not None and seed != self.input_config.seed:
             self.input_config.seed = seed
             set_random_seed(seed)
@@ -508,8 +536,12 @@ class DiTRuntimeState(RuntimeState):
             or (height and self.input_config.height != height)
             or (width and self.input_config.width != width)
             or (batch_size and self.input_config.batch_size != batch_size)
+            or split_latents_by_rows != self.split_latents_by_rows
         ):
+            self.split_latents_by_rows = split_latents_by_rows
             self._input_size_change(height, width, batch_size)
+        else:
+            self._reset_recv_buffer()
 
         self.ready = True
 
@@ -524,8 +556,6 @@ class DiTRuntimeState(RuntimeState):
         split_text_embed_in_sp: bool = True,
     ):
         self.input_config.num_inference_steps = num_inference_steps or self.input_config.num_inference_steps
-        if self.runtime_config.warmup_steps > self.input_config.num_inference_steps:
-            self.runtime_config.warmup_steps = self.input_config.num_inference_steps
         self.split_text_embed_in_sp = split_text_embed_in_sp
         if seed is not None and seed != self.input_config.seed:
             self.input_config.seed = seed
@@ -538,6 +568,8 @@ class DiTRuntimeState(RuntimeState):
             or (batch_size and self.input_config.batch_size != batch_size)
         ):
             self._video_input_size_change(height, width, num_frames, batch_size)
+        else:
+            self._reset_recv_buffer()
 
         self.ready = True
 
@@ -615,7 +647,7 @@ class DiTRuntimeState(RuntimeState):
         self.input_config.height = height or self.input_config.height
         self.input_config.width = width or self.input_config.width
         self.input_config.batch_size = batch_size or self.input_config.batch_size
-        self._calc_patches_metadata()
+        self._calc_patches_metadata(self.split_latents_by_rows)
         self._reset_recv_buffer()
 
     def _video_input_size_change(
@@ -640,7 +672,7 @@ class DiTRuntimeState(RuntimeState):
             self._calc_patches_metadata()
         self._reset_recv_buffer()
 
-    def _calc_patches_metadata(self):
+    def _calc_patches_metadata(self, split_latents_by_rows: bool = True):
         num_sp_patches = get_sequence_parallel_world_size()
         sp_patch_idx = get_sequence_parallel_rank()
         patch_size = self.backbone_patch_size
@@ -649,7 +681,19 @@ class DiTRuntimeState(RuntimeState):
         latents_width = self.input_config.width // vae_scale_factor
 
         if latents_height % num_sp_patches != 0:
-            raise ValueError("The height of the input is not divisible by the number of sequence parallel devices")
+            if split_latents_by_rows:
+                raise ValueError("The height of the input is not divisible by the number of sequence parallel devices")
+            # The transformer shards the token sequence itself, so the row
+            # patches below are never read; leave them unset rather than
+            # describe a split that cannot exist.
+            self.num_pipeline_patch = self.parallel_config.pp_config.num_pipeline_patch
+            self.pp_patches_height = None
+            self.pp_patches_start_idx_local = None
+            self.pp_patches_start_end_idx_global = None
+            self.pp_patches_token_start_idx_local = None
+            self.pp_patches_token_start_end_idx_global = None
+            self.pp_patches_token_num = None
+            return
 
         self.num_pipeline_patch = self.parallel_config.pp_config.num_pipeline_patch
         # Pipeline patches
@@ -878,12 +922,14 @@ class DiTRuntimeState(RuntimeState):
         self.pp_patches_token_num = pp_patches_token_num
 
     def _reset_recv_buffer(self):
+        # Called on every request so stages renegotiate shapes that changed.
         get_pp_group().reset_buffer()
         get_pp_group().set_config(dtype=self.runtime_config.dtype)
 
-    def _reset_recv_skip_buffer(self, num_blocks_per_stage):
-        batch_size = self.input_config.batch_size
-        batch_size = batch_size * (2 // self.parallel_config.cfg_degree)
+    def _reset_recv_skip_buffer(self, num_blocks_per_stage, num_images_per_prompt=1, classifier_free_guidance=True):
+        batch_size = self.input_config.batch_size * num_images_per_prompt
+        if classifier_free_guidance:
+            batch_size = batch_size * (2 // self.parallel_config.cfg_degree)
         hidden_dim = self.backbone_inner_dim
         num_patches_tokens = [end - start for start, end in self.pp_patches_token_start_end_idx_global]
         patches_shape = [[num_blocks_per_stage, batch_size, tokens, hidden_dim] for tokens in num_patches_tokens]
@@ -909,11 +955,42 @@ class ExternalRuntimeState(RuntimeState):
 
     def __init__(self, config: Optional[EngineConfig] = None):
         if config is None:
-            config, _ = xFuserArgs().create_config()
+            config = _default_engine_config()
         super().__init__(config)
 
     def _check_distributed_env(self, parallel_config):
         pass
+
+
+def _default_engine_config() -> EngineConfig:
+    """An engine config whose parallel degrees describe the processes in place.
+
+    The default xFuserArgs describe a single process. On more ranks, take the
+    degrees of the model-parallel groups when they are initialized; otherwise
+    every rank runs the whole model, as one data-parallel replica.
+    """
+    args = xFuserArgs()
+    if model_parallel_is_initialized():
+        args.data_parallel_degree = get_data_parallel_world_size()
+        args.use_cfg_parallel = get_classifier_free_guidance_world_size() > 1
+        # The sequence-parallel group splits into Ulysses and ring subgroups
+        # only where yunchang can build them; its size is the product either way.
+        args.ring_degree = get_ring_parallel_world_size()
+        args.ulysses_degree = get_sequence_parallel_world_size() // args.ring_degree
+        args.pipefusion_parallel_degree = get_pipeline_parallel_world_size()
+        args.tensor_parallel_degree = get_tensor_model_parallel_world_size()
+        args.fully_shard_degree = get_fully_shard_world_size()
+        dit_world_size = get_dit_world_size()
+        vae_ranks = torch.distributed.get_world_size() - dit_world_size
+        if vae_ranks:
+            # Dedicated VAE ranks beyond the DiT ranks.
+            args.dit_parallel_size = dit_world_size
+            args.vae_parallel_size = vae_ranks
+            args.use_parallel_vae = True
+    elif torch.distributed.is_initialized():
+        args.data_parallel_degree = torch.distributed.get_world_size()
+    config, _ = args.create_config()
+    return config
 
 
 # _RUNTIME: Optional[RuntimeState] = None

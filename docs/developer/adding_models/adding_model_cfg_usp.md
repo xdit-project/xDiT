@@ -20,4 +20,18 @@ initialize_model_parallel(
 # restriction: dist.get_world_size() == 2 x <ring_degree> x <ulysses_degree>
 ```
 
+The example computes attention with `USP` from `xfuser.model_executor.layers.usp`, which reads the attention backend from xDiT's runtime state. Initialize it with the same layout before the first denoising step:
+
+```python
+from xfuser import xFuserArgs
+from xfuser.core.distributed import initialize_runtime_state
+engine_config, _ = xFuserArgs(
+    model=<checkpoint-path>,
+    ring_degree=<ring_degree>,
+    ulysses_degree=<ulysses_degree>,
+    use_cfg_parallel=True,
+).create_config()
+initialize_runtime_state(engine_config=engine_config)
+```
+
 Following this, both CFG parallelism and USP can be simultaneously implemented. For a comprehensive example script showcasing this approach, refer to [adding_model_cfg_usp.py](adding_model_cfg_usp.py).

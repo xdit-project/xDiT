@@ -1,73 +1,73 @@
+import types
+import weakref
+
 import torch
-import torch.distributed as dist
-from typing import Union, Optional, Dict
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionOutput
+
+from xfuser.core.distributed import get_cfg_group
+
+
+def _cfg_shard(value, batch_size: int, rank: int):
+    """Return this CFG rank's half of every tensor that carries the UNet batch."""
+    if torch.is_tensor(value):
+        if value.ndim > 0 and value.shape[0] == batch_size:
+            half = batch_size // 2
+            return value[rank * half : (rank + 1) * half]
+        return value
+    if isinstance(value, dict):
+        return {key: _cfg_shard(item, batch_size, rank) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(_cfg_shard(item, batch_size, rank) for item in value)
+    return value
+
 
 def unet_cfg_parallel_monkey_patch_forward(
     self,
     sample: torch.Tensor,
-    timestep: Union[torch.Tensor, float, int],
+    timestep,
     encoder_hidden_states: torch.Tensor,
-    added_cond_kwargs: Optional[Dict[str, torch.Tensor]] = None,
-    return_dict: bool = True,
     *args,
-    **kwargs
+    return_dict: bool = True,
+    **kwargs,
 ):
-    assert dist.is_initialized(), "Distributed training is not initialized"
+    """Run the UNet on one CFG half of the batch and gather both halves.
 
-    # Initialize output_buffer and buffer_list as instance attributes if they don't exist
-    if not hasattr(self, 'output_buffer'):
-        self.output_buffer = None
-    if not hasattr(self, 'buffer_list'):
-        self.buffer_list = None
-    
-    b, c, h, w = sample.shape
+    Diffusers stacks the batch as ``[unconditional, conditional]`` when
+    classifier-free guidance is on, so each of the two CFG ranks runs one half
+    and the halves are gathered back in that order. Without CFG the batch holds
+    only conditional samples and every rank runs the whole batch.
+    """
     original_forward = type(self).forward
+    batch_size = sample.shape[0]
+    pipeline = self._xfuser_cfg_pipeline()
+    split = (
+        pipeline is not None
+        and getattr(pipeline, "_guidance_scale", None) is not None
+        and pipeline.do_classifier_free_guidance
+    )
+    if not split:
+        return original_forward(self, sample, timestep, encoder_hidden_states, *args, return_dict=return_dict, **kwargs)
 
-    rank = dist.get_rank()
-    sample = sample[rank:rank+1]
-    timestep = timestep[rank:rank+1] if torch.is_tensor(timestep) and timestep.ndim > 0 else timestep
-    encoder_hidden_states = encoder_hidden_states[rank:rank+1]
-    if added_cond_kwargs is not None:
-        new_added_cond_kwargs = {}
-        for k in added_cond_kwargs:
-            new_added_cond_kwargs[k] = added_cond_kwargs[k][rank : rank + 1]
-        added_cond_kwargs = new_added_cond_kwargs
-
+    cfg_group = get_cfg_group()
+    rank = cfg_group.rank_in_group
     output = original_forward(
         self,
-        sample=sample,
-        timestep=timestep, 
-        encoder_hidden_states=encoder_hidden_states,
-        added_cond_kwargs=added_cond_kwargs,
+        _cfg_shard(sample, batch_size, rank),
+        _cfg_shard(timestep, batch_size, rank),
+        _cfg_shard(encoder_hidden_states, batch_size, rank),
+        *_cfg_shard(args, batch_size, rank),
         return_dict=False,
-        *args,
-        **kwargs
+        **_cfg_shard(kwargs, batch_size, rank),
     )[0]
-
-    world_size = dist.get_world_size()
-    assert world_size == 2, f"world_size is {world_size}, expected 2 in unet_cfg_parallel_monkey_patch_forward"
-
-    if self.output_buffer is None:
-        self.output_buffer = torch.empty((b, c, h, w), device=output.device, dtype=output.dtype)
-    if self.buffer_list is None:
-        self.buffer_list = [torch.empty_like(output) for _ in range(world_size)]
-
-    dist.all_gather(self.buffer_list, output.contiguous(), async_op=False)
-    torch.cat(self.buffer_list[: 1], dim=2, out=self.output_buffer[0:1])
-    torch.cat(self.buffer_list[1 :], dim=2, out=self.output_buffer[1:2])
-    output = self.output_buffer
+    output = cfg_group.all_gather(output.contiguous(), dim=0)
 
     if return_dict:
-        output = UNet2DConditionOutput(sample=output)
-    else:
-        output = (output,)
-    return output
+        return UNet2DConditionOutput(sample=output)
+    return (output,)
+
 
 def apply_unet_cfg_parallel_monkey_patch(pipe):
-    """Apply the monkey patch to the pipeline's UNet if world size is 2."""
-    import types
-    world_size = dist.get_world_size()
-    if world_size == 2:
-        pipe.unet.forward = types.MethodType(unet_cfg_parallel_monkey_patch_forward, pipe.unet)
-    return pipe 
+    """Split the UNet batch across the two ranks of the CFG parallel group."""
+    pipe.unet._xfuser_cfg_pipeline = weakref.ref(pipe)
+    pipe.unet.forward = types.MethodType(unet_cfg_parallel_monkey_patch_forward, pipe.unet)
+    return pipe

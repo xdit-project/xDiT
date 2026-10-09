@@ -1,7 +1,5 @@
-import math
 import torch
 from torch.nn.functional import scaled_dot_product_attention as sdpa
-from typing import Optional
 
 from xfuser.model_executor.layers.usp import USP, attention
 from xfuser.core.distributed import (
@@ -76,8 +74,11 @@ class xFuserCosmos3AttnProcessor:
             k_full_b = torch.cat([k_und_b, k_gen_b], dim=2)
             v_full_b = torch.cat([v_und_b, v_gen_b], dim=2)
             full_out = USP(
-                q_gen_b, k_full_b, v_full_b,
-                dropout_p=0.0, is_causal=False,
+                q_gen_b,
+                k_full_b,
+                v_full_b,
+                dropout_p=0.0,
+                is_causal=False,
             )
             causal_out = causal_out.squeeze(0).transpose(0, 1).flatten(-2, -1)
             full_out = full_out.squeeze(0).transpose(0, 1).flatten(-2, -1)
@@ -90,23 +91,33 @@ class xFuserCosmos3AttnProcessor:
             k_und_exp = k_und.repeat_interleave(num_kv_groups, dim=1)
             v_und_exp = v_und.repeat_interleave(num_kv_groups, dim=1)
             # [S, H, D] -> [1, H, S, D] (BHSD)
-            causal_out = sdpa(
-                q_und.unsqueeze(0).transpose(1, 2),
-                k_und_exp.unsqueeze(0).transpose(1, 2),
-                v_und_exp.unsqueeze(0).transpose(1, 2),
-                is_causal=True,
-            ).transpose(1, 2).squeeze(0).flatten(-2, -1)
+            causal_out = (
+                sdpa(
+                    q_und.unsqueeze(0).transpose(1, 2),
+                    k_und_exp.unsqueeze(0).transpose(1, 2),
+                    v_und_exp.unsqueeze(0).transpose(1, 2),
+                    is_causal=True,
+                )
+                .transpose(1, 2)
+                .squeeze(0)
+                .flatten(-2, -1)
+            )
 
             all_k = torch.cat([k_und, k_gen], dim=0)
             all_v = torch.cat([v_und, v_gen], dim=0)
             all_k_exp = all_k.repeat_interleave(num_kv_groups, dim=1)
             all_v_exp = all_v.repeat_interleave(num_kv_groups, dim=1)
-            full_out = sdpa(
-                q_gen.unsqueeze(0).transpose(1, 2),
-                all_k_exp.unsqueeze(0).transpose(1, 2),
-                all_v_exp.unsqueeze(0).transpose(1, 2),
-                is_causal=False,
-            ).transpose(1, 2).squeeze(0).flatten(-2, -1)
+            full_out = (
+                sdpa(
+                    q_gen.unsqueeze(0).transpose(1, 2),
+                    all_k_exp.unsqueeze(0).transpose(1, 2),
+                    all_v_exp.unsqueeze(0).transpose(1, 2),
+                    is_causal=False,
+                )
+                .transpose(1, 2)
+                .squeeze(0)
+                .flatten(-2, -1)
+            )
 
         und_out = attn.to_out(causal_out)
         gen_out = attn.to_add_out(full_out)
@@ -122,11 +133,20 @@ def _make_xfuser_cosmos3_transformer_wrapper():
     """Lazily create the wrapper class to avoid import errors when diffusers < 0.37.1."""
     from diffusers.models.transformers.transformer_cosmos3 import (
         Cosmos3OmniTransformer,
-        Cosmos3PackedMoTAttention,
     )
+
+    try:
+        from diffusers.models.transformers.transformer_cosmos3 import (
+            Cosmos3OmniTransformerOutput,
+        )
+    except ImportError:
+        # diffusers 0.39: the stock forward has no return_dict and always
+        # returns a tuple, so the wrapper does too.
+        Cosmos3OmniTransformerOutput = None
 
     class _AutoCastWrapper(torch.nn.Module):
         """Wraps a module to auto-cast inputs to match parameter dtype."""
+
         def __init__(self, module):
             super().__init__()
             self.module = module
@@ -139,7 +159,6 @@ def _make_xfuser_cosmos3_transformer_wrapper():
             return self.module.parameters(*args, **kwargs)
 
     class xFuserCosmos3OmniTransformerWrapper(Cosmos3OmniTransformer):
-
         def _install_xfuser_processors(self):
             for layer in self.layers:
                 layer.self_attn.processor = xFuserCosmos3AttnProcessor()
@@ -195,6 +214,7 @@ def _make_xfuser_cosmos3_transformer_wrapper():
             action_timesteps=None,
             action_noisy_frame_indexes=None,
             action_domain_ids=None,
+            return_dict: bool = True,
         ):
             try:
                 get_runtime_state().increment_step_counter()
@@ -209,6 +229,7 @@ def _make_xfuser_cosmos3_transformer_wrapper():
                 # Our xFuserCosmos3AttnProcessor handles the attention
                 # correctly with USP (which falls through to direct attention
                 # when sp_size == 1).
+                return_kwargs = {} if Cosmos3OmniTransformerOutput is None else {"return_dict": return_dict}
                 return Cosmos3OmniTransformer.forward(
                     self,
                     input_ids=input_ids,
@@ -235,6 +256,7 @@ def _make_xfuser_cosmos3_transformer_wrapper():
                     action_timesteps=action_timesteps,
                     action_noisy_frame_indexes=action_noisy_frame_indexes,
                     action_domain_ids=action_domain_ids,
+                    **return_kwargs,
                 )
 
             # SP path: chunk gen_seq across ranks so MLPs/norms run on 1/P
@@ -245,19 +267,13 @@ def _make_xfuser_cosmos3_transformer_wrapper():
             # Replicate parent's setup: embed, patchify, build joint sequence
             packed_text_embedding = self.embed_tokens(input_ids)
             target_dtype = packed_text_embedding.dtype
-            hidden_states = packed_text_embedding.new_zeros(
-                size=(sequence_length, self.config.hidden_size)
-            )
+            hidden_states = packed_text_embedding.new_zeros(size=(sequence_length, self.config.hidden_size))
             hidden_states[text_indexes] = packed_text_embedding
 
-            packed_tokens_vision, original_latent_shapes = (
-                self._patchify_and_pack_latents(vision_tokens)
-            )
+            packed_tokens_vision, original_latent_shapes = self._patchify_and_pack_latents(vision_tokens)
             packed_tokens_vision = self.proj_in(packed_tokens_vision)
             timesteps_vision = vision_timesteps * self.config.timestep_scale
-            packed_timestep_embeds_vision = self.time_embedder(
-                self.time_proj(timesteps_vision)
-            ).to(target_dtype)
+            packed_timestep_embeds_vision = self.time_embedder(self.time_proj(timesteps_vision)).to(target_dtype)
             packed_tokens_vision = self._apply_timestep_embeds_to_noisy_tokens(
                 packed_tokens=packed_tokens_vision,
                 packed_timestep_embeds=packed_timestep_embeds_vision,
@@ -267,17 +283,10 @@ def _make_xfuser_cosmos3_transformer_wrapper():
             hidden_states[vision_sequence_indexes] = packed_tokens_vision
 
             if has_sound:
-                packed_tokens_sound = self._pack_sound_latents(
-                    sound_tokens, sound_token_shapes
-                ).to(target_dtype)
-                packed_tokens_sound = (
-                    self.audio_proj_in(packed_tokens_sound)
-                    + self.audio_modality_embed
-                )
+                packed_tokens_sound = self._pack_sound_latents(sound_tokens, sound_token_shapes).to(target_dtype)
+                packed_tokens_sound = self.audio_proj_in(packed_tokens_sound) + self.audio_modality_embed
                 timesteps_sound = sound_timesteps * self.config.timestep_scale
-                packed_timestep_embeds_sound = self.time_embedder(
-                    self.time_proj(timesteps_sound)
-                ).to(target_dtype)
+                packed_timestep_embeds_sound = self.time_embedder(self.time_proj(timesteps_sound)).to(target_dtype)
                 packed_tokens_sound = self._apply_timestep_embeds_to_noisy_tokens(
                     packed_tokens=packed_tokens_sound,
                     packed_timestep_embeds=packed_timestep_embeds_sound,
@@ -287,45 +296,29 @@ def _make_xfuser_cosmos3_transformer_wrapper():
                 hidden_states[sound_sequence_indexes] = packed_tokens_sound
 
             if has_action:
-                packed_tokens_action, per_token_domain_ids = (
-                    self._pack_action_latents(
-                        action_tokens, action_token_shapes, action_domain_ids
-                    )
+                packed_tokens_action, per_token_domain_ids = self._pack_action_latents(
+                    action_tokens, action_token_shapes, action_domain_ids
                 )
                 packed_tokens_action = packed_tokens_action.to(target_dtype)
-                per_token_domain_ids = per_token_domain_ids.to(
-                    device=packed_tokens_action.device
-                )
-                packed_tokens_action = self.action_proj_in(
-                    packed_tokens_action, per_token_domain_ids
-                )
-                packed_tokens_action = (
-                    packed_tokens_action + self.action_modality_embed
-                )
+                per_token_domain_ids = per_token_domain_ids.to(device=packed_tokens_action.device)
+                packed_tokens_action = self.action_proj_in(packed_tokens_action, per_token_domain_ids)
+                packed_tokens_action = packed_tokens_action + self.action_modality_embed
                 if action_mse_loss_indexes.numel() > 0:
-                    timesteps_action = (
-                        action_timesteps * self.config.timestep_scale
+                    timesteps_action = action_timesteps * self.config.timestep_scale
+                    packed_timestep_embeds_action = self.time_embedder(self.time_proj(timesteps_action)).to(
+                        target_dtype
                     )
-                    packed_timestep_embeds_action = self.time_embedder(
-                        self.time_proj(timesteps_action)
-                    ).to(target_dtype)
-                    packed_tokens_action = (
-                        self._apply_timestep_embeds_to_noisy_tokens(
-                            packed_tokens=packed_tokens_action,
-                            packed_timestep_embeds=packed_timestep_embeds_action,
-                            noisy_frame_indexes=action_noisy_frame_indexes,
-                            token_shapes=action_token_shapes,
-                        )
+                    packed_tokens_action = self._apply_timestep_embeds_to_noisy_tokens(
+                        packed_tokens=packed_tokens_action,
+                        packed_timestep_embeds=packed_timestep_embeds_action,
+                        noisy_frame_indexes=action_noisy_frame_indexes,
+                        token_shapes=action_token_shapes,
                     )
                 hidden_states[action_sequence_indexes] = packed_tokens_action
 
             # Rotary embeddings for the full joint sequence
             cos, sin = self.rotary_emb(
-                position_ids=(
-                    position_ids.unsqueeze(0)
-                    if position_ids.ndim == 1
-                    else position_ids.unsqueeze(1)
-                ),
+                position_ids=(position_ids.unsqueeze(0) if position_ids.ndim == 1 else position_ids.unsqueeze(1)),
                 device=hidden_states.device,
                 dtype=hidden_states.dtype,
             )
@@ -344,23 +337,15 @@ def _make_xfuser_cosmos3_transformer_wrapper():
             # Chunk gen_seq and gen rotary embeddings across SP ranks
             gen_len = gen_seq.shape[0]
             pad_amount = (sp_size - (gen_len % sp_size)) % sp_size
-            gen_seq = self._chunk_and_pad_sequence(
-                gen_seq, sp_rank, sp_size, pad_amount, dim=0
-            )
-            gen_cos = self._chunk_and_pad_sequence(
-                gen_cos, sp_rank, sp_size, pad_amount, dim=0
-            )
-            gen_sin = self._chunk_and_pad_sequence(
-                gen_sin, sp_rank, sp_size, pad_amount, dim=0
-            )
+            gen_seq = self._chunk_and_pad_sequence(gen_seq, sp_rank, sp_size, pad_amount, dim=0)
+            gen_cos = self._chunk_and_pad_sequence(gen_cos, sp_rank, sp_size, pad_amount, dim=0)
+            gen_sin = self._chunk_and_pad_sequence(gen_sin, sp_rank, sp_size, pad_amount, dim=0)
 
             rotary_emb_chunked = (und_cos, und_sin, gen_cos, gen_sin)
 
             # Run decoder layers on chunked gen_seq
             for decoder_layer in self.layers:
-                und_seq, gen_seq = decoder_layer(
-                    und_seq, gen_seq, rotary_emb_chunked
-                )
+                und_seq, gen_seq = decoder_layer(und_seq, gen_seq, rotary_emb_chunked)
 
             # Gather gen_seq back to full length
             gen_seq = self._gather_and_unpad(gen_seq, pad_amount, dim=0)
@@ -370,9 +355,7 @@ def _make_xfuser_cosmos3_transformer_wrapper():
             gen_out = self.norm_moe_gen(gen_seq)
             last_hidden_state = torch.cat([und_out, gen_out], dim=0)
 
-            preds_vision_packed = self.proj_out(
-                last_hidden_state[vision_mse_loss_indexes]
-            )
+            preds_vision_packed = self.proj_out(last_hidden_state[vision_mse_loss_indexes])
             preds_vision = self._unpatchify_and_unpack_latents(
                 preds_vision_packed,
                 token_shapes_vision=vision_token_shapes,
@@ -382,11 +365,10 @@ def _make_xfuser_cosmos3_transformer_wrapper():
 
             preds_sound = None
             if has_sound:
-                preds_sound_packed = self.audio_proj_out(
-                    last_hidden_state[sound_mse_loss_indexes]
-                )
+                preds_sound_packed = self.audio_proj_out(last_hidden_state[sound_mse_loss_indexes])
                 preds_sound = self._unpack_sound_latents(
-                    preds_sound_packed, sound_token_shapes,
+                    preds_sound_packed,
+                    sound_token_shapes,
                     sound_noisy_frame_indexes,
                 )
 
@@ -394,29 +376,29 @@ def _make_xfuser_cosmos3_transformer_wrapper():
             if has_action:
                 per_noisy_domain_ids = [
                     domain_id.reshape(1).expand(len(noisy_idxs))
-                    for domain_id, noisy_idxs in zip(
-                        action_domain_ids, action_noisy_frame_indexes
-                    )
+                    for domain_id, noisy_idxs in zip(action_domain_ids, action_noisy_frame_indexes)
                 ]
-                per_noisy_domain_ids = torch.cat(
-                    per_noisy_domain_ids, dim=0
-                ).to(device=last_hidden_state.device)
+                per_noisy_domain_ids = torch.cat(per_noisy_domain_ids, dim=0).to(device=last_hidden_state.device)
                 preds_action_packed = self.action_proj_out(
                     last_hidden_state[action_mse_loss_indexes],
                     per_noisy_domain_ids,
                 )
                 preds_action = self._unpack_action_latents(
-                    preds_action_packed, action_token_shapes,
+                    preds_action_packed,
+                    action_token_shapes,
                     action_noisy_frame_indexes,
                 )
 
-            return preds_vision, preds_sound, preds_action
+            if not return_dict or Cosmos3OmniTransformerOutput is None:
+                return preds_vision, preds_sound, preds_action
+            return Cosmos3OmniTransformerOutput(sample=preds_vision, sound=preds_sound, action=preds_action)
 
     return xFuserCosmos3OmniTransformerWrapper
 
 
 # Lazy singleton
 _wrapper_cls = None
+
 
 def get_cosmos3_transformer_wrapper_class():
     global _wrapper_cls

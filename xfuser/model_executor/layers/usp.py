@@ -24,7 +24,7 @@ from xfuser.core.distributed import (
 
 from xfuser.compat import version_at_least
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
-from xfuser.logger import init_logger
+from xfuser.logger import init_logger, warn_once
 from xfuser.core.attention import registry as attention_registry
 from xfuser.core.attention.spec import VarlenPacking
 from xfuser.core.attention.spec import AttnCall
@@ -243,7 +243,8 @@ def _validate_gqa_params(
     key,
     value,
     kv_head_repeat,
-    joint_strategy,
+    joint_key=None,
+    joint_value=None,
 ):
     if isinstance(kv_head_repeat, bool) or not isinstance(kv_head_repeat, int):
         raise TypeError("kv_head_repeat must be an integer.")
@@ -267,8 +268,9 @@ def _validate_gqa_params(
         raise ValueError(
             f"KV heads ({key.shape[1]}) must be divisible by the Ulysses world size ({ulysses_world_size})."
         )
-    if joint_strategy is not None:
-        raise NotImplementedError("GQA KV repetition does not support joint tensors.")
+    for joint in (joint_key, joint_value):
+        if joint is not None and (joint.ndim != 4 or joint.shape[1] != key.shape[1]):
+            raise ValueError("GQA joint key and value must have the KV head count.")
 
 
 def _ft_c_output_all_to_all(x):
@@ -379,6 +381,53 @@ def _trim_trailing_kv_padding(key, value, attention_kwargs, backend=None):
         consumed["cu_seqlens_k"] = None
         consumed["max_seqlen_k"] = None
     return key[:, :, :valid_kv_len], value[:, :, :valid_kv_len], consumed
+
+
+_RING_SP_PADDING_WARNING = (
+    "The token count is not divisible by the sequence parallel degree, so the "
+    "sequence was zero-padded. Ring attention cannot exclude the padded tokens "
+    "from the keys, so results are approximate. For results that match a single "
+    "device, choose a resolution or frame count whose token count is divisible "
+    "by ulysses_degree * ring_degree, or use Ulysses parallelism only."
+)
+
+
+def sp_padding_attention_kwargs(local_kv_len, sp_padding, attention_kwargs=None):
+    """Attention kwargs that keep sequence-parallel padding out of the keys.
+
+    For wrappers that zero-pad a sequence so it splits evenly across the
+    sequence parallel ranks. ``sp_padding`` is the number of padding tokens and
+    ``local_kv_len`` the number of keys this rank passes to USP. The padding
+    must sit at the end of the last rank's keys, so that after the Ulysses
+    all-to-all it is a uniform suffix that USP slices off via ``valid_kv_len``.
+
+    Returns ``attention_kwargs`` unchanged when nothing is padded. Ring
+    attention sees one shard of keys per step and cannot drop that suffix, so
+    with ``ring_degree > 1`` the padded keys stay in and a one-time warning
+    says the result is approximate.
+    """
+    if not sp_padding:
+        return attention_kwargs
+    if get_ring_parallel_world_size() > 1:
+        warn_once(logger, _RING_SP_PADDING_WARNING)
+        return attention_kwargs
+    valid_kv_len = get_ulysses_parallel_world_size() * local_kv_len - sp_padding
+    return {**(attention_kwargs or {}), "valid_kv_len": valid_kv_len}
+
+
+class SequenceParallelPadding:
+    """The padding count a wrapper shares with its attention processors.
+
+    The wrapper sets ``tokens`` each forward before running its blocks, and the
+    processors read it when they call USP. One object is shared, so processors
+    created once at init see every forward's value.
+    """
+
+    def __init__(self):
+        self.tokens = 0
+
+    def attention_kwargs(self, local_kv_len, attention_kwargs=None):
+        return sp_padding_attention_kwargs(local_kv_len, self.tokens, attention_kwargs)
 
 
 def _get_attention_function(backend=None):
@@ -534,7 +583,7 @@ def USP(
     """
     if combine_qkv_a2a is None:
         combine_qkv_a2a = False
-    _validate_gqa_params(query, key, value, kv_head_repeat, joint_strategy)
+    _validate_gqa_params(query, key, value, kv_head_repeat, joint_key, joint_value)
 
     attention_function = _get_attention_function(backend=backend)
 
@@ -580,7 +629,9 @@ def USP(
 
     joint_attn_kwargs = None
     if joint_strategy:
-        query = _concat_joint_tensor(query, joint_query, joint_strategy, dim=2)
+        # joint_query may be None when the joint tokens only serve as keys.
+        if joint_query is not None:
+            query = _concat_joint_tensor(query, joint_query, joint_strategy, dim=2)
         joint_key, joint_value = _preprocess_joint_tensors(joint_key, joint_value)
         joint_attn_kwargs = {
             "joint_value": joint_value,
@@ -637,6 +688,11 @@ def USP(
 
     if kv_head_repeat > 1:
         key, value = _repeat_kv_heads(key, value, kv_head_repeat)
+        if joint_attn_kwargs is not None:
+            # This rank's slice of the joint KV heads, repeated like the rest.
+            joint_attn_kwargs["joint_key"], joint_attn_kwargs["joint_value"] = _repeat_kv_heads(
+                joint_attn_kwargs["joint_key"], joint_attn_kwargs["joint_value"], kv_head_repeat
+            )
 
     if get_sequence_parallel_world_size() == 1:  # No SP
         out, _ = attention_function(

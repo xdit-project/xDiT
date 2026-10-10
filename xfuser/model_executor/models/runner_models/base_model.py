@@ -89,6 +89,9 @@ _SPARSE_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SS
 _SPARGE_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SPARGE) | attention_registry.types_where(
     sparsity=Sparsity.VSA
 )
+# Prism's block-sparse attention needs a token grid that only models declaring the
+# capability publish; anywhere else it would quietly run dense.
+_BSA_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.BSA)
 
 
 def _parse_attention_backend(name: Optional[str], kind: str) -> Optional[AttentionBackendType]:
@@ -222,6 +225,7 @@ class ModelCapabilities:
     cross_attention_backend: bool = False
     supports_sparse_attention_backends: bool = False
     supports_sparge_attention_backends: bool = False
+    supports_bsa_attention_backends: bool = False
     supports_distilled_weights: bool = False
     profile_capture_phase: bool = False
 
@@ -684,6 +688,20 @@ class xFuserModel(abc.ABC):
 
         self._validate_supported_attn_backends(config)
 
+        if not self.capabilities.supports_bsa_attention_backends:
+            for value, label in (
+                (config.attention_backend, "attention backend"),
+                (config.cross_attention_backend, "cross attention backend"),
+                (config.hybrid_attn_low_precision_backend, "hybrid low-precision attention backend"),
+                (config.hybrid_attn_high_precision_backend, "hybrid high-precision attention backend"),
+            ):
+                bsa = _parse_attention_backend(value, label)
+                if bsa in _BSA_ATTENTION_BACKENDS:
+                    raise ValueError(
+                        f"Model {config.model} does not support {bsa.name}: it publishes no token grid "
+                        f"for block-sparse attention, so every call would run dense."
+                    )
+
         backend = _parse_attention_backend(config.attention_backend, "attention backend")
         supports_sparse = self.capabilities.supports_sparse_attention_backends
         supports_sparge = self.capabilities.supports_sparge_attention_backends
@@ -790,6 +808,10 @@ class xFuserModel(abc.ABC):
     def _get_compile_dynamic(self) -> Optional[bool]:
         return None  # torch default (auto)
 
+    def _prefer_blockwise_compile(self) -> bool:
+        """Compile per block even without FSDP or caching, for forwards that sync to host outside the block loop."""
+        return False
+
     def _mark_cudagraph_steps(self, component: torch.nn.Module) -> None:
         """Tell CUDA Graphs where one inference step ends, so the next may reuse its buffers.
 
@@ -867,7 +889,7 @@ class xFuserModel(abc.ABC):
                 and component_name in self.settings.fsdp_strategy
                 and (requested_shards is None or component_name in requested_shards)
             )
-            if component_is_sharded or self.config.cache_method:
+            if component_is_sharded or self.config.cache_method or self._prefer_blockwise_compile():
                 # Per-block compile: leaves transformer as original object so cache-dit's
                 # transformer.forward patch remains visible during compiled execution.
                 wrap_attrs = self.settings.fsdp_strategy.get(component_name, {}).get("wrap_attrs", [])

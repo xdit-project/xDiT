@@ -20,7 +20,7 @@ from xfuser.model_executor.layers.attention_mask import (
     make_attn_mask_with_meta,
 )
 from xfuser.model_executor.layers.norms import _replace_rms_norms_with_aiter
-from xfuser.model_executor.layers.usp import USP, attention
+from xfuser.model_executor.layers.usp import USP, SequenceParallelPadding, attention
 
 
 def _get_mask_meta(cache: MaskMetaCache, mask: torch.Tensor | None) -> object | None:
@@ -31,12 +31,20 @@ def _get_mask_meta(cache: MaskMetaCache, mask: torch.Tensor | None) -> object | 
 
 
 class xFuserLTX2PerturbedAttnProcessor:
-    def __init__(self, use_parallel_attention: bool = True, gather_kv=False):
+    def __init__(
+        self,
+        use_parallel_attention: bool = True,
+        gather_kv=False,
+        sp_padding: SequenceParallelPadding | None = None,
+    ):
         if use_parallel_attention:
             self.attention_method = USP
         else:
             self.attention_method = attention
         self.gather_kv = gather_kv
+        # Shared with the transformer wrapper, which records how many video
+        # tokens it zero-padded for sequence parallelism.
+        self.sp_padding = sp_padding
 
     def __call__(
         self,
@@ -58,6 +66,11 @@ class xFuserLTX2PerturbedAttnProcessor:
             # Tokens sit second to last in both RoPE layouts: interleaved
             # cos/sin are [B, S, D], split ones [B, H, S, D // 2].
             key_rotary_emb = [get_sp_group().all_gather(x, dim=-2) for x in key_rotary_emb]
+            # Drop the video tokens padded for sequence parallelism.
+            pad = self.sp_padding.tokens if self.sp_padding is not None else 0
+            if pad:
+                encoder_hidden_states = encoder_hidden_states[:, :-pad]
+                key_rotary_emb = [x[..., :-pad, :] for x in key_rotary_emb]
 
         if isinstance(attention_mask, AttentionMaskWithMeta):
             attn_kw = {
@@ -109,6 +122,9 @@ class xFuserLTX2PerturbedAttnProcessor:
             key = key.unflatten(2, (attn.heads, -1)).transpose(1, 2)
             value = value.unflatten(2, (attn.heads, -1)).transpose(1, 2)
 
+            if self.sp_padding is not None and not self.gather_kv:
+                # Sharded video keys: USP drops the padding after its exchange.
+                attn_kw = self.sp_padding.attention_kwargs(key.shape[2], attn_kw)
             hidden_states = self.attention_method(
                 query,
                 key,
@@ -136,12 +152,20 @@ class xFuserLTX2PerturbedAttnProcessor:
 
 
 class xFuserLTX2AudioVideoAttnProcessor:
-    def __init__(self, use_parallel_attention: bool = True, gather_kv=False):
+    def __init__(
+        self,
+        use_parallel_attention: bool = True,
+        gather_kv=False,
+        sp_padding: SequenceParallelPadding | None = None,
+    ):
         if use_parallel_attention:
             self.attention_method = USP
         else:
             self.attention_method = attention
         self.gather_kv = gather_kv
+        # Shared with the transformer wrapper, which records how many video
+        # tokens it zero-padded for sequence parallelism.
+        self.sp_padding = sp_padding
 
     def __call__(
         self,
@@ -162,6 +186,11 @@ class xFuserLTX2AudioVideoAttnProcessor:
             # Tokens sit second to last in both RoPE layouts: interleaved
             # cos/sin are [B, S, D], split ones [B, H, S, D // 2].
             key_rotary_emb = [get_sp_group().all_gather(x, dim=-2) for x in key_rotary_emb]
+            # Drop the video tokens padded for sequence parallelism.
+            pad = self.sp_padding.tokens if self.sp_padding is not None else 0
+            if pad:
+                encoder_hidden_states = encoder_hidden_states[:, :-pad]
+                key_rotary_emb = [x[..., :-pad, :] for x in key_rotary_emb]
 
         if isinstance(attention_mask, AttentionMaskWithMeta):
             attn_kw = {
@@ -208,6 +237,9 @@ class xFuserLTX2AudioVideoAttnProcessor:
         key = key.unflatten(2, (attn.heads, -1)).transpose(1, 2)
         value = value.unflatten(2, (attn.heads, -1)).transpose(1, 2)
 
+        if self.sp_padding is not None and not self.gather_kv:
+            # Sharded video keys: USP drops the padding after its exchange.
+            attn_kw = self.sp_padding.attention_kwargs(key.shape[2], attn_kw)
         hidden_states = self.attention_method(
             query, key, value, dropout_p=0.0, is_causal=False, attention_kwargs=attn_kw
         )
@@ -337,13 +369,19 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
         else:
             attn_processor_cls = xFuserLTX2AudioVideoAttnProcessor
 
+        # Video tokens padded for sequence parallelism: the video self-attention
+        # drops them after the Ulysses exchange, and the audio-to-video
+        # attention, which gathers the video keys, slices them off.
+        self.sp_padding = SequenceParallelPadding()
         for block in self.transformer_blocks:
-            block.attn1.processor = attn_processor_cls()
+            block.attn1.processor = attn_processor_cls(sp_padding=self.sp_padding)
             block.attn2.processor = attn_processor_cls(use_parallel_attention=False)
             block.audio_attn1.processor = attn_processor_cls(use_parallel_attention=False)
             block.audio_attn2.processor = attn_processor_cls(use_parallel_attention=False)
             block.audio_to_video_attn.processor = attn_processor_cls(use_parallel_attention=False)
-            block.video_to_audio_attn.processor = attn_processor_cls(use_parallel_attention=False, gather_kv=True)
+            block.video_to_audio_attn.processor = attn_processor_cls(
+                use_parallel_attention=False, gather_kv=True, sp_padding=self.sp_padding
+            )
 
     def _chunk_and_pad_sequence(
         self,
@@ -417,6 +455,7 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
 
         full_seq_len = hidden_states.shape[1]
         pad_amount = (sp_world_size - (full_seq_len % sp_world_size)) % sp_world_size
+        self.sp_padding.tokens = pad_amount
         hidden_states = self._chunk_and_pad_sequence(hidden_states, sp_world_rank, sp_world_size, pad_amount, dim=1)
 
         # Determine timestep for audio before chunking the video-side timestep.

@@ -999,6 +999,10 @@ class xFuserModel(abc.ABC):
                 warmup_args["prompt"] = warmup_args["prompt"][: self.config.batch_size]
             self._run_warmup_calls(warmup_args)
 
+        # Compile warmup traces the graphs, then frees its outputs, so the next
+        # call re-records. Absorb that here unless an explicit warmup already did.
+        captured_cudagraph = self._warmup_cudagraph_capture(input_args)
+
         if self.config.determinism_check > 0:
             log(
                 f"Since determinism check is enabled ({self.config.determinism_check}), "
@@ -1036,8 +1040,8 @@ class xFuserModel(abc.ABC):
 
         output = self._gather_dp_outputs(output)
 
-        if not self.config.warmup_calls and len(timings) > 1:
-            # Without warmup calls, the first timed run absorbs one-time costs such as compilation.
+        if not self.config.warmup_calls and not captured_cudagraph and len(timings) > 1:
+            # Without a warmup, the first timed run absorbs one-time costs such as compilation.
             timings.pop(0)
         log(f"Average time over {len(timings)} runs: {sum(timings) / len(timings):.2f}s")
         log(f"Total time spent: {inference_start.elapsed_time(inference_end) / 1000:.2f}s")
@@ -1066,6 +1070,31 @@ class xFuserModel(abc.ABC):
             log(f"Batch {batch_index} completed in {timing:.2f}s")
 
         return DiffusionOutput.from_outputs(all_outputs, self.settings.model_output_type), timings
+
+    def _warmup_cudagraph_capture(self, input_args: dict) -> bool:
+        """Record CUDA graphs once, before timings, and report whether that happened.
+
+        This is not the compile-time capture. ``_run_compile_warmup`` still traces
+        the graphs (and, with ``--profile_capture_phase``, profiles that recording).
+        ``--warmup_calls`` is also left to do its own full pipe calls. Both of those
+        already give the measured loop a warmed allocator, so this adds a call only
+        when neither has, and only for modes that actually record CUDA graphs.
+        """
+        if not getattr(self.config, "use_torch_compile", False):
+            return False
+        if self.config.warmup_calls:
+            return False
+        if self._get_compile_mode() not in self.CUDAGRAPH_COMPILE_MODES:
+            return False
+
+        capture_args = copy.deepcopy(input_args)
+        if self.config.batch_size and isinstance(capture_args.get("prompt"), list):
+            capture_args["prompt"] = capture_args["prompt"][: self.config.batch_size]
+        log("CUDA graph capture warmup (untimed, excluded from timings)...")
+        _output, timing = self._run_timed_pipe(capture_args)
+        del _output
+        log(f"CUDA graph capture warmup completed in {timing:.2f}s")
+        return True
 
     def _run_warmup_calls(self, input_args: dict) -> None:
         """Run initial warmup calls if specified"""

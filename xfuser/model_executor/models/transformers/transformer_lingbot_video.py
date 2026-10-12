@@ -3,7 +3,7 @@ from typing import Optional
 
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
-from xfuser.model_executor.layers.usp import USP
+from xfuser.model_executor.layers.usp import USP, SequenceParallelPadding
 from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
     get_sequence_parallel_rank,
@@ -28,7 +28,9 @@ def get_lingbot_video_classes():
     )
 
 
-def _usp_attention_forward(attn_module, x, rotary_emb, attention_mask=None, packed_indices=None, parallel_config=None):
+def _usp_attention_forward(
+    attn_module, x, rotary_emb, attention_mask=None, packed_indices=None, parallel_config=None, sp_padding=None
+):
     """Replacement forward for LingBotVideoAttention that uses USP for distributed attention.
 
     For single GPU (sp_world_size=1), USP routes through the configured attention backend
@@ -47,7 +49,9 @@ def _usp_attention_forward(attn_module, x, rotary_emb, attention_mask=None, pack
     q = q.transpose(1, 2)
     k = k.transpose(1, 2)
     v = v.transpose(1, 2)
-    out = USP(q, k, v)
+    # The joint [video; text] sequence is padded at its end for sequence
+    # parallelism, so the gathered keys end with the padding.
+    out = USP(q, k, v, attention_kwargs=sp_padding.attention_kwargs(k.shape[2]) if sp_padding is not None else None)
     out = out.transpose(1, 2)  # back to (B, S, H, D)
     return attn_module.to_out(out.flatten(2, 3).type_as(x))
 
@@ -227,9 +231,12 @@ class xFuserLingBotVideoTransformer3DWrapper:
             block.ffn._run_grouped_experts = _make_fast(block.ffn).__get__(block.ffn)
 
     def _install_usp_attention(self):
+        self.sp_padding = SequenceParallelPadding()
         for block in self.blocks:
             block.attn._original_forward = block.attn.forward
-            block.attn.forward = lambda *args, _attn=block.attn, **kw: _usp_attention_forward(_attn, *args, **kw)
+            block.attn.forward = lambda *args, _attn=block.attn, _pad=self.sp_padding, **kw: _usp_attention_forward(
+                _attn, *args, sp_padding=_pad, **kw
+            )
 
     def _chunk_and_pad_sequence(self, x, sp_world_rank, sp_world_size, pad_amount, dim):
         if pad_amount > 0:
@@ -297,6 +304,7 @@ class xFuserLingBotVideoTransformer3DWrapper:
 
         # SP chunking — chunk BEFORE computing temb6 to avoid full-seq allocations
         pad_amount = (sp_world_size - (joint_seq_len % sp_world_size)) % sp_world_size
+        self.sp_padding.tokens = pad_amount
         joint = self._chunk_and_pad_sequence(joint, sp_world_rank, sp_world_size, pad_amount, dim=1)
         rotary = self._chunk_and_pad_sequence(rotary, sp_world_rank, sp_world_size, pad_amount, dim=1)
         local_seq_len = joint.shape[1]

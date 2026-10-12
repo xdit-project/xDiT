@@ -4,17 +4,15 @@ from diffusers import UniPCMultistepScheduler
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
 from xfuser.model_executor.models.runner_models.base_model import (
-    DIFFUSERS_FROM_SOURCE,
     ModelSettings,
     xFuserModel,
     register_model,
     ModelCapabilities,
     DefaultInputValues,
     DiffusionOutput,
-    _parse_attention_backend,
 )
 from xfuser.model_executor.quant.targets import GemmTargets, Select
-from xfuser.core.distributed.attention_backend import AttentionBackendType
+from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.core.utils.runner_utils import log, resize_and_crop_image
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
@@ -24,16 +22,18 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
 # Only full-precision attention backends produce correct results on Cosmos3.
 # Quantized backends (FP8, MXFP4, MLA) cause >50% relative error per layer
 # due to extreme K/V dynamic range mismatch in the MoT attention.
-_COSMOS3_SUPPORTED_ATTN_BACKENDS = frozenset({
-    AttentionBackendType.AITER,
-    AttentionBackendType.SDPA,
-    AttentionBackendType.SDPA_MATH,
-    AttentionBackendType.SDPA_EFFICIENT,
-    AttentionBackendType.SDPA_FLASH,
-    AttentionBackendType.FLASH,
-    AttentionBackendType.FLASH_3,
-    AttentionBackendType.FLASH_4,
-})
+COSMOS3_SUPPORTED_ATTN_BACKENDS = frozenset(
+    {
+        AttentionBackendType.AITER,
+        AttentionBackendType.SDPA,
+        AttentionBackendType.SDPA_MATH,
+        AttentionBackendType.SDPA_EFFICIENT,
+        AttentionBackendType.SDPA_FLASH,
+        AttentionBackendType.FLASH,
+        AttentionBackendType.FLASH_3,
+        AttentionBackendType.FLASH_4,
+    }
+)
 
 
 COSMOS3_FSDP_STRATEGY = {
@@ -47,14 +47,19 @@ COSMOS3_FSDP_STRATEGY = {
 @register_model("nvidia/Cosmos3-Super")
 @register_model("Cosmos3-Super")
 class xFuserCosmos3SuperModel(xFuserModel):
-    # No released diffusers ships pipeline_cosmos3_omni yet.
-    min_diffusers_version = DIFFUSERS_FROM_SOURCE
+    # diffusers 0.39.0 is the first release with pipeline_cosmos3_omni.
+    min_diffusers_version = "0.39.0"
 
     load_support = LoadSupport(
-        meta_transformers=('transformer',),
+        meta_transformers=("transformer",),
         meta_text_encoders=(),
         replicated_meta=True,
         routes=STANDARD_LOAD_ROUTES,
+    )
+    supported_attn_backends = COSMOS3_SUPPORTED_ATTN_BACKENDS
+    unsupported_attn_backend_reason = (
+        "Quantized attention backends produce >50% relative error on this model "
+        "due to extreme K/V dynamic range mismatch in the MoT attention."
     )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
@@ -94,18 +99,6 @@ class xFuserCosmos3SuperModel(xFuserModel):
         ),
         fsdp_strategy=COSMOS3_FSDP_STRATEGY,
     )
-
-    def _validate_config(self, config) -> None:
-        super()._validate_config(config)
-        backend = _parse_attention_backend(config.attention_backend, "attention backend")
-        if backend is not None and backend not in _COSMOS3_SUPPORTED_ATTN_BACKENDS:
-            supported = ", ".join(sorted(b.name for b in _COSMOS3_SUPPORTED_ATTN_BACKENDS))
-            raise ValueError(
-                f"Cosmos3 does not support --attention_backend {backend.name}. "
-                f"Quantized attention backends produce >50% relative error on this "
-                f"model due to extreme K/V dynamic range mismatch in the MoT attention. "
-                f"Supported backends: {supported}"
-            )
 
     def _load_model(self) -> DiffusionPipeline:
         from xfuser.model_executor.models.transformers.transformer_cosmos3 import (
@@ -173,19 +166,22 @@ class xFuserCosmos3SuperModel(xFuserModel):
             image = images[0]
             width, height = input_args["width"], input_args["height"]
             if input_args.get("resize_input_images", False):
-                image = resize_and_crop_image(image, width, height, self.settings.mod_value)
+                image = resize_and_crop_image(
+                    image,
+                    target_height=height,
+                    target_width=width,
+                    mod_value=self.settings.mod_value,
+                )
             input_args["image"] = image
         return input_args
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
         flow_shift = input_args.get("flow_shift", 10.0)
-        self.pipe.scheduler = UniPCMultistepScheduler.from_config(
-            self.pipe.scheduler.config, flow_shift=flow_shift
-        )
+        self.pipe.scheduler = UniPCMultistepScheduler.from_config(self.pipe.scheduler.config, flow_shift=flow_shift)
         log(f"Scheduler set to UniPCMultistepScheduler with flow_shift={flow_shift}")
         if self.config.fully_shard_degree > 1:
-            if hasattr(self.pipe.transformer, '_patch_time_embedder_for_fsdp'):
+            if hasattr(self.pipe.transformer, "_patch_time_embedder_for_fsdp"):
                 self.pipe.transformer._patch_time_embedder_for_fsdp()
 
 
@@ -193,7 +189,7 @@ class xFuserCosmos3SuperModel(xFuserModel):
 @register_model("Cosmos3-Nano")
 class xFuserCosmos3NanoModel(xFuserCosmos3SuperModel):
     load_support = LoadSupport(
-        meta_transformers=('transformer',),
+        meta_transformers=("transformer",),
         meta_text_encoders=(),
         replicated_meta=True,
         routes=STANDARD_LOAD_ROUTES,

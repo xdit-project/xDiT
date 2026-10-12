@@ -1,5 +1,5 @@
 import torch
-from typing import Optional, Union, Dict, Any
+from typing import Optional
 
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
@@ -19,6 +19,7 @@ def get_lingbot_video_classes():
         make_joint_position_ids,
         _cat_interleave,
     )
+
     return (
         LingBotVideoTransformer3DModel,
         apply_rotary_emb,
@@ -58,10 +59,10 @@ def _patch_block_bulk_dtype(block):
     forward's `self.attn.to_q.weight.dtype` crashes. This patches the block to
     use the pre-cached dtype instead.
     """
-    original_forward = block.forward
 
-    def patched_forward(x, temb6, rotary_emb, attention_mask=None, moe_padding_mask=None, packed_indices=None, parallel_config=None):
-        import torch.nn.functional as F
+    def patched_forward(
+        x, temb6, rotary_emb, attention_mask=None, moe_padding_mask=None, packed_indices=None, parallel_config=None
+    ):
         from lingbot_video.transformer_lingbot_video import LingBotVideoSparseMoeBlock
 
         expected_tokens = x.shape[0] * x.shape[1]
@@ -78,8 +79,11 @@ def _patch_block_bulk_dtype(block):
         bulk_dtype = getattr(block, "_cached_bulk_dtype", torch.bfloat16)
         attn_in = (block.norm1(x) * scale_msa + shift_msa).to(bulk_dtype)
         attn_out = block.attn(
-            attn_in, rotary_emb, attention_mask,
-            packed_indices=packed_indices, parallel_config=parallel_config,
+            attn_in,
+            rotary_emb,
+            attention_mask,
+            packed_indices=packed_indices,
+            parallel_config=parallel_config,
         )
         x = x + (gate_msa * block.norm_post_attn(attn_out)).to(x.dtype)
 
@@ -144,9 +148,7 @@ class xFuserLingBotVideoTransformer3DWrapper:
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
         LingBotVideoTransformer3DModel = get_lingbot_video_classes()[0]
-        model = LingBotVideoTransformer3DModel.from_pretrained(
-            pretrained_model_name_or_path, **kwargs
-        )
+        model = LingBotVideoTransformer3DModel.from_pretrained(pretrained_model_name_or_path, **kwargs)
         model.__class__ = type(
             "xFuserLingBotVideoTransformer3DWrapper",
             (xFuserLingBotVideoTransformer3DWrapper, LingBotVideoTransformer3DModel),
@@ -177,6 +179,7 @@ class xFuserLingBotVideoTransformer3DWrapper:
         self.rope.forward = lambda pos_ids, _r=self.rope: _rope_forward_no_rebuild(_r, pos_ids)
         # Patch MoE _reorder_tokens to avoid dynamic-shape torch.where graph breaks
         from lingbot_video.transformer_lingbot_video import LingBotVideoSparseMoeBlock
+
         for block in self.blocks:
             if isinstance(block.ffn, LingBotVideoSparseMoeBlock):
                 block.ffn._reorder_tokens = staticmethod(_reorder_tokens_compile_friendly)
@@ -206,15 +209,21 @@ class xFuserLingBotVideoTransformer3DWrapper:
             # Patch _run_grouped_experts to skip .bfloat16().transpose() since weights are pre-transposed
             def _make_fast(moe_block):
                 e = moe_block.experts
+
                 def _fast(self_moe, tokens, counts):
                     import torch.nn.functional as F
-                    input_shape, padded_tokens, permuted_indices, aligned_counts = self_moe._pad_grouped_tokens(tokens, counts)
+
+                    input_shape, padded_tokens, permuted_indices, aligned_counts = self_moe._pad_grouped_tokens(
+                        tokens, counts
+                    )
                     offsets = torch.cumsum(aligned_counts, dim=0, dtype=torch.int32)
                     h = F.silu(torch._grouped_mm(padded_tokens.bfloat16(), e.w1, offs=offsets))
                     h = h * torch._grouped_mm(padded_tokens.bfloat16(), e.w3, offs=offsets)
                     out = torch._grouped_mm(h, e.w2, offs=offsets).type_as(padded_tokens)
                     return self_moe._unpad_grouped_tokens(out, input_shape, permuted_indices)
+
                 return _fast
+
             block.ffn._run_grouped_experts = _make_fast(block.ffn).__get__(block.ffn)
 
     def _install_usp_attention(self):
@@ -251,8 +260,12 @@ class xFuserLingBotVideoTransformer3DWrapper:
         if sp_world_size <= 1:
             LingBotVideoTransformer3DModel = get_lingbot_video_classes()[0]
             return LingBotVideoTransformer3DModel.forward(
-                self, hidden_states, timestep, encoder_hidden_states,
-                encoder_attention_mask, return_dict,
+                self,
+                hidden_states,
+                timestep,
+                encoder_hidden_states,
+                encoder_attention_mask,
+                return_dict,
             )
 
         _, _, make_joint_position_ids_fn, _ = get_lingbot_video_classes()
@@ -265,10 +278,6 @@ class xFuserLingBotVideoTransformer3DWrapper:
         n_video = gt * gh * gw
         L = encoder_hidden_states.shape[1]
         device = hidden_states.device
-
-        # For compile-friendliness, use L directly as text_len (pipeline already
-        # strips padding for B=1). Avoids .tolist() / .item() graph breaks.
-        text_lens_list = [L] * B
 
         # Patchify
         patch_tokens = hidden_states.reshape(B, C, gt, pF, gh, pH, gw, pW)

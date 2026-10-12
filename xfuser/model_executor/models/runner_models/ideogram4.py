@@ -188,15 +188,10 @@ def _shard_paths(model_id: str, subfolder: str, basename: str) -> list[str]:
     try:
         index_path = _resolve_pretrained_file(model_id, index_filename)
     except (EntryNotFoundError, FileNotFoundError):
-        return [
-            _resolve_pretrained_file(model_id, f"{subfolder}/{basename}.safetensors")
-        ]
+        return [_resolve_pretrained_file(model_id, f"{subfolder}/{basename}.safetensors")]
     with open(index_path) as index_file:
         weight_map = json.load(index_file)["weight_map"]
-    return [
-        _resolve_pretrained_file(model_id, f"{subfolder}/{shard}")
-        for shard in sorted(set(weight_map.values()))
-    ]
+    return [_resolve_pretrained_file(model_id, f"{subfolder}/{shard}") for shard in sorted(set(weight_map.values()))]
 
 
 def _fp8_transformer_manifest(
@@ -240,9 +235,7 @@ def _fp8_transformer_manifest(
                 continue
             live = name
             if name.endswith(".attention.o.weight"):
-                live = name.replace(
-                    ".attention.o.weight", ".attention.to_out.0.weight"
-                )
+                live = name.replace(".attention.o.weight", ".attention.to_out.0.weight")
             weight_map[live] = path
             derived[live] = DerivedTensor(
                 sources=(name, scale),
@@ -265,8 +258,7 @@ def _check_load_result(
 ) -> None:
     if missing_keys or unexpected_keys:
         raise RuntimeError(
-            f"Failed to load {component_name}: "
-            f"missing keys={missing_keys[:10]}, unexpected keys={unexpected_keys[:10]}"
+            f"Failed to load {component_name}: missing keys={missing_keys[:10]}, unexpected keys={unexpected_keys[:10]}"
         )
 
 
@@ -287,9 +279,10 @@ class xFuserIdeogram4Model(xFuserModel):
     # The transformer config states this too, and runtime_state re-checks it against the loaded
     # model. Stated here so a Ulysses degree that cannot work is refused before the download.
     attention_heads = 18
+    attention_head_dims = frozenset({256})
 
     load_support = LoadSupport(
-        meta_transformers=('transformer', 'unconditional_transformer'),
+        meta_transformers=("transformer", "unconditional_transformer"),
         # trust_remote_code hides text-encoder parameter names from manifest discovery.
         meta_text_encoders=(),
         replicated_meta=True,
@@ -333,19 +326,14 @@ class xFuserIdeogram4Model(xFuserModel):
         super()._validate_config(config)
         heads = self.attention_heads
         if heads % config.ulysses_degree != 0:
-            raise ValueError(
-                f"Ideogram 4 has {heads} attention heads, so --ulysses_degree must "
-                f"divide {heads}."
-            )
+            raise ValueError(f"Ideogram 4 has {heads} attention heads, so --ulysses_degree must divide {heads}.")
 
     def _validate_args(self, input_args: dict) -> None:
         super()._validate_args(input_args)
         height = input_args["height"]
         width = input_args["width"]
         if height < 256 or width < 256:
-            raise ValueError(
-                f"Ideogram 4 requires height and width of at least 256, got {height}x{width}."
-            )
+            raise ValueError(f"Ideogram 4 requires height and width of at least 256, got {height}x{width}.")
 
     def _load_fp8_transformer(
         self,
@@ -357,9 +345,7 @@ class xFuserIdeogram4Model(xFuserModel):
         )
 
         transformer_class = get_ideogram4_transformer_wrapper_class()
-        transformer = transformer_class.from_config(
-            transformer_class.load_config(model_id, subfolder=subfolder)
-        )
+        transformer = transformer_class.from_config(transformer_class.load_config(model_id, subfolder=subfolder))
         transformer._install_xfuser_processors()
 
         state_dict = _load_sharded_safetensors(model_id, subfolder)
@@ -387,9 +373,7 @@ class xFuserIdeogram4Model(xFuserModel):
         return self.loader.load_transformer(
             transformer_class,
             subfolder=subfolder,
-            weight_source=_fp8_transformer_manifest(
-                self.settings.model_name, subfolder
-            ),
+            weight_source=_fp8_transformer_manifest(self.settings.model_name, subfolder),
         )
 
     def _load_fp8_text_encoder(self, model_id: str):
@@ -430,12 +414,8 @@ class xFuserIdeogram4Model(xFuserModel):
 
         if _is_fp8_checkpoint(model_id):
             if self.loader.fsdp_meta_load() or self.loader.replicated_broadcast_load():
-                transformer = self._meta_fp8_transformer(
-                    transformer_class, "transformer"
-                )
-                unconditional_transformer = self._meta_fp8_transformer(
-                    transformer_class, "unconditional_transformer"
-                )
+                transformer = self._meta_fp8_transformer(transformer_class, "transformer")
+                unconditional_transformer = self._meta_fp8_transformer(transformer_class, "unconditional_transformer")
             else:
                 transformer = self._load_fp8_transformer(model_id, "transformer")
                 unconditional_transformer = self._load_fp8_transformer(
@@ -467,11 +447,9 @@ class xFuserIdeogram4Model(xFuserModel):
         try:
             from diffusers import Ideogram4PromptEnhancerHead
 
-            pipeline_kwargs["prompt_enhancer_head"] = (
-                Ideogram4PromptEnhancerHead.from_pretrained(
-                    "diffusers/qwen3-vl-8b-instruct-lm-head",
-                    torch_dtype=torch.bfloat16,
-                )
+            pipeline_kwargs["prompt_enhancer_head"] = Ideogram4PromptEnhancerHead.from_pretrained(
+                "diffusers/qwen3-vl-8b-instruct-lm-head",
+                torch_dtype=torch.bfloat16,
             )
             log("Loaded the Ideogram 4 prompt enhancer head.")
         except Exception as error:
@@ -503,9 +481,7 @@ class xFuserIdeogram4Model(xFuserModel):
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         guidance_scale = input_args.get("guidance_scale")
         guidance_schedule = (
-            None
-            if guidance_scale is not None
-            else _default_guidance_schedule(input_args["num_inference_steps"])
+            None if guidance_scale is not None else _default_guidance_schedule(input_args["num_inference_steps"])
         )
         output = self.pipe(
             prompt=input_args["prompt"],

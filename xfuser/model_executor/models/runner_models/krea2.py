@@ -7,14 +7,13 @@ from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from xfuser.core.distributed import get_runtime_state
 from xfuser.core.utils.runner_utils import log
 from xfuser.envs import _is_hip
-from xfuser.core.distributed.attention_backend import AttentionBackendType
+from xfuser.core.attention.backends.aiter_mha_v4.spec import DENSE_BACKENDS
+from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.model_executor.models.runner_models.base_model import (
-    DIFFUSERS_FROM_SOURCE,
     DefaultInputValues,
     DiffusionOutput,
     ModelCapabilities,
     ModelSettings,
-    _parse_attention_backend,
     register_model,
     xFuserModel,
 )
@@ -30,7 +29,7 @@ _QUANT_GEMM_MODULES = ("transformer.transformer_blocks",)
 # padding key positions.  SDPA_FLASH is excluded because
 # aten._scaled_dot_product_flash_attention has no mask parameter.
 # Quantised backends (FP8, SAGE, MLA, etc.) are excluded for the same reason.
-_KREA2_SUPPORTED_ATTN_BACKENDS = frozenset(
+KREA2_SUPPORTED_ATTN_BACKENDS = frozenset(
     {
         AttentionBackendType.AITER,
         AttentionBackendType.SDPA,
@@ -38,6 +37,11 @@ _KREA2_SUPPORTED_ATTN_BACKENDS = frozenset(
         AttentionBackendType.FLASH,
         AttentionBackendType.FLASH_3,
         AttentionBackendType.FLASH_4,
+        # Guidance runs the transformer twice rather than as one batched pair, so each
+        # call is a single sequence, which MHA v4 serves by gathering the valid keys
+        # into a shorter dense K/V. Krea-2 declares no valid_kv_len, so the gather is
+        # the path it takes rather than the trailing-pad slice.
+        *DENSE_BACKENDS,
     }
 )
 
@@ -66,24 +70,24 @@ def _patch_text_encoder_linear_for_rocm(text_encoder: "torch.nn.Module") -> None
             module.forward = _make_f32_forward(module)
             count += 1
 
-    log(
-        f"Patched {count} Linear layers to float32 compute "
-        "(ROCm 7.13 bfloat16 split-K NaN fix for Qwen3VL shapes)."
-    )
+    log(f"Patched {count} Linear layers to float32 compute (ROCm 7.13 bfloat16 split-K NaN fix for Qwen3VL shapes).")
 
 
 class _Krea2BaseModel(xFuserModel):
     """Shared base for the Krea-2-Raw and Krea-2-Turbo runner models."""
-    # No released diffusers ships Krea2Transformer2DModel yet.
-    min_diffusers_version = DIFFUSERS_FROM_SOURCE
+
+    # diffusers 0.39.0 is the first release with Krea2Transformer2DModel.
+    min_diffusers_version = "0.39.0"
 
     load_support = LoadSupport(
-        meta_transformers=('transformer',),
+        meta_transformers=("transformer",),
         # Qwen3VL's ROCm float32-Linear workaround has no compatible shared-load contract.
         meta_text_encoders=(),
         replicated_meta=True,
         routes=STANDARD_LOAD_ROUTES,
     )
+    supported_attn_backends = KREA2_SUPPORTED_ATTN_BACKENDS
+    unsupported_attn_backend_reason = "The attention mask requires a backend with varlen support."
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=False,
@@ -97,29 +101,6 @@ class _Krea2BaseModel(xFuserModel):
         enable_tiling=True,
         enable_slicing=True,
     )
-
-    def _validate_config(self, config) -> None:
-        super()._validate_config(config)
-        if config.use_hybrid_attn_schedule:
-            specs = [
-                (config.hybrid_attn_high_precision_backend, "hybrid attention high precision backend"),
-                (config.hybrid_attn_low_precision_backend, "hybrid attention low precision backend"),
-            ]
-        else:
-            specs = [(config.attention_backend, "attention backend")]
-
-        backends = [b for v, lbl in specs if (b := _parse_attention_backend(v, lbl)) is not None]
-
-        for backend in backends:
-            if backend not in _KREA2_SUPPORTED_ATTN_BACKENDS:
-                supported = ", ".join(
-                    sorted(b.name for b in _KREA2_SUPPORTED_ATTN_BACKENDS)
-                )
-                raise ValueError(
-                    f"Krea-2 does not support --attention_backend {backend.name}. "
-                    f"The attention mask requires a backend with varlen support. "
-                    f"Supported backends: {supported}"
-                )
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers.pipelines.krea2 import Krea2Pipeline
@@ -168,6 +149,7 @@ class _Krea2BaseModel(xFuserModel):
             num_inference_steps=input_args["num_inference_steps"],
             max_condition_sequence_length=max_seq,
             split_text_embed_in_sp=False,
+            split_latents_by_rows=False,
         )
 
         output = self.pipe(
@@ -191,8 +173,9 @@ class _Krea2BaseModel(xFuserModel):
 @register_model("Krea-2-Raw")
 class xFuserKrea2RawModel(_Krea2BaseModel):
     """Krea-2-Raw: base checkpoint. 52 steps, guidance_scale=3.5."""
+
     load_support = LoadSupport(
-        meta_transformers=('transformer',),
+        meta_transformers=("transformer",),
         meta_text_encoders=(),
         replicated_meta=True,
         routes=STANDARD_LOAD_ROUTES,
@@ -235,8 +218,9 @@ class xFuserKrea2RawModel(_Krea2BaseModel):
 @register_model("Krea-2-Turbo")
 class xFuserKrea2TurboModel(_Krea2BaseModel):
     """Krea-2-Turbo: 8-step CFG-free distilled checkpoint."""
+
     load_support = LoadSupport(
-        meta_transformers=('transformer',),
+        meta_transformers=("transformer",),
         meta_text_encoders=(),
         replicated_meta=True,
         routes=STANDARD_LOAD_ROUTES,

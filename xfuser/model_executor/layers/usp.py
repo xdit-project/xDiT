@@ -1,6 +1,7 @@
 # This file implements USP with torch version >= '2.5.0'
 import torch
 import functools
+from typing import Tuple
 
 import torch.distributed._functional_collectives as ft_c
 
@@ -13,10 +14,10 @@ else:
     PROCESS_GROUP = None
 
 from xfuser.core.distributed import (
+    model_parallel_is_initialized,
     get_sequence_parallel_world_size,
     get_ulysses_parallel_world_size,
     get_ring_parallel_world_size,
-    get_sequence_parallel_rank,
     get_ulysses_parallel_rank,
     get_runtime_state,
 )
@@ -24,11 +25,9 @@ from xfuser.core.distributed import (
 from xfuser.compat import version_at_least
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from xfuser.logger import init_logger
-from xfuser.core.distributed.attention_backend import (
-    AITER_MHA_V4_SPARGE_BACKEND_SET,
-    ATTENTION_FUNCTION_REGISTRY,
-    AttentionBackendType,
-)
+from xfuser.core.attention import registry as attention_registry
+from xfuser.core.attention.spec import VarlenPacking
+from xfuser.core.attention.spec import AttnCall
 from xfuser.core.distributed.fp8_comms import (
     fp8_attention_kwargs,
     fp8_comms_input_all_to_all,
@@ -44,11 +43,7 @@ from xfuser.core.sparge_attention.head_balance import (
 # These all build a block mask via _build_sparge_block_mask and write the
 # per-head cost into the head-balance "cost sink". Non-sparge backends are
 # excluded so head balancing is a clean no-op for them.
-_HEAD_BALANCE_BACKENDS = frozenset({
-    AttentionBackendType.AITER_SPARGE,
-    AttentionBackendType.AITER_SPARGE_V2,
-    AttentionBackendType.FLEX_BLOCK_SPARGE,
-}) | AITER_MHA_V4_SPARGE_BACKEND_SET
+_HEAD_BALANCE_BACKENDS = attention_registry.types_where(head_balanced=True)
 
 _FP8_NCCL_NEEDS_VIEW = not version_at_least(torch.__version__, "2.11.0")
 _FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz)
@@ -69,13 +64,16 @@ def _warn_fp8_comms_missing_attn():
         "(or a module with fp8 scale buffers). FP8 all-to-all will not run on this path."
     )
 
+
 # A backend that needs per-head tensors of its own alongside query/key/value
 # lists their ``attention_kwargs`` keys under this one, and USP carries them
 # through the same Ulysses exchange without knowing what they mean.
 ULYSSES_EXTRA_INPUTS_KEY = "ulysses_extra_inputs"
 
 
-def ring_attn(attention_function, query, key, value, dropout_p=0.0, is_causal=False, joint_attn_kwargs=None, attention_kwargs=None):
+def ring_attn(
+    attention_function, query, key, value, dropout_p=0.0, is_causal=False, joint_attn_kwargs=None, attention_kwargs=None
+):
     kwargs = {
         "dropout_p": dropout_p,
         "is_causal": is_causal,
@@ -84,6 +82,7 @@ def ring_attn(attention_function, query, key, value, dropout_p=0.0, is_causal=Fa
     }
     if version_at_least(torch.__version__, "2.6.0"):
         from torch.distributed.tensor.experimental._attention import _cp_options
+
         _cp_options.enable_load_balance = False
         out, *_ = _templated_ring_attention(
             PROCESS_GROUP.RING_PG,
@@ -190,20 +189,14 @@ def _combined_gqa_qkv_all_to_all(q, k, v, *extra):
         raise ValueError("GQA all-to-all inputs must all have four dimensions.")
     if k.shape != v.shape:
         raise ValueError(
-            "GQA key and value tensors must have identical shapes, got "
-            f"{tuple(k.shape)} and {tuple(v.shape)}."
+            f"GQA key and value tensors must have identical shapes, got {tuple(k.shape)} and {tuple(v.shape)}."
         )
 
     batch_size, _, _, head_dim = q.shape
-    if any(
-        tensor.shape[0] != batch_size or tensor.shape[-1] != head_dim
-        for tensor in tensors
-    ):
+    if any(tensor.shape[0] != batch_size or tensor.shape[-1] != head_dim for tensor in tensors):
         raise ValueError("GQA all-to-all inputs must share batch and head dimensions.")
     if any(tensor.shape[1] % world_size != 0 for tensor in tensors):
-        raise ValueError(
-            "Every GQA head count must be divisible by the Ulysses world size."
-        )
+        raise ValueError("Every GQA head count must be divisible by the Ulysses world size.")
     if any(tensor.shape != q.shape for tensor in extra):
         raise ValueError("Extra GQA all-to-all inputs must match the query shape.")
 
@@ -214,18 +207,14 @@ def _combined_gqa_qkv_all_to_all(q, k, v, *extra):
         local_heads = heads // world_size
         # Match _ft_c_input_all_to_all's destination-major layout, then pack
         # unequal Q and KV payloads into one equally split collective.
-        packed_chunks.append(
-            tensor.permute(1, 0, 2, 3).contiguous().reshape(world_size, -1)
-        )
+        packed_chunks.append(tensor.permute(1, 0, 2, 3).contiguous().reshape(world_size, -1))
         metadata.append((local_heads, sequence_length, tensor_head_dim))
 
     chunk_sizes = [chunk.shape[1] for chunk in packed_chunks]
     exchanged = _sdpa_all_to_all_single(torch.cat(packed_chunks, dim=1))
 
     outputs = []
-    for chunk, (local_heads, sequence_length, tensor_head_dim) in zip(
-        exchanged.split(chunk_sizes, dim=1), metadata
-    ):
+    for chunk, (local_heads, sequence_length, tensor_head_dim) in zip(exchanged.split(chunk_sizes, dim=1), metadata):
         outputs.append(
             chunk.view(
                 world_size,
@@ -276,8 +265,7 @@ def _validate_gqa_params(
     ulysses_world_size = get_ulysses_parallel_world_size()
     if ulysses_world_size > 1 and key.shape[1] % ulysses_world_size != 0:
         raise ValueError(
-            f"KV heads ({key.shape[1]}) must be divisible by the Ulysses "
-            f"world size ({ulysses_world_size})."
+            f"KV heads ({key.shape[1]}) must be divisible by the Ulysses world size ({ulysses_world_size})."
         )
     if joint_strategy is not None:
         raise NotImplementedError("GQA KV repetition does not support joint tensors.")
@@ -304,25 +292,21 @@ def _preprocess_joint_tensors(joint_key, joint_value):
     """
     ulysses_world_size = get_ulysses_parallel_world_size()
     ulysses_rank = get_ulysses_parallel_rank()
-    attn_heads_per_ulysses_rank = (
-        joint_key.shape[1] // ulysses_world_size
-    )
-    joint_key = joint_key.transpose(1,2)
-    joint_value = joint_value.transpose(1,2)
+    attn_heads_per_ulysses_rank = joint_key.shape[1] // ulysses_world_size
+    joint_key = joint_key.transpose(1, 2)
+    joint_value = joint_value.transpose(1, 2)
     joint_key = joint_key[
         ...,
-        attn_heads_per_ulysses_rank
-        * ulysses_rank : attn_heads_per_ulysses_rank
-        * (ulysses_rank + 1),
-        :, ].transpose(1,2)
+        attn_heads_per_ulysses_rank * ulysses_rank : attn_heads_per_ulysses_rank * (ulysses_rank + 1),
+        :,
+    ].transpose(1, 2)
     joint_value = joint_value[
         ...,
-        attn_heads_per_ulysses_rank
-        * ulysses_rank : attn_heads_per_ulysses_rank
-        * (ulysses_rank + 1),
+        attn_heads_per_ulysses_rank * ulysses_rank : attn_heads_per_ulysses_rank * (ulysses_rank + 1),
         :,
-    ].transpose(1,2)
+    ].transpose(1, 2)
     return joint_key, joint_value
+
 
 def _concat_joint_tensor(tensor, joint_tensor, joint_strategy, dim):
     """
@@ -335,6 +319,7 @@ def _concat_joint_tensor(tensor, joint_tensor, joint_strategy, dim):
     else:
         raise ValueError(f"Invalid joint_strategy: {joint_strategy}")
     return tensor
+
 
 def _update_and_get_kv_cache(key, value, attn_layer):
     """
@@ -353,28 +338,47 @@ def _update_and_get_kv_cache(key, value, attn_layer):
 
 def _has_kv_cache(attn_layer) -> bool:
     """Return whether PipeFusion registered a KV cache for this attention layer."""
-    return (
-        attn_layer is not None
-        and get_cache_manager().has_cache_entry(attn_layer)
+    return attn_layer is not None and get_cache_manager().has_cache_entry(attn_layer)
+
+
+def _serves_packed_keys(backend, key, attention_kwargs) -> bool:
+    """Whether the selected backend will honour the packing itself."""
+    spec = attention_registry.find(backend)
+    if spec is None:
+        return False
+    probe = AttnCall(
+        varlen=VarlenPacking.from_kwargs(attention_kwargs),
+        attention_kwargs=attention_kwargs,
     )
+    return spec.rejects(key, key, key, probe) is None
 
 
-def _trim_trailing_kv_padding(key, value, attention_kwargs):
-    """Slice a uniform padded K/V suffix while retaining every query row."""
+def _trim_trailing_kv_padding(key, value, attention_kwargs, backend=None):
+    """Slice a uniform padded K/V suffix while retaining every query row.
+
+    Returns the kwargs the backend should see: once the pad has been sliced
+    the packing has been honoured, so it is cleared -- left in place, it would
+    describe keys that are no longer there. Keys are set to None rather than
+    removed, because torch.compile guards on this dict's key set.
+    """
     kwargs = attention_kwargs or {}
     valid_kv_len = kwargs.get("valid_kv_len")
     if valid_kv_len is None:
-        return key, value
-    if kwargs.get("indices_k") is not None:
-        # A producer that publishes both leaves the choice to the backend: a
-        # varlen-capable one packs K/V itself, and slicing here would leave its
-        # indices pointing past the end of K.
-        return key, value
+        return key, value, attention_kwargs
+    if kwargs.get("indices_k") is not None and _serves_packed_keys(backend, key, kwargs):
+        # A backend that accepts packed keys handles the pad itself, and
+        # slicing first would leave its indices pointing past the end of K.
+        return key, value, attention_kwargs
     if not 0 < valid_kv_len <= key.shape[2]:
-        raise ValueError(
-            f"valid_kv_len must be in [1, {key.shape[2]}], got {valid_kv_len}."
-        )
-    return key[:, :, :valid_kv_len], value[:, :, :valid_kv_len]
+        raise ValueError(f"valid_kv_len must be in [1, {key.shape[2]}], got {valid_kv_len}.")
+
+    consumed = kwargs
+    if kwargs.get("indices_k") is not None:
+        consumed = dict(kwargs)
+        consumed["indices_k"] = None
+        consumed["cu_seqlens_k"] = None
+        consumed["max_seqlen_k"] = None
+    return key[:, :, :valid_kv_len], value[:, :, :valid_kv_len], consumed
 
 
 def _get_attention_function(backend=None):
@@ -385,10 +389,56 @@ def _get_attention_function(backend=None):
         attention_backend = backend
     else:
         attention_backend = get_runtime_state().attention_backend
-    func = ATTENTION_FUNCTION_REGISTRY.get(attention_backend, None)
-    if func is None:
+
+    spec = attention_registry.find(attention_backend)
+    if spec is None:
         raise NotImplementedError(f"Attention backend {attention_backend} not registered.")
-    return concat_joint_tensors_decorator(func)
+    return concat_joint_tensors_decorator(_spec_adapter(spec))
+
+
+def _parallel_degrees() -> Tuple[int, int]:
+    """(ulysses, ring) sequence-parallel degrees, or the single-rank default.
+
+    `attention()` is the entry point for calls that need no sequence
+    parallelism, and it is reached before -- or entirely without -- an
+    initialised process group. Asking for the degrees there must not be what
+    fails.
+    """
+    if not model_parallel_is_initialized():
+        return 1, 1
+    return get_ulysses_parallel_world_size(), get_ring_parallel_world_size()
+
+
+def _spec_adapter(spec):
+    """Present a Spec with the calling convention ring_attn and the direct
+    call sites already use.
+
+    This is also where the two things kernels used to fetch for themselves get
+    supplied: the varlen packing, previously rebuilt inside every kernel from
+    attention_kwargs, and the sequence-parallel degrees, previously read from
+    globals. Both now arrive on the call, which is what makes a backend
+    testable without an initialised process group.
+    """
+
+    def call(query, key, value, dropout_p=0.0, is_causal=False, attention_kwargs=None):
+        kwargs = attention_kwargs if attention_kwargs is not None else {}
+        ulysses_world_size, ring_world_size = _parallel_degrees()
+        return spec.run(
+            query,
+            key,
+            value,
+            AttnCall(
+                dropout_p=dropout_p,
+                is_causal=is_causal,
+                varlen=VarlenPacking.from_kwargs(kwargs),
+                ulysses_world_size=ulysses_world_size,
+                ring_world_size=ring_world_size,
+                attention_kwargs=kwargs,
+            ),
+        )
+
+    return call
+
 
 def concat_joint_tensors_decorator(func):
     """
@@ -397,6 +447,7 @@ def concat_joint_tensors_decorator(func):
     needs to concat the joint tensors before calling the attention function
     but only on the last step.
     """
+
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         query, key, value = args[0:3]
@@ -414,9 +465,10 @@ def concat_joint_tensors_decorator(func):
             if (joint_strategy == "front" and step == 0) or (joint_strategy == "rear" and step == total_steps - 1):
                 key = _concat_joint_tensor(key, joint_key, joint_strategy, dim=2)
                 value = _concat_joint_tensor(value, joint_value, joint_strategy, dim=2)
-            joint_attn_kwargs["step"] = step + 1 # In place increment step
+            joint_attn_kwargs["step"] = step + 1  # In place increment step
 
         return func(query, key, value, dropout_p=dropout_p, is_causal=is_causal, attention_kwargs=attention_kwargs)
+
     return wrapper
 
 
@@ -440,22 +492,22 @@ def _ulysses_extra_inputs(attention_kwargs, query):
 
 
 def USP(
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        dropout_p: float = 0.0,
-        is_causal: bool = False,
-        joint_query: torch.Tensor | None = None,
-        joint_key: torch.Tensor | None = None,
-        joint_value: torch.Tensor | None = None,
-        joint_strategy: str | None = None,
-        attn_layer=None,
-        combine_qkv_a2a: bool | None = None,
-        backend=None,
-        attention_kwargs: dict | None = None,
-        head_balance_layer=None,
-        kv_head_repeat: int = 1,
-    ):
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    dropout_p: float = 0.0,
+    is_causal: bool = False,
+    joint_query: torch.Tensor | None = None,
+    joint_key: torch.Tensor | None = None,
+    joint_value: torch.Tensor | None = None,
+    joint_strategy: str | None = None,
+    attn_layer=None,
+    combine_qkv_a2a: bool | None = None,
+    backend=None,
+    attention_kwargs: dict | None = None,
+    head_balance_layer=None,
+    kv_head_repeat: int = 1,
+):
     """
     Unified Sequence Parallelism (USP) attention call, supporting combinations of Ulysses and
     Ring attention. Also supports joint tensors and key-value caching for pipeline parallelism.
@@ -482,9 +534,7 @@ def USP(
     """
     if combine_qkv_a2a is None:
         combine_qkv_a2a = False
-    _validate_gqa_params(
-        query, key, value, kv_head_repeat, joint_strategy
-    )
+    _validate_gqa_params(query, key, value, kv_head_repeat, joint_strategy)
 
     attention_function = _get_attention_function(backend=backend)
 
@@ -507,18 +557,16 @@ def USP(
             ).get("fp8_comms")
 
     if kv_head_repeat > 1 and fp8_comms is not None:
-        raise NotImplementedError(
-            "GQA KV repetition does not support FP8 communication."
-        )
+        raise NotImplementedError("GQA KV repetition does not support FP8 communication.")
 
     hb_uly = get_ulysses_parallel_world_size()
     hb_backend = backend if backend is not None else get_runtime_state().attention_backend
     query, key, value, hb_applied, attention_kwargs = apply_head_balance(
-        query, key, value, head_balance_layer,
-        enabled=(
-            get_runtime_state().runtime_config.use_spargeattn_head_balance
-            and kv_head_repeat == 1
-        ),
+        query,
+        key,
+        value,
+        head_balance_layer,
+        enabled=(get_runtime_state().runtime_config.use_spargeattn_head_balance and kv_head_repeat == 1),
         ulysses_world_size=hb_uly,
         ring_world_size=get_ring_parallel_world_size(),
         is_sparge_backend=hb_backend in _HEAD_BALANCE_BACKENDS,
@@ -540,7 +588,6 @@ def USP(
             "joint_strategy": joint_strategy,
             "step": 0,
             "total_steps": get_ring_parallel_world_size(),
-
         }
 
     extra_inputs = _ulysses_extra_inputs(attention_kwargs, query)
@@ -550,27 +597,26 @@ def USP(
         if fp8_comms is not None:
             if extra_inputs:
                 raise NotImplementedError(
-                    "fp8 comms does not support extra Ulysses inputs: "
-                    f"{', '.join(name for name, _ in extra_inputs)}."
+                    f"fp8 comms does not support extra Ulysses inputs: {', '.join(name for name, _ in extra_inputs)}."
                 )
             fp8_comms_backend = backend if backend is not None else get_runtime_state().attention_backend
             query, key, value, attn_kwargs_update, qkv_amaxes = fp8_comms_input_all_to_all(
-                query, key, value,
-                fp8_comms.q_scale, fp8_comms.k_scale, fp8_comms.v_scale,
+                query,
+                key,
+                value,
+                fp8_comms.q_scale,
+                fp8_comms.k_scale,
+                fp8_comms.v_scale,
                 fp8_comms_backend,
             )
             attention_kwargs = (attention_kwargs or {}) | attn_kwargs_update
         elif combine_qkv_a2a and kv_head_repeat > 1:
-            exchanged = _combined_gqa_qkv_all_to_all(
-                query, key, value, *(tensor for _, tensor in extra_inputs)
-            )
+            exchanged = _combined_gqa_qkv_all_to_all(query, key, value, *(tensor for _, tensor in extra_inputs))
             query, key, value = exchanged[:3]
             for (name, _), tensor in zip(extra_inputs, exchanged[3:]):
                 attention_kwargs[name] = tensor
         elif combine_qkv_a2a and query.shape == key.shape == value.shape:
-            exchanged = _combined_qkv_all_to_all(
-                query, key, value, *(tensor for _, tensor in extra_inputs)
-            )
+            exchanged = _combined_qkv_all_to_all(query, key, value, *(tensor for _, tensor in extra_inputs))
             query, key, value = exchanged[:3]
             for (name, _), tensor in zip(extra_inputs, exchanged[3:]):
                 attention_kwargs[name] = tensor
@@ -587,48 +633,56 @@ def USP(
     # Uniform trailing padding needs no mask or varlen packing. Keeping all Q
     # rows but slicing K/V is equivalent to masking those keys and lets dense
     # backends retain their optimized cross-attention path.
-    key, value = _trim_trailing_kv_padding(key, value, attention_kwargs)
+    key, value, attention_kwargs = _trim_trailing_kv_padding(key, value, attention_kwargs, hb_backend)
 
     if kv_head_repeat > 1:
         key, value = _repeat_kv_heads(key, value, kv_head_repeat)
 
-    if get_sequence_parallel_world_size() == 1: # No SP
-        out, _ = attention_function(query,
-                                    key,
-                                    value,
-                                    dropout_p=dropout_p,
-                                    is_causal=is_causal,
-                                    joint_attn_kwargs=joint_attn_kwargs,
-                                    attention_kwargs=attention_kwargs)
+    if get_sequence_parallel_world_size() == 1:  # No SP
+        out, _ = attention_function(
+            query,
+            key,
+            value,
+            dropout_p=dropout_p,
+            is_causal=is_causal,
+            joint_attn_kwargs=joint_attn_kwargs,
+            attention_kwargs=attention_kwargs,
+        )
 
-    elif get_ulysses_parallel_world_size() == 1: # Ring only
-        out = ring_attn(attention_function,
-                        query,
-                        key,
-                        value,
-                        dropout_p=dropout_p,
-                        is_causal=is_causal,
-                        joint_attn_kwargs=joint_attn_kwargs,
-                        attention_kwargs=attention_kwargs)
+    elif get_ulysses_parallel_world_size() == 1:  # Ring only
+        out = ring_attn(
+            attention_function,
+            query,
+            key,
+            value,
+            dropout_p=dropout_p,
+            is_causal=is_causal,
+            joint_attn_kwargs=joint_attn_kwargs,
+            attention_kwargs=attention_kwargs,
+        )
 
     else:
-        if get_ring_parallel_world_size() == 1: # Ulysses only
-            out, _ = attention_function(query,
-                                        key,
-                                        value,
-                                        dropout_p=dropout_p,
-                                        is_causal=is_causal,
-                                        joint_attn_kwargs=joint_attn_kwargs,
-                                        attention_kwargs=attention_kwargs)
-        else: # USP
-            out = ring_attn(attention_function,
-                            query,
-                            key,
-                            value,
-                            dropout_p=dropout_p,
-                            is_causal=is_causal,
-                            joint_attn_kwargs=joint_attn_kwargs,
-                            attention_kwargs=attention_kwargs)
+        if get_ring_parallel_world_size() == 1:  # Ulysses only
+            out, _ = attention_function(
+                query,
+                key,
+                value,
+                dropout_p=dropout_p,
+                is_causal=is_causal,
+                joint_attn_kwargs=joint_attn_kwargs,
+                attention_kwargs=attention_kwargs,
+            )
+        else:  # USP
+            out = ring_attn(
+                attention_function,
+                query,
+                key,
+                value,
+                dropout_p=dropout_p,
+                is_causal=is_causal,
+                joint_attn_kwargs=joint_attn_kwargs,
+                attention_kwargs=attention_kwargs,
+            )
         if fp8_comms is not None:
             out = fp8_comms_output_all_to_all(out, fp8_comms.o_scale, qkv_amaxes)
         else:
@@ -636,9 +690,7 @@ def USP(
         if hb_applied:
             # Restore global head order on the output, gather this step's per-head
             # costs across the Ulysses group, and plan next step's permutation.
-            out = revert_head_balance(
-                out, attention_kwargs, head_balance_layer, hb_uly
-            )
+            out = revert_head_balance(out, attention_kwargs, head_balance_layer, hb_uly)
 
     if fp8_module is not None and not joint_strategy:
         fp8_observe_output(get_runtime_state().fp8_comms, fp8_module, out, False)
@@ -647,16 +699,16 @@ def USP(
 
 
 def attention(
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        dropout_p: float = 0.0,
-        is_causal: bool = False,
-        backend=None,
-        attention_kwargs=None,
-        head_balance_layer=None,
-        attn_layer=None,
-    ):
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    dropout_p: float = 0.0,
+    is_causal: bool = False,
+    backend=None,
+    attention_kwargs=None,
+    head_balance_layer=None,
+    attn_layer=None,
+):
     """
     Runs attention call without any parallelism.
     This can be used when the logic necessitates no Ulysses or Ring parallelism in any case.
@@ -667,6 +719,10 @@ def attention(
     no head sharding or FP8 all-to-all.
     """
     attention_function = _get_attention_function(backend=backend)
+    # Same rule as USP: a backend that cannot serve packed keys gets the pad
+    # sliced instead, which is the same computation.
+    resolved = backend if backend is not None else get_runtime_state().attention_backend
+    key, value, attention_kwargs = _trim_trailing_kv_padding(key, value, attention_kwargs, resolved)
     out, _ = attention_function(
         query,
         key,
@@ -676,4 +732,3 @@ def attention(
         attention_kwargs=attention_kwargs,
     )
     return out
-

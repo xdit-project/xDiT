@@ -10,6 +10,7 @@ class QuantizationFormat(str, Enum):
     FP8 = "fp8"
     FP4 = "fp4"
     FP6 = "fp6"
+    A6W4 = "a6w4"
     INT8 = "int8"
 
 
@@ -22,6 +23,7 @@ IMPL_PREFERENCE = {
     "fp8": ("aiter", "torchao"),
     "fp4": ("torchao", "aiter"),
     "fp6": ("aiter",),
+    "a6w4": ("aiter",),
     "int8": ("torchao",),
 }
 

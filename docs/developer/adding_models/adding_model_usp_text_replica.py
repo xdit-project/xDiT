@@ -1,15 +1,15 @@
 # Example for parallelize new models with USP
 # run with
-#     torchrun --nproc_per_node=<ulysses_degree x ring-degree> \
-#          adding_cogvideox.py <cogvideox-checkpoint-path> \
-#          <ulysses_degree> <ring-degree>
+#     torchrun --nproc_per_node=<ring_degree x ulysses_degree> \
+#          adding_model_usp_text_replica.py <cogvideox-checkpoint-path> \
+#          <ring_degree> <ulysses_degree>
 # E.g.,
 #     torchrun --nproc_per_node=2 \
-#          adding_cogvideox.py <cogvideox-checkpoint-path> \
+#          adding_model_usp_text_replica.py <cogvideox-checkpoint-path> \
 #          2 1
 import sys
 import functools
-from typing import List, Optional, Tuple, Union
+from typing import Optional, Tuple, Union
 
 import time
 import torch
@@ -58,18 +58,12 @@ class xDiTCogVideoXAttnProcessor(CogVideoXAttnProcessor2_0):
         hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
 
         batch_size, sequence_length, _ = (
-            hidden_states.shape
-            if encoder_hidden_states is None
-            else encoder_hidden_states.shape
+            hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
         )
 
         if attention_mask is not None:
-            attention_mask = attn.prepare_attention_mask(
-                attention_mask, sequence_length, batch_size
-            )
-            attention_mask = attention_mask.view(
-                batch_size, attn.heads, -1, attention_mask.shape[-1]
-            )
+            attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)
+            attention_mask = attention_mask.view(batch_size, attn.heads, -1, attention_mask.shape[-1])
 
         query = attn.to_q(hidden_states)
         key = attn.to_k(hidden_states)
@@ -89,13 +83,9 @@ class xDiTCogVideoXAttnProcessor(CogVideoXAttnProcessor2_0):
 
         # Apply RoPE if needed
         if image_rotary_emb is not None:
-            query[:, :, text_seq_length:] = apply_rotary_emb(
-                query[:, :, text_seq_length:], image_rotary_emb
-            )
+            query[:, :, text_seq_length:] = apply_rotary_emb(query[:, :, text_seq_length:], image_rotary_emb)
             if not attn.is_cross_attention:
-                key[:, :, text_seq_length:] = apply_rotary_emb(
-                    key[:, :, text_seq_length:], image_rotary_emb
-                )
+                key[:, :, text_seq_length:] = apply_rotary_emb(key[:, :, text_seq_length:], image_rotary_emb)
 
         #! ---------------------------------------- ATTENTION ----------------------------------------
         encoder_query = query[:, :, :text_seq_length, :]
@@ -132,9 +122,7 @@ class xDiTCogVideoXAttnProcessor(CogVideoXAttnProcessor2_0):
         # dropout
         hidden_states = attn.to_out[1](hidden_states)
 
-        encoder_hidden_states, hidden_states = hidden_states.split(
-            [text_seq_length, latent_seq_length], dim=1
-        )
+        encoder_hidden_states, hidden_states = hidden_states.split([text_seq_length, latent_seq_length], dim=1)
         return hidden_states, encoder_hidden_states
 
 
@@ -155,22 +143,18 @@ def parallelize_transformer(pipe: DiffusionPipeline):
     ):
         rope_h, rope_w = hidden_states.shape[-2] // 2, hidden_states.shape[-1] // 2
 
-        hidden_states = torch.chunk(
-            hidden_states, get_sequence_parallel_world_size(), dim=-2
-        )[get_sequence_parallel_rank()]
+        hidden_states = torch.chunk(hidden_states, get_sequence_parallel_world_size(), dim=-2)[
+            get_sequence_parallel_rank()
+        ]
         if image_rotary_emb is not None:
             freqs_cos, freqs_sin = image_rotary_emb
             dim_thw = freqs_cos.shape[-1]
             freqs_cos = freqs_cos.reshape(-1, rope_h, rope_w, dim_thw)
-            freqs_cos = torch.chunk(
-                freqs_cos, get_sequence_parallel_world_size(), dim=-3
-            )[get_sequence_parallel_rank()]
+            freqs_cos = torch.chunk(freqs_cos, get_sequence_parallel_world_size(), dim=-3)[get_sequence_parallel_rank()]
             freqs_cos = freqs_cos.reshape(-1, dim_thw)
 
             freqs_sin = freqs_sin.reshape(-1, rope_h, rope_w, dim_thw)
-            freqs_sin = torch.chunk(
-                freqs_sin, get_sequence_parallel_world_size(), dim=-3
-            )[get_sequence_parallel_rank()]
+            freqs_sin = torch.chunk(freqs_sin, get_sequence_parallel_world_size(), dim=-3)[get_sequence_parallel_rank()]
             freqs_sin = freqs_sin.reshape(-1, dim_thw)
 
             image_rotary_emb = (freqs_cos, freqs_sin)
@@ -213,13 +197,11 @@ def parallelize_transformer(pipe: DiffusionPipeline):
         output = original_patch_embed_forward(text_embeds, image_embeds)
 
         text_embeds = output[:, :text_len, :]
-        image_embeds = output[:, text_len:, :].reshape(
-            batch, -1, embed_height, embed_width, output.shape[-1]
-        )
+        image_embeds = output[:, text_len:, :].reshape(batch, -1, embed_height, embed_width, output.shape[-1])
 
-        image_embeds = torch.chunk(
-            image_embeds, get_sequence_parallel_world_size(), dim=-3
-        )[get_sequence_parallel_rank()]
+        image_embeds = torch.chunk(image_embeds, get_sequence_parallel_world_size(), dim=-3)[
+            get_sequence_parallel_rank()
+        ]
         image_embeds = image_embeds.reshape(batch, -1, image_embeds.shape[-1])
         return torch.cat([text_embeds, image_embeds], dim=1)
 

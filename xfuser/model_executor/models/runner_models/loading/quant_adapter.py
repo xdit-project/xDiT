@@ -265,6 +265,7 @@ class QuantLoadDescriptor:
     serialization: str
     fallback_reason: str | None = None
     component_name: str = "transformer"
+    fills_blocks_locally: bool = True
 
     def log_message(self) -> str:
         message = (
@@ -323,6 +324,12 @@ class QuantAdapter:
     #: plus a scale buffer does; a tensor subclass has to be converted after,
     #: which the memory-efficient FSDP path refuses.
     meta_layout_matches_storage = False
+    #: Whether a per-block fill can quantize on the way in, or this converter
+    #: has to run once over the finished component. A converter that captures
+    #: more than the leaf's own weight -- A6W4 pairs an FP4 weight with an FP6
+    #: activation layout -- has nothing to read when it is handed one block at
+    #: a time, so the local blockwise fallback must not claim it.
+    fills_blocks_locally = True
     #: Whether a native streaming config is expressed by *excluding* the leaves
     #: it must not touch, which needs the model's structure to enumerate. A
     #: converter that takes the targets positively needs no structure at all.
@@ -499,6 +506,7 @@ def descriptor_for(adapter, component_name, mode, fallback=None) -> QuantLoadDes
         serialization=adapter.serialization,
         fallback_reason=fallback,
         component_name=component_name,
+        fills_blocks_locally=adapter.fills_blocks_locally,
     )
 
 

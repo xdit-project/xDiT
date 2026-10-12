@@ -15,6 +15,7 @@ Functions:
     - shard_t5_encoder: Shard a T5 encoder model
     - shard_component: Generic transformer block sharding
 """
+
 import logging
 from functools import partial
 from typing import Callable, Iterable, Optional, Union
@@ -22,7 +23,6 @@ from typing import Callable, Iterable, Optional, Union
 import torch
 import functools
 from torch.distributed.fsdp import (
-    MixedPrecision,
     ShardingStrategy,
     FullyShardedDataParallel as FSDP,
 )
@@ -65,9 +65,7 @@ def _save_nonpersistent_buffers(module: torch.nn.Module, device: str):
         for name in owner._non_persistent_buffers_set:
             buffer = owner._buffers.get(name)
             if buffer is not None and not buffer.is_meta:
-                saved.append(
-                    (owner, name, buffer.detach().to(device=device, copy=True))
-                )
+                saved.append((owner, name, buffer.detach().to(device=device, copy=True)))
     return saved
 
 
@@ -100,9 +98,7 @@ def _collective_quantize_call(operation, process_group, context):
     for rank, failure in enumerate(failures):
         if failure is not None:
             error_type, message = failure
-            raise RuntimeError(
-                f"{context} failed on rank {rank}: {error_type}: {message}"
-            ) from local_exception
+            raise RuntimeError(f"{context} failed on rank {rank}: {error_type}: {message}") from local_exception
     return result
 
 
@@ -116,9 +112,7 @@ def _make_mesh(
     return DeviceMesh.from_group(process_group, device_type)
 
 
-def children_to_device(
-    module: torch.nn.Module, device: str, excluded_children: Iterable[str] = []
-) -> None:
+def children_to_device(module: torch.nn.Module, device: str, excluded_children: Iterable[str] = []) -> None:
     """
     Move immediate children of a module to the specified device.
 
@@ -152,7 +146,7 @@ def shard_dit(
     transformer: torch.nn.Module,
     local_rank: int,
     process_group: Optional[torch.distributed.ProcessGroup] = None,
-    block_attr: str = "blocks"
+    block_attr: str = "blocks",
 ) -> torch.nn.Module:
     """
     Shard a DiT (Diffusion Transformer) model with FSDP block-by-block.
@@ -196,9 +190,8 @@ def shard_dit(
         dtype=torch.bfloat16,
         use_orig_params=True,
         sync_module_states=True,
-        forward_prefetch=True
+        forward_prefetch=True,
     )
-
 
     return transformer
 
@@ -207,7 +200,7 @@ def shard_t5_encoder(
     transformer: torch.nn.Module,
     local_rank: int,
     process_group: Optional[torch.distributed.ProcessGroup] = None,
-    block_attr: str = "block"
+    block_attr: str = "block",
 ) -> torch.nn.Module:
     """
     Shard a T5 encoder model with FSDP block-by-block.
@@ -252,9 +245,8 @@ def shard_t5_encoder(
         process_group=process_group,
         use_orig_params=True,
         sync_module_states=True,
-        forward_prefetch=True
+        forward_prefetch=True,
     )
-
 
     return transformer
 
@@ -275,8 +267,8 @@ def _keep_recording_outputs(component: torch.nn.Module) -> None:
 
     Absence of the registry is not an error: it means the installed transformers does not resolve
     recording this way, in which case there is nothing to carry over. The end-to-end behaviour is
-    pinned by tests/core/test_sharded_text_encoder_outputs.py, so a reworked mechanism fails there
-    rather than silently costing a caller its hidden states.
+    pinned by tests/integration/accelerator/model_executor/loading/test_sharded_text_encoder_outputs.py,
+    so a reworked mechanism fails there rather than silently costing a caller its hidden states.
     """
     try:
         from transformers.modeling_utils import (  # noqa: PLC0415
@@ -440,6 +432,7 @@ def shard_component(
     # FSDP2: Required for torchao quantized tensors, or when use_fsdp2=True for
     # sequential block-by-block init to reduce peak GPU memory during model load.
     from torch.distributed._composable.fsdp import fully_shard, CPUOffloadPolicy  # noqa: PLC0415
+
     device_type = device.type if device is not None else "cpu"
     device_str = str(device) if device is not None else "cpu"
     mesh = _make_mesh(process_group, device_type)
@@ -508,20 +501,18 @@ def shard_component(
     # trigger its prefetch, so a pre-hook manually unshards it before the forward begins.
     if forward_prefetch and len(wrapped_blocks) > 1:
         for i, block in enumerate(wrapped_blocks):
-            lookahead = [
-                wrapped_blocks[i + j]
-                for j in range(1, 3)
-                if i + j < len(wrapped_blocks)
-            ]
+            lookahead = [wrapped_blocks[i + j] for j in range(1, 3) if i + j < len(wrapped_blocks)]
             if lookahead:
                 block.set_modules_to_forward_prefetch(lookahead)
 
         def _unshard_first_block(_module, _args, _kwargs):
             wrapped_blocks[0].unshard(async_op=True)
+
         component.register_forward_pre_hook(_unshard_first_block, with_kwargs=True)
 
     return component
 
+
 def rgetattr(obj: object, attr: str) -> object:
-    """ Recursive getattr to get nested attributes """
+    """Recursive getattr to get nested attributes"""
     return functools.reduce(getattr, [obj] + attr.split("."))

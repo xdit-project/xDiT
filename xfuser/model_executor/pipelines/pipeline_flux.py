@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
-from typing import Any, Dict, List, Tuple, Callable, Optional, Union
+from typing import Any, Dict, List, Callable, Optional, Union
 
 import numpy as np
 import torch
@@ -33,11 +33,7 @@ from xfuser.core.distributed import (
     is_pipeline_first_stage,
     is_pipeline_last_stage,
     is_dp_last_group,
-    get_world_group,
-    get_vae_parallel_group,
-    get_dit_world_size,
 )
-from xfuser.core.distributed.group_coordinator import GroupCoordinator
 from .base_pipeline import xFuserPipelineBaseWrapper
 from .register import xFuserPipelineWrapperRegister
 from ...envs import _is_npu
@@ -52,13 +48,12 @@ else:
 
 @xFuserPipelineWrapperRegister.register(FluxPipeline)
 class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
-
     @classmethod
     def from_pretrained(
         cls,
         pretrained_model_name_or_path: Optional[Union[str, os.PathLike]],
         engine_config: EngineConfig,
-        cache_args: Dict={},
+        cache_args: Dict = {},
         return_org_pipeline: bool = False,
         **kwargs,
     ):
@@ -240,11 +235,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
         )
         #! ---------------------------------------- ADDED ABOVE ----------------------------------------
 
-        lora_scale = (
-            self.joint_attention_kwargs.get("scale", None)
-            if self.joint_attention_kwargs is not None
-            else None
-        )
+        lora_scale = self.joint_attention_kwargs.get("scale", None) if self.joint_attention_kwargs is not None else None
         (
             prompt_embeds,
             pooled_prompt_embeds,
@@ -291,16 +282,12 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             sigmas,
             mu=mu,
         )
-        num_warmup_steps = max(
-            len(timesteps) - num_inference_steps * self.scheduler.order, 0
-        )
+        num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         self._num_timesteps = len(timesteps)
 
         # handle guidance
         if self.transformer.config.guidance_embeds:
-            guidance = torch.full(
-                [1], guidance_scale, device=device, dtype=torch.float32
-            )
+            guidance = torch.full([1], guidance_scale, device=device, dtype=torch.float32)
             guidance = guidance.expand(latents.shape[0])
         else:
             guidance = None
@@ -308,10 +295,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
         num_pipeline_warmup_steps = get_runtime_state().runtime_config.warmup_steps
         # 6. Denoising loop
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            if (
-                get_pipeline_parallel_world_size() > 1
-                and len(timesteps) > num_pipeline_warmup_steps
-            ):
+            if get_pipeline_parallel_world_size() > 1 and len(timesteps) > num_pipeline_warmup_steps:
                 # raise RuntimeError("Async pipeline not supported in flux")
                 latents = self._sync_pipeline(
                     latents=latents,
@@ -356,23 +340,23 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
                 )
 
         image = None
-        def process_latents(latents):
-            latents = self._unpack_latents(
-                latents, height, width, self.vae_scale_factor
-            )
 
-            latents = (
-                latents / self.vae.config.scaling_factor
-            ) + self.vae.config.shift_factor
+        def process_latents(latents):
+            latents = self._unpack_latents(latents, height, width, self.vae_scale_factor)
+
+            latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
             return latents
 
         if not output_type == "latent":
-            if get_runtime_state().runtime_config.use_parallel_vae and get_runtime_state().parallel_config.vae_parallel_size > 0: 
+            if (
+                get_runtime_state().runtime_config.use_parallel_vae
+                and get_runtime_state().parallel_config.vae_parallel_size > 0
+            ):
                 # VAE is loaded in another worker
                 latents = self.gather_latents_for_vae(latents)
                 if latents is not None:
                     latents = process_latents(latents)
-                self.send_to_vae_decode(latents) 
+                self.send_to_vae_decode(latents)
             else:
                 if get_runtime_state().runtime_config.use_parallel_vae:
                     latents = self.gather_broadcast_latents(latents)
@@ -399,8 +383,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             return None
 
     def _init_sync_pipeline(
-        self, latents: torch.Tensor, latent_image_ids: torch.Tensor, 
-        prompt_embeds: torch.Tensor, text_ids: torch.Tensor
+        self, latents: torch.Tensor, latent_image_ids: torch.Tensor, prompt_embeds: torch.Tensor, text_ids: torch.Tensor
     ):
         get_runtime_state().set_patched_mode(patch_mode=False)
 
@@ -417,15 +400,19 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
 
         if get_runtime_state().split_text_embed_in_sp:
             if prompt_embeds.shape[-2] % get_sequence_parallel_world_size() == 0:
-                prompt_embeds = torch.chunk(prompt_embeds, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
+                prompt_embeds = torch.chunk(prompt_embeds, get_sequence_parallel_world_size(), dim=-2)[
+                    get_sequence_parallel_rank()
+                ]
             else:
-                get_runtime_state().split_text_embed_in_sp = False                
+                get_runtime_state().split_text_embed_in_sp = False
 
         if get_runtime_state().split_text_embed_in_sp:
             if text_ids.shape[-2] % get_sequence_parallel_world_size() == 0:
-                text_ids = torch.chunk(text_ids, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
+                text_ids = torch.chunk(text_ids, get_sequence_parallel_world_size(), dim=-2)[
+                    get_sequence_parallel_rank()
+                ]
             else:
-                get_runtime_state().split_text_embed_in_sp = False                
+                get_runtime_state().split_text_embed_in_sp = False
 
         return latents, latent_image_ids, prompt_embeds, text_ids
 
@@ -445,7 +432,9 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         sync_only: bool = False,
     ):
-        latents, latent_image_ids, prompt_embeds, text_ids = self._init_sync_pipeline(latents, latent_image_ids, prompt_embeds, text_ids)
+        latents, latent_image_ids, prompt_embeds, text_ids = self._init_sync_pipeline(
+            latents, latent_image_ids, prompt_embeds, text_ids
+        )
         for i, t in enumerate(timesteps):
             if self.interrupt:
                 continue
@@ -463,9 +452,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             else:
                 latents = get_pp_group().pipeline_recv()
                 if not is_pipeline_first_stage():
-                    encoder_hidden_state = get_pp_group().pipeline_recv(
-                        0, "encoder_hidden_state"
-                    )
+                    encoder_hidden_state = get_pp_group().pipeline_recv(0, "encoder_hidden_state")
 
             # # handle guidance
             # if self.transformer.config.guidance_embeds:
@@ -476,9 +463,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
 
             latents, encoder_hidden_state = self._backbone_forward(
                 latents=latents,
-                encoder_hidden_states=(
-                    prompt_embeds if is_pipeline_first_stage() else encoder_hidden_state
-                ),
+                encoder_hidden_states=(prompt_embeds if is_pipeline_first_stage() else encoder_hidden_state),
                 pooled_prompt_embeds=pooled_prompt_embeds,
                 text_ids=text_ids,
                 latent_image_ids=latent_image_ids,
@@ -504,9 +489,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
                     latents = callback_outputs.pop("latents", latents)
                     prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
 
-            if i == len(timesteps) - 1 or (
-                (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
-            ):
+            if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                 progress_bar.update()
 
             if XLA_AVAILABLE:
@@ -517,15 +500,9 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             elif get_pipeline_parallel_world_size() > 1:
                 get_pp_group().pipeline_send(latents)
                 if not is_pipeline_last_stage():
-                    get_pp_group().pipeline_send(
-                        encoder_hidden_state, name="encoder_hidden_state"
-                    )
+                    get_pp_group().pipeline_send(encoder_hidden_state, name="encoder_hidden_state")
 
-        if (
-            sync_only
-            and get_sequence_parallel_world_size() > 1
-            and is_pipeline_last_stage()
-        ):
+        if sync_only and get_sequence_parallel_world_size() > 1 and is_pipeline_last_stage():
             sp_degree = get_sequence_parallel_world_size()
             sp_latents_list = get_sp_group().all_gather(latents, separate_tensors=True)
             latents_list = []
@@ -533,9 +510,9 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
                 latents_list += [
                     sp_latents_list[sp_patch_idx][
                         :,
-                        get_runtime_state()
-                        .pp_patches_token_start_idx_local[pp_patch_idx] : get_runtime_state()
-                        .pp_patches_token_start_idx_local[pp_patch_idx + 1],
+                        get_runtime_state().pp_patches_token_start_idx_local[
+                            pp_patch_idx
+                        ] : get_runtime_state().pp_patches_token_start_idx_local[pp_patch_idx + 1],
                         :,
                     ]
                     for sp_patch_idx in range(sp_degree)
@@ -568,11 +545,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             num_pipeline_warmup_steps=num_pipeline_warmup_steps,
             latent_image_ids=latent_image_ids,
         )
-        last_patch_latents = (
-            [None for _ in range(num_pipeline_patch)]
-            if (is_pipeline_last_stage())
-            else None
-        )
+        last_patch_latents = [None for _ in range(num_pipeline_patch)] if (is_pipeline_last_stage()) else None
 
         first_async_recv = True
         for i, t in enumerate(timesteps):
@@ -592,29 +565,19 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
                         first_async_recv = False
 
                     if not is_pipeline_first_stage() and patch_idx == 0:
-                        last_encoder_hidden_states = (
-                            get_pp_group().get_pipeline_recv_data(
-                                idx=patch_idx, name="encoder_hidden_states"
-                            )
+                        last_encoder_hidden_states = get_pp_group().get_pipeline_recv_data(
+                            idx=patch_idx, name="encoder_hidden_states"
                         )
-                    patch_latents[patch_idx] = get_pp_group().get_pipeline_recv_data(
-                        idx=patch_idx
-                    )
+                    patch_latents[patch_idx] = get_pp_group().get_pipeline_recv_data(idx=patch_idx)
 
-                patch_latents[patch_idx], next_encoder_hidden_states = (
-                    self._backbone_forward(
-                        latents=patch_latents[patch_idx],
-                        encoder_hidden_states=(
-                            prompt_embeds
-                            if is_pipeline_first_stage()
-                            else last_encoder_hidden_states
-                        ),
-                        pooled_prompt_embeds=pooled_prompt_embeds,
-                        text_ids=text_ids,
-                        latent_image_ids=patch_latent_image_ids[patch_idx],
-                        guidance=guidance,
-                        t=t,
-                    )
+                patch_latents[patch_idx], next_encoder_hidden_states = self._backbone_forward(
+                    latents=patch_latents[patch_idx],
+                    encoder_hidden_states=(prompt_embeds if is_pipeline_first_stage() else last_encoder_hidden_states),
+                    pooled_prompt_embeds=pooled_prompt_embeds,
+                    text_ids=text_ids,
+                    latent_image_ids=patch_latent_image_ids[patch_idx],
+                    guidance=guidance,
+                    t=t,
                 )
                 if is_pipeline_last_stage():
                     latents_dtype = patch_latents[patch_idx].dtype
@@ -624,36 +587,17 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
                         t,
                     )
 
-                    if latents.dtype != latents_dtype:
+                    if patch_latents[patch_idx].dtype != latents_dtype:
                         if torch.backends.mps.is_available():
                             # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
-                            latents = latents.to(latents_dtype)
-
-                    if callback_on_step_end is not None:
-                        callback_kwargs = {}
-                        for k in callback_on_step_end_tensor_inputs:
-                            callback_kwargs[k] = locals()[k]
-                        callback_outputs = callback_on_step_end(
-                            self, i, t, callback_kwargs
-                        )
-
-                        latents = callback_outputs.pop("latents", latents)
-                        prompt_embeds = callback_outputs.pop(
-                            "prompt_embeds", prompt_embeds
-                        )
+                            patch_latents[patch_idx] = patch_latents[patch_idx].to(latents_dtype)
 
                     if i != len(timesteps) - 1:
-                        get_pp_group().pipeline_isend(
-                            patch_latents[patch_idx], segment_idx=patch_idx
-                        )
+                        get_pp_group().pipeline_isend(patch_latents[patch_idx], segment_idx=patch_idx)
                 else:
                     if patch_idx == 0:
-                        get_pp_group().pipeline_isend(
-                            next_encoder_hidden_states, name="encoder_hidden_states"
-                        )
-                    get_pp_group().pipeline_isend(
-                        patch_latents[patch_idx], segment_idx=patch_idx
-                    )
+                        get_pp_group().pipeline_isend(next_encoder_hidden_states, name="encoder_hidden_states")
+                    get_pp_group().pipeline_isend(patch_latents[patch_idx], segment_idx=patch_idx)
 
                 if is_pipeline_first_stage() and i == 0:
                     pass
@@ -671,6 +615,16 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
 
                 get_runtime_state().next_patch()
 
+            self._async_pipeline_step_end(
+                callback_on_step_end,
+                callback_on_step_end_tensor_inputs,
+                i + num_pipeline_warmup_steps,
+                t,
+                patch_latents,
+                patch_dim=-2,
+                step_tensors={"prompt_embeds": prompt_embeds},
+            )
+
             if i == len(timesteps) - 1 or (
                 (i + num_pipeline_warmup_steps + 1) > num_warmup_steps
                 and (i + num_pipeline_warmup_steps + 1) % self.scheduler.order == 0
@@ -685,19 +639,15 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             latents = torch.cat(patch_latents, dim=-2)
             if get_sequence_parallel_world_size() > 1:
                 sp_degree = get_sequence_parallel_world_size()
-                sp_latents_list = get_sp_group().all_gather(
-                    latents, separate_tensors=True
-                )
+                sp_latents_list = get_sp_group().all_gather(latents, separate_tensors=True)
                 latents_list = []
                 for pp_patch_idx in range(get_runtime_state().num_pipeline_patch):
                     latents_list += [
                         sp_latents_list[sp_patch_idx][
                             ...,
-                            get_runtime_state()
-                            .pp_patches_token_start_idx_local[
+                            get_runtime_state().pp_patches_token_start_idx_local[
                                 pp_patch_idx
-                            ] : get_runtime_state()
-                            .pp_patches_token_start_idx_local[pp_patch_idx + 1],
+                            ] : get_runtime_state().pp_patches_token_start_idx_local[pp_patch_idx + 1],
                             :,
                         ]
                         for sp_patch_idx in range(sp_degree)
@@ -717,31 +667,19 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
         if is_pipeline_first_stage():
             # get latents computed in warmup stage
             # ignore latents after the last timestep
-            latents = (
-                get_pp_group().pipeline_recv()
-                if num_pipeline_warmup_steps > 0
-                else latents
-            )
-            patch_latents = list(
-                latents.split(get_runtime_state().pp_patches_token_num, dim=-2)
-            )
+            latents = get_pp_group().pipeline_recv() if num_pipeline_warmup_steps > 0 else latents
+            patch_latents = list(latents.split(get_runtime_state().pp_patches_token_num, dim=-2))
         elif is_pipeline_last_stage():
-            patch_latents = list(
-                latents.split(get_runtime_state().pp_patches_token_num, dim=-2)
-            )
+            patch_latents = list(latents.split(get_runtime_state().pp_patches_token_num, dim=-2))
         else:
-            patch_latents = [
-                None for _ in range(get_runtime_state().num_pipeline_patch)
-            ]
+            patch_latents = [None for _ in range(get_runtime_state().num_pipeline_patch)]
 
         patch_latent_image_ids = list(
             latent_image_ids[start_idx:end_idx]
             for start_idx, end_idx in get_runtime_state().pp_patches_token_start_end_idx_global
         )
 
-        recv_timesteps = (
-            num_timesteps - 1 if is_pipeline_first_stage() else num_timesteps
-        )
+        recv_timesteps = num_timesteps - 1 if is_pipeline_first_stage() else num_timesteps
 
         if is_pipeline_first_stage():
             for _ in range(recv_timesteps):

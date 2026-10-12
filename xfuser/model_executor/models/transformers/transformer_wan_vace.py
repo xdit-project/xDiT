@@ -16,8 +16,8 @@ from xfuser.model_executor.models.transformers.transformers_utils import (
     gather_and_unpad,
 )
 
-class xFuserWanVACETransformer3DWrapper(WanVACETransformer3DModel):
 
+class xFuserWanVACETransformer3DWrapper(WanVACETransformer3DModel):
     def __init__(
         self,
         patch_size: Tuple[int, ...] = (1, 2, 2),
@@ -39,7 +39,6 @@ class xFuserWanVACETransformer3DWrapper(WanVACETransformer3DModel):
         vace_layers: List[int] = [0, 5, 10, 15, 20, 25, 30, 35],
         vace_in_channels: int = 96,
     ) -> None:
-
         super().__init__(
             patch_size,
             num_attention_heads,
@@ -63,11 +62,15 @@ class xFuserWanVACETransformer3DWrapper(WanVACETransformer3DModel):
 
         for block in self.blocks:
             block.attn1.processor = xFuserWanAttnProcessor()
-            block.attn2.processor = xFuserWanAttnProcessor(use_ulysses_parallel_attention=False, is_cross_attention=True)
+            block.attn2.processor = xFuserWanAttnProcessor(
+                use_ulysses_parallel_attention=False, is_cross_attention=True
+            )
 
         for block in self.vace_blocks:
             block.attn1.processor = xFuserWanAttnProcessor()
-            block.attn2.processor = xFuserWanAttnProcessor(use_ulysses_parallel_attention=False, is_cross_attention=True)
+            block.attn2.processor = xFuserWanAttnProcessor(
+                use_ulysses_parallel_attention=False, is_cross_attention=True
+            )
 
     def forward(
         self,
@@ -80,8 +83,6 @@ class xFuserWanVACETransformer3DWrapper(WanVACETransformer3DModel):
         return_dict: bool = True,
         attention_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
-
-
         get_runtime_state().increment_step_counter()
 
         sp_world_rank = get_sequence_parallel_rank()
@@ -102,7 +103,6 @@ class xFuserWanVACETransformer3DWrapper(WanVACETransformer3DModel):
                 f"equal to {len(self.config.vace_layers)}."
             )
 
-
         # 1. Rotary position embedding
         rotary_emb = self.rope(hidden_states)
 
@@ -119,9 +119,13 @@ class xFuserWanVACETransformer3DWrapper(WanVACETransformer3DModel):
 
         pad_amount = (sp_world_size - (hidden_states.shape[1] % sp_world_size)) % sp_world_size
         hidden_states = chunk_and_pad_sequence(hidden_states, sp_world_rank, sp_world_size, pad_amount, dim=1)
-        control_hidden_states = chunk_and_pad_sequence(control_hidden_states, sp_world_rank, sp_world_size, pad_amount, dim=1)
+        control_hidden_states = chunk_and_pad_sequence(
+            control_hidden_states, sp_world_rank, sp_world_size, pad_amount, dim=1
+        )
 
-        rotary_emb = [chunk_and_pad_sequence(freqs, sp_world_rank, sp_world_size, pad_amount, dim=1) for freqs in rotary_emb]
+        rotary_emb = [
+            chunk_and_pad_sequence(freqs, sp_world_rank, sp_world_size, pad_amount, dim=1) for freqs in rotary_emb
+        ]
 
         # 3. Time embedding
         temb, timestep_proj, encoder_hidden_states, encoder_hidden_states_image = self.condition_embedder(

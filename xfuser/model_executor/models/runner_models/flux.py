@@ -17,7 +17,6 @@ from xfuser.model_executor.models.runner_models.base_model import (
 from xfuser.model_executor.quant.targets import GemmTargets, Select
 from xfuser.envs import PACKAGES_CHECKER
 from xfuser.core.utils.runner_utils import (
-    log,
     resize_and_crop_image,
 )
 from xfuser.core.distributed import get_runtime_state, get_pipeline_parallel_world_size
@@ -34,8 +33,8 @@ class xFuserFluxModel(xFuserModel):
     min_diffusers_version = "0.35.2"
 
     load_support = LoadSupport(
-        meta_transformers=('transformer',),
-        meta_text_encoders=('text_encoder_2',),
+        meta_transformers=("transformer",),
+        meta_text_encoders=("text_encoder_2",),
         replicated_meta=True,
         routes=STANDARD_LOAD_ROUTES,
     )
@@ -122,11 +121,17 @@ class xFuserFluxModel(xFuserModel):
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         batch_size = self.config.batch_size if self.config.batch_size else 1
+        # Only the PipeFusion pipeline splits the latents by row; the diffusers
+        # pipeline's transformer pads the token sequence for sequence parallelism.
+        uses_pipefusion = get_pipeline_parallel_world_size() > 1
         get_runtime_state().set_input_parameters(
+            height=input_args["height"],
+            width=input_args["width"],
             batch_size=batch_size,
             num_inference_steps=input_args["num_inference_steps"],
             max_condition_sequence_length=input_args["max_sequence_length"],
-            split_text_embed_in_sp=get_pipeline_parallel_world_size() == 1,
+            split_text_embed_in_sp=not uses_pipefusion,
+            split_latents_by_rows=uses_pipefusion,
         )
         output = self.pipe(
             height=input_args["height"],
@@ -147,8 +152,8 @@ class xFuserFluxKontextModel(xFuserModel):
     min_diffusers_version = "0.35.2"
 
     load_support = LoadSupport(
-        meta_transformers=('transformer',),
-        meta_text_encoders=('text_encoder_2',),
+        meta_transformers=("transformer",),
+        meta_text_encoders=("text_encoder_2",),
         replicated_meta=True,
         routes=STANDARD_LOAD_ROUTES,
     )
@@ -198,7 +203,8 @@ class xFuserFluxKontextModel(xFuserModel):
                     blocks=(("transformer_blocks", "Pattern_1"), ("single_transformer_blocks", "Pattern_1")),
                 ),
                 preset=DBCachePreset(Fn_compute_blocks=2, residual_diff_threshold=0.12, scm_policy="ultra"),
-        )},
+            )
+        },
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -221,10 +227,13 @@ class xFuserFluxKontextModel(xFuserModel):
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         batch_size = self.config.batch_size if self.config.batch_size else 1
         get_runtime_state().set_input_parameters(
+            height=input_args["height"],
+            width=input_args["width"],
             batch_size=batch_size,
             num_inference_steps=input_args["num_inference_steps"],
             max_condition_sequence_length=input_args["max_sequence_length"],
             split_text_embed_in_sp=get_pipeline_parallel_world_size() == 1,
+            split_latents_by_rows=False,
         )
         output = self.pipe(
             height=input_args["height"],
@@ -247,9 +256,9 @@ class xFuserFluxKontextModel(xFuserModel):
         if input_args.get("resize_input_images", False):
             image = resize_and_crop_image(
                 image,
-                input_args["width"],
-                input_args["height"],
-                self.settings.mod_value,
+                target_height=input_args["height"],
+                target_width=input_args["width"],
+                mod_value=self.settings.mod_value,
             )
             input_args["height"], input_args["width"] = image.height, image.width
         input_args["image"] = image
@@ -261,22 +270,19 @@ class xFuserFluxKontextModel(xFuserModel):
         super()._validate_args(input_args)
         images = input_args.get("input_images", [])
         if len(images) != 1:
-            raise ValueError(
-                "Exactly one input image is required for Flux.1-Kontext-dev model."
-            )
+            raise ValueError("Exactly one input image is required for Flux.1-Kontext-dev model.")
 
 
 @register_model("black-forest-labs/FLUX.2-dev")
 @register_model("FLUX.2-dev")
 class xFuserFlux2Model(xFuserModel):
-    # Flux2Pipeline and the transformer symbols the wrapper needs all landed in 0.36.
-    # PipeFusion additionally needs 0.37, because xfuser's FLUX.2 pipeline module also
-    # binds Flux2KleinPipeline.
+    # Flux2Pipeline and the transformer symbols the wrapper needs, including the
+    # PipeFusion pipeline, all landed in 0.36.
     min_diffusers_version = "0.36.0"
 
     load_support = LoadSupport(
-        meta_transformers=('transformer',),
-        meta_text_encoders=('text_encoder',),
+        meta_transformers=("transformer",),
+        meta_text_encoders=("text_encoder",),
         replicated_meta=True,
         routes=STANDARD_LOAD_ROUTES,
     )
@@ -348,7 +354,7 @@ class xFuserFlux2Model(xFuserModel):
     def _get_compile_mode(self) -> str:
         # CUDA graphs incompatible with cross-step caching, and
         # cause pathological re-captures on RDNA4.
-        if (self.config.cache_method or PACKAGES_CHECKER._on_rdna4()):
+        if self.config.cache_method or PACKAGES_CHECKER._on_rdna4():
             return "default"
         return "reduce-overhead"
 
@@ -391,11 +397,11 @@ class xFuserFlux2Model(xFuserModel):
             images = None
         elif input_args.get("resize_input_images", False):
             images = [
-                self._resize_and_crop_image(
+                resize_and_crop_image(
                     image,
-                    input_args["width"],
-                    input_args["height"],
-                    self.settings.mod_value,
+                    target_height=input_args["height"],
+                    target_width=input_args["width"],
+                    mod_value=self.settings.mod_value,
                 )
                 for image in images
             ]
@@ -424,8 +430,8 @@ class xFuserFlux2Klein9BModel(xFuserModel):
     min_diffusers_version = "0.37.0"
 
     load_support = LoadSupport(
-        meta_transformers=('transformer',),
-        meta_text_encoders=('text_encoder',),
+        meta_transformers=("transformer",),
+        meta_text_encoders=("text_encoder",),
         replicated_meta=True,
         routes=STANDARD_LOAD_ROUTES,
     )
@@ -455,6 +461,7 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         model_name="black-forest-labs/FLUX.2-klein-9B",
         output_name="flux_2_klein_9b",
         model_output_type="image",
+        mod_value=16,
         gemm_targets=GemmTargets(
             transformer=Select(modules=(
                 "transformer.transformer_blocks",
@@ -476,7 +483,7 @@ class xFuserFlux2Klein9BModel(xFuserModel):
     def _get_compile_mode(self) -> str:
         # CUDA graphs incompatible with cross-step caching, and
         # cause pathological re-captures on RDNA4.
-        if (self.config.cache_method or PACKAGES_CHECKER._on_rdna4()):
+        if self.config.cache_method or PACKAGES_CHECKER._on_rdna4():
             return "default"
         return "reduce-overhead"
 
@@ -485,7 +492,7 @@ class xFuserFlux2Klein9BModel(xFuserModel):
 
     def _load_model(self) -> DiffusionPipeline:
         if self.config.pipefusion_parallel_degree > 1:
-            from xfuser.model_executor.pipelines.pipeline_flux2 import (
+            from xfuser.model_executor.pipelines.pipeline_flux2_klein import (
                 xFuserFlux2KleinPipeline,
             )
 
@@ -532,11 +539,11 @@ class xFuserFlux2Klein9BModel(xFuserModel):
             images = None
         elif input_args.get("resize_input_images", False):
             images = [
-                self._resize_and_crop_image(
+                resize_and_crop_image(
                     image,
-                    input_args["width"],
-                    input_args["height"],
-                    self.settings.mod_value,
+                    target_height=input_args["height"],
+                    target_width=input_args["width"],
+                    mod_value=self.settings.mod_value,
                 )
                 for image in images
             ]
@@ -548,8 +555,8 @@ class xFuserFlux2Klein9BModel(xFuserModel):
 @register_model("FLUX.2-klein-4B")
 class xFuserFlux2Klein4BModel(xFuserFlux2Klein9BModel):
     load_support = LoadSupport(
-        meta_transformers=('transformer',),
-        meta_text_encoders=('text_encoder',),
+        meta_transformers=("transformer",),
+        meta_text_encoders=("text_encoder",),
         replicated_meta=True,
         routes=STANDARD_LOAD_ROUTES,
     )
@@ -558,6 +565,7 @@ class xFuserFlux2Klein4BModel(xFuserFlux2Klein9BModel):
         model_name="black-forest-labs/FLUX.2-klein-4B",
         output_name="flux_2_klein_4b",
         model_output_type="image",
+        mod_value=16,
         gemm_targets=GemmTargets(
             transformer=Select(modules=(
                 "transformer.transformer_blocks",

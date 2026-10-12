@@ -2,8 +2,9 @@
 adapted from https://github.com/ali-vilab/TeaCache.git
 adapted from https://github.com/chengzeyi/ParaAttention.git
 """
+
 import dataclasses
-from typing import Dict, Optional, List
+from typing import Optional, List
 import diffusers
 from xfuser.compat import version_at_least
 from xfuser.core.distributed import (
@@ -22,8 +23,10 @@ class CacheContext(Module):
     def __init__(self):
         super().__init__()
         self.register_buffer("default_coef", torch.tensor([1.0, 0.0]).to(get_device(0)))
-        self.register_buffer("flux_coef", torch.tensor([498.651651, -283.781631, 55.8554382, -3.82021401, 0.264230861]).to(get_device(0)))
-        
+        self.register_buffer(
+            "flux_coef", torch.tensor([498.651651, -283.781631, 55.8554382, -3.82021401, 0.264230861]).to(get_device(0))
+        )
+
         self.register_buffer("original_hidden_states", None, persistent=False)
         self.register_buffer("original_encoder_hidden_states", None, persistent=False)
         self.register_buffer("hidden_states_residual", None, persistent=False)
@@ -33,7 +36,8 @@ class CacheContext(Module):
     def get_coef(self, name: str) -> torch.Tensor:
         return getattr(self, f"{name}_coef")
 
-#---------  CacheCallback  ---------#
+
+# ---------  CacheCallback  ---------#
 @dataclasses.dataclass
 class CacheState:
     transformer: Optional[torch.nn.Module] = None
@@ -48,10 +52,17 @@ class CacheState:
 
 
 class CacheCallback:
-    def on_init_end(self, state: CacheState, **kwargs): pass
-    def on_forward_begin(self, state: CacheState, **kwargs): pass
-    def on_forward_remaining_begin(self, state: CacheState, **kwargs): pass
-    def on_forward_end(self, state: CacheState, **kwargs): pass
+    def on_init_end(self, state: CacheState, **kwargs):
+        pass
+
+    def on_forward_begin(self, state: CacheState, **kwargs):
+        pass
+
+    def on_forward_remaining_begin(self, state: CacheState, **kwargs):
+        pass
+
+    def on_forward_end(self, state: CacheState, **kwargs):
+        pass
 
 
 class CallbackHandler(CacheCallback):
@@ -61,6 +72,7 @@ class CallbackHandler(CacheCallback):
     def trigger_event(self, event: str, state: CacheState):
         for cb in self.callbacks:
             getattr(cb, event)(state)
+
 
 # --------- Vectorized Poly1D --------- #
 class VectorizedPoly1D(Module):
@@ -91,7 +103,9 @@ class CachedTransformerBlocks(torch.nn.Module, ABC):
     ):
         super().__init__()
         self.transformer_blocks = torch.nn.ModuleList(transformer_blocks)
-        self.single_transformer_blocks = torch.nn.ModuleList(single_transformer_blocks) if single_transformer_blocks else None
+        self.single_transformer_blocks = (
+            torch.nn.ModuleList(single_transformer_blocks) if single_transformer_blocks else None
+        )
         self.transformer = transformer
         self.register_buffer("cnt", torch.tensor(0).to(get_device(0)))
         self.register_buffer("accumulated_rel_l1_distance", torch.tensor([0.0]).to(get_device(0)))
@@ -124,13 +138,24 @@ class CachedTransformerBlocks(torch.nn.Module, ABC):
         return (diff / norm).squeeze()
 
     @abstractmethod
-    def are_two_tensor_similar(self, t1: torch.Tensor, t2: torch.Tensor, threshold: float) -> torch.Tensor: pass
+    def are_two_tensor_similar(self, t1: torch.Tensor, t2: torch.Tensor, threshold: float) -> torch.Tensor:
+        pass
 
     @abstractmethod
-    def get_start_idx(self) -> int: pass
+    def get_start_idx(self) -> int:
+        pass
 
     @abstractmethod
-    def get_modulated_inputs(self, hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor, *args, **kwargs): pass
+    def get_modulated_inputs(self, hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor, *args, **kwargs):
+        pass
+
+    def _store_modulated_inputs(self, tensor: torch.Tensor) -> None:
+        self.cache_context.modulated_inputs = tensor
+
+    def reset_cache_state(self) -> None:
+        self.cnt = torch.zeros_like(self.cnt)
+        self.accumulated_rel_l1_distance = torch.zeros_like(self.accumulated_rel_l1_distance)
+        self.use_cache = torch.zeros_like(self.use_cache)
 
     def process_blocks(self, start_idx: int, hidden: torch.Tensor, encoder: torch.Tensor, *args, **kwargs):
         for block in self.transformer_blocks[start_idx:]:
@@ -157,14 +182,25 @@ class CachedTransformerBlocks(torch.nn.Module, ABC):
     def forward(self, hidden_states, encoder_hidden_states, *args, **kwargs):
         self.callback_handler.trigger_event("on_forward_begin", self)
 
-        modulated, prev_modulated, orig_hidden, orig_encoder = \
-            self.get_modulated_inputs(hidden_states, encoder_hidden_states, *args, **kwargs)
+        modulated, prev_modulated, orig_hidden, orig_encoder = self.get_modulated_inputs(
+            hidden_states, encoder_hidden_states, *args, **kwargs
+        )
 
         self.cache_context.original_hidden_states = orig_hidden
         self.cache_context.original_encoder_hidden_states = orig_encoder
 
-        self.use_cache = self.are_two_tensor_similar(prev_modulated, modulated, self.rel_l1_thresh) \
-            if prev_modulated is not None else torch.tensor(False, dtype=torch.bool)
+        if prev_modulated is not None and prev_modulated.shape != modulated.shape:
+            # Incompatible shapes cannot share step-cache state. Request boundaries
+            # must reset it separately, including when the shape stays the same.
+            self.reset_cache_state()
+            self._store_modulated_inputs(modulated)
+            prev_modulated = None
+
+        self.use_cache = (
+            self.are_two_tensor_similar(prev_modulated, modulated, self.rel_l1_thresh)
+            if prev_modulated is not None
+            else torch.tensor(False, dtype=torch.bool)
+        )
 
         self.callback_handler.trigger_event("on_forward_remaining_begin", self)
         if self.use_cache:
@@ -174,7 +210,7 @@ class CachedTransformerBlocks(torch.nn.Module, ABC):
             hidden, encoder = self.process_blocks(self.get_start_idx(), orig_hidden, orig_encoder, *args, **kwargs)
 
         self.callback_handler.trigger_event("on_forward_end", self)
-        return ((hidden, encoder) if self.return_hidden_states_first else (encoder, hidden))
+        return (hidden, encoder) if self.return_hidden_states_first else (encoder, hidden)
 
 
 class FBCachedTransformerBlocks(CachedTransformerBlocks):
@@ -190,14 +226,16 @@ class FBCachedTransformerBlocks(CachedTransformerBlocks):
         name="default",
         callbacks: Optional[List[CacheCallback]] = None,
     ):
-        super().__init__(transformer_blocks,
-                       single_transformer_blocks=single_transformer_blocks,
-                       transformer=transformer,
-                       rel_l1_thresh=rel_l1_thresh,
-                       num_steps=num_steps,
-                       return_hidden_states_first=return_hidden_states_first,
-                       name=name,
-                       callbacks=callbacks)
+        super().__init__(
+            transformer_blocks,
+            single_transformer_blocks=single_transformer_blocks,
+            transformer=transformer,
+            rel_l1_thresh=rel_l1_thresh,
+            num_steps=num_steps,
+            return_hidden_states_first=return_hidden_states_first,
+            name=name,
+            callbacks=callbacks,
+        )
 
     def get_start_idx(self) -> int:
         return 1
@@ -210,12 +248,18 @@ class FBCachedTransformerBlocks(CachedTransformerBlocks):
     def get_modulated_inputs(self, hidden_states, encoder_hidden_states, *args, **kwargs):
         original_hidden_states = hidden_states
         first_transformer_block = self.transformer_blocks[0]
-        hidden_states, encoder_hidden_states = first_transformer_block(hidden_states, encoder_hidden_states, *args, **kwargs)
-        hidden_states, encoder_hidden_states = (hidden_states, encoder_hidden_states) if self.return_hidden_states_first else (encoder_hidden_states, hidden_states)
+        hidden_states, encoder_hidden_states = first_transformer_block(
+            hidden_states, encoder_hidden_states, *args, **kwargs
+        )
+        hidden_states, encoder_hidden_states = (
+            (hidden_states, encoder_hidden_states)
+            if self.return_hidden_states_first
+            else (encoder_hidden_states, hidden_states)
+        )
         first_hidden_states_residual = hidden_states - original_hidden_states
         prev_first_hidden_states_residual = self.cache_context.modulated_inputs
         if not self.use_cache:
-           self.cache_context.modulated_inputs = first_hidden_states_residual
+            self._store_modulated_inputs(first_hidden_states_residual)
 
         return first_hidden_states_residual, prev_first_hidden_states_residual, hidden_states, encoder_hidden_states
 
@@ -233,14 +277,16 @@ class TeaCachedTransformerBlocks(CachedTransformerBlocks):
         name="default",
         callbacks: Optional[List[CacheCallback]] = None,
     ):
-        super().__init__(transformer_blocks,
-                       single_transformer_blocks=single_transformer_blocks,
-                       transformer=transformer,
-                       rel_l1_thresh=rel_l1_thresh,
-                       num_steps=num_steps,
-                       return_hidden_states_first=return_hidden_states_first,
-                       name=name,
-                       callbacks=callbacks)
+        super().__init__(
+            transformer_blocks,
+            single_transformer_blocks=single_transformer_blocks,
+            transformer=transformer,
+            rel_l1_thresh=rel_l1_thresh,
+            num_steps=num_steps,
+            return_hidden_states_first=return_hidden_states_first,
+            name=name,
+            callbacks=callbacks,
+        )
         self.rescale_func = VectorizedPoly1D(self.cache_context.get_coef(self.name))
 
     def get_start_idx(self) -> int:

@@ -14,7 +14,7 @@ import yaml
 #: parsing must not import the registry, which pulls in torch -- so
 #: ``test_the_parser_knows_exactly_the_formats_the_registry_does`` pins the two
 #: together instead.
-_KNOWN_FORMATS = frozenset({"none", "fp8", "fp4", "fp6", "int8"})
+_KNOWN_FORMATS = frozenset({"none", "fp8", "fp4", "fp6", "a6w4", "int8"})
 #: Formats whose GEMM kernel refuses a small M. TorchAO's INT8 path lowers to
 #: ``torch._int_mm`` under ``torch.compile``, which needs M >= 16; the FP8 and
 #: MX kernels have no such floor. A module a model declares ``short_sequence``

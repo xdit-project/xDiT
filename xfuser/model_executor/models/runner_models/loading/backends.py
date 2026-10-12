@@ -411,6 +411,63 @@ def _probe_aiter_mxfp6_apis(
     return True, None
 
 
+def _probe_aiter_a6w4_apis(
+    gcn_arch_probe: Callable[[], str | None] | None = None,
+) -> tuple[bool, str | None]:
+    """Probe the exact gfx950 AITER A6W4 surface used by xFuserA6W4Linear.
+
+    A6W4 reads an FP4 weight through one AITER module and an FP6 activation
+    through another, so both submodules and both packed layouts are checked
+    here rather than trusting the single ``import aiter`` the MX formats need.
+    """
+
+    if os.getenv("AITER_TRITON_ONLY", "0") == "1":
+        return False, "AITER A6W4 requires AITER ASM, not AITER_TRITON_ONLY"
+    try:
+        a6w4 = import_module("aiter.ops.gemm_op_a6w4")
+        a6w6 = import_module("aiter.ops.gemm_op_a6w6")
+    except Exception as exc:  # noqa: BLE001 - report every capability probe failure
+        return (
+            False,
+            f"AITER A6W4 import probe failed: {type(exc).__name__}: {exc}",
+        )
+
+    required = (
+        ("gemm_a6w4", getattr(a6w4, "gemm_a6w4", None)),
+        ("mxfp4_gemm_pack_size", getattr(a6w4, "mxfp4_gemm_pack_size", None)),
+        ("quant_mxfp4_gemm_hip_out", getattr(a6w4, "quant_mxfp4_gemm_hip_out", None)),
+        ("mxfp6_gemm_pack_size", getattr(a6w6, "mxfp6_gemm_pack_size", None)),
+        ("quant_mxfp6_gemm", getattr(a6w6, "quant_mxfp6_gemm", None)),
+    )
+    missing = [name for name, value in required if not callable(value)]
+    if missing:
+        return (
+            False,
+            "missing required AITER mixed-MXFP APIs: " + ", ".join(missing),
+        )
+
+    expected_fp4 = (3 * 16384, 3 * 1024)
+    expected_fp6 = (3 * 24576, 3 * 1024)
+    try:
+        actual_fp4 = tuple(int(value) for value in a6w4.mxfp4_gemm_pack_size(256, 128))
+        actual_fp6 = tuple(int(value) for value in a6w6.mxfp6_gemm_pack_size(256, 128))
+    except Exception as exc:  # noqa: BLE001
+        return False, f"AITER mixed-MXFP pack-size probe failed: {exc}"
+    if actual_fp4 != expected_fp4 or actual_fp6 != expected_fp6:
+        return (
+            False,
+            "AITER mixed-MXFP packed-layout ABI mismatch: "
+            f"fp4={actual_fp4}, fp6={actual_fp6}",
+        )
+
+    arch = (gcn_arch_probe or _gcn_arch_name)()
+    if arch is None:
+        return False, "cannot determine the ROCm architecture for AITER A6W4 support"
+    if "gfx950" not in arch:
+        return False, f"AITER A6W4 ASM kernels require gfx950, detected {arch}"
+    return True, None
+
+
 def _probe_aiter_transformers_streaming() -> tuple[bool, str | None]:
     from .text_encoder_adapter import probe_transformers_streaming_loader
 
@@ -515,6 +572,7 @@ def probe_backend_capabilities(
     aiter_transformers_probe: Callable[[], _ProbeResult] | None = None,
     mxfp4_probe: Callable[[], _ProbeResult] | None = None,
     mxfp6_probe: Callable[[], _ProbeResult] | None = None,
+    a6w4_probe: Callable[[], _ProbeResult] | None = None,
     nvfp4_probe: Callable[[], _ProbeResult] | None = None,
     int8_probe: Callable[[], _ProbeResult] | None = None,
     torchao_fp8_probe: Callable[[], _ProbeResult] | None = None,
@@ -592,6 +650,8 @@ def probe_backend_capabilities(
         mxfp4_probe = from_aiter("MXFP4") if aiter_probe else _probe_aiter_mxfp4_apis
     if mxfp6_probe is None:
         mxfp6_probe = from_aiter("MXFP6") if aiter_probe else _probe_aiter_mxfp6_apis
+    if a6w4_probe is None:
+        a6w4_probe = from_aiter("A6W4") if aiter_probe else _probe_aiter_a6w4_apis
     if aiter_fp8_probe is None:
 
         def aiter_fp8_probe():
@@ -676,6 +736,14 @@ def probe_backend_capabilities(
         mxfp6 = False
         mxfp6_reason = "AITER MXFP6 requires ROCm"
 
+    if not is_wanted("a6w4"):
+        a6w4, a6w4_reason = False, "a6w4 was not requested"
+    elif on_hip():
+        a6w4, a6w4_reason = _result(a6w4_probe())
+    else:
+        a6w4 = False
+        a6w4_reason = "AITER A6W4 requires ROCm"
+
     if not is_wanted("int8"):
         int8, int8_reason = False, "int8 was not requested"
     elif on_cuda():
@@ -734,6 +802,14 @@ def probe_backend_capabilities(
             ),
             ("fp6", "aiter"): derived(
                 mxfp6, mxfp6_reason, fsdp=lambda: fsdp_probe("mxfp6")
+            ),
+            ("a6w4", "aiter"): derived(
+                a6w4,
+                a6w4_reason,
+                # Not asked of FSDP2 at all: the converter runs after the
+                # component is built, so there is no packed parameter for a
+                # wrapped block to shard in the first place.
+                fsdp=lambda: (False, "A6W4 currently requires eager materialization"),
             ),
             ("int8", "torchao"): derived(
                 int8,
@@ -964,6 +1040,46 @@ class AiterMxfp6BackendAdapter(QuantAdapter):
         )
 
 
+@stores("a6w4", "aiter")
+class AiterA6W4BackendAdapter(QuantAdapter):
+    meta_layout_matches_storage = True
+    streams_by_exclusion = False
+    # Deliberately takes no ``companion``: the kernel computes one leaf's FP4
+    # weight against its own FP6 activation and has no seam for a second
+    # layer, so ``leads_a_pair`` reads False off this signature and a per-step
+    # schedule asking A6W4 to lead is refused where every other pair is.
+    fills_blocks_locally = False
+    # Neither leg survives the hook: packing reads the source weight on the
+    # device it will compute on, and a host-resident parameter has nothing to
+    # pack from. Pinning is not what fails, so both legs carry one reason.
+    group_offload_refusal = {
+        "pinned": "mixed-MXFP packing requires GPU-resident source weights",
+        "unpinned": "mixed-MXFP packing requires GPU-resident source weights",
+    }
+    storage_semantics = "aiter_a6w4_per_1x32"
+    parameter_semantics = "packed_weight_parameter"
+    auxiliary_state_semantics = "persistent_scale_buffer"
+    serialization = "packed_state_supported_not_portable"
+
+    def _single_layer_factory(self, *, device):
+        from xfuser.core.utils.runner_utils import packed_layer_factory
+        from xfuser.model_executor.layers.mixed_mxfp_linear import xFuserA6W4Linear
+
+        return packed_layer_factory(xFuserA6W4Linear, device)
+
+    def convert_module(
+        self, module, *, device, filter_fn=None, offload_to_cpu=False, **kwargs
+    ):
+        from xfuser.core.utils.runner_utils import replace_linears
+
+        return replace_linears(
+            module,
+            self.layer_factory(device=device),
+            filter_fn=filter_fn,
+            offload_to_cpu=offload_to_cpu,
+        )
+
+
 @stores("int8", "torchao")
 class TorchaoInt8BackendAdapter(QuantAdapter):
     default_unavailable_reason = "Diffusers TorchAoConfig API is unavailable"
@@ -1094,6 +1210,10 @@ def plan_eager_blockwise_fallback(
 
     if prepared.descriptor.materialization_mode != "post_load":
         return EagerBlockwisePlan(False, "native loading already owns materialization")
+    if not prepared.descriptor.fills_blocks_locally:
+        return EagerBlockwisePlan(
+            False, "this format requires ordinary eager post-load conversion"
+        )
     if world_size != 1:
         return EagerBlockwisePlan(False, "local blockwise loading requires one rank")
     if not standard_loader:

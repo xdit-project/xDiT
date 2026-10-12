@@ -3,7 +3,11 @@ from math import prod
 import numpy as np
 from typing import Optional, Dict, Any, Union, Tuple, List
 from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
-from diffusers.models.transformers.transformer_qwenimage import QwenImageTransformer2DModel, apply_rotary_emb_qwen, compute_text_seq_len_from_mask
+from diffusers.models.transformers.transformer_qwenimage import (
+    QwenImageTransformer2DModel,
+    apply_rotary_emb_qwen,
+    compute_text_seq_len_from_mask,
+)
 from diffusers.utils import (
     USE_PEFT_BACKEND,
     scale_lora_layers,
@@ -14,7 +18,6 @@ from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_module
 from xfuser.core.distributed import (
     get_sequence_parallel_rank,
     get_sequence_parallel_world_size,
-    get_sp_group,
 )
 from xfuser.model_executor.models.transformers.transformers_utils import chunk_and_pad_sequence, gather_and_unpad
 
@@ -40,7 +43,6 @@ def _qwen_cos_sin(freqs: torch.Tensor):
 
 
 class xFuserQwenDoubleStreamAttnProcessor:
-
     def __call__(
         self,
         attn,
@@ -50,7 +52,6 @@ class xFuserQwenDoubleStreamAttnProcessor:
         attention_mask: Optional[torch.FloatTensor] = None,
         image_rotary_emb: Optional[torch.Tensor] = None,
     ) -> torch.FloatTensor:
-
         seq_txt = encoder_hidden_states.shape[1]
 
         # Compute QKV for image stream (sample projections)
@@ -110,9 +111,6 @@ class xFuserQwenDoubleStreamAttnProcessor:
         joint_key = torch.cat([txt_key, img_key], dim=1)
         joint_value = torch.cat([txt_value, img_value], dim=1)
 
-
-
-
         joint_hidden_states = USP(
             joint_query.transpose(1, 2),
             joint_key.transpose(1, 2),
@@ -141,7 +139,6 @@ class xFuserQwenDoubleStreamAttnProcessor:
 
 
 class xFuserQwenImageTransformerWrapper(QwenImageTransformer2DModel):
-
     def __init__(
         self,
         patch_size: int = 2,
@@ -174,9 +171,7 @@ class xFuserQwenImageTransformerWrapper(QwenImageTransformer2DModel):
 
         for block in self.transformer_blocks:
             block.attn.processor = xFuserQwenDoubleStreamAttnProcessor()
-        register_fp8_comms_eligible_modules(
-            self, [block.attn for block in self.transformer_blocks]
-        )
+        register_fp8_comms_eligible_modules(self, [block.attn for block in self.transformer_blocks])
 
     def forward(
         self,
@@ -192,8 +187,6 @@ class xFuserQwenImageTransformerWrapper(QwenImageTransformer2DModel):
         additional_t_cond=None,
         return_dict: bool = True,
     ) -> Union[torch.Tensor, Transformer2DModelOutput]:
-
-
         sp_world_rank = get_sequence_parallel_rank()
         sp_world_size = get_sequence_parallel_world_size()
 
@@ -224,8 +217,6 @@ class xFuserQwenImageTransformerWrapper(QwenImageTransformer2DModel):
         encoder_hidden_states = self.txt_norm(encoder_hidden_states)
         encoder_hidden_states = self.txt_in(encoder_hidden_states)
 
-
-
         # Use the encoder_hidden_states sequence length for RoPE computation and normalize mask
         text_seq_len, _, encoder_hidden_states_mask = compute_text_seq_len_from_mask(
             encoder_hidden_states, encoder_hidden_states_mask
@@ -245,7 +236,9 @@ class xFuserQwenImageTransformerWrapper(QwenImageTransformer2DModel):
         pad_amount = (sp_world_size - (hidden_states.shape[1] % sp_world_size)) % sp_world_size
         encoder_pad_amount = (sp_world_size - (encoder_hidden_states.shape[1] % sp_world_size)) % sp_world_size
         hidden_states = chunk_and_pad_sequence(hidden_states, sp_world_rank, sp_world_size, pad_amount, dim=1)
-        encoder_hidden_states = chunk_and_pad_sequence(encoder_hidden_states, sp_world_rank, sp_world_size, encoder_pad_amount, dim=1)
+        encoder_hidden_states = chunk_and_pad_sequence(
+            encoder_hidden_states, sp_world_rank, sp_world_size, encoder_pad_amount, dim=1
+        )
 
         image_rotary_emb = [
             chunk_and_pad_sequence(image_rotary_emb[0], sp_world_rank, sp_world_size, pad_amount, dim=0),

@@ -22,17 +22,31 @@ from .quant_adapter import module_paths_overlap
 
 
 def shard_pipeline_components(loader) -> None:
-    """Shard every component the run's fsdp_strategy names, and move the rest to the local device."""
+    """Shard selected strategy components and place the rest locally."""
     model = loader.model
     local_rank = get_world_group().local_rank
     fs_local_rank = get_fs_group().local_rank
     device_group = get_fs_group().device_group
+    requested = getattr(model.config, "fully_shard_components", None)
+    strategy_components = set(model.settings.fsdp_strategy)
+    sharded_components = strategy_components if requested is None else set(requested)
+    unknown = sharded_components - strategy_components
+    if unknown:
+        raise ValueError(
+            "--fully_shard_components contains components without an FSDP "
+            f"strategy: {sorted(unknown)}. Available components: "
+            f"{sorted(strategy_components)}"
+        )
+    if requested is None:
+        loader.fill_eager_transformers()
+    else:
+        loader.fill_eager_transformers(component_names=set(model.pipe.components) - sharded_components)
     for component_name, component in model.pipe.components.items():
-        if component_name in model.settings.fsdp_strategy:
+        if component_name in sharded_components:
             log(
                 f"Sharding {component_name} with FSDP... "
                 f"(host cur/anon/file: {host_mem_gb()} GB, "
-                f"VRAM: {torch.cuda.memory_allocated(local_rank)/1e9:.2f}GB)"
+                f"VRAM: {torch.cuda.memory_allocated(local_rank) / 1e9:.2f}GB)"
             )
             strategy = model.settings.fsdp_strategy[component_name]
             wrap_attrs = strategy.get("wrap_attrs", [])
@@ -46,9 +60,7 @@ def shard_pipeline_components(loader) -> None:
             # rank0.
             # Agreed across the fs group: this picks a collective branch, so a rank-local
             # answer that diverged would hang instead of raising.
-            is_meta = loader.agreed_is_meta(
-                component, component_name, get_fs_group(), f"cuda:{fs_local_rank}"
-            )
+            is_meta = loader.agreed_is_meta(component, component_name, get_fs_group(), f"cuda:{fs_local_rank}")
             is_selffill = is_meta and loader.self_fills_from_disk(component)
             load_block_fn = load_epilogue_fn = None
             if is_selffill:
@@ -95,29 +107,25 @@ def shard_pipeline_components(loader) -> None:
                 load_epilogue_fn=load_epilogue_fn,
             )
             if is_meta and not is_selffill:
-                loader.broadcast_load(
-                    fsdp_object, component_name, offload_policy == "cpu"
-                )
+                loader.broadcast_load(fsdp_object, component_name, offload_policy == "cpu")
             setattr(model.pipe, component_name, fsdp_object)
             torch.cuda.empty_cache()
             log(
                 f"Sharded {component_name}. "
                 f"(host cur/anon/file: {host_mem_gb()} GB, "
-                f"VRAM: {torch.cuda.memory_allocated(local_rank)/1e9:.2f}GB)"
+                f"VRAM: {torch.cuda.memory_allocated(local_rank) / 1e9:.2f}GB)"
             )
         else:
             log(f"Skipping FSDP wrapping for {component_name}...")
             if hasattr(component, "to"):
                 component.to(f"cuda:{local_rank}")
             else:
-                log(
-                    f"Component {component_name} has no .to() method, skipping device move."
-                )
+                log(f"Component {component_name} has no .to() method, skipping device move.")
 
-    _give_cpu_offloaded_components_an_exec_device_hook(model, local_rank)
+    _give_cpu_offloaded_components_an_exec_device_hook(model, local_rank, sharded_components)
 
 
-def _give_cpu_offloaded_components_an_exec_device_hook(model, local_rank: int) -> None:
+def _give_cpu_offloaded_components_an_exec_device_hook(model, local_rank: int, sharded_components=None) -> None:
     """Keep diffusers' _execution_device from resolving to cpu on a cpu-offloaded pipeline.
 
     _execution_device short-circuits on the first nn.Module component that lacks _hf_hook, returning
@@ -128,7 +136,7 @@ def _give_cpu_offloaded_components_an_exec_device_hook(model, local_rank: int) -
     cpu_offloaded = {
         name
         for name, s in model.settings.fsdp_strategy.items()
-        if s.get("offload_policy") == "cpu"
+        if s.get("offload_policy") == "cpu" and (sharded_components is None or name in sharded_components)
     }
     if not cpu_offloaded:
         return
@@ -142,18 +150,13 @@ def _give_cpu_offloaded_components_an_exec_device_hook(model, local_rank: int) -
         if not isinstance(component, torch.nn.Module):
             continue
         if not hasattr(component, "_hf_hook"):
-            component._hf_hook = _ExecDeviceHook(
-                cuda_device if name in cpu_offloaded else None
-            )
+            component._hf_hook = _ExecDeviceHook(cuda_device if name in cpu_offloaded else None)
 
 
 def _wrapped_block_paths(component, component_name, wrap_attrs):
     paths = []
     for attr in wrap_attrs:
-        paths.extend(
-            f"{component_name}.{attr}.{index}"
-            for index, _ in enumerate(rgetattr(component, attr))
-        )
+        paths.extend(f"{component_name}.{attr}.{index}" for index, _ in enumerate(rgetattr(component, attr)))
     return tuple(paths)
 
 
@@ -227,16 +230,11 @@ def build_block_quantize_fn(
         else None
     )
     if block_paths is None and len(wrap_attrs) != 1:
-        raise ValueError(
-            "multiple wrap_attrs require the component to resolve flattened "
-            "block indices"
-        )
+        raise ValueError("multiple wrap_attrs require the component to resolve flattened block indices")
 
     def quantize_fn(block, block_idx: int) -> None:
         block_path = (
-            block_paths[block_idx]
-            if block_paths is not None
-            else f"{component_name}.{wrap_attrs[0]}.{block_idx}"
+            block_paths[block_idx] if block_paths is not None else f"{component_name}.{wrap_attrs[0]}.{block_idx}"
         )
         present = [
             format_name

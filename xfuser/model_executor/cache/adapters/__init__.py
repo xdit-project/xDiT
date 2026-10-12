@@ -1,9 +1,9 @@
 """Unified entry point for xDiT step-caching adapters."""
+
 import json
 import logging
 from typing import Any, Dict, Optional
 
-import torch
 
 logger = logging.getLogger(__name__)
 
@@ -38,9 +38,7 @@ def _resolve_threshold(
             raise ValueError(f"--cache_config is not valid JSON: {e}") from e
         unknown = set(override) - {"residual_diff_threshold"}
         if unknown:
-            raise ValueError(
-                f"Unknown --cache_config keys for in-tree caching: {sorted(unknown)}"
-            )
+            raise ValueError(f"Unknown --cache_config keys for in-tree caching: {sorted(unknown)}")
         threshold = override.get("residual_diff_threshold", threshold)
     return threshold
 
@@ -66,6 +64,7 @@ def apply_cache(
     """
     if cache_method == "teacache":
         from xfuser.model_executor.cache.adapters.flux import apply_teacache
+
         target = transformer if transformer is not None else getattr(pipe, transformer_attr)
         patch_target = _unwrap_fsdp(target)
         apply_teacache(
@@ -82,11 +81,7 @@ def apply_cache(
 
         target = transformer if transformer is not None else getattr(pipe, transformer_attr)
         patch_target = _unwrap_fsdp(target)
-        default_threshold = (
-            float(XDIT_FBCACHE_THRESH)
-            if XDIT_FBCACHE_THRESH
-            else 0.12
-        )
+        default_threshold = float(XDIT_FBCACHE_THRESH) if XDIT_FBCACHE_THRESH else 0.12
         if hasattr(patch_target, "single_stream_modulation"):
             from xfuser.model_executor.cache.adapters.flux2 import apply_fbcache
         else:
@@ -111,6 +106,7 @@ def apply_cache(
             apply_cache_dit_cache,
             apply_cache_dit_cache_multi,
         )
+
         if isinstance(adapter_config, list):
             apply_cache_dit_cache_multi(
                 pipe=pipe,
@@ -139,7 +135,4 @@ def apply_cache(
             setattr(pipe, attr, patched)
         return patched
 
-    raise ValueError(
-        f"Unknown cache_method: {cache_method!r}. "
-        "Supported: 'teacache', 'fbcache', 'dbcache'."
-    )
+    raise ValueError(f"Unknown cache_method: {cache_method!r}. Supported: 'teacache', 'fbcache', 'dbcache'.")

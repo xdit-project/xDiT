@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61", "setuptools-scm>=8"]
+requires = ["setuptools>=61", "setuptools-scm>=10.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -29,7 +29,7 @@ dependencies = [
 
 [project.optional-dependencies]
 flash-attn = [
-    "flash-attn>=2.6.0",  # NOTE: flash-attn is necessary if ring_degree > 1
+    "flash-attn>=2.7.0",  # NOTE: flash-attn is necessary if ring_degree > 1; yunchang needs the 2.7.0 window_size API
 ]
 optimum-quanto = [
     "optimum-quanto",  # NOTE: optimum-quanto is necessary if use_fp8_t5_encoder is enabled
@@ -51,6 +51,7 @@ cache-dit = [
 ]
 test = [
     "pytest",
+    "pytest-timeout",
     "imageio",
     "imageio-ffmpeg",
 ]

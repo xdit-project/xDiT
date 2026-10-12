@@ -13,6 +13,8 @@ Key differences from FLUX.1:
     Input hidden_states is already [txt || img] concatenated.
     Returns: hidden_states (no split)
 
+  - These are the diffusers 0.37+ names; see _BLOCKS_SPLIT_MODULATION for 0.36.
+
   - Modulation tensors are pre-computed ONCE before all block loops:
         double_stream_mod_img  -> passed to every dual-stream block
         double_stream_mod_txt  -> passed to every dual-stream block
@@ -34,9 +36,16 @@ Implementation note:
 """
 
 import torch
+from diffusers.models.transformers.transformer_flux2 import Flux2Modulation
 from torch import nn
 
 from xfuser.model_executor.cache import utils
+
+# diffusers 0.37 added Flux2Modulation.split and moved the split into the blocks. Before
+# that (0.36) the modulation layers returned split parameter sets, and blocks took them
+# as temb_mod_params*. Dual-stream blocks get whatever the model's own forward passes,
+# so only the single-stream call below depends on this.
+_BLOCKS_SPLIT_MODULATION = hasattr(Flux2Modulation, "split")
 
 
 class Flux2FBCachedTransformerBlocks(utils.FBCachedTransformerBlocks):
@@ -112,9 +121,11 @@ class Flux2FBCachedTransformerBlocks(utils.FBCachedTransformerBlocks):
         subsequent calls — the graph reads from the same pointer, getting updated
         data because we .copy_() into it before each replay.
         """
-        if (self._persistent_modulated_inputs is None
-                or self._persistent_modulated_inputs.shape != tensor.shape
-                or self._persistent_modulated_inputs.device != tensor.device):
+        if (
+            self._persistent_modulated_inputs is None
+            or self._persistent_modulated_inputs.shape != tensor.shape
+            or self._persistent_modulated_inputs.device != tensor.device
+        ):
             self._persistent_modulated_inputs = torch.empty_like(tensor)
         self._persistent_modulated_inputs.copy_(tensor)
         self.cache_context.modulated_inputs = self._persistent_modulated_inputs
@@ -126,16 +137,20 @@ class Flux2FBCachedTransformerBlocks(utils.FBCachedTransformerBlocks):
         encoder_residual: torch.Tensor,
     ) -> None:
         """Copy block residuals into persistent buffers outside any CUDA graph."""
-        if (self._persistent_hidden_residual is None
-                or self._persistent_hidden_residual.shape != hidden_residual.shape
-                or self._persistent_hidden_residual.device != hidden_residual.device):
+        if (
+            self._persistent_hidden_residual is None
+            or self._persistent_hidden_residual.shape != hidden_residual.shape
+            or self._persistent_hidden_residual.device != hidden_residual.device
+        ):
             self._persistent_hidden_residual = torch.empty_like(hidden_residual)
         self._persistent_hidden_residual.copy_(hidden_residual)
         self.cache_context.hidden_states_residual = self._persistent_hidden_residual
 
-        if (self._persistent_encoder_residual is None
-                or self._persistent_encoder_residual.shape != encoder_residual.shape
-                or self._persistent_encoder_residual.device != encoder_residual.device):
+        if (
+            self._persistent_encoder_residual is None
+            or self._persistent_encoder_residual.shape != encoder_residual.shape
+            or self._persistent_encoder_residual.device != encoder_residual.device
+        ):
             self._persistent_encoder_residual = torch.empty_like(encoder_residual)
         self._persistent_encoder_residual.copy_(encoder_residual)
         self.cache_context.encoder_hidden_states_residual = self._persistent_encoder_residual
@@ -191,14 +206,18 @@ class Flux2FBCachedTransformerBlocks(utils.FBCachedTransformerBlocks):
             encoder_seq_len = encoder.shape[1]
 
             image_rotary_emb = kwargs.get("image_rotary_emb", None)
-            single_mod = self._single_stream_mod
+            if _BLOCKS_SPLIT_MODULATION:
+                single_mod_kwargs = {"temb_mod": self._single_stream_mod}
+            else:
+                # 0.36's single-stream layer returns one parameter set
+                single_mod_kwargs = {"temb_mod_params": self._single_stream_mod[0]}
             single_jkw = self._single_joint_attn_kwargs
 
             for block in self.single_transformer_blocks:
                 combined = block(
                     hidden_states=combined,
                     encoder_hidden_states=None,
-                    temb_mod=single_mod,
+                    **single_mod_kwargs,
                     image_rotary_emb=image_rotary_emb,
                     joint_attention_kwargs=single_jkw,
                 )
@@ -327,11 +346,10 @@ def apply_fbcache(
     # Registering it as a pre-hook ensures it fires eagerly (pre-hooks run
     # by nn.Module._call_impl BEFORE entering the compiled forward_call).
     if hasattr(torch.compiler, "cudagraph_mark_step_begin"):
+
         def _mark_cudagraph_step_begin(module, args, kwargs):
             torch.compiler.cudagraph_mark_step_begin()
 
-        transformer.register_forward_pre_hook(
-            _mark_cudagraph_step_begin, with_kwargs=True, prepend=True
-        )
+        transformer.register_forward_pre_hook(_mark_cudagraph_step_begin, with_kwargs=True, prepend=True)
 
     return transformer

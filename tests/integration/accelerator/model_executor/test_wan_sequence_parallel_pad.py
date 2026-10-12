@@ -196,9 +196,7 @@ def _worker(rank, world_size, init_method, name, ulysses, ring, latent_shape, nu
     numerics = NUMERICS[numerics]
     fp8_comms = numerics.fp8_comms and ulysses > 1
     torch.cuda.set_device(rank)
-    init_distributed_environment(
-        rank=rank, world_size=world_size, local_rank=rank, distributed_init_method=init_method
-    )
+    init_distributed_environment(rank=rank, world_size=world_size, local_rank=rank, distributed_init_method=init_method)
     initialize_model_parallel(ulysses_degree=ulysses, ring_degree=ring)
     try:
         args = xFuserArgs(

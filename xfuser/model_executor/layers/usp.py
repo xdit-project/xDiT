@@ -392,11 +392,7 @@ _SPARSITY_STRIPPING_SP_PAD = (Sparsity.SPARGE, Sparsity.VSA)
 
 def _backend_strips_sp_pad(backend, attention_kwargs) -> bool:
     spec = attention_registry.find(backend)
-    return (
-        spec is not None
-        and spec.sparsity in _SPARSITY_STRIPPING_SP_PAD
-        and attention_kwargs.get("thw") is not None
-    )
+    return spec is not None and spec.sparsity in _SPARSITY_STRIPPING_SP_PAD and attention_kwargs.get("thw") is not None
 
 
 def _ring_trim_trailing_kv_padding(attention_function, valid_kv_len, shard_len):
@@ -418,7 +414,7 @@ def _ring_trim_trailing_kv_padding(attention_function, valid_kv_len, shard_len):
             f"The SP pad spans more than one ring shard (valid_kv_len={valid_kv_len}, "
             f"shard length {shard_len}, ring degree {ring_size})."
         )
-    state = [0] # {"step": 0}
+    state = [0]  # {"step": 0}
 
     @functools.wraps(attention_function)
     def wrapper(query, key, value, *args, **kwargs):

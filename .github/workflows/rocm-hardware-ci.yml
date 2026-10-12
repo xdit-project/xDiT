@@ -1,6 +1,6 @@
 # Manually requests AMD hardware validation and mirrors the correlated remote result.
 name: ROCm Hardware CI
-run-name: "ROCm HW CI [origin:${{ github.actor == 'github-actions[bot]' && inputs.original_run_id || github.run_id }}]"
+run-name: "ROCm HW CI [origin:${{ inputs.original_run_id || github.run_id }}]"
 
 on:
   workflow_dispatch:
@@ -40,8 +40,8 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       SELF_WORKFLOW: rocm-hardware-ci.yml
-      ORIGINAL_RUN_ID: ${{ github.actor == 'github-actions[bot]' && inputs.original_run_id || github.run_id }}
-      CONTINUATION_COUNT: ${{ github.actor == 'github-actions[bot]' && inputs.continuation_count || '0' }}
+      ORIGINAL_RUN_ID: ${{ inputs.original_run_id || github.run_id }}
+      CONTINUATION_COUNT: ${{ inputs.original_run_id && inputs.continuation_count || '0' }}
       BENCHMARKS: ${{ inputs.benchmarks }}
       ARCHITECTURES: ${{ inputs.architectures }}
       AMD_REF: ${{ inputs.amd_ref }}
@@ -75,7 +75,7 @@ jobs:
           echo "WAIT_DEADLINE=$(( $(date +%s) + 21000 ))" >> "$GITHUB_ENV"
 
       - name: Publish request metadata
-        if: github.actor != 'github-actions[bot]'
+        if: inputs.original_run_id == ''
         run: |
           mkdir -p request
           jq -n \
@@ -85,7 +85,7 @@ jobs:
             '{benchmarks: $benchmarks, architectures: $architectures, amd_ref: $amd_ref}' > request/request.json
 
       - name: Upload request metadata
-        if: github.actor != 'github-actions[bot]'
+        if: inputs.original_run_id == ''
         uses: actions/upload-artifact@v4
         with:
           name: rocm-hardware-request
@@ -96,8 +96,7 @@ jobs:
       - name: Preflight — confirm cross-repo read access
         run: |
           if ! gh api "repos/${PARTNER_REPO}/actions/workflows/${PARTNER_WORKFLOW}/runs?per_page=1" >/dev/null 2>&1; then
-            echo "::error::Cannot read ${PARTNER_REPO} Actions API. If GITHUB_TOKEN lacks cross-repo"
-            echo "::error::access, add a read-only PAT as a secret and set GH_TOKEN to it."
+            echo "::error::Cannot read ${PARTNER_REPO} Actions API. Verify that ${PARTNER_REPO} is still public and has the corresponding workflow."
             exit 1
           fi
 

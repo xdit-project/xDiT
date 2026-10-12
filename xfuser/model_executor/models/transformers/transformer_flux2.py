@@ -47,7 +47,7 @@ from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from xfuser.core.distributed.parallel_state import _SP
 from xfuser.envs import PACKAGES_CHECKER
 
-from xfuser.model_executor.layers.usp import USP
+from xfuser.model_executor.layers.usp import USP, sp_padding_attention_kwargs
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
 from xfuser.model_executor.layers import (
     xFuserLayerWrappersRegister,
@@ -92,6 +92,7 @@ class xFuserFlux2AttnProcessor(Flux2AttnProcessor):
         encoder_hidden_states: torch.Tensor = None,
         attention_mask: Optional[torch.Tensor] = None,
         image_rotary_emb: Optional[torch.Tensor] = None,
+        sp_padding: int = 0,
     ) -> torch.Tensor:
         query, key, value, encoder_query, encoder_key, encoder_value = _get_qkv_projections(
             attn, hidden_states, encoder_hidden_states
@@ -203,7 +204,15 @@ class xFuserFlux2AttnProcessor(Flux2AttnProcessor):
             # would make USP update it again with the joint text+image KV.
             hidden_states = USP(query, key, value, head_balance_layer=attn)
         else:
-            hidden_states = USP(query, key, value, attn_layer=attn)
+            # Each rank holds [text shard, image shard] and only the last rank's
+            # image shard ends with padding, so the gathered keys end with it.
+            hidden_states = USP(
+                query,
+                key,
+                value,
+                attn_layer=attn,
+                attention_kwargs=sp_padding_attention_kwargs(key.shape[2], sp_padding),
+            )
 
         # Transpose back to original shape
         hidden_states = hidden_states.transpose(1, 2)
@@ -242,6 +251,7 @@ class xFuserFlux2ParallelSelfAttnProcessor(Flux2ParallelSelfAttnProcessor):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         image_rotary_emb: Optional[torch.Tensor] = None,
+        sp_padding: int = 0,
         **kwargs,
     ) -> torch.Tensor:
         # Parallel in (QKV + MLP in) projection
@@ -329,7 +339,15 @@ class xFuserFlux2ParallelSelfAttnProcessor(Flux2ParallelSelfAttnProcessor):
             # The stale-KV cache was updated above; see xFuserFlux2AttnProcessor.
             hidden_states = USP(query, key, value, combine_qkv_a2a=True, head_balance_layer=attn)
         else:
-            hidden_states = USP(query, key, value, combine_qkv_a2a=True, attn_layer=attn)
+            # The single blocks run on [text shard, image shard] too.
+            hidden_states = USP(
+                query,
+                key,
+                value,
+                combine_qkv_a2a=True,
+                attn_layer=attn,
+                attention_kwargs=sp_padding_attention_kwargs(key.shape[2], sp_padding),
+            )
 
         # Transpose back to original shape
         hidden_states = hidden_states.transpose(1, 2)
@@ -505,6 +523,12 @@ class xFuserFlux2Transformer2DWrapper(Flux2Transformer2DModel):
         img_ids = torch.chunk(img_ids, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
         txt_ids = torch.chunk(txt_ids, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
 
+        if padding_length > 0:
+            # Tell the attention processors how many image tokens are padding.
+            kwargs["joint_attention_kwargs"] = {
+                **(kwargs.get("joint_attention_kwargs") or {}),
+                "sp_padding": padding_length,
+            }
         output = super().forward(
             hidden_states,
             encoder_hidden_states,

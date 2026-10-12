@@ -7,7 +7,7 @@ from diffusers.models.attention_processor import Attention
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
 
-from xfuser.model_executor.layers.usp import USP
+from xfuser.model_executor.layers.usp import USP, SequenceParallelPadding
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
 from xfuser.model_executor.layers.fused_qk_rope_zimage_flydsl import (
     flydsl_fused_qk_norm_rope,
@@ -64,6 +64,11 @@ class xFuserZSingleStreamAttnProcessor:
     Processor for Z-Image single stream attention that adapts the existing Attention class to match the behavior of the
     original Z-ImageAttention module.
     """
+
+    def __init__(self, sp_padding: Optional[SequenceParallelPadding] = None):
+        # Shared with the transformer wrapper, which records how many tokens it
+        # zero-padded for sequence parallelism before each stage.
+        self.sp_padding = sp_padding
 
     @staticmethod
     def _pad_heads(x: torch.Tensor, pad_heads: int) -> torch.Tensor:
@@ -126,6 +131,7 @@ class xFuserZSingleStreamAttnProcessor:
             dropout_p=0.0,
             is_causal=False,
             attn_layer=attn,
+            attention_kwargs=(self.sp_padding.attention_kwargs(key.shape[2]) if self.sp_padding is not None else None),
         )
 
         if pad_heads:
@@ -160,8 +166,9 @@ def z_image_attn_modules(transformer) -> list[torch.nn.Module]:
 class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.sp_padding = SequenceParallelPadding()
         for layer in self.layers + self.context_refiner + self.noise_refiner:
-            layer.attention.processor = xFuserZSingleStreamAttnProcessor()
+            layer.attention.processor = xFuserZSingleStreamAttnProcessor(sp_padding=self.sp_padding)
         register_fp8_comms_eligible_modules(self, z_image_attn_modules(self))
 
     def _chunk_and_pad_sequence(
@@ -265,6 +272,7 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
 
         # SP support
         pad_amount = (sp_world_size - (x.shape[1] % sp_world_size)) % sp_world_size
+        self.sp_padding.tokens = pad_amount
         x = self._chunk_and_pad_sequence(x, sp_world_rank, sp_world_size, pad_amount, dim=-2)
         x_attn_mask = self._chunk_and_pad_sequence(x_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1)
         x_freqs_cis_chunked = self._chunk_and_pad_sequence(
@@ -305,6 +313,7 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
 
         # SP support
         pad_amount = (sp_world_size - (cap_feats.shape[1] % sp_world_size)) % sp_world_size
+        self.sp_padding.tokens = pad_amount
         cap_feats = self._chunk_and_pad_sequence(cap_feats, sp_world_rank, sp_world_size, pad_amount, dim=-2)
         cap_attn_mask = self._chunk_and_pad_sequence(cap_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1)
         cap_freqs_cis_chunked = self._chunk_and_pad_sequence(
@@ -341,6 +350,7 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
 
         # SP support
         pad_amount = (sp_world_size - (unified.shape[1] % sp_world_size)) % sp_world_size
+        self.sp_padding.tokens = pad_amount
         unified = self._chunk_and_pad_sequence(unified, sp_world_rank, sp_world_size, pad_amount, dim=-2)
         unified_attn_mask = self._chunk_and_pad_sequence(
             unified_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1

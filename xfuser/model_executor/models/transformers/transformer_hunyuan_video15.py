@@ -6,8 +6,10 @@ from diffusers.models.embeddings import apply_rotary_emb
 from diffusers.models.attention_processor import Attention
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
-from xfuser.model_executor.layers.usp import USP
+from xfuser.model_executor.layers.usp import USP, SequenceParallelPadding, key_padding_mask_attention_kwargs
+from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.core.distributed import (
+    get_ring_parallel_world_size,
     get_runtime_state,
     get_sequence_parallel_world_size,
     get_sequence_parallel_rank,
@@ -16,8 +18,15 @@ from xfuser.core.distributed import (
 
 
 class xFuserHunyuanVideo15AttnProcessor:
-    def __init__(self, attention_kwargs: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self,
+        attention_kwargs: Optional[Dict[str, Any]] = None,
+        sp_padding: Optional[SequenceParallelPadding] = None,
+    ):
         self.attention_kwargs = attention_kwargs
+        # Shared with the transformer wrapper, which records how many image
+        # tokens it zero-padded for sequence parallelism.
+        self.sp_padding = sp_padding
 
     def __call__(
         self,
@@ -77,17 +86,35 @@ class xFuserHunyuanVideo15AttnProcessor:
 
         #! ---------------------------------------- ATTENTION ----------------------------------------
         if self.attention_kwargs is not None:
+            # Sparse attention applies the text mask itself.
             self.attention_kwargs["encoder_sequence_length"] = num_encoder_hidden_states_tokens
             self.attention_kwargs["text_mask"] = attention_mask
+            key_padding_mask = None
+        else:
+            # The wrapper's [batch, keys] mask, or None.
+            key_padding_mask = attention_mask
         if get_sequence_parallel_world_size() > 1:
             if get_runtime_state().split_text_embed_in_sp:
+                attention_kwargs, backend = key_padding_mask_attention_kwargs(key_padding_mask, self.attention_kwargs)
                 hidden_states = USP(
-                    query, key, value, dropout_p=0.0, is_causal=False, attention_kwargs=self.attention_kwargs
+                    query,
+                    key,
+                    value,
+                    dropout_p=0.0,
+                    is_causal=False,
+                    backend=backend,
+                    attention_kwargs=attention_kwargs,
                 )
             else:
                 query, encoder_query = query.split([num_query_tokens, num_encoder_hidden_states_tokens], dim=2)
                 key, encoder_key = key.split([num_query_tokens, num_encoder_hidden_states_tokens], dim=2)
                 value, encoder_value = value.split([num_query_tokens, num_encoder_hidden_states_tokens], dim=2)
+                # The image keys gathered by Ulysses end with the padding; the
+                # replicated text joins them afterwards as joint keys.
+                attention_kwargs = self.attention_kwargs
+                if self.sp_padding is not None:
+                    attention_kwargs = self.sp_padding.attention_kwargs(key.shape[2], attention_kwargs)
+                attention_kwargs, backend = key_padding_mask_attention_kwargs(key_padding_mask, attention_kwargs)
 
                 hidden_states = USP(
                     query,
@@ -99,11 +126,19 @@ class xFuserHunyuanVideo15AttnProcessor:
                     joint_key=encoder_key,
                     joint_value=encoder_value,
                     joint_strategy="rear",
-                    attention_kwargs=self.attention_kwargs,
+                    backend=backend,
+                    attention_kwargs=attention_kwargs,
                 )
         else:
+            attention_kwargs, backend = key_padding_mask_attention_kwargs(key_padding_mask, self.attention_kwargs)
             hidden_states = USP(
-                query, key, value, dropout_p=0.0, is_causal=False, attention_kwargs=self.attention_kwargs
+                query,
+                key,
+                value,
+                dropout_p=0.0,
+                is_causal=False,
+                backend=backend,
+                attention_kwargs=attention_kwargs,
             )
 
         # Transpose back to original shape
@@ -178,8 +213,11 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
             use_meanflow=use_meanflow,
         )
         self.attention_kwargs = attention_kwargs
+        self.sp_padding = SequenceParallelPadding()
         for block in self.transformer_blocks:
-            block.attn.processor = xFuserHunyuanVideo15AttnProcessor(attention_kwargs=attention_kwargs)
+            block.attn.processor = xFuserHunyuanVideo15AttnProcessor(
+                attention_kwargs=attention_kwargs, sp_padding=self.sp_padding
+            )
 
     def _chunk_and_pad_sequence(
         self, x: torch.Tensor, sp_world_rank: int, sp_world_size: int, pad_amount: int, dim: int
@@ -202,6 +240,32 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
             )
         x = torch.chunk(x, sp_world_size, dim=dim)[sp_world_rank]
         return x
+
+    @staticmethod
+    def _key_padding_mask(
+        text_mask: torch.Tensor, image_tokens: int, sp_world_size: int, split_text: bool
+    ) -> Optional[torch.Tensor]:
+        """The [batch, keys] mask of the dense attention, or None if no key is masked.
+
+        The stock model masks the padded prompt tokens of each sample out of
+        the keys. The keys are ordered as the attention sees them: with the
+        text split across ranks, each rank's [image, text] chunk in rank order;
+        otherwise the image tokens, without the sequence-parallel padding that
+        USP trims, followed by the text.
+        """
+        if bool(text_mask.all()):
+            return None
+        batch_size = text_mask.shape[0]
+        image_mask = text_mask.new_ones((batch_size, image_tokens))
+        if not split_text:
+            return torch.cat([image_mask, text_mask], dim=1)
+        return torch.cat(
+            [
+                image_mask.view(batch_size, sp_world_size, -1),
+                text_mask.view(batch_size, sp_world_size, -1),
+            ],
+            dim=2,
+        ).flatten(1)
 
     def _gather_and_unpad(self, x: torch.Tensor, pad_amount: int, dim: int) -> torch.Tensor:
         x = get_sp_group().all_gather(x, dim=dim)
@@ -334,7 +398,9 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
         encoder_attention_mask = torch.stack(new_encoder_attention_mask)
 
         # sequence parallel
-        hidden_states_pad_amount = (sp_world_size - (hidden_states.shape[1] % sp_world_size)) % sp_world_size
+        image_tokens = hidden_states.shape[1]
+        hidden_states_pad_amount = (sp_world_size - (image_tokens % sp_world_size)) % sp_world_size
+        self.sp_padding.tokens = hidden_states_pad_amount
         hidden_states = self._chunk_and_pad_sequence(
             hidden_states, sp_world_rank, sp_world_size, hidden_states_pad_amount, dim=1
         )
@@ -343,11 +409,29 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
         sin = self._chunk_and_pad_sequence(sin, sp_world_rank, sp_world_size, hidden_states_pad_amount, dim=0)
         image_rotary_emb = (cos, sin)
 
-        any_valid = encoder_attention_mask.to(torch.bool).any(dim=0)
-        encoder_hidden_states = encoder_hidden_states[:, any_valid, :]
-        encoder_attention_mask = encoder_attention_mask.to(torch.bool)[:, any_valid]
+        # With SDPA, keep every text column under the mask, as the stock model
+        # does, so the output is bit-identical to diffusers. This costs speed
+        # even for a single prompt: the padded text columns, most of the text
+        # for a short prompt, stay in as masked keys. Other backends ignore
+        # masks, so drop the columns no sample uses and mask only prompts of
+        # different lengths. Ring attention cannot apply a mask.
+        keep_padded_text = (
+            self.attention_kwargs is None
+            and get_runtime_state().attention_backend == AttentionBackendType.SDPA
+            and get_ring_parallel_world_size() == 1
+        )
+        encoder_attention_mask = encoder_attention_mask.to(torch.bool)
+        if not keep_padded_text:
+            any_valid = encoder_attention_mask.any(dim=0)
+            encoder_hidden_states = encoder_hidden_states[:, any_valid, :]
+            encoder_attention_mask = encoder_attention_mask[:, any_valid]
 
-        if encoder_hidden_states.shape[1] % sp_world_size != 0:
+        # Each rank holds [image, text]. With padded image tokens, split text
+        # would leave the padding in the middle of the gathered keys, so the
+        # dense path replicates the text instead: the gathered image keys then
+        # end with the padding, which USP drops, and the text joins as joint keys.
+        image_padded_dense = hidden_states_pad_amount > 0 and self.attention_kwargs is None
+        if encoder_hidden_states.shape[1] % sp_world_size != 0 or image_padded_dense:
             if self.attention_kwargs is not None:
                 # Sparse models requires symmetric [image, text] layout in Q/K/V.
                 # Pad text to be divisible by sp_world_size so it can be chunked,
@@ -365,6 +449,17 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
             get_runtime_state().split_text_embed_in_sp = True
             encoder_hidden_states = torch.chunk(encoder_hidden_states, sp_world_size, dim=1)[sp_world_rank]
 
+        if self.attention_kwargs is None:
+            key_padding_mask = self._key_padding_mask(
+                encoder_attention_mask,
+                image_tokens,
+                sp_world_size,
+                split_text=get_runtime_state().split_text_embed_in_sp,
+            )
+            attention_mask = key_padding_mask
+        else:
+            attention_mask = encoder_attention_mask
+
         # 4. Transformer blocks
         if torch.is_grad_enabled() and self.gradient_checkpointing:
             for block in self.transformer_blocks:
@@ -373,7 +468,7 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
                     hidden_states,
                     encoder_hidden_states,
                     temb,
-                    encoder_attention_mask,
+                    attention_mask,
                     image_rotary_emb,
                 )
 
@@ -383,7 +478,7 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
                     hidden_states,
                     encoder_hidden_states,
                     temb,
-                    encoder_attention_mask,
+                    attention_mask,
                     image_rotary_emb,
                 )
 

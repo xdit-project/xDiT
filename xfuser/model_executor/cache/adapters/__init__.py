@@ -1,5 +1,6 @@
 """Unified entry point for xDiT step-caching adapters."""
 
+import functools
 import json
 import logging
 from typing import Any, Dict, Optional
@@ -43,6 +44,43 @@ def _resolve_threshold(
     return threshold
 
 
+def _restart_step_caches_per_request(pipe: Any, transformer: Any) -> None:
+    """Restart the in-tree step caches of ``transformer`` whenever ``pipe`` starts a request.
+
+    TeaCache forces a full compute on the first and last step of a request and
+    both caches compare each step with the previous one. Diffusers pipelines set
+    the scheduler's timesteps once at the start of every call, so that is where
+    a request begins and where its step count is known.
+    """
+    scheduler = getattr(pipe, "scheduler", None)
+    # Legacy pipelines wrap the scheduler later; hook the diffusers instance.
+    scheduler = getattr(scheduler, "module", scheduler)
+    if scheduler is None or not hasattr(scheduler, "set_timesteps"):
+        logger.warning(
+            "The pipeline has no scheduler with set_timesteps; step caches keep their "
+            "state across requests and assume a fixed step count."
+        )
+        return
+
+    if hasattr(scheduler.set_timesteps, "_xfuser_step_cache_root"):
+        # Already hooked: a re-applied cache replaces the previous root.
+        scheduler.set_timesteps._xfuser_step_cache_root = transformer
+        return
+
+    from xfuser.model_executor.cache.utils import restart_step_caches
+
+    original = scheduler.set_timesteps
+
+    @functools.wraps(original)
+    def set_timesteps(*args, **kwargs):
+        result = original(*args, **kwargs)
+        restart_step_caches(set_timesteps._xfuser_step_cache_root, len(scheduler.timesteps))
+        return result
+
+    set_timesteps._xfuser_step_cache_root = transformer
+    scheduler.set_timesteps = set_timesteps
+
+
 def apply_cache(
     cache_method: str,
     num_steps: int,
@@ -72,6 +110,7 @@ def apply_cache(
             rel_l1_thresh=_resolve_threshold(preset_kwargs, cache_config),
             num_steps=num_steps,
         )
+        _restart_step_caches_per_request(pipe, patch_target)
         if transformer is None:
             setattr(pipe, transformer_attr, target)
         return target
@@ -97,6 +136,7 @@ def apply_cache(
             return_hidden_states_first=False,
             num_steps=num_steps,
         )
+        _restart_step_caches_per_request(pipe, patch_target)
         if transformer is None:
             setattr(pipe, transformer_attr, target)
         return target

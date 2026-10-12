@@ -487,7 +487,8 @@ class xFuserCausalWanTransformer3DWrapper(WanTransformer3DModel):
         rotary_emb = self._compute_rope_with_offset(hidden_states, start_frame)
 
         hidden_states = self.patch_embedding(hidden_states)
-        hidden_states = hidden_states.flatten(2).transpose(1, 2)
+        # Contiguous for the residual stream's sake, as in transformer_wan.py.
+        hidden_states = hidden_states.flatten(2).transpose(1, 2).contiguous()
 
         # timestep shape: batch_size, or batch_size, seq_len (wan 2.2 ti2v)
         if timestep.ndim == 2:

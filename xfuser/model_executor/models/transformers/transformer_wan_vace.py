@@ -108,7 +108,8 @@ class xFuserWanVACETransformer3DWrapper(WanVACETransformer3DModel):
 
         # 2. Patch embedding
         hidden_states = self.patch_embedding(hidden_states)
-        hidden_states = hidden_states.flatten(2).transpose(1, 2)
+        # Contiguous for the residual stream's sake, as in transformer_wan.py.
+        hidden_states = hidden_states.flatten(2).transpose(1, 2).contiguous()
 
         control_hidden_states = self.vace_patch_embedding(control_hidden_states)
         control_hidden_states = control_hidden_states.flatten(2).transpose(1, 2)

@@ -3,6 +3,7 @@ import torch
 import copy
 import json
 import os
+from math import gcd
 from PIL.Image import Image
 from typing import Callable, List, Optional, Tuple, Generator
 from dataclasses import dataclass, field
@@ -82,6 +83,9 @@ _SPARSE_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SS
 _SPARGE_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SPARGE) | attention_registry.types_where(
     sparsity=Sparsity.VSA
 )
+# Prism's block-sparse attention needs a token grid that only models declaring the
+# capability publish; anywhere else it would quietly run dense.
+_BSA_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.BSA)
 
 
 def _parse_attention_backend(name: Optional[str], kind: str) -> Optional[AttentionBackendType]:
@@ -126,7 +130,10 @@ def _selected_attention_backends(config: xFuserArgs) -> list[AttentionBackendTyp
 
 
 def _validate_attention_head_dims(model: "xFuserModel", config: xFuserArgs) -> None:
-    """Refuse a backend that cannot serve any head dimension the model runs.
+    """Validate backend head widths and the Ulysses Q/KV head layout.
+
+    Ulysses must divide the declared head counts unless the model pads heads.
+    Refuse a backend that cannot serve any head dimension the model runs.
 
     Disjoint rather than subset on purpose: LTX-2 pairs 128-wide video blocks with 64-wide
     audio ones and the odd size falls back per call, so a model keeps a backend as long as
@@ -137,26 +144,44 @@ def _validate_attention_head_dims(model: "xFuserModel", config: xFuserArgs) -> N
     unrestricted, and guessing would trade a silent bypass for a wrong refusal.
     """
     required = getattr(model, "attention_head_dims", None)
-    if not required:
-        return
-    for backend in _selected_attention_backends(config):
-        spec = attention_registry.find(backend)
-        supported = spec.accepts.head_dims() if spec is not None else None
-        if supported is None or not set(supported).isdisjoint(required):
-            continue
-        # What a rejected call does differs by backend, and the difference is the
-        # whole reason to refuse here: one wastes the selection, the other stops
-        # the run at the first layer.
-        outcome = (
-            f"every layer would fall through to {spec.fallback.name} and the selection would have no effect"
-            if spec.fallback is not None
-            else "every layer would be refused"
-        )
+    if required:
+        for backend in _selected_attention_backends(config):
+            spec = attention_registry.find(backend)
+            supported = spec.accepts.head_dims() if spec is not None else None
+            if supported is None or not set(supported).isdisjoint(required):
+                continue
+            # What a rejected call does differs by backend, and the difference is the
+            # whole reason to refuse here: one wastes the selection, the other stops
+            # the run at the first layer.
+            outcome = (
+                f"every layer would fall through to {spec.fallback.name} and the selection would have no effect"
+                if spec.fallback is not None
+                else "every layer would be refused"
+            )
+            raise ValueError(
+                f"{model.settings.model_name} does not support --attention_backend "
+                f"{backend.name}: it runs head dimension "
+                f"{', '.join(str(d) for d in sorted(required))} and that backend serves only "
+                f"{', '.join(str(d) for d in sorted(supported))}, so {outcome}."
+            )
+
+    heads = model.attention_heads
+    kv_heads = model.attention_kv_heads
+    ulysses_degree = config.ulysses_degree or 1
+    head_divisor = gcd(heads, kv_heads) if heads and kv_heads else heads
+    if (
+        model.capabilities.ulysses_degree
+        and not model.supports_ulysses_head_padding
+        and head_divisor
+        and head_divisor % ulysses_degree != 0
+    ):
+        divisors = ", ".join(str(d) for d in range(1, head_divisor + 1) if head_divisor % d == 0)
+        layout = f"{heads} attention heads" + (f" and {kv_heads} KV heads" if kv_heads else "")
+        required = "both head counts" if kv_heads else str(heads)
+        hint = " Use --ring_degree to scale sequence parallelism further." if model.capabilities.ring_degree else ""
         raise ValueError(
-            f"{model.settings.model_name} does not support --attention_backend "
-            f"{backend.name}: it runs head dimension "
-            f"{', '.join(str(d) for d in sorted(required))} and that backend serves only "
-            f"{', '.join(str(d) for d in sorted(supported))}, so {outcome}."
+            f"{model.settings.model_name} has {layout}, so "
+            f"--ulysses_degree must divide {required} ({divisors}); got {ulysses_degree}.{hint}"
         )
 
 
@@ -186,12 +211,14 @@ class ModelCapabilities:
     gemm_formats: frozenset = frozenset()
     quantize_text_encoder: bool = False
     supports_step_caching: bool = False
+    supports_lora: bool = False
     use_fp8_comms: bool = False
     use_hybrid_attn_schedule: bool = False
     use_hybrid_gemm_schedule: bool = False
     cross_attention_backend: bool = False
     supports_sparse_attention_backends: bool = False
     supports_sparge_attention_backends: bool = False
+    supports_bsa_attention_backends: bool = False
     supports_distilled_weights: bool = False
     profile_capture_phase: bool = False
 
@@ -342,9 +369,18 @@ class xFuserModel(abc.ABC):
     capabilities: ModelCapabilities = ModelCapabilities()
     default_input_values: DefaultInputValues = DefaultInputValues()
     settings: ModelSettings = ModelSettings()
-    model_output_type: str = ""
-    fps: int = 0
     checkpoint_request_defaults: dict = {}
+
+    # Attention heads of the model's transformer(s). When set, a --ulysses_degree that
+    # does not divide it is refused while validating the config, before any weights are
+    # downloaded or loaded; runtime_state re-checks it against the loaded model. A runner
+    # whose registered names differ in head count sets it per instance in
+    # _customize_settings.
+    attention_heads: Optional[int] = None
+    # Set only when GQA keeps KV heads compact through the Ulysses exchange.
+    attention_kv_heads: Optional[int] = None
+    # Z-Image pads Q/K/V heads, so divisibility of its real heads is not required.
+    supports_ulysses_head_padding: bool = False
 
     # Lowest diffusers release this model is expected to run on, used only to name an
     # upgrade target when a load fails. It never gates a load, so a value above the
@@ -617,6 +653,17 @@ class xFuserModel(abc.ABC):
     def _validate_config(self, config: xFuserArgs) -> None:
         """Validate if the model supports requested config"""
         config._validate_gemm_quantization_flags()
+        if config.lora_path:
+            if not self.capabilities.supports_lora:
+                raise ValueError(f"Model {self.settings.model_name} does not support startup LoRA fusion.")
+            if (
+                config.pipefusion_parallel_degree > 1
+                or config.fully_shard_degree > 1
+                or config.memory_efficient_sharding
+                or config.memory_efficient_replicated_load
+                or not config.gemm_quantization_spec.is_pure("none")
+            ):
+                raise ValueError("Startup LoRA fusion requires eager, unquantized loading without FSDP or PipeFusion.")
         _validate_attention_head_dims(self, config)
         for key in ModelCapabilities.__annotations__.keys():
             config_value = getattr(
@@ -653,6 +700,20 @@ class xFuserModel(abc.ABC):
                 )
 
         self._validate_supported_attn_backends(config)
+
+        if not self.capabilities.supports_bsa_attention_backends:
+            for value, label in (
+                (config.attention_backend, "attention backend"),
+                (config.cross_attention_backend, "cross attention backend"),
+                (config.hybrid_attn_low_precision_backend, "hybrid low-precision attention backend"),
+                (config.hybrid_attn_high_precision_backend, "hybrid high-precision attention backend"),
+            ):
+                bsa = _parse_attention_backend(value, label)
+                if bsa in _BSA_ATTENTION_BACKENDS:
+                    raise ValueError(
+                        f"Model {config.model} does not support {bsa.name}: it publishes no token grid "
+                        f"for block-sparse attention, so every call would run dense."
+                    )
 
         backend = _parse_attention_backend(config.attention_backend, "attention backend")
         supports_sparse = self.capabilities.supports_sparse_attention_backends
@@ -717,7 +778,7 @@ class xFuserModel(abc.ABC):
 
         validate_fp8_comms_config(config, self.capabilities, self.settings)
 
-        if self.model_output_type == "video" and not self.fps:
+        if self.settings.model_output_type == "video" and not self.settings.fps:
             raise ValueError(f"Model {self.settings.model_name} produces video output but fps is not set.")
 
         # Whether this machine can store a format is not asked here. The same
@@ -739,6 +800,10 @@ class xFuserModel(abc.ABC):
 
     def _get_compile_dynamic(self) -> Optional[bool]:
         return None  # torch default (auto)
+
+    def _prefer_blockwise_compile(self) -> bool:
+        """Compile per block even without FSDP or caching, for forwards that sync to host outside the block loop."""
+        return False
 
     def _mark_cudagraph_steps(self, component: torch.nn.Module) -> None:
         """Tell CUDA Graphs where one inference step ends, so the next may reuse its buffers.
@@ -817,7 +882,7 @@ class xFuserModel(abc.ABC):
                 and component_name in self.settings.fsdp_strategy
                 and (requested_shards is None or component_name in requested_shards)
             )
-            if component_is_sharded or self.config.cache_method:
+            if component_is_sharded or self.config.cache_method or self._prefer_blockwise_compile():
                 # Per-block compile: leaves transformer as original object so cache-dit's
                 # transformer.forward patch remains visible during compiled execution.
                 wrap_attrs = self.settings.fsdp_strategy.get(component_name, {}).get("wrap_attrs", [])

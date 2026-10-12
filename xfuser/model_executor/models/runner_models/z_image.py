@@ -26,7 +26,7 @@ def _normalize_prompt(prompt_input):
     if isinstance(prompt_input, str):
         return [prompt_input]
     if isinstance(prompt_input, list):
-        return list(prompt_input) # Recreates the list to avoid issues with in-place editing
+        return list(prompt_input)  # Recreates the list to avoid issues with in-place editing
     raise TypeError(f"prompt must be str or list[str], got {type(prompt_input)}")
 
 
@@ -100,9 +100,15 @@ def _set_effective_heads_for_ulysses(transformer, ulysses_degree: int) -> None:
 
     transformer.config.num_attention_heads = effective_heads
 
+
 @register_model("Tongyi-MAI/Z-Image")
 @register_model("Z-Image")
 class xFuserZImageModel(xFuserModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 30
+    # The attention processor pads heads before the Ulysses exchange.
+    supports_ulysses_head_padding = True
+
     min_diffusers_version = "0.36.0"
 
     default_input_values = DefaultInputValues(
@@ -112,8 +118,8 @@ class xFuserZImageModel(xFuserModel):
         guidance_scale=4.0,
     )
     load_support = LoadSupport(
-        meta_transformers=('transformer',),
-        meta_text_encoders=('text_encoder',),
+        meta_transformers=("transformer",),
+        meta_text_encoders=("text_encoder",),
         replicated_meta=True,
         routes=STANDARD_LOAD_ROUTES,
     )
@@ -155,7 +161,7 @@ class xFuserZImageModel(xFuserModel):
             short_sequence=Select(modules=("transformer.context_refiner",)),
         ),
         step_cache_config={
-            "dbcache":DBCacheSettings(
+            "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("layers", "Pattern_3"),),
                 ),
@@ -199,11 +205,16 @@ class xFuserZImageModel(xFuserModel):
 @register_model("Tongyi-MAI/Z-Image-Turbo")
 @register_model("Z-Image-Turbo")
 class xFuserZImageTurboModel(xFuserModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 30
+    # The attention processor pads heads before the Ulysses exchange.
+    supports_ulysses_head_padding = True
+
     min_diffusers_version = "0.36.0"
 
     load_support = LoadSupport(
-        meta_transformers=('transformer',),
-        meta_text_encoders=('text_encoder',),
+        meta_transformers=("transformer",),
+        meta_text_encoders=("text_encoder",),
         replicated_meta=True,
         routes=STANDARD_LOAD_ROUTES,
     )

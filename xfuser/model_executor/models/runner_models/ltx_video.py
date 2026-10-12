@@ -1,7 +1,6 @@
 import torch
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
-from xfuser.config import xFuserArgs
 from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
@@ -45,6 +44,7 @@ class xFuserLTXVideoModel(xFuserModel):
     # 0.9.7's checkpoint was converted with diffusers 0.34.0.dev0.
     min_diffusers_version = "0.34.0"
 
+    attention_heads = LTX_VIDEO_097_NUM_ATTENTION_HEADS
     attention_head_dims = frozenset({LTX_VIDEO_097_ATTENTION_HEAD_DIM})
 
     capabilities = ModelCapabilities(
@@ -79,15 +79,6 @@ class xFuserLTXVideoModel(xFuserModel):
             },
         },
     )
-
-    def _validate_config(self, config: xFuserArgs) -> None:
-        super()._validate_config(config)
-        ulysses_degree = config.ulysses_degree or 1
-        if LTX_VIDEO_097_NUM_ATTENTION_HEADS % ulysses_degree != 0:
-            raise ValueError(
-                f"{self.settings.model_name} has {LTX_VIDEO_097_NUM_ATTENTION_HEADS} attention "
-                f"heads, which ulysses_degree {ulysses_degree} does not divide."
-            )
 
     def _validate_args(self, input_args: dict) -> None:
         super()._validate_args(input_args)

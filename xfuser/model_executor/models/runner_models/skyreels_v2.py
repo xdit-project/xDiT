@@ -76,15 +76,6 @@ class xFuserSkyReelsV2Model(xFuserModel):
     def _resolve_model_name(self, requested: str) -> str:
         raise NotImplementedError
 
-    def _validate_config(self, config: xFuserArgs) -> None:
-        super()._validate_config(config)
-        ulysses_degree = config.ulysses_degree or 1
-        if self.attention_heads % ulysses_degree != 0:
-            raise ValueError(
-                f"{self.settings.model_name} has {self.attention_heads} attention heads, so "
-                f"--ulysses_degree must divide {self.attention_heads}; got {ulysses_degree}."
-            )
-
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
         # The checkpoints ship flow_shift=1.0; SkyReels-V2 samples with a larger shift.

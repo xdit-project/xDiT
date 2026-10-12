@@ -1,5 +1,6 @@
 import argparse
 import dataclasses
+import math
 import os
 import sys
 import warnings
@@ -164,6 +165,9 @@ class xFuserArgs:
     model: str = ""
     download_dir: Optional[str] = None
     trust_remote_code: bool = False
+    lora_path: Optional[str] = None
+    lora_weight_name: Optional[str] = None
+    lora_scale: float = 1.0
     # Runtime arguments
     warmup_steps: int = 1
     # use_cuda_graph: bool = True
@@ -308,11 +312,20 @@ class xFuserArgs:
     use_vsa_static_block_mask: bool = True
     use_vsa_first_frame_mask: bool = True
     vsa_collect_density: bool = False
+    # Prism block-sparse attention (TRITON_BSA)
+    bsa_sparsity: float = 0.75
+    bsa_cdf_threshold: float = 0.2
     # Distilled model weight paths
     distilled_transformer_path: Optional[str] = None
     distilled_transformer_2_path: Optional[str] = None
+    # Separate prompt for the audio stream of joint video-audio models
+    audio_prompt: Optional[str] = None
 
     def __post_init__(self):
+        if not math.isfinite(self.lora_scale):
+            raise ValueError("lora_scale must be finite")
+        if not self.lora_path and (self.lora_weight_name or self.lora_scale != 1.0):
+            raise ValueError("lora_weight_name and lora_scale require lora_path")
         self.determinism_check_report_ranks = _normalize_determinism_check_report_ranks(
             self.determinism_check_report_ranks
         )
@@ -417,7 +430,6 @@ class xFuserArgs:
             action="store_true",
             help="Trust remote code from huggingface.",
         )
-
         # Runtime arguments
         runtime_group = parser.add_argument_group("Runtime Options")
         runtime_group.add_argument("--warmup_steps", type=int, default=1, help="Warmup steps in generation.")
@@ -751,6 +763,14 @@ class xFuserArgs:
             help="Name or path of the huggingface model to use.",
             required=True,
         )
+        parser.add_argument(
+            "--lora_path",
+            type=nullable_str,
+            default=None,
+            help="LoRA repository or local path to fuse at startup (supported runners only).",
+        )
+        parser.add_argument("--lora_weight_name", type=nullable_str, default=None)
+        parser.add_argument("--lora_scale", type=float, default=1.0)
         parser.add_argument("--use_parallel_vae", help="Enable parallel VAE.", action="store_true")
         parser.add_argument(
             "--use_torch_compile",
@@ -1267,6 +1287,18 @@ class xFuserArgs:
             help="Jenga cumulative probability threshold for AITER VSA.",
         )
         parser.add_argument(
+            "--bsa_sparsity",
+            type=float,
+            default=0.75,
+            help="TRITON_BSA: fraction of key blocks each query block skips (top-k).",
+        )
+        parser.add_argument(
+            "--bsa_cdf_threshold",
+            type=float,
+            default=0.2,
+            help="TRITON_BSA: also keep the key blocks holding this much attention weight (top-p); 0 disables.",
+        )
+        parser.add_argument(
             "--vsa_reorder_sequence",
             action=argparse.BooleanOptionalAction,
             default=True,
@@ -1300,6 +1332,12 @@ class xFuserArgs:
             type=nullable_str,
             default=None,
             help="Path to the low-noise distilled transformer_2 safetensors file.",
+        )
+        parser.add_argument(
+            "--audio_prompt",
+            type=nullable_str,
+            default=None,
+            help="Prompt for the audio stream of a joint video-audio model (Prism). Defaults to --prompt.",
         )
         parser.add_argument(
             "--use_teacache",

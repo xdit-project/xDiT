@@ -32,13 +32,13 @@ def _randn(*shape, generator):
     return torch.randn(*shape, generator=generator).to(device="cuda", dtype=torch.bfloat16)
 
 
-def _strided_qkv(layout):
+def _strided_qkv(layout, batch):
     generator = torch.Generator().manual_seed(0)
     if layout == "pad-dropped":
-        query, key, value = (_randn(1, HEADS, SEQ_LEN, HEAD_DIM, generator=generator) for _ in range(3))
+        query, key, value = (_randn(batch, HEADS, SEQ_LEN, HEAD_DIM, generator=generator) for _ in range(3))
         return query, key[:, :, : SEQ_LEN - SP_PAD], value[:, :, : SEQ_LEN - SP_PAD]
-    query = _randn(1, SEQ_LEN, HEADS, HEAD_DIM, generator=generator).transpose(1, 2)
-    key, value = (_randn(1, TEXT_LEN, HEADS, HEAD_DIM, generator=generator).transpose(1, 2) for _ in range(2))
+    query = _randn(batch, SEQ_LEN, HEADS, HEAD_DIM, generator=generator).transpose(1, 2)
+    key, value = (_randn(batch, TEXT_LEN, HEADS, HEAD_DIM, generator=generator).transpose(1, 2) for _ in range(2))
     return query, key, value
 
 
@@ -46,12 +46,17 @@ def _error(output, reference):
     return (output.float() - reference).abs().max().item()
 
 
+# A second batch row puts the batch stride, which spans the padded length too, in play.
+BATCH_SIZES = [pytest.param(1, id="batch1"), pytest.param(2, id="batch2")]
+
+
+@pytest.mark.parametrize("batch", BATCH_SIZES)
 @pytest.mark.parametrize("layout", ["pad-dropped", "transposed-cross-attention"])
 @pytest.mark.parametrize("backend", DENSE_BACKENDS, ids=lambda backend: backend.name)
-def test_strided_kv_gives_what_contiguous_kv_gives(backend, layout):
+def test_strided_kv_gives_what_contiguous_kv_gives(backend, layout, batch):
     spec = registry.get(backend)
     _available(spec)
-    query, key, value = _strided_qkv(layout)
+    query, key, value = _strided_qkv(layout, batch)
     reason = spec.rejects(query, key, value, AttnCall())
     if reason is not None:
         pytest.skip(reason)
@@ -72,7 +77,8 @@ def test_strided_kv_gives_what_contiguous_kv_gives(backend, layout):
     )
 
 
-def test_prequantized_fp8_attention_reads_pad_dropped_views_as_copies():
+@pytest.mark.parametrize("batch", BATCH_SIZES)
+def test_prequantized_fp8_attention_reads_pad_dropped_views_as_copies(batch):
     """FP8 comms quantizes Q/K/V per tensor before the Ulysses exchange and hands AITER_FP8 the fp8 tensors
     with their descales; USP then slices the pad off those."""
     spec = registry.get(AttentionBackendType.AITER_FP8)
@@ -83,7 +89,7 @@ def test_prequantized_fp8_attention_reads_pad_dropped_views_as_copies():
     fp8_max = torch.finfo(_FP8_DTYPE).max
     quantized = []
     for _ in range(3):
-        tensor = _randn(1, HEADS, SEQ_LEN, HEAD_DIM, generator=generator)
+        tensor = _randn(batch, HEADS, SEQ_LEN, HEAD_DIM, generator=generator)
         quantized.append(_per_tensor_quant(tensor, (tensor.float().abs().amax() / fp8_max).reshape(1)))
     (query, q_descale), (key, k_descale), (value, v_descale) = quantized
     dequantized = [tensor.float() * descale for tensor, descale in quantized]

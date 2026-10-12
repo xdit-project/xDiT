@@ -25,7 +25,8 @@ CASES = {
     "declared-pad": dict(real_len=45, declared=True),
     "declared-pad-causal": dict(real_len=45, declared=True, causal=True),
 }
-MODES = {"ulysses": (2, 1), "ring": (1, 2), "hybrid": (2, 2)}
+# (Ulysses, ring) degrees. At ring degree 4 only one of a rank's four steps attends to the pad.
+MODES = {"ulysses": (2, 1), "ring": (1, 2), "hybrid": (2, 2), "ring4": (1, 4), "hybrid-ring4": (2, 4)}
 # Every variant computes in fp32 on the same CPU kernel; the leak of an attended pad is several orders larger.
 TOLERANCE = 1e-5
 

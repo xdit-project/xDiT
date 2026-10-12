@@ -103,27 +103,34 @@ def _same_strides(a, b) -> bool:
     return all(sa == sb for sa, sb, n in zip(a.stride(), b.stride(), a.shape) if n > 1)
 
 
-def _v1_readable_kv(key, value):
-    """K/V in a layout AITER's v1 quantization reads correctly.
+def _v1_readable(query, key, value):
+    """Q/K/V in layouts AITER's v1 kernel reads correctly. A None Q is not checked.
 
     WORKAROUND for an AITER bug; remove once ``sage_quant`` (aiter
     ops/triton/quant/sage_attention_quant_wrappers.py) is fixed. It takes K's
     strides, then replaces K by the smoothed ``K - mean(K)`` and reads that new
     tensor -- and V -- through the strides it took. That is right only while the
     subtraction keeps K's layout (contiguous BHSD, or BSHD viewed as BHSD) and V
-    shares it. USP's trailing-pad trim hands K/V as sequence slices, which is
-    neither, and the kernel returns garbage or faults. Layouts that already work
-    are returned as they are, so their results do not change.
+    shares it; a sequence slice of Q comes out as garbage too. USP's trailing-pad
+    trim hands over K/V as sequence slices, setup_sparge's strip without a
+    reorder Q/K/V too, and the kernel returns garbage or faults on them. Layouts
+    that already work are returned as they are, so their results do not change.
     """
-    if _same_strides(key, value) and (key.is_contiguous() or key.transpose(1, 2).is_contiguous()):
-        return key, value
-    return key.contiguous(), value.contiguous()
+
+    def dense(tensor):
+        return tensor.is_contiguous() or tensor.transpose(1, 2).is_contiguous()
+
+    if query is not None and not dense(query):
+        query = query.contiguous()
+    if not (_same_strides(key, value) and dense(key)):
+        key, value = key.contiguous(), value.contiguous()
+    return query, key, value
 
 
 def sage(query, key, value, call: AttnCall):
     """No mask. The only cell that can join a ring, and only then is there an
     LSE to merge."""
-    key, value = _v1_readable_kv(key, value)
+    _, key, value = _v1_readable(None, key, value)
     if call.ring_world_size > 1:
         return SAGE_V1(query, key, value, layout="bhsd", return_lse=True, smooth_k=True)
     return SAGE_V1(query, key, value, layout="bhsd"), None
@@ -133,7 +140,7 @@ def sparse_sage(query, key, value, call: AttnCall):
     """Tile-based static mask, supplied by the model's sparse config."""
     config = _ssta_config(CONFIG_V1)
     q, k, v, block_lut, state = _ssta_mask(query, key, value, call)
-    k, v = _v1_readable_kv(k, v)
+    _, k, v = _v1_readable(None, k, v)
     output = SAGE_V1(q, k, v, layout="bhsd", config=config, block_lut=block_lut)
     return _untile(output, state, call), None
 
@@ -142,7 +149,7 @@ def sparge(query, key, value, call: AttnCall):
     """Data-dependent mask computed from Q/K."""
     config = CONFIG_V1()
     q, k, v, block_lut, state = _sparge_mask(query, key, value, call, config)
-    k, v = _v1_readable_kv(k, v)
+    q, k, v = _v1_readable(q, k, v)
     output = SAGE_V1(q, k, v, layout="bhsd", config=config, block_lut=block_lut)
     return restore_sparge_output(output, state), None
 

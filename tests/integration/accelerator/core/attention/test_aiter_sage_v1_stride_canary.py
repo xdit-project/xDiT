@@ -1,10 +1,11 @@
-"""Canary for the Sage v1 layout workaround, `_v1_readable_kv` in xfuser/core/attention/backends/aiter_sage/kernel.py.
+"""Canary for the Sage v1 layout workaround in xfuser/core/attention/backends/aiter_sage/kernel.py.
 
-AITER's Sage v1 kernel misreads K/V in some layouts: its quantization reads
-`K - mean(K)`, a new dense tensor, and V through K's original strides. The
-workaround copies K/V in those layouts. Each case feeds the raw kernel one of
-them and passes while the kernel still gets it wrong; a failure means AITER
-fixed that layout, so the matching part of the workaround can go.
+AITER's Sage v1 kernel misreads Q/K/V in some layouts: its quantization reads
+`K - mean(K)`, a new dense tensor, and V through K's original strides, and a
+sequence slice of Q comes out as garbage too. `_v1_readable` copies the tensors
+in those layouts. Each case feeds the raw kernel one of them and passes while
+the kernel still gets it wrong; a failure means AITER fixed that layout, so the
+matching part of the workaround can go.
 """
 
 import json
@@ -35,30 +36,38 @@ def randn(*shape):
     return torch.randn(*shape, generator=generator).to(device="cuda", dtype=torch.bfloat16)
 
 
-query = randn(1, heads, seq_len, head_dim)
-if sys.argv[1] == "sequence-sliced":
-    key, value = (randn(1, heads, seq_len, head_dim)[:, :, : seq_len - sp_pad] for _ in range(2))
+def sliced():
+    return randn(1, heads, seq_len + sp_pad, head_dim)[:, :, :seq_len]
+
+
+layout = sys.argv[1]
+query = sliced() if layout == "query-sequence-sliced" else randn(1, heads, seq_len, head_dim)
+if layout == "kv-sequence-sliced":
+    key, value = sliced(), sliced()
+elif layout == "value-strides-differ":
+    key, value = randn(1, heads, seq_len, head_dim), randn(1, seq_len, heads, head_dim).transpose(1, 2)
 else:
-    key = randn(1, heads, seq_len, head_dim)
-    value = randn(1, seq_len, heads, head_dim).transpose(1, 2)
+    key, value = randn(1, heads, seq_len, head_dim), randn(1, heads, seq_len, head_dim)
 
 
-def relative_error(key, value):
+def relative_error(query, key, value):
     output = sage(query, key, value, layout="bhsd").float()
     reference = torch.nn.functional.scaled_dot_product_attention(query.float(), key.float(), value.float())
     return ((output - reference).norm() / reference.norm()).item()
 
 
-print(json.dumps({"contiguous": relative_error(key.contiguous(), value.contiguous())}), flush=True)
-print(json.dumps({"strided": relative_error(key, value)}), flush=True)
+print(json.dumps({"contiguous": relative_error(query.contiguous(), key.contiguous(), value.contiguous())}), flush=True)
+print(json.dumps({"strided": relative_error(query, key, value)}), flush=True)
 """
 
-_WORKAROUND = "_v1_readable_kv in xfuser/core/attention/backends/aiter_sage/kernel.py"
+_KERNEL = "xfuser/core/attention/backends/aiter_sage/kernel.py"
 LAYOUTS = {
     # K/V sliced along the sequence, as USP drops the pad: head stride larger than seq_len * head_dim.
-    "sequence-sliced": "the copy of K/V that are neither dense nor transposed-dense",
+    "kv-sequence-sliced": "the dense check on K in _v1_readable",
     # Contiguous K with V transposed from BSHD: either alone is dense, but V's strides are not K's.
-    "value-strides-differ": "the copy of K/V whose strides differ (_same_strides)",
+    "value-strides-differ": "the stride comparison (_same_strides) in _v1_readable",
+    # Q sliced along the sequence, as setup_sparge strips the pad without reordering.
+    "query-sequence-sliced": "the check on Q in _v1_readable (and its query argument)",
 }
 
 
@@ -82,13 +91,13 @@ def test_sage_v1_kernel_still_misreads(layout):
     for line in child.stdout.splitlines():
         if line.startswith("{"):
             results.update(json.loads(line))
-    assert "contiguous" in results, f"the kernel failed on contiguous K/V, so the canary cannot tell:\n{child.stderr}"
+    assert "contiguous" in results, f"the kernel failed on contiguous inputs, so this cannot tell:\n{child.stderr}"
     if "strided" not in results:
         return  # The strided call crashed the process: still misread.
     strided, contiguous = results["strided"], results["contiguous"]
-    # Measured on gfx950: 3x (V strides) up to inf (sliced) the contiguous call's error.
+    # Measured on gfx950: 3x (V strides) up to inf (sliced K/V) the contiguous call's error.
     still_misread = not math.isfinite(strided) or strided > 2 * contiguous
     assert still_misread, (
-        f"AITER's Sage v1 now reads {layout} K/V correctly (relative error {strided:.3e}, contiguous "
-        f"{contiguous:.3e}). Remove {LAYOUTS[layout]} from {_WORKAROUND}, then this case."
+        f"AITER's Sage v1 now reads {layout} inputs correctly (relative error {strided:.3e}, contiguous "
+        f"{contiguous:.3e}). Remove {LAYOUTS[layout]} from {_KERNEL}, then this case."
     )

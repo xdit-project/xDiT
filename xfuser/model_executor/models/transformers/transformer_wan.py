@@ -209,15 +209,27 @@ def _zero_sp_pad_rows_hook(sp_pad):
     last pointwise op, eagerly it is ~5 us per block.
 
     A hook rather than a line in forward's loop, so it also runs when a step
-    cache iterates the blocks itself.
+    cache iterates the blocks itself. A VACE block returns its conditioning
+    states with its control states; both are zeroed, since the conditioning
+    states are added to the main stream as hints.
     """
 
     def hook(module, args, output):
         rows = sp_pad["local_rows"]
         if rows:
-            output[:, -rows:] = 0
+            for tensor in output if isinstance(output, tuple) else (output,):
+                if tensor is not None:
+                    tensor[:, -rows:] = 0
 
     return hook
+
+
+def _local_sp_pad_rows(seq_len: int, local_len: int, sp_rank: int) -> int:
+    """How many of this rank's `local_len` rows are SP pad, for a real length `seq_len`.
+
+    The pad trails the global sequence, so only the last ranks' chunks hold any.
+    """
+    return min(local_len, max(0, (sp_rank + 1) * local_len - seq_len))
 
 
 class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
@@ -395,9 +407,7 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
         self._self_attn_kwargs["valid_kv_len"] = hidden_states.shape[1] if pad_amount else None
         seq_len = hidden_states.shape[1]
         hidden_states = self._chunk_and_pad_sequence(hidden_states, sp_world_rank, sp_world_size, pad_amount, dim=1)
-        local_len = hidden_states.shape[1]
-        # The pad trails the global sequence, so only the last ranks' chunks hold any.
-        self._sp_pad["local_rows"] = min(local_len, max(0, (sp_world_rank + 1) * local_len - seq_len))
+        self._sp_pad["local_rows"] = _local_sp_pad_rows(seq_len, hidden_states.shape[1], sp_world_rank)
 
         if ts_seq_len is not None:  # (wan2.2 ti2v)
             temb = self._chunk_and_pad_sequence(temb, sp_world_rank, sp_world_size, pad_amount, dim=1)

@@ -97,6 +97,30 @@ def test_any_distinct_pair_is_accepted(runtime, raw):
     config._validate_gemm_quantization_flags()
 
 
+@pytest.mark.parametrize("raw", ["low=int8,high=fp8", "low=int8,high=fp4", "low=fp4,high=fp8"])
+def test_a_runner_declaring_both_formats_accepts_the_tiered_pair(runtime, raw):
+    """The runner gate asks the capability set, not a list of banned pairs.
+
+    `_validate_config` used to carry its own copy of the rules -- refusing int8
+    beside fp8 or fp4, and refusing tiers on hardware grounds it restated from
+    the probes. Both were removed in favour of one question: does this runner
+    declare the formats the profile names. A runner that declares them is
+    therefore accepted for any tiering of them.
+    """
+    spec = GemmQuantizationSpec.parse(raw)
+    model = object.__new__(runtime.model_cls)
+    model.settings = SimpleNamespace(
+        model_name="test/model",
+        valid_tasks=[],
+        step_cache_config={},
+        model_output_type="image",
+        fps=None,
+    )
+    model.capabilities = runtime.capabilities_cls(gemm_formats=frozenset(spec.formats - {"none"}))
+
+    model._validate_config(_args(runtime, gemm_quantization=raw))
+
+
 def test_unsupported_runner_rejects_fp8_text_encoder_via_capability_validation(
     runtime,
 ):

@@ -1202,6 +1202,68 @@ def _attach_backends(runner):
     return runner
 
 
+def test_the_meta_text_encoder_swap_builds_the_declared_fp8_layout():
+    """`places_text_encoder` claims a pair can be placed in an encoder, and on
+    the meta and broadcast paths `_swap_meta_te_to_fp8` is what places it.
+
+    It builds one specific layer class rather than consulting anything, so a
+    second declared format would leave the swap behind while the plan, the
+    adapter lookup and the ledger all moved. The companion check that only fp8
+    declares an encoder lives with the registry, in
+    test_format_backend_adapters.py; this one pins what the swap actually
+    builds, so the two fail together rather than drifting apart.
+    """
+    from xfuser.model_executor.layers.fp8_linear import xFuserFP8BlockScaleLinear, _fp8_dtype
+
+    class Encoder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.block = torch.nn.Sequential(torch.nn.Linear(128, 128, bias=False))
+
+    with torch.device("meta"):
+        encoder = Encoder()
+    loader = object.__new__(ModelLoader)
+
+    loader._swap_meta_te_to_fp8(encoder, ["block"])
+
+    swapped = encoder.block[0]
+    assert isinstance(swapped, xFuserFP8BlockScaleLinear)
+    # The plain TE layout the rank0 broadcast fills: fp8 param + fp32 scale.
+    assert swapped.weight_fp8.dtype is _fp8_dtype()
+    assert swapped.weight_scale.dtype is torch.float32
+
+
+def test_a_declared_encoder_with_no_targets_never_resolves_an_adapter():
+    """Resolving the encoder's format up front asks this machine to store a
+    format the run may never have named.
+
+    It used to be resolved before the loop, which was harmless only while
+    capability probing answered for every format on every run. Once probing was
+    narrowed to the formats a run actually names, that lookup had no truthful
+    answer and refused the load -- on a plain bf16 run of any model that merely
+    declares encoder targets. So the lookup has to sit after the no-targets
+    guard, and an encoder with nothing to place must not reach it at all.
+    """
+    declared = GemmTargets(text_encoder=Select(modules=("text_encoder.encoder.block",)))
+    runner = SimpleNamespace(
+        _replicated_broadcast_load=lambda: False,
+        _memory_efficient_fsdp_load=lambda: False,
+        settings=SimpleNamespace(gemm_targets=declared),
+        # Declared, but nothing enabled: the run names no format for it.
+        fp8=SimpleNamespace(
+            component_targets=lambda name: (),
+            gemm_plan=resolve(declared, GemmQuantizationSpec.parse("fp8"), enable=()),
+        ),
+    )
+
+    def refuse(format_name):
+        raise AssertionError(f"resolved an adapter for {format_name!r} with no encoder targets to place")
+
+    runner.backends = SimpleNamespace(adapter_for=refuse)
+
+    assert text_encoder_plan.plan_text_encoders(loader_for(runner)) == ({}, None)
+
+
 def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
     logs = []
     sentinel = SimpleNamespace(quant_mapping={})

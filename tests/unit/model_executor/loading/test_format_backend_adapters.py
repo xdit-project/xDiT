@@ -13,6 +13,7 @@ BACKENDS_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/backe
 CONTRACTS_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/contracts.py"
 ADAPTER_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/quant_adapter.py"
 SELECTION_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/backend_selection.py"
+TEXT_ENCODER_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/text_encoder_adapter.py"
 GEMM_PATH = ROOT / "xfuser/config/gemm.py"
 
 
@@ -46,6 +47,7 @@ def modules():
     adapter = _load_module(ADAPTER_PATH, "quant_adapter")
     backends = _load_module(BACKENDS_PATH, "format_adapter_backends")
     selection = _load_module(SELECTION_PATH, "backend_selection")
+    text_encoder = _load_module(TEXT_ENCODER_PATH, "text_encoder_adapter")
     # By path like the rest: importing xfuser.config.gemm would execute the
     # package root, which imports torch.
     gemm = _load_module(GEMM_PATH, "gemm_config")
@@ -56,6 +58,7 @@ def modules():
         adapter=adapter,
         fp8=backends,
         selection=selection,
+        text_encoder=text_encoder,
         gemm=gemm,
     )
 
@@ -797,25 +800,24 @@ def test_the_encoder_formats_are_read_off_the_registry(modules):
 
 def test_every_pair_claiming_an_encoder_has_a_framework_branch(modules):
     """`places_text_encoder` claims a framework config exists for that
-    implementation. The dispatch is the claim's only backing, so read it."""
-    import ast
+    implementation. The dispatch is the claim's only backing, so call it.
 
-    source = (ROOT / "xfuser/model_executor/models/runner_models/loading/text_encoder_adapter.py").read_text()
-    dispatch = next(
-        node
-        for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.FunctionDef) and node.name == "component_quantization_config"
+    Stub factories stand in for the real ones so this stays a question about
+    which branches exist, not about whether torchao/transformers are installed.
+    """
+    built = object()
+    framework = modules.text_encoder.TextEncoderFrameworkAdapter(
+        torchao_config_factory=lambda exclusions: built,
+        aiter_config_factory=lambda targets: built,
     )
-    wired = {
-        value.value
-        for node in ast.walk(dispatch)
-        if isinstance(node, ast.Compare)
-        for value in node.comparators
-        if isinstance(value, ast.Constant) and isinstance(value.value, str)
-    }
     claimed = {impl for (_, impl), cls in modules.adapter.REGISTRY.items() if cls.places_text_encoder}
 
     assert claimed, "nothing declares text-encoder wiring any more"
-    assert claimed <= wired, (
-        f"{sorted(claimed - wired)} declare a text encoder, but component_quantization_config has no branch for them"
-    )
+    for impl in sorted(claimed):
+        try:
+            config = framework.component_quantization_config(backend=impl, targets=("blocks",))
+        except ValueError as exc:
+            pytest.fail(
+                f"{impl} declares a text encoder, but component_quantization_config has no branch for it: {exc}"
+            )
+        assert config is built

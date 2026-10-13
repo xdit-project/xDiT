@@ -4,6 +4,8 @@
 # Copyright 2023 The vLLM team.
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 from collections import namedtuple
+from datetime import timedelta
+import os
 from typing import Any, Dict, List, Optional, Tuple, Union
 import pickle
 
@@ -312,6 +314,18 @@ class GroupCoordinator:
             torch.distributed.broadcast_object_list(recv, src=self.ranks[src], group=self.cpu_group)
             return recv[0]
 
+    def all_gather_object(self, obj: Any) -> List[Any]:
+        """Gather one Python object from every rank over the CPU process group."""
+        if self.world_size == 1:
+            return [obj]
+        gathered = [None] * self.world_size
+        torch.distributed.all_gather_object(
+            gathered,
+            obj,
+            group=self.cpu_group,
+        )
+        return gathered
+
     def broadcast_object_list(self, obj_list: List[Any], src: int = 0, group: Optional[ProcessGroup] = None):
         """Broadcast the input object list.
         NOTE: `src` is the local rank of the source rank.
@@ -588,6 +602,7 @@ class PipelineGroupCoordinator(GroupCoordinator):
         local_rank: int,
         torch_distributed_backend: Union[str, Backend],
     ):
+        pipeline_timeout = timedelta(minutes=int(os.getenv("XDIT_PIPELINE_TIMEOUT_MINUTES", "10")))
         self.rank = torch.distributed.get_rank()
         self.local_rank = local_rank
         self.device_group = None
@@ -597,10 +612,18 @@ class PipelineGroupCoordinator(GroupCoordinator):
         self.device_groups = []
         if len(group_ranks[0]) > 2 or len(group_ranks[0]) == 1:
             for ranks in group_ranks:
-                device_group = torch.distributed.new_group(ranks, backend=torch_distributed_backend)
+                device_group = torch.distributed.new_group(
+                    ranks,
+                    backend=torch_distributed_backend,
+                    timeout=pipeline_timeout,
+                )
                 # a group with `gloo` backend, to allow direct coordination between
                 # processes through the CPU.
-                cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+                cpu_group = torch.distributed.new_group(
+                    ranks,
+                    backend="gloo",
+                    timeout=pipeline_timeout,
+                )
                 if self.rank in ranks:
                     self.ranks = ranks
                     self.world_size = len(ranks)
@@ -615,12 +638,28 @@ class PipelineGroupCoordinator(GroupCoordinator):
         #   device 0.
         elif len(group_ranks[0]) == 2:
             for ranks in group_ranks:
-                device_group_0_1 = torch.distributed.new_group(ranks, backend=torch_distributed_backend)
-                device_group_1_0 = torch.distributed.new_group(ranks, backend=torch_distributed_backend)
+                device_group_0_1 = torch.distributed.new_group(
+                    ranks,
+                    backend=torch_distributed_backend,
+                    timeout=pipeline_timeout,
+                )
+                device_group_1_0 = torch.distributed.new_group(
+                    ranks,
+                    backend=torch_distributed_backend,
+                    timeout=pipeline_timeout,
+                )
                 # a group with `gloo` backend, to allow direct coordination between
                 # processes through the CPU.
-                cpu_group_0_1 = torch.distributed.new_group(ranks, backend="gloo")
-                cpu_group_1_0 = torch.distributed.new_group(ranks, backend="gloo")
+                cpu_group_0_1 = torch.distributed.new_group(
+                    ranks,
+                    backend="gloo",
+                    timeout=pipeline_timeout,
+                )
+                cpu_group_1_0 = torch.distributed.new_group(
+                    ranks,
+                    backend="gloo",
+                    timeout=pipeline_timeout,
+                )
                 if self.rank in ranks:
                     self.ranks = ranks
                     self.world_size = len(ranks)
@@ -651,7 +690,11 @@ class PipelineGroupCoordinator(GroupCoordinator):
         self.skip_tensor_recv_buffer: Optional[Union[List[torch.Tensor], torch.Tensor]] = None
         self.skip_device_group = None
         for ranks in group_ranks:
-            skip_device_group = torch.distributed.new_group(ranks, backend=torch_distributed_backend)
+            skip_device_group = torch.distributed.new_group(
+                ranks,
+                backend=torch_distributed_backend,
+                timeout=pipeline_timeout,
+            )
             if self.rank in ranks:
                 self.skip_device_group = skip_device_group
         assert self.skip_device_group is not None
@@ -826,10 +869,12 @@ class PipelineGroupCoordinator(GroupCoordinator):
         self._check_shape_and_buffer(tensor_send_to_next=tensor, name=name, segment_idx=segment_idx)
         self._pipeline_isend(tensor).wait()
 
-    def pipeline_isend(self, tensor: torch.Tensor, name: str = "latent", segment_idx: int = -1) -> None:
+    def pipeline_isend(
+        self, tensor: torch.Tensor, name: str = "latent", segment_idx: int = -1
+    ) -> torch.distributed.Work:
         tensor = tensor.contiguous()
         self._check_shape_and_buffer(tensor_send_to_next=tensor, name=name, segment_idx=segment_idx)
-        self._pipeline_isend(tensor)
+        return self._pipeline_isend(tensor)
 
     def pipeline_recv(self, idx: int = -1, name: str = "latent") -> torch.Tensor:
         name = name or "latent"

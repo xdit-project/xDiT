@@ -20,6 +20,7 @@ from xfuser.core.distributed import (
     get_ring_parallel_world_size,
     get_ulysses_parallel_rank,
     get_runtime_state,
+    runtime_state_is_initialized,
 )
 
 from xfuser.compat import version_at_least
@@ -49,6 +50,14 @@ _FP8_NCCL_NEEDS_VIEW = not version_at_least(torch.__version__, "2.11.0")
 _FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz)
 _warned_fp8_comms_missing_attn = False
 logger = init_logger(__name__)
+
+
+def _compile_capture_bypasses_attention() -> bool:
+    return runtime_state_is_initialized() and getattr(
+        get_runtime_state(),
+        "_xdit_compile_capture_bypass_attention",
+        False,
+    )
 
 
 def _warn_fp8_comms_missing_attn():
@@ -536,6 +545,15 @@ def USP(
         combine_qkv_a2a = False
     _validate_gqa_params(query, key, value, kv_head_repeat, joint_strategy)
 
+    if _compile_capture_bypasses_attention():
+        # Capture needs the public attention output contract, not attention
+        # values. Bypass before communication or backend-specific quantization
+        # so every activation dtype is preserved without guessing how a
+        # low-precision backend represents Q/K/V internally.
+        if joint_strategy:
+            query = _concat_joint_tensor(query, joint_query, joint_strategy, dim=2)
+        return torch.zeros_like(query)
+
     attention_function = _get_attention_function(backend=backend)
 
     fp8_module = attn_layer if attn_layer is not None else head_balance_layer
@@ -718,6 +736,9 @@ def attention(
     parity with ``USP`` but ignored here: with no Ulysses parallelism there is
     no head sharding or FP8 all-to-all.
     """
+    if _compile_capture_bypasses_attention():
+        return torch.zeros_like(query)
+
     attention_function = _get_attention_function(backend=backend)
     # Same rule as USP: a backend that cannot serve packed keys gets the pad
     # sliced instead, which is the same computation.

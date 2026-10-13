@@ -8,6 +8,40 @@ from xfuser.model_executor.layers import usp
 from xfuser.model_executor.layers.attention_mask import make_attn_mask_with_meta
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@mock.patch("xfuser.model_executor.layers.usp.attention_registry.find")
+@mock.patch("xfuser.model_executor.layers.usp._compile_capture_bypasses_attention", return_value=True)
+def test_compile_capture_bypasses_attention_backend(bypass, find, dtype):
+    query = torch.randn(1, 4, 8, 16, dtype=dtype)
+
+    output = usp.attention(query, query, query, backend=object())
+
+    torch.testing.assert_close(output, torch.zeros_like(query))
+    assert output.dtype == dtype
+    bypass.assert_called_once()
+    find.assert_not_called()
+
+
+@mock.patch("xfuser.model_executor.layers.usp._compile_capture_bypasses_attention", return_value=True)
+def test_compile_capture_bypass_preserves_joint_output_shape(bypass):
+    query = torch.randn(1, 4, 8, 16)
+    joint_query = torch.randn(1, 4, 3, 16)
+
+    output = usp.USP(
+        query,
+        query,
+        query,
+        joint_query=joint_query,
+        joint_key=joint_query,
+        joint_value=joint_query,
+        joint_strategy="front",
+    )
+
+    assert output.shape == (1, 4, 11, 16)
+    assert output.dtype == query.dtype
+    bypass.assert_called_once()
+
+
 @mock.patch("xfuser.model_executor.layers.usp.get_cache_manager")
 def test_cache_update_requires_registered_layer(get_cache_manager):
     cache_manager = get_cache_manager.return_value

@@ -34,10 +34,26 @@ The PipeFusion pipeline workflow when $M$ = $N$ =4 is shown in the following pic
   and can compose with PipeFusion when the model advertises the corresponding
   capability. Tile-parallel decoding remains subject to the model's normal tile
   geometry and memory validation.
-- Step caching is not yet supported. It requires per-patch histories and cache
-  decisions synchronized across pipeline stages, so configuration rejects
-  `--cache_method` with PipeFusion instead of applying an incorrect stage-local
-  cache.
+- `--cache_method pipefusion` enables patch-aware step caching for models with
+  a DBCache block layout. Every pipeline patch retains its own residual
+  buffers. Patch 0 chooses the adaptive compute/reuse path for the stage and
+  later patches follow that path without waiting for a timestep-wide
+  collective. Different pipeline stages still decide independently because
+  they own different blocks. With composed sequence parallelism, only replicas
+  of the same stage synchronize through their sequence-parallel group.
+- Other cache method names remain rejected with PipeFusion. The PipeFusion
+  method reuses the model's DBCache block layout and tuning parameters, so
+  model-specific `--cache_config` overrides such as the residual threshold
+  continue to apply without exposing Cache-DiT's WORLD-group synchronization.
+  Models whose cache layout spans multiple transformers are not yet supported.
+- A Cache-DiT SCM mask can provide a stage-coordinated static policy by setting
+  `scm_policy` to `slow`, `medium`, `fast`, `ultra`, or xDiT's `alternating`
+  policy and `steps_computation_policy` to `static` in `--cache_config`.
+  Because every stage knows those decisions in advance, PipeFusion caches the
+  complete local stage residual and bypasses the configured Fn prefix on
+  scheduled reuse steps. `alternating` computes the configured warmup prefix,
+  reuses isolated alternating steps, and computes the final two correction
+  steps. Dynamic policies continue to compute Fn and use residual similarity.
 - `--memory_efficient_replicated_load` has a PipeFusion-specific meaning on
   runners that support stage-local meta construction (currently the FLUX
   family): each rank constructs and streams only its local transformer blocks.

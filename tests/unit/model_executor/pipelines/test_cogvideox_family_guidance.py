@@ -160,6 +160,40 @@ def test_cogvideox_matches_diffusers_with_and_without_guidance(guidance_scale):
     torch.testing.assert_close(actual, expected)
 
 
+def _stub_image_encode(vae):
+    """Replace VAE encode with a zero posterior of the shape the VAE would emit.
+
+    The guidance comparison only needs both pipelines to see the same image
+    latents. Running the real encoder reaches GroupNorm, which this environment
+    may replace with an accelerator kernel.
+    """
+    spatial = 2 ** (len(vae.config.block_out_channels) - 1)
+    temporal = vae.config.temporal_compression_ratio
+    channels = vae.config.latent_channels
+
+    class _Posterior:
+        def __init__(self, value):
+            self._value = value
+
+        def sample(self, generator=None):
+            return self._value
+
+        def mode(self):
+            return self._value
+
+    class _Encoded:
+        def __init__(self, value):
+            self.latent_dist = _Posterior(value)
+
+    def encode(sample):
+        batch, _, frames, height, width = sample.shape
+        latent_frames = (frames - 1) // temporal + 1
+        value = sample.new_zeros(batch, channels, latent_frames, height // spatial, width // spatial)
+        return _Encoded(value)
+
+    vae.encode = encode
+
+
 def _consisid_pipe():
     torch.manual_seed(0)
     transformer = ConsisIDTransformer3DModel(
@@ -203,6 +237,7 @@ def test_consisid_matches_diffusers_with_and_without_guidance(guidance_scale):
     from xfuser.model_executor.pipelines import pipeline_consisid
 
     pipe = _consisid_pipe()
+    _stub_image_encode(pipe.vae)
     prompt_embeds, negative_prompt_embeds = _embeds()
     image = torch.rand(1, 3, 16, 16, generator=torch.Generator().manual_seed(3))
     latents = torch.randn(1, 3, 4, 2, 2, generator=torch.Generator().manual_seed(2))

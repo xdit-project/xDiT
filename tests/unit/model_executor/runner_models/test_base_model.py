@@ -120,3 +120,59 @@ def test_head_width_and_ulysses_constraints_are_both_validated(heads, widths, pa
             model_class(config)
     else:
         assert model_class(config).pipe is None
+
+
+class _HeadDimConfig:
+    use_hybrid_attn_schedule = False
+    cross_attention_backend = None
+    ulysses_degree = None
+
+    def __init__(self, backend):
+        self.attention_backend = backend
+
+
+class _HeadDimModel:
+    """The validator reads head counts after the width check, even when it refused nothing."""
+
+    def __init__(self, dims):
+        self.attention_head_dims = dims
+        self.attention_heads = None
+        self.attention_kv_heads = None
+        self.supports_ulysses_head_padding = False
+        self.capabilities = SimpleNamespace(ulysses_degree=False, ring_degree=False)
+        self.settings = SimpleNamespace(model_name="model")
+
+
+def test_a_model_is_refused_a_backend_that_serves_none_of_its_head_dims():
+    """Ideogram 4 runs head dimension 256, which MHA v4 does not serve.
+    A backend that declares no HEAD_DIM makes no claim and stays selectable."""
+    from xfuser.core.attention import registry
+    from xfuser.core.attention.spec import AttentionBackendType
+    from xfuser.core.attention.backends.aiter_mha_v4.spec import DENSE_BACKENDS
+    from xfuser.model_executor.models.runner_models.ideogram4 import xFuserIdeogram4Model
+    from xfuser.model_executor.models.runner_models.ltx import _xFuserLTX25VideoModelBase
+
+    ideogram4 = _HeadDimModel(xFuserIdeogram4Model.attention_head_dims)
+    for backend in DENSE_BACKENDS:
+        with pytest.raises(ValueError, match="head dimension"):
+            base_model._validate_attention_head_dims(ideogram4, _HeadDimConfig(backend.name))
+
+    assert registry.get(AttentionBackendType.AITER).accepts.head_dims() is None
+    base_model._validate_attention_head_dims(ideogram4, _HeadDimConfig("AITER"))
+    base_model._validate_attention_head_dims(ideogram4, _HeadDimConfig("SDPA"))
+
+    ltx25 = _HeadDimModel(_xFuserLTX25VideoModelBase.attention_head_dims)
+    assert 64 in ltx25.attention_head_dims
+    base_model._validate_attention_head_dims(ltx25, _HeadDimConfig("AITER_BF16"))
+
+    base_model._validate_attention_head_dims(_HeadDimModel(frozenset()), _HeadDimConfig("AITER_BF16"))
+
+
+def test_the_head_dim_refusal_names_fallback_or_a_hard_stop():
+    model = _HeadDimModel(frozenset({256}))
+
+    with pytest.raises(ValueError, match="fall through to AITER"):
+        base_model._validate_attention_head_dims(model, _HeadDimConfig("AITER_BF16"))
+
+    with pytest.raises(ValueError, match="would be refused"):
+        base_model._validate_attention_head_dims(model, _HeadDimConfig("AITER_FP8_SPARGE"))

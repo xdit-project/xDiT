@@ -1,18 +1,18 @@
 import pytest
 import torch
 
+from xfuser.core.attention import registry
+from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.core.vsa_attention import block_mask_to_delta_lut
 
 pytestmark = pytest.mark.rocm
 
 
 def test_ck_vsa_matches_masked_dense():
-    if not torch.cuda.is_available() or torch.version.hip is None:
-        pytest.skip("AITER VSA requires a ROCm GPU")
-    try:
-        from aiter.ops.jenga_sparse_attention import vsa_sparse_attention
-    except ImportError:
-        pytest.skip("AITER VSA kernel is unavailable")
+    reason = registry.get(AttentionBackendType.AITER_VSA).unavailable()
+    if reason is not None:
+        pytest.skip(reason)
+    from aiter.ops.jenga_sparse_attention import vsa_sparse_attention
 
     torch.manual_seed(7)
     query = torch.randn(1, 4, 256, 128, device="cuda", dtype=torch.bfloat16)

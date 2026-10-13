@@ -1212,8 +1212,13 @@ def test_the_meta_text_encoder_swap_builds_the_declared_fp8_layout():
     declares an encoder lives with the registry, in
     test_format_backend_adapters.py; this one pins what the swap actually
     builds, so the two fail together rather than drifting apart.
+
+    The swap asks AITER for the fp8 dtype (twice: in the swap itself and in
+    ``absorb_fp8_weight_from_weight_attr``), so this cannot run on a host
+    without it -- the CPU CI image included.
     """
-    from xfuser.model_executor.layers.fp8_linear import xFuserFP8BlockScaleLinear, _fp8_dtype
+    fp8_dtype = pytest.importorskip("aiter").dtypes.fp8
+    from xfuser.model_executor.layers.fp8_linear import xFuserFP8BlockScaleLinear
 
     class Encoder(torch.nn.Module):
         def __init__(self):
@@ -1229,7 +1234,7 @@ def test_the_meta_text_encoder_swap_builds_the_declared_fp8_layout():
     swapped = encoder.block[0]
     assert isinstance(swapped, xFuserFP8BlockScaleLinear)
     # The plain TE layout the rank0 broadcast fills: fp8 param + fp32 scale.
-    assert swapped.weight_fp8.dtype is _fp8_dtype()
+    assert swapped.weight_fp8.dtype is fp8_dtype
     assert swapped.weight_scale.dtype is torch.float32
 
 

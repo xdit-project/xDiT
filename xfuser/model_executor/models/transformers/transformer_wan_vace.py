@@ -10,7 +10,11 @@ from xfuser.core.distributed import (
     get_runtime_state,
 )
 
-from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanAttnProcessor
+from xfuser.model_executor.models.transformers.transformer_wan import (
+    _local_sp_pad_rows,
+    _zero_sp_pad_rows_hook,
+    xFuserWanAttnProcessor,
+)
 from xfuser.model_executor.models.transformers.transformers_utils import (
     chunk_and_pad_sequence,
     gather_and_unpad,
@@ -60,17 +64,27 @@ class xFuserWanVACETransformer3DWrapper(WanVACETransformer3DModel):
             vace_in_channels,
         )
 
+        # Self-attention needs the SP pad length, published per forward; cross-attention
+        # attends to the text, which has no SP pad. The key is always present because
+        # torch.compile guards on the dict's key set.
+        self._self_attn_kwargs = {"valid_kv_len": None}
         for block in self.blocks:
-            block.attn1.processor = xFuserWanAttnProcessor()
+            block.attn1.processor = xFuserWanAttnProcessor(attention_kwargs=self._self_attn_kwargs)
             block.attn2.processor = xFuserWanAttnProcessor(
                 use_ulysses_parallel_attention=False, is_cross_attention=True
             )
 
         for block in self.vace_blocks:
-            block.attn1.processor = xFuserWanAttnProcessor()
+            block.attn1.processor = xFuserWanAttnProcessor(attention_kwargs=self._self_attn_kwargs)
             block.attn2.processor = xFuserWanAttnProcessor(
                 use_ulysses_parallel_attention=False, is_cross_attention=True
             )
+
+        # Pad rows of this rank's chunk, set per forward; 0 leaves the blocks untouched.
+        # Both block lists, as in Wan, for the reasons _zero_sp_pad_rows_hook gives.
+        self._sp_pad = {"local_rows": 0}
+        for block in [*self.blocks, *self.vace_blocks]:
+            block.register_forward_hook(_zero_sp_pad_rows_hook(self._sp_pad))
 
     def forward(
         self,
@@ -119,7 +133,12 @@ class xFuserWanVACETransformer3DWrapper(WanVACETransformer3DModel):
         control_hidden_states = torch.cat([control_hidden_states, control_hidden_states_padding], dim=1)
 
         pad_amount = (sp_world_size - (hidden_states.shape[1] % sp_world_size)) % sp_world_size
+        # The pad rows' keys get a zero logit (the RoPE tables are zero-padded too)
+        # and would act as an attention sink; USP drops them given the real length.
+        self._self_attn_kwargs["valid_kv_len"] = hidden_states.shape[1] if pad_amount else None
+        seq_len = hidden_states.shape[1]
         hidden_states = chunk_and_pad_sequence(hidden_states, sp_world_rank, sp_world_size, pad_amount, dim=1)
+        self._sp_pad["local_rows"] = _local_sp_pad_rows(seq_len, hidden_states.shape[1], sp_world_rank)
         control_hidden_states = chunk_and_pad_sequence(
             control_hidden_states, sp_world_rank, sp_world_size, pad_amount, dim=1
         )

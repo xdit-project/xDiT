@@ -29,7 +29,9 @@ class _Event:
         return 0.0
 
 
-def _runner(monkeypatch, *, warmup_calls, num_iterations, batch_size=None):
+def _runner(
+    monkeypatch, *, warmup_calls, num_iterations, batch_size=None, use_torch_compile=False, compile_mode="default"
+):
     # log() reads the rank from the environment.
     monkeypatch.setenv("RANK", "0")
     monkeypatch.setenv("WORLD_SIZE", "1")
@@ -44,7 +46,9 @@ def _runner(monkeypatch, *, warmup_calls, num_iterations, batch_size=None):
         determinism_check=0,
         batch_size=batch_size,
         data_parallel_degree=1,
+        use_torch_compile=use_torch_compile,
     )
+    model._get_compile_mode = lambda: compile_mode
     model.settings = SimpleNamespace(model_output_type="image")
     model._validate_args = lambda input_args: None
     model._split_prompts_for_dp = lambda input_args: input_args
@@ -76,3 +80,54 @@ def test_run_reports_the_measured_timings(monkeypatch, warmup_calls, num_iterati
     _, timings = model.run({"prompt": prompt})
 
     assert timings == expected
+
+
+def test_cuda_graph_compile_mode_keeps_every_measured_iteration(monkeypatch):
+    """reduce-overhead records one untimed warmup, then reports every measured iteration.
+
+    The stubbed pipe takes 1.0 s, then 2.0 s, and so on. The capture warmup consumes
+    the 1.0 s call and is not a timing. All three measured iterations are reported,
+    which is only possible once that warmup has absorbed the one-time cost that
+    would otherwise make the runner discard the first measurement.
+    """
+    model = _runner(
+        monkeypatch,
+        warmup_calls=0,
+        num_iterations=3,
+        use_torch_compile=True,
+        compile_mode="reduce-overhead",
+    )
+
+    _, timings = model.run({"prompt": "p"})
+
+    assert timings == [2.0, 3.0, 4.0]
+
+
+def test_explicit_warmup_calls_are_not_repeated_for_cuda_graphs(monkeypatch):
+    """--warmup_calls already runs a full pipe before timings, so reduce-overhead must not add another."""
+    model = _runner(
+        monkeypatch,
+        warmup_calls=1,
+        num_iterations=3,
+        use_torch_compile=True,
+        compile_mode="reduce-overhead",
+    )
+
+    _, timings = model.run({"prompt": "p"})
+
+    assert timings == [2.0, 3.0, 4.0]
+
+
+@pytest.mark.parametrize("compile_mode", ["default", "max-autotune-no-cudagraphs"])
+def test_modes_without_cuda_graphs_still_drop_the_first_iteration(monkeypatch, compile_mode):
+    model = _runner(
+        monkeypatch,
+        warmup_calls=0,
+        num_iterations=3,
+        use_torch_compile=True,
+        compile_mode=compile_mode,
+    )
+
+    _, timings = model.run({"prompt": "p"})
+
+    assert timings == [2.0, 3.0]

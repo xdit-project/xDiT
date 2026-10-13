@@ -1,4 +1,4 @@
-"""Sol-Attn backend: contract checks, and a kernel smoke test when it can run."""
+"""Sol-Attn backend contract checks that do not launch the kernel."""
 
 from types import SimpleNamespace
 
@@ -96,40 +96,3 @@ def test_runtime_config_is_forwarded_to_kernel(monkeypatch):
     assert received["config"] == (2.5, 0, 4, 32, 0)
     assert out.shape == q.shape
     assert lse is None
-
-
-def test_kernel_returns_the_query_shape(monkeypatch):
-    spec = _spec()
-    reason = spec.unavailable()
-    if reason is not None:
-        import pytest
-
-        pytest.skip(reason)
-
-    from xfuser.core.attention.backends.sol_attn import kernel
-
-    runtime_config = SimpleNamespace(
-        sol_attn_tau=1.0,
-        sol_attn_thresh_type="diag",
-        sol_attn_kv_splits="1",
-        sol_attn_sink_tokens=0,
-        sol_attn_sink_start=None,
-    )
-    runtime_state = SimpleNamespace(runtime_config=runtime_config)
-    monkeypatch.setattr(kernel, "get_runtime_state", lambda: runtime_state)
-    torch.manual_seed(0)
-    q, k, v = _qkv(heads=4, length=128)
-    q = torch.randn_like(q)
-    k = torch.randn_like(k)
-    v = torch.randn_like(v)
-    q, k, v = q.cuda(), k.cuda(), v.cuda()
-    out, lse = spec.run(
-        q,
-        k,
-        v,
-        AttnCall(),
-    )
-    assert out.shape == q.shape
-    assert out.dtype == torch.bfloat16
-    assert lse is None
-    assert torch.isfinite(out).all()

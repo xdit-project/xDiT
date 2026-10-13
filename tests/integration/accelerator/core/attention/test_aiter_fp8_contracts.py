@@ -11,6 +11,8 @@ import torch
 from xfuser.core.attention import registry
 from xfuser.core.attention.spec import AttentionBackendType, AttnCall, VarlenPacking
 
+pytestmark = pytest.mark.rocm
+
 
 def _feature_reversal_matrix():
     return torch.flip(torch.eye(128), dims=[1])

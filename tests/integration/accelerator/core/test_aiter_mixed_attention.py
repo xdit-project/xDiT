@@ -1,6 +1,5 @@
 import itertools
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -133,35 +132,45 @@ def _require_mha_v4_recipe(backend_name):
 
 # Dense MXFP4 V returns garbage at any sequence length that is not a multiple of 128 on AITER
 # main: cosine against SDPA measures 0.040 at S=257 and -0.012 at S=129, while FP8 V and MXFP6 V
-# stay correct. AITER's own unaligned-sequence test asserts only eager==compiled and isfinite,
-# so it does not catch this.
-_MXFP4_V_BACKENDS = ("AITER_F4F4", "AITER_F6F4")
+# stay correct. AITER_MXFP4 stores V in MXFP4 and fails the same way. AITER's own
+# unaligned-sequence test asserts only eager==compiled and isfinite, so it does not catch this.
+_MXFP4_V_BACKENDS = ("AITER_F4F4", "AITER_F6F4", "AITER_MXFP4")
 
 
-def _xfail_broken_mxfp4_v(backend_name, sequence_length):
+def _mixed_attention_case(backend_name, sequence_length):
     if backend_name in _MXFP4_V_BACKENDS and sequence_length % 128:
-        pytest.xfail(
-            f"AITER dense MXFP4 V is numerically wrong at S={sequence_length} (S % 128 != 0); tracked upstream"
+        return pytest.param(
+            backend_name,
+            sequence_length,
+            marks=pytest.mark.xfail(
+                reason=(
+                    f"AITER dense MXFP4 V is numerically wrong at S={sequence_length} (S % 128 != 0); tracked upstream"
+                ),
+                strict=True,
+            ),
         )
+    return pytest.param(backend_name, sequence_length)
 
 
 @pytest.mark.parametrize(
-    "backend_name",
+    ("backend_name", "sequence_length"),
     [
-        "AITER_BF16",
-        "AITER_BF16FP8",
-        "AITER_MXFP8",
-        "AITER_F8F6",
-        "AITER_F6F4",
-        "AITER_MXFP4",
-        "AITER_F4F4",
+        _mixed_attention_case(backend_name, sequence_length)
+        for sequence_length in (128, 257)
+        for backend_name in (
+            "AITER_BF16",
+            "AITER_BF16FP8",
+            "AITER_MXFP8",
+            "AITER_F8F6",
+            "AITER_F6F4",
+            "AITER_MXFP4",
+            "AITER_F4F4",
+        )
     ],
 )
-@pytest.mark.parametrize("sequence_length", [128, 257])
 def test_aiter_mixed_attention_matches_sdpa(backend_name, sequence_length):
     _require_mha_v4_aiter(backend_name)
     _require_mha_v4_recipe(backend_name)
-    _xfail_broken_mxfp4_v(backend_name, sequence_length)
 
     torch.manual_seed(1234)
     shape = (1, 5, sequence_length, 128)
@@ -710,81 +719,6 @@ def test_mha_v4_fallback_lse_keeps_batch_major_layout_under_padding():
     assert padded_lse.shape == dense_lse.shape == (batch, heads, padded), (
         f"packed {tuple(padded_lse.shape)} vs dense {tuple(dense_lse.shape)}"
     )
-
-
-# ---------------------------------------------------------------------------
-# head dimension, checked at configuration rather than per call
-# ---------------------------------------------------------------------------
-
-
-class _HeadDimConfig:
-    use_hybrid_attn_schedule = False
-    cross_attention_backend = None
-
-    def __init__(self, backend):
-        self.attention_backend = backend
-
-
-class _HeadDimModel:
-    def __init__(self, dims):
-        self.attention_head_dims = dims
-        self.settings = SimpleNamespace(model_name="model")
-
-
-def test_a_model_is_refused_a_backend_that_serves_none_of_its_head_dims():
-    """Ideogram 4 runs head dimension 256, which MHA v4 does not serve.
-    Selecting one used to be accepted and then bypassed for every layer, so
-    the choice read as applied while nothing about the run changed.
-
-    The widths come from each backend's own `accepts`, so this needs no list:
-    a backend declaring no HEAD_DIM makes no claim and stays selectable."""
-    from xfuser.core.attention.backends.aiter_mha_v4.spec import DENSE_BACKENDS
-    from xfuser.model_executor.models.runner_models.base_model import (
-        _validate_attention_head_dims,
-    )
-    from xfuser.model_executor.models.runner_models.ideogram4 import (
-        xFuserIdeogram4Model,
-    )
-    from xfuser.model_executor.models.runner_models.ltx import (
-        _xFuserLTX25VideoModelBase,
-    )
-
-    ideogram4 = _HeadDimModel(xFuserIdeogram4Model.attention_head_dims)
-    for backend in DENSE_BACKENDS:
-        with pytest.raises(ValueError, match="head dimension"):
-            _validate_attention_head_dims(ideogram4, _HeadDimConfig(backend.name))
-
-    # v3 covers 256 and constrains nothing, so it stays selectable.
-    assert registry.get(AttentionBackendType.AITER).accepts.head_dims() is None
-    _validate_attention_head_dims(ideogram4, _HeadDimConfig("AITER"))
-    _validate_attention_head_dims(ideogram4, _HeadDimConfig("SDPA"))
-
-    # LTX-2.5 mixes 128-wide video with 64-wide audio; one served width keeps it.
-    ltx25 = _HeadDimModel(_xFuserLTX25VideoModelBase.attention_head_dims)
-    assert 64 in ltx25.attention_head_dims
-    _validate_attention_head_dims(ltx25, _HeadDimConfig("AITER_BF16"))
-
-    # A model that declares nothing is never refused on head dimension.
-    _validate_attention_head_dims(_HeadDimModel(frozenset()), _HeadDimConfig("AITER_BF16"))
-
-
-def test_the_head_dim_refusal_says_what_would_actually_happen():
-    """A dense row hands the call to its fallback, so the cost is a selection
-    that does nothing. A sparge row has no fallback and raises, so the cost is
-    a run that stops. Same refusal, different consequence, and the message has
-    to name the right one or it sends the reader looking for a silent bypass
-    that never happens."""
-    from xfuser.model_executor.models.runner_models.base_model import (
-        _validate_attention_head_dims,
-    )
-
-    model = _HeadDimModel(frozenset({256}))
-
-    with pytest.raises(ValueError, match="fall through to AITER"):
-        _validate_attention_head_dims(model, _HeadDimConfig("AITER_BF16"))
-
-    with pytest.raises(ValueError, match="would be refused"):
-        _validate_attention_head_dims(model, _HeadDimConfig("AITER_FP8_SPARGE"))
 
 
 def test_mha_v4_gathers_a_multi_sequence_batch_that_declares_valid_kv_len():

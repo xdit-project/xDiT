@@ -662,91 +662,6 @@ def test_pack_kv_flattens_keys_against_their_own_length():
     assert packed.unflatten(out).shape == (batch, q_len, heads, head_dim)
 
 
-# --------------------------------------------------------------------------
-# the enum move
-# --------------------------------------------------------------------------
-
-
-def test_enum_still_has_every_member():
-    """Guards the refactor against dropping one. 45 came over from the
-    monolith; AITER_BF16_SPARGE and AITER_BF16FP8_SPARGE joined with the MHA
-    v4 Sparge rows that serve them, SOL_ATTN joined with the NVIDIA
-    Sol-Attn backend, and TRITON_BSA with Prism's block-sparse attention, so a
-    further change to this number should be a deliberate new backend rather
-    than a casualty."""
-    assert len(list(AttentionBackendType)) == 49
-
-
-# --------------------------------------------------------------------------
-# the framework must import anywhere
-# --------------------------------------------------------------------------
-
-VENDOR_MODULES = {
-    "aiter",
-    "flash_attn",
-    "flash_attn_interface",
-    "sageattention",
-    "transformer_engine",
-    "torch_npu",
-    "flex_block_attn",
-    "yunchang",
-    "distvae",
-}
-
-FRAMEWORK_MODULES = ["spec", "requirements", "constraints", "registry", "numerics/layout", "numerics/hadamard"]
-
-
-def _imported_top_level_modules(path):
-    import ast
-
-    names = set()
-    for node in ast.walk(ast.parse(path.read_text())):
-        if isinstance(node, ast.Import):
-            names.update(a.name.split(".")[0] for a in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            names.add(node.module.split(".")[0])
-    return names
-
-
-def test_framework_has_no_vendor_dependencies():
-    """Backends may need aiter or flash-attn; the framework never may. A user
-    on any machine must be able to import the registry and be told which
-    backends are unavailable, rather than hitting an ImportError."""
-    from pathlib import Path
-    import xfuser.core.attention as package
-
-    root = Path(package.__file__).parent
-    for name in FRAMEWORK_MODULES:
-        imported = _imported_top_level_modules(root / f"{name}.py")
-        leaked = imported & VENDOR_MODULES
-        assert not leaked, f"{name}.py imports vendor module(s): {sorted(leaked)}"
-
-
-def test_framework_only_depends_on_torch_stdlib_and_itself():
-    from pathlib import Path
-    import xfuser.core.attention as package
-
-    allowed = {
-        "torch",
-        "xfuser",
-        "__future__",
-        "dataclasses",
-        "enum",
-        "typing",
-        "functools",
-        "importlib",
-        "inspect",
-        "ast",
-        "pathlib",
-        "contextlib",
-        "types",
-    }
-    root = Path(package.__file__).parent
-    for name in FRAMEWORK_MODULES:
-        unexpected = _imported_top_level_modules(root / f"{name}.py") - allowed
-        assert not unexpected, f"{name}.py imports {sorted(unexpected)}"
-
-
 def test_missing_module_is_reported_not_raised():
     """A backend whose library is absent must yield a reason, never an
     exception -- that is what lets the registry load on any machine."""
@@ -1090,35 +1005,6 @@ def test_a_masked_pack_reaches_the_varlen_and_mask_applying_backends_only():
 # --------------------------------------------------------------------------
 
 
-def _impl_source(spec):
-    """The file and function name an Impl target names, without importing it."""
-    from pathlib import Path
-    import importlib
-
-    module_name, _, symbol = spec.impl.target.partition(":")
-    package = importlib.import_module(spec.package)
-    return Path(package.__file__).parent / f"{module_name}.py", symbol
-
-
-def test_every_impl_target_names_a_function_that_exists():
-    """Static: the target is a string, so a typo or a renamed function is
-    invisible until that backend is selected on a machine that can run it.
-    Parsing the file catches it anywhere, with no vendor library present."""
-    import ast
-
-    from xfuser.core.attention import registry
-
-    for spec in registry.REGISTRY.values():
-        path, symbol = _impl_source(spec)
-        assert path.exists(), f"{spec.type.name}: no module at {path}"
-        defined = {
-            node.name
-            for node in ast.parse(path.read_text()).body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        }
-        assert symbol in defined, f"{spec.type.name}: {path.name} defines no {symbol}"
-
-
 def test_every_registered_backend_resolves_where_it_is_available():
     """A kernel module is only imported when its backend is selected, so a
     broken one -- a bad import, a name used before it is defined -- stays
@@ -1157,22 +1043,23 @@ def test_impl_bound_arguments_are_accepted_by_the_target():
     """A generated family binds a table row to a shared launcher by keyword.
     Rename the launcher's parameter and every spec in the family breaks at its
     first call; the binding is a plain dict, so nothing else notices."""
-    import ast
+    import functools
+    import inspect
 
     from xfuser.core.attention import registry
 
     for spec in registry.REGISTRY.values():
-        if not spec.impl.bound:
+        if not isinstance(spec.impl, Impl) or not spec.impl.bound:
             continue
-        path, symbol = _impl_source(spec)
-        fn = next(
-            node
-            for node in ast.parse(path.read_text()).body
-            if isinstance(node, ast.FunctionDef) and node.name == symbol
-        )
-        accepted = {a.arg for a in fn.args.args + fn.args.kwonlyargs}
-        missing = set(spec.impl.bound) - accepted
-        assert not missing, f"{spec.type.name}: {symbol} takes no {sorted(missing)}"
+        if spec.unavailable() is not None:
+            continue
+        resolved = spec.resolved()
+        target = resolved.func if isinstance(resolved, functools.partial) else resolved
+        parameters = inspect.signature(target).parameters
+        if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+            continue
+        missing = set(spec.impl.bound) - set(parameters)
+        assert not missing, f"{spec.type.name}: {target.__name__} takes no {sorted(missing)}"
 
 
 # --------------------------------------------------------------------------

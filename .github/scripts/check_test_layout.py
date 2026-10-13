@@ -104,8 +104,7 @@ def _file_problems(root: Path, path: Path) -> list[str]:
             )
         if places_on_device and bucket == "tests/unit" and not accelerator:
             problems.append(
-                f"{node} places a tensor on cuda but is not marked accelerator, "
-                "so the CPU selector runs it"
+                f"{node} places a tensor on cuda but is not marked accelerator, so the CPU selector runs it"
             )
         if "nvidia" in marks and "rocm" in marks:
             problems.append(f"{node} is marked both nvidia and rocm, so neither vendor selector runs it")

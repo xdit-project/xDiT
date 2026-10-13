@@ -144,8 +144,7 @@ def _mixed_attention_case(backend_name, sequence_length):
             sequence_length,
             marks=pytest.mark.xfail(
                 reason=(
-                    f"AITER dense MXFP4 V is numerically wrong at S={sequence_length} "
-                    "(S % 128 != 0); tracked upstream"
+                    f"AITER dense MXFP4 V is numerically wrong at S={sequence_length} (S % 128 != 0); tracked upstream"
                 ),
                 strict=True,
             ),

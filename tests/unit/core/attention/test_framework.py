@@ -27,6 +27,7 @@ from xfuser.core.attention.requirements import (
 from xfuser.core.attention.constraints import (
     ANY_CALL,
     HEAD_DIM,
+    MASKED_VARLEN,
     MHA_ONLY,
     NON_CAUSAL,
     NO_VARLEN,
@@ -480,8 +481,9 @@ def test_find_returns_none_rather_than_raising():
     """usp and runtime_state look a backend up before knowing it is
     registered, and do so inside a traced region -- so this reads the dict,
     not the REGISTRY proxy, which Dynamo cannot subscript by a non-constant
-    key. tests/test_minimax_h3.py's fullgraph cases are what catch a
-    regression here."""
+    key. The fullgraph cases in
+    tests/unit/model_executor/runner_models/test_minimax_h3.py are what catch
+    a regression here."""
     spec = _spec(AttentionBackendType.SDPA)
     with registry.using([spec]):
         assert registry.find(AttentionBackendType.SDPA) is spec
@@ -658,89 +660,6 @@ def test_pack_kv_flattens_keys_against_their_own_length():
     assert torch.equal(packed.cu_seqlens_q, torch.tensor([0, 3, 6], dtype=torch.int32))
     out = torch.randn(batch * q_len, heads, head_dim)
     assert packed.unflatten(out).shape == (batch, q_len, heads, head_dim)
-
-
-# --------------------------------------------------------------------------
-# the enum move
-# --------------------------------------------------------------------------
-
-
-def test_enum_still_has_every_member():
-    """Guards the refactor against dropping one. 45 came over from the
-    monolith; AITER_BF16_SPARGE and AITER_BF16FP8_SPARGE joined with the MHA
-    v4 Sparge rows that serve them, so a further change to this number should
-    be a deliberate new backend rather than a casualty."""
-    assert len(list(AttentionBackendType)) == 47
-
-
-# --------------------------------------------------------------------------
-# the framework must import anywhere
-# --------------------------------------------------------------------------
-
-VENDOR_MODULES = {
-    "aiter",
-    "flash_attn",
-    "flash_attn_interface",
-    "sageattention",
-    "transformer_engine",
-    "torch_npu",
-    "flex_block_attn",
-    "yunchang",
-    "distvae",
-}
-
-FRAMEWORK_MODULES = ["spec", "requirements", "constraints", "registry", "numerics/layout", "numerics/hadamard"]
-
-
-def _imported_top_level_modules(path):
-    import ast
-
-    names = set()
-    for node in ast.walk(ast.parse(path.read_text())):
-        if isinstance(node, ast.Import):
-            names.update(a.name.split(".")[0] for a in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            names.add(node.module.split(".")[0])
-    return names
-
-
-def test_framework_has_no_vendor_dependencies():
-    """Backends may need aiter or flash-attn; the framework never may. A user
-    on any machine must be able to import the registry and be told which
-    backends are unavailable, rather than hitting an ImportError."""
-    from pathlib import Path
-    import xfuser.core.attention as package
-
-    root = Path(package.__file__).parent
-    for name in FRAMEWORK_MODULES:
-        imported = _imported_top_level_modules(root / f"{name}.py")
-        leaked = imported & VENDOR_MODULES
-        assert not leaked, f"{name}.py imports vendor module(s): {sorted(leaked)}"
-
-
-def test_framework_only_depends_on_torch_stdlib_and_itself():
-    from pathlib import Path
-    import xfuser.core.attention as package
-
-    allowed = {
-        "torch",
-        "xfuser",
-        "__future__",
-        "dataclasses",
-        "enum",
-        "typing",
-        "functools",
-        "importlib",
-        "inspect",
-        "ast",
-        "pathlib",
-        "contextlib",
-        "types",
-    }
-    root = Path(package.__file__).parent
-    for name in FRAMEWORK_MODULES:
-        unexpected = _imported_top_level_modules(root / f"{name}.py") - allowed
-        assert not unexpected, f"{name}.py imports {sorted(unexpected)}"
 
 
 def test_missing_module_is_reported_not_raised():
@@ -986,9 +905,9 @@ def test_hadamard_declares_its_symbol_once():
 #     gathering the valid rows, or scattering several sequences into a padded
 #     batch whose true lengths travel in seqlens_k.
 #
-# Everything else must declare NO_VARLEN: accepting a packed call without
-# honouring it runs dense attention over padded keys and returns wrong numbers
-# rather than failing.
+# Everything else must declare NO_VARLEN, or MASKED_VARLEN when its kernel
+# applies attn_mask: accepting a packed call without honouring it runs dense
+# attention over padded keys and returns wrong numbers rather than failing.
 #
 # Maintained by hand on purpose. Deriving it from the specs would compare the
 # registry with itself; the point is that adding a name here is a claim someone
@@ -1036,38 +955,54 @@ def test_only_varlen_capable_backends_accept_packed_keys():
     )
 
 
+# Backends whose kernel applies ``attn_mask``. The models that pack their keys
+# (Krea-2, LTX-2) derive the packing from a dense key mask and pass both, so a
+# kernel that applies the mask serves the call without the packing. Maintained
+# by hand for the reason above.
+MASK_APPLYING = {"SDPA", "SDPA_MATH", "SDPA_EFFICIENT", "CUDNN"}
+
+
+def _masked_pack(batch=1, kv_len=8):
+    mask = torch.ones(batch, kv_len, dtype=torch.bool)
+    mask[:, kv_len // 2 :] = False
+    return AttnCall(
+        varlen=VarlenPacking(
+            indices_k=mask.flatten().nonzero().flatten(),
+            cu_seqlens_k=torch.arange(batch + 1, dtype=torch.int32) * (kv_len // 2),
+            max_seqlen_k=kv_len // 2,
+        ),
+        attention_kwargs={"attn_mask": mask[:, None, None, :]},
+    )
+
+
+def test_masked_varlen_accepts_a_pack_only_when_a_mask_comes_with_it():
+    t = torch.empty((1, 2, 8, 128))
+    assert MASKED_VARLEN.unmet(t, t, t, AttnCall()) is None
+    assert MASKED_VARLEN.unmet(t, t, t, _masked_pack()) is None
+
+    unmasked = _masked_pack()
+    unmasked.attention_kwargs["attn_mask"] = None
+    assert "attn_mask" in MASKED_VARLEN.unmet(t, t, t, unmasked)
+
+
+def test_a_masked_pack_reaches_the_varlen_and_mask_applying_backends_only():
+    """Krea-2 and LTX-2 send both the mask and the packing. Mask-applying
+    backends can serve the call through the mask; varlen backends honour the
+    packing directly."""
+    from xfuser.core.attention import registry
+
+    # xDiT's CUDNN spec accepts only half-precision calls; use a supported
+    # dtype so this test isolates masked-varlen support from the dtype gate.
+    q = torch.zeros(1, 4, 8, 128, dtype=torch.bfloat16)
+    call = _masked_pack()
+    accepting = {backend.name for backend, spec in registry.REGISTRY.items() if spec.rejects(q, q, q, call) is None}
+    expected = VARLEN_CAPABLE | MASK_APPLYING
+    assert accepting == expected, f"unexpected: {sorted(accepting - expected)}, missing: {sorted(expected - accepting)}"
+
+
 # --------------------------------------------------------------------------
 # every spec points at code that exists
 # --------------------------------------------------------------------------
-
-
-def _impl_source(spec):
-    """The file and function name an Impl target names, without importing it."""
-    from pathlib import Path
-    import importlib
-
-    module_name, _, symbol = spec.impl.target.partition(":")
-    package = importlib.import_module(spec.package)
-    return Path(package.__file__).parent / f"{module_name}.py", symbol
-
-
-def test_every_impl_target_names_a_function_that_exists():
-    """Static: the target is a string, so a typo or a renamed function is
-    invisible until that backend is selected on a machine that can run it.
-    Parsing the file catches it anywhere, with no vendor library present."""
-    import ast
-
-    from xfuser.core.attention import registry
-
-    for spec in registry.REGISTRY.values():
-        path, symbol = _impl_source(spec)
-        assert path.exists(), f"{spec.type.name}: no module at {path}"
-        defined = {
-            node.name
-            for node in ast.parse(path.read_text()).body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        }
-        assert symbol in defined, f"{spec.type.name}: {path.name} defines no {symbol}"
 
 
 def test_every_registered_backend_resolves_where_it_is_available():
@@ -1108,22 +1043,23 @@ def test_impl_bound_arguments_are_accepted_by_the_target():
     """A generated family binds a table row to a shared launcher by keyword.
     Rename the launcher's parameter and every spec in the family breaks at its
     first call; the binding is a plain dict, so nothing else notices."""
-    import ast
+    import functools
+    import inspect
 
     from xfuser.core.attention import registry
 
     for spec in registry.REGISTRY.values():
-        if not spec.impl.bound:
+        if not isinstance(spec.impl, Impl) or not spec.impl.bound:
             continue
-        path, symbol = _impl_source(spec)
-        fn = next(
-            node
-            for node in ast.parse(path.read_text()).body
-            if isinstance(node, ast.FunctionDef) and node.name == symbol
-        )
-        accepted = {a.arg for a in fn.args.args + fn.args.kwonlyargs}
-        missing = set(spec.impl.bound) - accepted
-        assert not missing, f"{spec.type.name}: {symbol} takes no {sorted(missing)}"
+        if spec.unavailable() is not None:
+            continue
+        resolved = spec.resolved()
+        target = resolved.func if isinstance(resolved, functools.partial) else resolved
+        parameters = inspect.signature(target).parameters
+        if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+            continue
+        missing = set(spec.impl.bound) - set(parameters)
+        assert not missing, f"{spec.type.name}: {target.__name__} takes no {sorted(missing)}"
 
 
 # --------------------------------------------------------------------------

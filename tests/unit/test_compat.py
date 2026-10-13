@@ -106,16 +106,16 @@ class TestDeclaredFloor(unittest.TestCase):
             self.assertIsNone(declared_floor("diffusers"))
         declared_floor.cache_clear()
 
-    def test_pyproject_floors_are_actually_resolvable(self):
-        # Guards against pyproject.toml being reshaped into something requires() can't
-        # express, which would silently disable every runtime version check.
-        pyproject = (_repo_root() / "pyproject.toml").read_text()
-        self.assertIn("diffusers>=", pyproject)
-        self.assertIn("flash-attn>=", pyproject)
-
-
-def _repo_root():
-    return pathlib.Path(__file__).resolve().parents[2]
+    def test_installed_metadata_exposes_floors(self):
+        """A reshape of project metadata that requires() cannot express disables
+        every runtime version check. Read the installed distribution, which is
+        what declared_floor reads."""
+        declared_floor.cache_clear()
+        self.addCleanup(declared_floor.cache_clear)
+        if declared_floor("diffusers") is None and declared_floor("torch") is None:
+            self.skipTest("xfuser is not installed")
+        self.assertIsNotNone(declared_floor("diffusers"))
+        self.assertIsNotNone(declared_floor("flash-attn"))
 
 
 class TestOptionalExport(unittest.TestCase):

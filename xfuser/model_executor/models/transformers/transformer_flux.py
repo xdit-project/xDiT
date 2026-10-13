@@ -1,10 +1,9 @@
 import inspect
 import torch
 import torch.distributed
-import torch.nn as nn
 from typing import Optional, Dict, Any, Union, Tuple
 
-#from diffusers.models.embeddings import PatchEmbed
+# from diffusers.models.embeddings import PatchEmbed
 from diffusers.models.transformers.transformer_flux import (
     _get_qkv_projections,
     FluxTransformer2DModel,
@@ -24,7 +23,6 @@ from diffusers.models.embeddings import apply_rotary_emb
 from xfuser.core.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
     is_pipeline_first_stage,
-    is_pipeline_last_stage,
 )
 from xfuser.core.distributed import (
     get_classifier_free_guidance_world_size,
@@ -50,7 +48,7 @@ from xfuser.model_executor.models.transformers.base_transformer import (
 from xfuser.model_executor.layers import xFuserLayerWrappersRegister
 from xfuser.model_executor.layers.attention_processor import (
     xFuserAttentionBaseWrapper,
-    xFuserAttentionProcessorRegister
+    xFuserAttentionProcessorRegister,
 )
 from xfuser.model_executor.layers.usp import USP
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
@@ -72,9 +70,7 @@ class xFuserFluxAttentionWrapper(xFuserAttentionBaseWrapper):
         attention: FluxAttention,
     ):
         super().__init__(attention=attention)
-        self.processor = xFuserAttentionProcessorRegister.get_processor(
-            attention.processor
-        )()
+        self.processor = xFuserAttentionProcessorRegister.get_processor(attention.processor)()
 
     def forward(
         self,
@@ -93,6 +89,7 @@ class xFuserFluxAttentionWrapper(xFuserAttentionBaseWrapper):
             )
         kwargs = {k: w for k, w in kwargs.items() if k in attn_parameters}
         return self.processor(self, hidden_states, encoder_hidden_states, attention_mask, image_rotary_emb, **kwargs)
+
 
 def _split_rotary_emb(image_rotary_emb, num_text_tokens: int, num_image_tokens: int):
     """Split a diffusers ``(cos, sin)`` pair at the text/image boundary.
@@ -125,14 +122,13 @@ def _split_rotary_emb(image_rotary_emb, num_text_tokens: int, num_image_tokens: 
 
 @xFuserAttentionProcessorRegister.register(FluxAttnProcessor)
 class xFuserFluxAttnProcessor(FluxAttnProcessor):
-
     def __init__(self):
         super().__init__()
         use_long_ctx_attn_kvcache = True
         self.use_long_ctx_attn_kvcache = (
             HAS_LONG_CTX_ATTN
             and use_long_ctx_attn_kvcache
-            and _SP # required for pipeline parallelism
+            and _SP  # required for pipeline parallelism
             and get_sequence_parallel_world_size() > 1
         )
 
@@ -174,9 +170,7 @@ class xFuserFluxAttnProcessor(FluxAttnProcessor):
                     attn.norm_added_k,
                     txt_rope,
                 )
-                query, key = flydsl_fused_qk_norm_rope(
-                    query, key, attn.norm_q, attn.norm_k, img_rope
-                )
+                query, key = flydsl_fused_qk_norm_rope(query, key, attn.norm_q, attn.norm_k, img_rope)
 
                 query = torch.cat([encoder_query, query], dim=1)
                 key = torch.cat([encoder_key, key], dim=1)
@@ -184,9 +178,7 @@ class xFuserFluxAttnProcessor(FluxAttnProcessor):
 
                 if txt_rope is None and image_rotary_emb is not None:
                     # tables could not be split -> apply RoPE on the joint stream
-                    query, key = flydsl_fused_qk_norm_rope(
-                        query, key, None, None, image_rotary_emb
-                    )
+                    query, key = flydsl_fused_qk_norm_rope(query, key, None, None, image_rotary_emb)
             else:
                 # No AITER: the original unfused diffusers path (norm then rope
                 # on the joint stream), unchanged from before the fused kernel.
@@ -204,14 +196,10 @@ class xFuserFluxAttnProcessor(FluxAttnProcessor):
                     key = apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
 
         else:
-            num_encoder_hidden_states_tokens = (
-                get_runtime_state().max_condition_sequence_length
-            )
+            num_encoder_hidden_states_tokens = get_runtime_state().max_condition_sequence_length
             num_query_tokens = query.shape[1] - num_encoder_hidden_states_tokens
             if _HAS_FLYDSL:
-                query, key = flydsl_fused_qk_norm_rope(
-                    query, key, attn.norm_q, attn.norm_k, image_rotary_emb
-                )
+                query, key = flydsl_fused_qk_norm_rope(query, key, attn.norm_q, attn.norm_k, image_rotary_emb)
             else:
                 query = attn.norm_q(query)
                 key = attn.norm_k(key)
@@ -220,13 +208,8 @@ class xFuserFluxAttnProcessor(FluxAttnProcessor):
                     key = apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
 
         distri_cache_updated = False
-        if (
-            get_runtime_state().num_pipeline_patch > 1
-            and not self.use_long_ctx_attn_kvcache
-        ):
-            encoder_hidden_states_key_proj, key = key.split(
-                [num_encoder_hidden_states_tokens, num_query_tokens], dim=1
-            )
+        if get_runtime_state().num_pipeline_patch > 1 and not self.use_long_ctx_attn_kvcache:
+            encoder_hidden_states_key_proj, key = key.split([num_encoder_hidden_states_tokens, num_query_tokens], dim=1)
             encoder_hidden_states_value_proj, value = value.split(
                 [num_encoder_hidden_states_tokens, num_query_tokens], dim=1
             )
@@ -246,9 +229,7 @@ class xFuserFluxAttnProcessor(FluxAttnProcessor):
 
         uses_pipeline_parallelism = get_runtime_state().num_pipeline_patch > 1
         if not uses_pipeline_parallelism:
-            hidden_states = USP(
-                query, key, value, combine_qkv_a2a=True, attn_layer=attn
-            )
+            hidden_states = USP(query, key, value, combine_qkv_a2a=True, attn_layer=attn)
             hidden_states = hidden_states.transpose(1, 2)
         else:
             if get_runtime_state().split_text_embed_in_sp:
@@ -283,7 +264,6 @@ class xFuserFluxAttnProcessor(FluxAttnProcessor):
             )
             hidden_states = hidden_states.transpose(1, 2)
 
-
         hidden_states = hidden_states.flatten(2, 3)
         hidden_states = hidden_states.to(query.dtype)
 
@@ -298,8 +278,6 @@ class xFuserFluxAttnProcessor(FluxAttnProcessor):
             return hidden_states, encoder_hidden_states
         else:
             return hidden_states
-
-
 
 
 def flux_attn_modules(transformer) -> list[torch.nn.Module]:
@@ -318,7 +296,6 @@ def flux_attn_modules(transformer) -> list[torch.nn.Module]:
 
 
 class xFuserFlux1Transformer2DWrapper(FluxTransformer2DModel):
-
     def __init__(
         self,
         patch_size: int = 1,
@@ -352,7 +329,7 @@ class xFuserFlux1Transformer2DWrapper(FluxTransformer2DModel):
         register_fp8_comms_eligible_modules(self, flux_attn_modules(self))
 
     def pad_to_sp_divisible(self, tensor: torch.Tensor, padding_length: int, dim: int) -> torch.Tensor:
-        padding =  torch.zeros(
+        padding = torch.zeros(
             *tensor.shape[:dim], padding_length, *tensor.shape[dim + 1 :], dtype=tensor.dtype, device=tensor.device
         )
         tensor = torch.cat([tensor, padding], dim=dim)
@@ -368,49 +345,40 @@ class xFuserFlux1Transformer2DWrapper(FluxTransformer2DModel):
         txt_ids: torch.Tensor = None,
         **kwargs,
     ):
-
         sp_world_size = get_sequence_parallel_world_size()
         sequence_length = hidden_states.shape[1]
         padding_length = (sp_world_size - (sequence_length % sp_world_size)) % sp_world_size
         if padding_length > 0:
             hidden_states = self._pad_to_sp_divisible(hidden_states, padding_length, dim=1)
             img_ids = self._pad_to_sp_divisible(img_ids, padding_length, dim=0)
-        assert (
-            hidden_states.shape[0] % get_classifier_free_guidance_world_size() == 0
-        ), f"Cannot split dim 0 of hidden_states ({hidden_states.shape[0]}) into {get_classifier_free_guidance_world_size()} parts."
+        assert hidden_states.shape[0] % get_classifier_free_guidance_world_size() == 0, (
+            f"Cannot split dim 0 of hidden_states ({hidden_states.shape[0]}) into {get_classifier_free_guidance_world_size()} parts."
+        )
         if encoder_hidden_states.shape[-2] % get_sequence_parallel_world_size() != 0:
             get_runtime_state().split_text_embed_in_sp = False
         else:
             get_runtime_state().split_text_embed_in_sp = True
 
-        if (
-            isinstance(timestep, torch.Tensor)
-            and timestep.ndim != 0
-            and timestep.shape[0] == hidden_states.shape[0]
-        ):
-            timestep = torch.chunk(
-                timestep, get_classifier_free_guidance_world_size(), dim=0
-            )[get_classifier_free_guidance_rank()]
-        hidden_states = torch.chunk(
-            hidden_states, get_classifier_free_guidance_world_size(), dim=0
-        )[get_classifier_free_guidance_rank()]
-        hidden_states = torch.chunk(
-            hidden_states, get_sequence_parallel_world_size(), dim=-2
-        )[get_sequence_parallel_rank()]
-        encoder_hidden_states = torch.chunk(
-            encoder_hidden_states, get_classifier_free_guidance_world_size(), dim=0
-        )[get_classifier_free_guidance_rank()]
-        if get_runtime_state().split_text_embed_in_sp:
-            encoder_hidden_states = torch.chunk(
-                encoder_hidden_states, get_sequence_parallel_world_size(), dim=-2
-            )[get_sequence_parallel_rank()]
-        img_ids = torch.chunk(img_ids, get_sequence_parallel_world_size(), dim=-2)[
+        if isinstance(timestep, torch.Tensor) and timestep.ndim != 0 and timestep.shape[0] == hidden_states.shape[0]:
+            timestep = torch.chunk(timestep, get_classifier_free_guidance_world_size(), dim=0)[
+                get_classifier_free_guidance_rank()
+            ]
+        hidden_states = torch.chunk(hidden_states, get_classifier_free_guidance_world_size(), dim=0)[
+            get_classifier_free_guidance_rank()
+        ]
+        hidden_states = torch.chunk(hidden_states, get_sequence_parallel_world_size(), dim=-2)[
             get_sequence_parallel_rank()
         ]
+        encoder_hidden_states = torch.chunk(encoder_hidden_states, get_classifier_free_guidance_world_size(), dim=0)[
+            get_classifier_free_guidance_rank()
+        ]
         if get_runtime_state().split_text_embed_in_sp:
-            txt_ids = torch.chunk(txt_ids, get_sequence_parallel_world_size(), dim=-2)[
+            encoder_hidden_states = torch.chunk(encoder_hidden_states, get_sequence_parallel_world_size(), dim=-2)[
                 get_sequence_parallel_rank()
             ]
+        img_ids = torch.chunk(img_ids, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
+        if get_runtime_state().split_text_embed_in_sp:
+            txt_ids = torch.chunk(txt_ids, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
 
         output = super().forward(
             hidden_states,
@@ -441,15 +409,11 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
     ):
         super().__init__(
             transformer=transformer,
-            submodule_classes_to_wrap=(
-                [FeedForward] if get_tensor_model_parallel_world_size() > 1 else []
-            ),
+            submodule_classes_to_wrap=([FeedForward] if get_tensor_model_parallel_world_size() > 1 else []),
             submodule_name_to_wrap=["attn"],
             transformer_blocks_name=["transformer_blocks", "single_transformer_blocks"],
         )
-        self.encoder_hidden_states_cache = [
-            None for _ in range(len(self.transformer_blocks))
-        ]
+        self.encoder_hidden_states_cache = [None for _ in range(len(self.transformer_blocks))]
         register_fp8_comms_eligible_modules(self, flux_attn_modules(self))
 
     def forward(
@@ -500,10 +464,7 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
             # weight the lora layers by setting `lora_scale` for each PEFT layer
             scale_lora_layers(self, lora_scale)
         else:
-            if (
-                joint_attention_kwargs is not None
-                and joint_attention_kwargs.get("scale", None) is not None
-            ):
+            if joint_attention_kwargs is not None and joint_attention_kwargs.get("scale", None) is not None:
                 logger.warning(
                     "Passing `scale` via `joint_attention_kwargs` when not using the PEFT backend is ineffective."
                 )
@@ -552,18 +513,14 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
 
                     return custom_forward
 
-                ckpt_kwargs: Dict[str, Any] = (
-                    {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
-                )
-                encoder_hidden_states, hidden_states = (
-                    torch.utils.checkpoint.checkpoint(
-                        create_custom_forward(block),
-                        hidden_states,
-                        encoder_hidden_states,
-                        temb,
-                        image_rotary_emb,
-                        **ckpt_kwargs,
-                    )
+                ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
+                encoder_hidden_states, hidden_states = torch.utils.checkpoint.checkpoint(
+                    create_custom_forward(block),
+                    hidden_states,
+                    encoder_hidden_states,
+                    temb,
+                    image_rotary_emb,
+                    **ckpt_kwargs,
                 )
 
             else:
@@ -594,9 +551,7 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
 
                     return custom_forward
 
-                ckpt_kwargs: Dict[str, Any] = (
-                    {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
-                )
+                ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
                 encoder_hidden_states, hidden_states = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(block),
                     hidden_states,
@@ -622,7 +577,6 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
             #         hidden_states[:, encoder_hidden_states.shape[1] :, ...]
             #         + controlnet_single_block_samples[index_block // interval_control]
             #     )
-
 
         hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
         encoder_hidden_states = hidden_states[:, : encoder_hidden_states.shape[1], ...]

@@ -120,7 +120,8 @@ def _run_isolated(check, tmp_path):
         args=(f"file://{tmp_path / 'nccl-init'}", check, result_queue),
     )
     process.start()
-    process.join(60)
+    # Include interpreter startup and cold imports on slow filesystems (#817).
+    process.join(600)
     if process.is_alive():
         process.terminate()
         process.join(5)

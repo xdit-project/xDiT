@@ -1,7 +1,5 @@
 """Distributed tests for model-replica process-group membership."""
 
-import queue
-import time
 import traceback
 from contextlib import nullcontext
 from unittest.mock import patch
@@ -94,44 +92,6 @@ def _nccl_model_replica_group_worker(rank, world_size, init_method, result_queue
     )
 
 
-def _run_spawned(torch, worker, init_method, *, world_size, timeout):
-    context = torch.multiprocessing.get_context("spawn")
-    result_queue = context.Queue()
-    processes = [
-        context.Process(
-            target=worker,
-            args=(rank, world_size, init_method, result_queue),
-        )
-        for rank in range(world_size)
-    ]
-    for process in processes:
-        process.start()
-
-    deadline = time.monotonic() + timeout
-    for process in processes:
-        process.join(max(0.0, deadline - time.monotonic()))
-
-    hung = [process.pid for process in processes if process.is_alive()]
-    for process in processes:
-        if process.is_alive():
-            process.terminate()
-            process.join(5)
-
-    for process in processes:
-        if process.is_alive():
-            process.kill()
-            process.join(5)
-    survivors = [process.pid for process in processes if process.is_alive()]
-
-    results = []
-    while len(results) < world_size:
-        try:
-            results.append(result_queue.get(timeout=1))
-        except queue.Empty:
-            break
-    return processes, hung, survivors, results
-
-
 def _require_torch_distributed():
     torch = pytest.importorskip("torch", reason="PyTorch is required for distributed process-group tests")
     if not torch.distributed.is_available():
@@ -172,37 +132,35 @@ def _assert_replica_group_results(processes, hung, survivors, results):
 @pytest.mark.accelerator
 @pytest.mark.multi_gpu
 @pytest.mark.slow
-def test_model_replica_group_on_real_gpus_without_hanging(tmp_path):
+def test_model_replica_group_on_real_gpus_without_hanging(tmp_path, run_spawned):
     torch = _require_torch_distributed()
     unavailable = _real_gpu_unavailability(torch)
     if unavailable:
         pytest.skip(f"real-GPU model-replica test requirements unsatisfied: {unavailable}")
 
-    processes, hung, survivors, results = _run_spawned(
+    processes, hung, survivors, results = run_spawned(
         torch,
         _nccl_model_replica_group_worker,
         f"file://{tmp_path / 'model-replica-nccl-init'}",
         world_size=_WORLD_SIZE,
-        timeout=60,
     )
 
     _assert_replica_group_results(processes, hung, survivors, results)
 
 
 @pytest.mark.slow
-def test_model_replica_group_on_cpu_without_hanging(tmp_path):
+def test_model_replica_group_on_cpu_without_hanging(tmp_path, run_spawned):
     torch = _require_torch_distributed()
     if _real_gpu_unavailability(torch) is None:
         pytest.skip("real GPUs are available; the NCCL test covers replica-group behavior")
     if not torch.distributed.is_gloo_available():
         pytest.skip("torch.distributed gloo backend is unavailable")
 
-    processes, hung, survivors, results = _run_spawned(
+    processes, hung, survivors, results = run_spawned(
         torch,
         _gloo_model_replica_group_worker,
         f"file://{tmp_path / 'model-replica-gloo-init'}",
         world_size=_WORLD_SIZE,
-        timeout=30,
     )
 
     _assert_replica_group_results(processes, hung, survivors, results)

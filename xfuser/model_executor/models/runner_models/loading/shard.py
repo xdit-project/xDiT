@@ -22,17 +22,31 @@ from .format_backends import module_path_is_covered, module_paths_overlap
 
 
 def shard_pipeline_components(loader) -> None:
-    """Shard every component the run's fsdp_strategy names, and move the rest to the local device."""
+    """Shard selected strategy components and place the rest locally."""
     model = loader.model
     local_rank = get_world_group().local_rank
     fs_local_rank = get_fs_group().local_rank
     device_group = get_fs_group().device_group
+    requested = getattr(model.config, "fully_shard_components", None)
+    strategy_components = set(model.settings.fsdp_strategy)
+    sharded_components = strategy_components if requested is None else set(requested)
+    unknown = sharded_components - strategy_components
+    if unknown:
+        raise ValueError(
+            "--fully_shard_components contains components without an FSDP "
+            f"strategy: {sorted(unknown)}. Available components: "
+            f"{sorted(strategy_components)}"
+        )
+    if requested is None:
+        loader.fill_eager_transformers()
+    else:
+        loader.fill_eager_transformers(component_names=set(model.pipe.components) - sharded_components)
     for component_name, component in model.pipe.components.items():
-        if component_name in model.settings.fsdp_strategy:
+        if component_name in sharded_components:
             log(
                 f"Sharding {component_name} with FSDP... "
                 f"(host cur/anon/file: {host_mem_gb()} GB, "
-                f"VRAM: {torch.cuda.memory_allocated(local_rank)/1e9:.2f}GB)"
+                f"VRAM: {torch.cuda.memory_allocated(local_rank) / 1e9:.2f}GB)"
             )
             strategy = model.settings.fsdp_strategy[component_name]
             wrap_attrs = strategy.get("wrap_attrs", [])
@@ -46,9 +60,7 @@ def shard_pipeline_components(loader) -> None:
             # rank0.
             # Agreed across the fs group: this picks a collective branch, so a rank-local
             # answer that diverged would hang instead of raising.
-            is_meta = loader.agreed_is_meta(
-                component, component_name, get_fs_group(), f"cuda:{fs_local_rank}"
-            )
+            is_meta = loader.agreed_is_meta(component, component_name, get_fs_group(), f"cuda:{fs_local_rank}")
             is_selffill = is_meta and loader.self_fills_from_disk(component)
             load_block_fn = load_epilogue_fn = None
             if is_selffill:
@@ -95,29 +107,25 @@ def shard_pipeline_components(loader) -> None:
                 load_epilogue_fn=load_epilogue_fn,
             )
             if is_meta and not is_selffill:
-                loader.broadcast_load(
-                    fsdp_object, component_name, offload_policy == "cpu"
-                )
+                loader.broadcast_load(fsdp_object, component_name, offload_policy == "cpu")
             setattr(model.pipe, component_name, fsdp_object)
             torch.cuda.empty_cache()
             log(
                 f"Sharded {component_name}. "
                 f"(host cur/anon/file: {host_mem_gb()} GB, "
-                f"VRAM: {torch.cuda.memory_allocated(local_rank)/1e9:.2f}GB)"
+                f"VRAM: {torch.cuda.memory_allocated(local_rank) / 1e9:.2f}GB)"
             )
         else:
             log(f"Skipping FSDP wrapping for {component_name}...")
             if hasattr(component, "to"):
                 component.to(f"cuda:{local_rank}")
             else:
-                log(
-                    f"Component {component_name} has no .to() method, skipping device move."
-                )
+                log(f"Component {component_name} has no .to() method, skipping device move.")
 
-    _give_cpu_offloaded_components_an_exec_device_hook(model, local_rank)
+    _give_cpu_offloaded_components_an_exec_device_hook(model, local_rank, sharded_components)
 
 
-def _give_cpu_offloaded_components_an_exec_device_hook(model, local_rank: int) -> None:
+def _give_cpu_offloaded_components_an_exec_device_hook(model, local_rank: int, sharded_components=None) -> None:
     """Keep diffusers' _execution_device from resolving to cpu on a cpu-offloaded pipeline.
 
     _execution_device short-circuits on the first nn.Module component that lacks _hf_hook, returning
@@ -128,7 +136,7 @@ def _give_cpu_offloaded_components_an_exec_device_hook(model, local_rank: int) -
     cpu_offloaded = {
         name
         for name, s in model.settings.fsdp_strategy.items()
-        if s.get("offload_policy") == "cpu"
+        if s.get("offload_policy") == "cpu" and (sharded_components is None or name in sharded_components)
     }
     if not cpu_offloaded:
         return
@@ -142,18 +150,13 @@ def _give_cpu_offloaded_components_an_exec_device_hook(model, local_rank: int) -
         if not isinstance(component, torch.nn.Module):
             continue
         if not hasattr(component, "_hf_hook"):
-            component._hf_hook = _ExecDeviceHook(
-                cuda_device if name in cpu_offloaded else None
-            )
+            component._hf_hook = _ExecDeviceHook(cuda_device if name in cpu_offloaded else None)
 
 
 def _wrapped_block_paths(component, component_name, wrap_attrs):
     paths = []
     for attr in wrap_attrs:
-        paths.extend(
-            f"{component_name}.{attr}.{index}"
-            for index, _ in enumerate(rgetattr(component, attr))
-        )
+        paths.extend(f"{component_name}.{attr}.{index}" for index, _ in enumerate(rgetattr(component, attr)))
     return tuple(paths)
 
 
@@ -168,21 +171,15 @@ def _block_local_targets(targets, block_path):
 
 
 def _target_filter(targets, excluded_targets=(), include_suffixes=None):
-    return lambda _module, fqn: any(
-        not target or fqn == target or fqn.startswith(f"{target}.")
-        for target in targets
-    ) and not any(
-        module_path_is_covered(fqn, target) for target in excluded_targets
-    ) and (
-        not include_suffixes or fqn.endswith(tuple(include_suffixes))
+    return (
+        lambda _module, fqn: any(not target or fqn == target or fqn.startswith(f"{target}.") for target in targets)
+        and not any(module_path_is_covered(fqn, target) for target in excluded_targets)
+        and (not include_suffixes or fqn.endswith(tuple(include_suffixes)))
     )
 
 
 def _has_unowned_target(targets, owners):
-    return any(
-        not any(module_path_is_covered(target, owner) for owner in owners)
-        for target in targets
-    )
+    return any(not any(module_path_is_covered(target, owner) for owner in owners) for target in targets)
 
 
 def build_block_quantize_fn(
@@ -209,20 +206,13 @@ def build_block_quantize_fn(
     use_fp6 = bool(getattr(config, "use_fp6_gemms", False))
     use_fp6_mixed = use_fp6 and config.use_fp4_gemms
     pure_fp6 = use_fp6 and not config.use_fp4_gemms
-    if not (
-        config.use_fp4_gemms
-        or config.use_fp8_gemms
-        or config.use_int8_gemms
-        or use_fp6
-    ):
+    if not (config.use_fp4_gemms or config.use_fp8_gemms or config.use_int8_gemms or use_fp6):
         return None
 
     device = f"cuda:{local_rank}"
     fp4_list = set(loader.quantization_plan.module_list("fp4"))
     fp8_list = set(loader.quantization_plan.module_list())
-    fp6_list = (
-        set(loader.quantization_plan.module_list("fp6")) if pure_fp6 else set()
-    )
+    fp6_list = set(loader.quantization_plan.module_list("fp6")) if pure_fp6 else set()
     fp8_overrides = settings.fp8_precision_overrides or ()
     fp8_suffix_overrides = settings.fp8_precision_override_suffixes
     int8_list = set(loader.quantization_plan.module_list("int8"))
@@ -230,44 +220,27 @@ def build_block_quantize_fn(
     paths = [f"{component_name}.{a}" for a in wrap_attrs]
 
     def overlaps_any(targets):
-        return any(
-            module_paths_overlap(path, target) for path in paths for target in targets
-        )
+        return any(module_paths_overlap(path, target) for path in paths for target in targets)
 
     use_fp4_here = config.use_fp4_gemms and overlaps_any(fp4_list)
-    use_fp6_here = (pure_fp6 and overlaps_any(fp6_list)) or (
-        use_fp6_mixed and overlaps_any(fp8_list)
-    )
+    use_fp6_here = (pure_fp6 and overlaps_any(fp6_list)) or (use_fp6_mixed and overlaps_any(fp8_list))
     # fp8-only: in fp8 list but not fp4 list (e.g. transformer_2 in Wan2.2 FP4 mode)
     use_fp8_here = not use_fp6 and (
         (config.use_fp8_gemms and overlaps_any(fp8_list))
-        or (
-            config.use_fp4_gemms
-            and overlaps_any(fp8_list)
-            and not overlaps_any(fp4_list)
-        )
+        or (config.use_fp4_gemms and overlaps_any(fp8_list) and not overlaps_any(fp4_list))
     )
     use_int8_here = config.use_int8_gemms and overlaps_any(int8_list)
 
     if not use_fp4_here and not use_fp6_here and not use_fp8_here and not use_int8_here:
         return None
 
-    block_paths = (
-        _wrapped_block_paths(component, component_name, wrap_attrs)
-        if component is not None
-        else None
-    )
+    block_paths = _wrapped_block_paths(component, component_name, wrap_attrs) if component is not None else None
     if block_paths is None and len(wrap_attrs) != 1:
-        raise ValueError(
-            "multiple wrap_attrs require the component to resolve flattened "
-            "block indices"
-        )
+        raise ValueError("multiple wrap_attrs require the component to resolve flattened block indices")
 
     def quantize_fn(block, block_idx: int) -> None:
         block_path = (
-            block_paths[block_idx]
-            if block_paths is not None
-            else f"{component_name}.{wrap_attrs[0]}.{block_idx}"
+            block_paths[block_idx] if block_paths is not None else f"{component_name}.{wrap_attrs[0]}.{block_idx}"
         )
         local_fp4_targets = _block_local_targets(fp4_list, block_path)
         local_fp8_targets = _block_local_targets(fp8_list, block_path)
@@ -277,47 +250,27 @@ def build_block_quantize_fn(
         use_fp6_block = (pure_fp6 and local_fp6_targets is not None) or (
             use_fp6_mixed
             and local_fp8_targets is not None
-            and (
-                local_fp4_targets is None
-                or _has_unowned_target(local_fp8_targets, local_fp4_targets)
-            )
+            and (local_fp4_targets is None or _has_unowned_target(local_fp8_targets, local_fp4_targets))
         )
         use_fp8_block = not use_fp6 and (
             (config.use_fp8_gemms and local_fp8_targets is not None)
             or (
                 config.use_fp4_gemms
                 and local_fp8_targets is not None
-                and (
-                    local_fp4_targets is None
-                    or _has_unowned_target(local_fp8_targets, local_fp4_targets)
-                )
+                and (local_fp4_targets is None or _has_unowned_target(local_fp8_targets, local_fp4_targets))
             )
         )
         use_int8_block = config.use_int8_gemms and local_int8_targets is not None
-        if (
-            not use_fp4_block
-            and not use_fp6_block
-            and not use_fp8_block
-            and not use_int8_block
-        ):
+        if not use_fp4_block and not use_fp6_block and not use_fp8_block and not use_int8_block:
             return
 
         block_prefix = f"{block_idx}."
         # Strip the block-index prefix so the quantize functions see local FQN paths.
-        local_fp8 = (
-            tuple(
-                o[len(block_prefix) :]
-                for o in fp8_overrides
-                if o.startswith(block_prefix)
-            )
-            or None
-        )
+        local_fp8 = tuple(o[len(block_prefix) :] for o in fp8_overrides if o.startswith(block_prefix)) or None
         if use_fp4_block:
             adapter = loader.backends.format
             if adapter is None:
-                raise RuntimeError(
-                    "FP4 block conversion requested without a selected backend"
-                )
+                raise RuntimeError("FP4 block conversion requested without a selected backend")
             adapter.convert_block(
                 block,
                 fp8_layers=local_fp8,
@@ -329,9 +282,7 @@ def build_block_quantize_fn(
         if use_fp6_block:
             adapter = loader.backends.format if pure_fp6 else loader.backends.fp6
             if adapter is None:
-                raise RuntimeError(
-                    "MXFP6 block conversion requested without a selected backend"
-                )
+                raise RuntimeError("MXFP6 block conversion requested without a selected backend")
             targets = local_fp6_targets if pure_fp6 else local_fp8_targets
             adapter.convert_block(
                 block,
@@ -339,19 +290,13 @@ def build_block_quantize_fn(
                 filter_fn=_target_filter(
                     targets,
                     (local_fp4_targets if use_fp6_mixed and use_fp4_block else ()),
-                    (
-                        getattr(settings, "fp8_gemm_include_suffixes", None)
-                        if use_fp6_mixed
-                        else None
-                    ),
+                    (getattr(settings, "fp8_gemm_include_suffixes", None) if use_fp6_mixed else None),
                 ),
             )
         if use_fp8_block:
             adapter = loader.backends.blockwise_fp8
             if adapter is None:
-                raise RuntimeError(
-                    "FP8 block conversion requested without a selected backend"
-                )
+                raise RuntimeError("FP8 block conversion requested without a selected backend")
             adapter.convert_block(
                 block,
                 device=device,
@@ -364,9 +309,7 @@ def build_block_quantize_fn(
         elif use_int8_block:
             adapter = loader.backends.format
             if adapter is None:
-                raise RuntimeError(
-                    "INT8 block conversion requested without a selected backend"
-                )
+                raise RuntimeError("INT8 block conversion requested without a selected backend")
             adapter.convert_block(
                 block,
                 device=device,

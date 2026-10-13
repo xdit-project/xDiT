@@ -11,7 +11,6 @@ from __future__ import annotations
 import ast
 import configparser
 import fnmatch
-import os
 import sys
 from pathlib import Path
 
@@ -31,14 +30,25 @@ def find_problems(root: Path) -> list[str]:
     if not tests_root.is_dir():
         return problems + ["tests/ is missing"]
 
-    for dirpath, dirnames, filenames in os.walk(tests_root):
-        dirnames[:] = [name for name in dirnames if name != "__pycache__"]
-        for filename in filenames:
-            if not filename.endswith(".py"):
-                continue
-            path = Path(dirpath) / filename
-            problems.extend(_file_problems(root, path))
+    for path in _python_files(tests_root):
+        problems.extend(_file_problems(root, path))
     return problems
+
+
+def _python_files(directory: Path) -> list[Path]:
+    """Python files in ``directory``, each directory before its children, names sorted."""
+    files: list[Path] = []
+    subdirectories: list[Path] = []
+    for child in sorted(directory.iterdir(), key=lambda path: path.name):
+        if child.name == "__pycache__":
+            continue
+        if child.is_dir():
+            subdirectories.append(child)
+        elif child.suffix == ".py":
+            files.append(child)
+    for subdirectory in subdirectories:
+        files.extend(_python_files(subdirectory))
+    return files
 
 
 def _testpaths_problems(root: Path) -> list[str]:
@@ -74,11 +84,12 @@ def _file_problems(root: Path, path: Path) -> list[str]:
     if not items:
         return [f"{relative} is a test module with no tests"]
     if bucket == "tests/e2e":
-        return []
+        return _source_inspection_problems(relative, tree)
 
     problems = []
+    problems.extend(_source_inspection_problems(relative, tree))
     implied_accelerator = bucket == "tests/integration/accelerator"
-    for name, marks, needs_gpu in items:
+    for name, marks, needs_gpu, places_on_device in items:
         node = f"{relative}::{name}"
         accelerator = implied_accelerator or "accelerator" in marks
         if "gloo" in marks and bucket != "tests/integration/cpu":
@@ -90,6 +101,10 @@ def _file_problems(root: Path, path: Path) -> list[str]:
             problems.append(
                 f"{node} skips unless a GPU is present but is not marked accelerator, "
                 "so the accelerator selectors never run it"
+            )
+        if places_on_device and bucket == "tests/unit" and not accelerator:
+            problems.append(
+                f"{node} places a tensor on cuda but is not marked accelerator, so the CPU selector runs it"
             )
         if "nvidia" in marks and "rocm" in marks:
             problems.append(f"{node} is marked both nvidia and rocm, so neither vendor selector runs it")
@@ -118,13 +133,13 @@ def _selected(bucket: str, marks: set[str]) -> bool:
     return True
 
 
-def _test_items(tree: ast.AST) -> list[tuple[str, set[str], bool]]:
+def _test_items(tree: ast.AST) -> list[tuple[str, set[str], bool, bool]]:
     module_marks, module_needs_gpu = _scope_marks(tree.body)
     items = []
     for node in tree.body:
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name.startswith("test"):
             marks, needs_gpu = _decorator_marks(node.decorator_list)
-            items.append((node.name, module_marks | marks, module_needs_gpu or needs_gpu))
+            items.append((node.name, module_marks | marks, module_needs_gpu or needs_gpu, _places_on_device(node)))
         elif isinstance(node, ast.ClassDef) and _is_test_class(node):
             class_marks, class_needs_gpu = _scope_marks(node.body)
             class_decorator_marks, class_decorator_gpu = _decorator_marks(node.decorator_list)
@@ -133,8 +148,72 @@ def _test_items(tree: ast.AST) -> list[tuple[str, set[str], bool]]:
             for child in node.body:
                 if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef) and child.name.startswith("test"):
                     marks, needs_gpu = _decorator_marks(child.decorator_list)
-                    items.append((f"{node.name}.{child.name}", inherited | marks, inherited_gpu or needs_gpu))
+                    items.append(
+                        (
+                            f"{node.name}.{child.name}",
+                            inherited | marks,
+                            inherited_gpu or needs_gpu,
+                            _places_on_device(child),
+                        )
+                    )
     return items
+
+
+def _source_inspection_problems(relative: str, tree: ast.AST) -> list[str]:
+    found = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        owner = node.func.value
+        if not isinstance(owner, ast.Name):
+            continue
+        if owner.id == "ast" and node.func.attr == "parse":
+            found.add("ast.parse")
+        elif owner.id == "inspect" and node.func.attr == "getsource":
+            found.add("inspect.getsource")
+    return [f"{relative} inspects source with {name}" for name in sorted(found)]
+
+
+def _places_on_device(node: ast.AST) -> bool:
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Call) or not isinstance(child.func, ast.Attribute):
+            continue
+        if child.func.attr == "cuda" and not _is_torch_cuda_namespace(child.func.value):
+            return True
+        if child.func.attr == "to" and _cuda_device_argument(child):
+            return True
+        # Every torch constructor accepting a device= keyword places or creates
+        # state there. Avoid a factory allowlist, which silently misses APIs such
+        # as rand_like, eye, and linspace.
+        if _is_torch(child.func.value) and _cuda_device_keyword(child):
+            return True
+    return False
+
+
+def _is_torch(node: ast.AST) -> bool:
+    return isinstance(node, ast.Name) and node.id == "torch"
+
+
+def _is_torch_cuda_namespace(node: ast.AST) -> bool:
+    return isinstance(node, ast.Attribute) and node.attr == "cuda" and _is_torch(node.value)
+
+
+def _cuda_device_keyword(call: ast.Call) -> bool:
+    for keyword in call.keywords:
+        if keyword.arg != "device" or not isinstance(keyword.value, ast.Constant):
+            continue
+        if isinstance(keyword.value.value, str) and keyword.value.value.startswith("cuda"):
+            return True
+    return False
+
+
+def _cuda_device_argument(call: ast.Call) -> bool:
+    if _cuda_device_keyword(call):
+        return True
+    if not call.args or not isinstance(call.args[0], ast.Constant):
+        return False
+    value = call.args[0].value
+    return isinstance(value, str) and value.startswith("cuda")
 
 
 def _is_test_class(node: ast.ClassDef) -> bool:

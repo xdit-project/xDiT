@@ -11,7 +11,7 @@ _ACCELERATOR_ROOT = Path(__file__).resolve().parent
 def accelerator_ranks(tmp_path):
     """Spawn NCCL/RCCL ranks for one multi-GPU test."""
 
-    def launch(worker, *, world_size, timeout=180, init_filename="dist-init", args=()):
+    def launch(worker, *, world_size, timeout=600, init_filename="dist-init", args=()):
         spawn_accelerator_ranks(
             worker,
             tmp_path,

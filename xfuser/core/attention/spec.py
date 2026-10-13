@@ -30,6 +30,7 @@ class AttentionBackendType(Enum):
     FLASH_4 = "Flash Attention V4"
     FLASH_4_FP4 = "Flash Attention V4 FP4"
     SAGE = "Sage Attention"
+    SOL_ATTN = "Sol Attention"
     FLEX_BLOCK_ATTN = "Flex Block Attention"
     AITER = "AITER"
     AITER_BF16 = "AITER BF16 MHA v4"
@@ -61,6 +62,7 @@ class AttentionBackendType(Enum):
     AITER_VSA = "AITER VSA CK"
     FLEX_VSA_H3 = "Flex VSA-H3"
     TRITON_VSA_H3 = "FastH3 VSA-H3 (Triton)"
+    TRITON_BSA = "Prism block-sparse attention (Triton)"
     FLEX_BLOCK_SPARGE = "Flex Block Sparge"
     AITER_FLYDSL = "AITER FlyDSL"
     AITER_FLYDSL_FP8 = "AITER FlyDSL FP8"
@@ -80,6 +82,7 @@ class Sparsity(Enum):
     SPARGE = "sparge"
     VSA = "vsa"
     H3 = "h3"
+    BSA = "bsa"
 
 
 @dataclass(frozen=True)

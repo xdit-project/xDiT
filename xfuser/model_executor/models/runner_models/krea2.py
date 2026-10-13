@@ -10,7 +10,6 @@ from xfuser.envs import _is_hip
 from xfuser.core.attention.backends.aiter_mha_v4.spec import DENSE_BACKENDS
 from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.model_executor.models.runner_models.base_model import (
-    DIFFUSERS_FROM_SOURCE,
     DefaultInputValues,
     DiffusionOutput,
     ModelCapabilities,
@@ -25,15 +24,16 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
 
 _QUANT_GEMM_MODULES = ["transformer.transformer_blocks"]
 
-# Backends that implement the _varlen_pack mask path and can correctly exclude
-# padding key positions.  SDPA_FLASH is excluded because
-# aten._scaled_dot_product_flash_attention has no mask parameter.
-# Quantised backends (FP8, SAGE, MLA, etc.) are excluded for the same reason.
+# Backends that exclude padded keys, through the varlen packing or the attn_mask.
+# SDPA_FLASH is excluded because aten._scaled_dot_product_flash_attention has no
+# mask parameter. Quantised backends (FP8, SAGE, MLA, etc.) are excluded for the
+# same reason.
 KREA2_SUPPORTED_ATTN_BACKENDS = frozenset(
     {
         AttentionBackendType.AITER,
         AttentionBackendType.SDPA,
         AttentionBackendType.SDPA_MATH,
+        AttentionBackendType.CUDNN,
         AttentionBackendType.FLASH,
         AttentionBackendType.FLASH_3,
         AttentionBackendType.FLASH_4,
@@ -70,19 +70,20 @@ def _patch_text_encoder_linear_for_rocm(text_encoder: "torch.nn.Module") -> None
             module.forward = _make_f32_forward(module)
             count += 1
 
-    log(
-        f"Patched {count} Linear layers to float32 compute "
-        "(ROCm 7.13 bfloat16 split-K NaN fix for Qwen3VL shapes)."
-    )
+    log(f"Patched {count} Linear layers to float32 compute (ROCm 7.13 bfloat16 split-K NaN fix for Qwen3VL shapes).")
 
 
 class _Krea2BaseModel(xFuserModel):
     """Shared base for the Krea-2-Raw and Krea-2-Turbo runner models."""
-    # No released diffusers ships Krea2Transformer2DModel yet.
-    min_diffusers_version = DIFFUSERS_FROM_SOURCE
+
+    # From the registered checkpoint's transformer config.
+    attention_heads = 48
+
+    # diffusers 0.39.0 is the first release with Krea2Transformer2DModel.
+    min_diffusers_version = "0.39.0"
 
     load_support = LoadSupport(
-        meta_transformers=('transformer',),
+        meta_transformers=("transformer",),
         # Qwen3VL's ROCm float32-Linear workaround has no compatible shared-load contract.
         meta_text_encoders=(),
         replicated_meta=True,
@@ -90,7 +91,7 @@ class _Krea2BaseModel(xFuserModel):
     )
     supported_attn_backends = KREA2_SUPPORTED_ATTN_BACKENDS
     unsupported_attn_backend_reason = (
-        "The attention mask requires a backend with varlen support."
+        "The attention mask requires a backend that excludes padded keys (varlen packing or attn_mask)."
     )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
@@ -154,6 +155,7 @@ class _Krea2BaseModel(xFuserModel):
             num_inference_steps=input_args["num_inference_steps"],
             max_condition_sequence_length=max_seq,
             split_text_embed_in_sp=False,
+            split_latents_by_rows=False,
         )
 
         output = self.pipe(
@@ -177,8 +179,9 @@ class _Krea2BaseModel(xFuserModel):
 @register_model("Krea-2-Raw")
 class xFuserKrea2RawModel(_Krea2BaseModel):
     """Krea-2-Raw: base checkpoint. 52 steps, guidance_scale=3.5."""
+
     load_support = LoadSupport(
-        meta_transformers=('transformer',),
+        meta_transformers=("transformer",),
         meta_text_encoders=(),
         replicated_meta=True,
         routes=STANDARD_LOAD_ROUTES,
@@ -220,8 +223,9 @@ class xFuserKrea2RawModel(_Krea2BaseModel):
 @register_model("Krea-2-Turbo")
 class xFuserKrea2TurboModel(_Krea2BaseModel):
     """Krea-2-Turbo: 8-step CFG-free distilled checkpoint."""
+
     load_support = LoadSupport(
-        meta_transformers=('transformer',),
+        meta_transformers=("transformer",),
         meta_text_encoders=(),
         replicated_meta=True,
         routes=STANDARD_LOAD_ROUTES,

@@ -9,7 +9,7 @@ Three paths, picked by what the call carries:
 """
 
 from xfuser.core.attention.numerics import hadamard
-from xfuser.core.attention.constraints import NO_DROPOUT
+from xfuser.core.attention.constraints import NO_DROPOUT, PACKED_KEYS
 from xfuser.core.attention.requirements import NEVER, SYMBOL
 from xfuser.core.attention.spec import AttentionBackendType, Impl, Spec
 
@@ -18,7 +18,7 @@ SPECS = [
         AttentionBackendType.AITER_FP8,
         impl=Impl("kernel:aiter_fp8"),
         low_precision=True,
-        accepts=NO_DROPOUT,
+        accepts=NO_DROPOUT & PACKED_KEYS,
         # Dual-path: MHA v4 for some shapes and v3 otherwise, so it would yield
         # no LSE for the rest.
         ring=NEVER,

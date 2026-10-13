@@ -2,6 +2,7 @@
 xDiT in-tree cache for Flux1 (FluxTransformer2DModel).
 USP-safe: all_reduce in l1_distance synchronises skip decision across SP ranks.
 """
+
 from torch import nn
 
 from xfuser.model_executor.cache import utils
@@ -15,6 +16,17 @@ def apply_teacache(
     num_steps=8,
 ):
     """Apply TeaCache to a Flux1 transformer. USP-safe via all_reduce in l1_distance."""
+    if len(transformer.transformer_blocks) == 1 and isinstance(
+        transformer.transformer_blocks[0], utils.TeaCachedTransformerBlocks
+    ):
+        # Keep the original dual/single blocks and update the existing cache
+        # instead of wrapping it as though it were an ordinary Flux block.
+        cached_blocks = transformer.transformer_blocks[0]
+        cached_blocks.rel_l1_thresh.fill_(rel_l1_thresh)
+        cached_blocks.return_hidden_states_first = return_hidden_states_first
+        cached_blocks.start_request(num_steps)
+        return transformer
+
     cached_blocks = utils.TeaCachedTransformerBlocks(
         transformer.transformer_blocks,
         transformer.single_transformer_blocks,

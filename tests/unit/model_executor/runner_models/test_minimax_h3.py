@@ -275,8 +275,8 @@ def test_fasth3_defaults_match_inference_contract():
     assert xFuserFastH3Model.settings.model_name == FASTH3_V1_DATAFREE_MODEL_ID
     assert xFuserFastH3Model.settings.valid_tasks == ["t2va"]
     assert xFuserFastH3Model.settings.default_attention_backend == AttentionBackendType.TRITON_VSA_H3.name
-    assert xFuserFastH3Model.default_input_values.num_inference_steps == 5
-    assert xFuserFastH3Model._warmup_num_inference_steps == 5
+    assert xFuserFastH3Model.default_input_values.num_inference_steps == 4
+    assert xFuserFastH3Model._warmup_num_inference_steps == 4
     assert xFuserFastH3Model._enable_fasth3_vsa
     assert xFuserFastH3Model.supported_attn_backends == (xFuserMiniMaxH3Model.supported_attn_backends | VSA_H3_BACKENDS)
 
@@ -315,8 +315,8 @@ def test_fasth3_dense_defaults_match_inference_contract():
     assert xFuserFastH3DenseModel.settings.valid_tasks == ["t2va"]
     # The dense ablation has no preferred backend, so --attention_backend decides.
     assert xFuserFastH3DenseModel.settings.default_attention_backend is None
-    assert xFuserFastH3DenseModel.default_input_values.num_inference_steps == 5
-    assert xFuserFastH3DenseModel._warmup_num_inference_steps == 5
+    assert xFuserFastH3DenseModel.default_input_values.num_inference_steps == 4
+    assert xFuserFastH3DenseModel._warmup_num_inference_steps == 4
     assert not xFuserFastH3DenseModel._enable_fasth3_vsa
     assert xFuserFastH3DenseModel.supported_attn_backends == xFuserMiniMaxH3Model.supported_attn_backends
     assert not (xFuserFastH3DenseModel.supported_attn_backends & VSA_H3_BACKENDS)
@@ -950,10 +950,23 @@ def test_minimax_h3_patches_shared_qwen_encoder_helper(monkeypatch):
     assert encoders._xfuser_broadcast_patched
 
 
+def _attach_online_loader(model, monkeypatch):
+    """Give a bare runner the checkpoint identity its loader would build online."""
+    from xfuser.model_executor.models.runner_models.loading.meta_load import (
+        ModelLoader,
+    )
+
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_OFFLINE", False)
+    model.loader = object.__new__(ModelLoader)
+    model.loader.model = model
+
+
 class _FakeMiniMaxPipe:
     def __init__(self):
         self.text_encoder = SimpleNamespace(lm_head=object())
         self.loaded_dtype = None
+        self.scheduler = SimpleNamespace(set_timesteps=lambda *args, **kwargs: None)
+        self.audio_scheduler = SimpleNamespace(set_timesteps=lambda *args, **kwargs: None)
 
     def update_components(self, **components):
         for name, component in components.items():
@@ -1015,6 +1028,8 @@ def test_minimax_h3_loads_task_workflow(
     model.config = SimpleNamespace(task=task, text_encoder_tp_degree=1)
     model._parallelize_text_encoder = lambda text_encoder: None
 
+    _attach_online_loader(model, monkeypatch)
+
     actual = model._load_model()
 
     assert actual is pipe
@@ -1071,6 +1086,8 @@ def test_fasth3_loads_published_checkpoint(monkeypatch):
     model.config = SimpleNamespace(task="t2va", text_encoder_tp_degree=1)
     model._parallelize_text_encoder = lambda text_encoder: None
 
+    _attach_online_loader(model, monkeypatch)
+
     actual = model._load_model()
 
     assert actual is pipe
@@ -1081,6 +1098,7 @@ def test_fasth3_loads_published_checkpoint(monkeypatch):
             {
                 "subfolder": "transformer",
                 "dtype": torch.bfloat16,
+                "local_files_only": False,
                 "enable_fasth3_vsa": True,
                 "attention_backend": None,
             },
@@ -1140,6 +1158,8 @@ def test_fasth3_dense_loads_published_checkpoint(monkeypatch):
     )
     model._parallelize_text_encoder = lambda text_encoder: None
 
+    _attach_online_loader(model, monkeypatch)
+
     actual = model._load_model()
 
     assert actual is pipe
@@ -1150,6 +1170,7 @@ def test_fasth3_dense_loads_published_checkpoint(monkeypatch):
             {
                 "subfolder": "transformer",
                 "dtype": torch.bfloat16,
+                "local_files_only": False,
                 "enable_fasth3_vsa": False,
                 "attention_backend": AttentionBackendType.AITER,
             },
@@ -1193,6 +1214,8 @@ def test_minimax_h3_ref2va_loads_workflow(monkeypatch):
     model = object.__new__(xFuserMiniMaxH3Ref2VAModel)
     model.config = SimpleNamespace(text_encoder_tp_degree=1)
     model._parallelize_text_encoder = lambda text_encoder: None
+
+    _attach_online_loader(model, monkeypatch)
 
     actual = model._load_model()
 
@@ -1267,7 +1290,7 @@ def test_fasth3_warmup_uses_four_forward_schedule(monkeypatch):
     model._run_warmup_calls(input_args)
 
     assert input_args["num_inference_steps"] == 50
-    assert [call["num_inference_steps"] for call in calls] == [5, 5]
+    assert [call["num_inference_steps"] for call in calls] == [4, 4]
 
 
 def test_minimax_h3_ref2va_uses_typed_image_references(monkeypatch):

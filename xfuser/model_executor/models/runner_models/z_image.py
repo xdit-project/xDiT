@@ -25,7 +25,7 @@ def _normalize_prompt(prompt_input):
     if isinstance(prompt_input, str):
         return [prompt_input]
     if isinstance(prompt_input, list):
-        return list(prompt_input) # Recreates the list to avoid issues with in-place editing
+        return list(prompt_input)  # Recreates the list to avoid issues with in-place editing
     raise TypeError(f"prompt must be str or list[str], got {type(prompt_input)}")
 
 
@@ -99,9 +99,15 @@ def _set_effective_heads_for_ulysses(transformer, ulysses_degree: int) -> None:
 
     transformer.config.num_attention_heads = effective_heads
 
+
 @register_model("Tongyi-MAI/Z-Image")
 @register_model("Z-Image")
 class xFuserZImageModel(xFuserModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 30
+    # The attention processor pads heads before the Ulysses exchange.
+    supports_ulysses_head_padding = True
+
     min_diffusers_version = "0.36.0"
 
     default_input_values = DefaultInputValues(
@@ -111,8 +117,8 @@ class xFuserZImageModel(xFuserModel):
         guidance_scale=4.0,
     )
     load_support = LoadSupport(
-        meta_transformers=('transformer',),
-        meta_text_encoders=('text_encoder',),
+        meta_transformers=("transformer",),
+        meta_text_encoders=("text_encoder",),
         replicated_meta=True,
         routes=STANDARD_LOAD_ROUTES,
     )
@@ -142,13 +148,9 @@ class xFuserZImageModel(xFuserModel):
         },
         fp8_gemm_module_list=["transformer.layers", "transformer.noise_refiner", "transformer.context_refiner"],
         fp8_text_encoder_module_list=["text_encoder.layers"],
-        int8_gemm_module_list=[
-            "transformer.layers",
-            "transformer.noise_refiner",
-            "transformer.context_refiner"
-        ],
+        int8_gemm_module_list=["transformer.layers", "transformer.noise_refiner", "transformer.context_refiner"],
         step_cache_config={
-            "dbcache":DBCacheSettings(
+            "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("layers", "Pattern_3"),),
                 ),
@@ -161,15 +163,14 @@ class xFuserZImageModel(xFuserModel):
         """Exclude context_refiner from INT8 quant when sequence parallelism is active.
 
         Both Ulysses and Ring attention split the sequence across GPUs.  The
-        caption features processed by ``context_refiner`` may be very short; 
-        after SP chunking each GPU may see M <= 16, which is below the minimum 
+        caption features processed by ``context_refiner`` may be very short;
+        after SP chunking each GPU may see M <= 16, which is below the minimum
         M required by the ``torch._int_mm`` kernel used by torch.compile.
         """
         sp_world_size = (config.ulysses_degree or 1) * (config.ring_degree or 1)
         if sp_world_size > 1 and config.use_int8_gemms:
             self.settings.int8_gemm_module_list = [
-                m for m in self.settings.int8_gemm_module_list
-                if m != "transformer.context_refiner"
+                m for m in self.settings.int8_gemm_module_list if m != "transformer.context_refiner"
             ]
 
     def _load_model(self) -> DiffusionPipeline:
@@ -207,11 +208,16 @@ class xFuserZImageModel(xFuserModel):
 @register_model("Tongyi-MAI/Z-Image-Turbo")
 @register_model("Z-Image-Turbo")
 class xFuserZImageTurboModel(xFuserModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 30
+    # The attention processor pads heads before the Ulysses exchange.
+    supports_ulysses_head_padding = True
+
     min_diffusers_version = "0.36.0"
 
     load_support = LoadSupport(
-        meta_transformers=('transformer',),
-        meta_text_encoders=('text_encoder',),
+        meta_transformers=("transformer",),
+        meta_text_encoders=("text_encoder",),
         replicated_meta=True,
         routes=STANDARD_LOAD_ROUTES,
     )
@@ -252,15 +258,14 @@ class xFuserZImageTurboModel(xFuserModel):
         """Exclude context_refiner from INT8 quant when sequence parallelism is active.
 
         Both Ulysses and Ring attention split the sequence across GPUs.  The
-        caption features processed by ``context_refiner`` may be very short; 
-        after SP chunking each GPU may see M <= 16, which is below the minimum 
+        caption features processed by ``context_refiner`` may be very short;
+        after SP chunking each GPU may see M <= 16, which is below the minimum
         M required by the ``torch._int_mm`` kernel used by torch.compile.
         """
         sp_world_size = (config.ulysses_degree or 1) * (config.ring_degree or 1)
         if sp_world_size > 1 and config.use_int8_gemms:
             self.settings.int8_gemm_module_list = [
-                m for m in self.settings.int8_gemm_module_list
-                if m != "transformer.context_refiner"
+                m for m in self.settings.int8_gemm_module_list if m != "transformer.context_refiner"
             ]
 
     def _load_model(self) -> DiffusionPipeline:

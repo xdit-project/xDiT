@@ -19,6 +19,11 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
 @register_model("Lumina-Image-2.0")
 @register_model("Lumina2")
 class xFuserLumina2Model(xFuserModel):
+    # From the registered checkpoint's transformer config.
+    attention_heads = 24
+    # KV heads remain compact through the Ulysses exchange.
+    attention_kv_heads = 8
+
     # The composition-style pipeline wrapper loads the transformer eagerly.
     load_support = LoadSupport(
         meta_transformers=(),

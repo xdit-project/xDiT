@@ -2,6 +2,8 @@
 
 Each rank is a spawned interpreter so CUDA and HIP can initialize. The parent
 surfaces the child traceback; a non-zero exit alone hides the failure.
+The total timeout includes interpreter startup, imports, and the worker body.
+Allow ten minutes by default: cold imports on a slow filesystem took 388 s (#817).
 """
 
 import os
@@ -12,7 +14,7 @@ import traceback
 import pytest
 
 
-def spawn_accelerator_ranks(worker, tmp_path, *, world_size, timeout=180, init_filename="dist-init", args=()):
+def spawn_accelerator_ranks(worker, tmp_path, *, world_size, timeout=600, init_filename="dist-init", args=()):
     torch = pytest.importorskip("torch")
     if not torch.cuda.is_available() or torch.cuda.device_count() < world_size:
         pytest.skip(f"requires {world_size} accelerator devices")
@@ -29,10 +31,9 @@ def spawn_accelerator_ranks(worker, tmp_path, *, world_size, timeout=180, init_f
         )
         for rank in range(world_size)
     ]
+    deadline = time.monotonic() + timeout
     for process in processes:
         process.start()
-
-    deadline = time.monotonic() + timeout
     for process in processes:
         process.join(max(0.0, deadline - time.monotonic()))
 

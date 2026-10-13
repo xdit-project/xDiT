@@ -20,16 +20,12 @@ class CacheEntry:
                 None,
             ] * num_cache_tensors
         elif isinstance(tensors, torch.Tensor):
-            assert (
-                num_cache_tensors == 1
-            ), "num_cache_tensors must be 1 if you pass a single tensor to tensors argument"
+            assert num_cache_tensors == 1, "num_cache_tensors must be 1 if you pass a single tensor to tensors argument"
             self.tensors = [
                 tensors,
             ]
         elif isinstance(tensors, List):
-            assert num_cache_tensors == len(
-                tensors
-            ), "num_cache_tensors must be equal to num of tensors"
+            assert num_cache_tensors == len(tensors), "num_cache_tensors must be equal to num of tensors"
             self.tensors = [
                 tensors,
             ]
@@ -44,13 +40,9 @@ class CacheManager:
     ):
         self.cache: Dict[Tuple[str, Any], CacheEntry] = {}
 
-    def register_cache_entry(
-        self, layer, layer_type: str, cache_type: str = "naive_cache"
-    ):
+    def register_cache_entry(self, layer, layer_type: str, cache_type: str = "naive_cache"):
         if layer_type not in self.supported_layer:
-            raise ValueError(
-                f"Layer type: {layer_type} is not supported. Supported layer type: {self.supported_layer}"
-            )
+            raise ValueError(f"Layer type: {layer_type} is not supported. Supported layer type: {self.supported_layer}")
         if cache_type not in self.supported_cache_type:
             raise ValueError(
                 f"Cache type: {cache_type} is not supported. Supported cache type: {self.supported_cache_type}"
@@ -60,9 +52,26 @@ class CacheManager:
                 f"Cache for [layer_type, layer]: [{layer_type}, {layer.__class__}] is already initialized, resetting the cache..."
             )
         self.cache[layer_type, layer] = CacheEntry(cache_type)
+        if isinstance(layer, torch.nn.Module):
+            if "_xdit_kv_cache" in layer._buffers:
+                layer._buffers["_xdit_kv_cache"] = None
+            else:
+                layer.register_buffer(
+                    "_xdit_kv_cache",
+                    None,
+                    persistent=False,
+                )
+            layer._xdit_kv_cache_type = cache_type
 
     def has_cache_entry(self, layer, layer_type: str = "attn") -> bool:
         return (layer_type, layer) in self.cache
+
+    def clear(self) -> None:
+        """Release cached activations while preserving layer registrations."""
+        for (_, layer), entry in self.cache.items():
+            entry.tensors = [None] * len(entry.tensors)
+            if isinstance(layer, torch.nn.Module) and "_xdit_kv_cache" in layer._buffers:
+                layer._xdit_kv_cache = None
 
     def update_and_get_kv_cache(
         self,
@@ -80,32 +89,48 @@ class CacheManager:
 
         if custom_get_kv is not None:
             return custom_get_kv(self, new_kv, layer, slice_dim, layer_type, **kwargs)
+
+        module_cache = isinstance(layer, torch.nn.Module) and "_xdit_kv_cache" in layer._buffers
+        if module_cache:
+            cache_type = layer._xdit_kv_cache_type
+            kv_cache = layer._xdit_kv_cache
         else:
-            cache_type = self.cache[layer_type, layer].cache_type
-            if cache_type == "naive_cache":
-                kv_cache = self._naive_cache_update(
-                    new_kv,
-                    layer=layer,
-                    slice_dim=slice_dim,
-                    layer_type=layer_type,
-                    **kwargs,
-                )
-            elif cache_type == "sequence_parallel_attn_cache":
-                kv_cache = self._sequence_parallel_cache_update(
-                    new_kv,
-                    layer=layer,
-                    slice_dim=slice_dim,
-                    layer_type=layer_type,
-                    **kwargs,
-                )
-            if return_list:
-                return torch.chunk(kv_cache, 2, dim=-1)
-            else:
-                return kv_cache
+            entry = self.cache[layer_type, layer]
+            cache_type = entry.cache_type
+            kv_cache = entry.tensors[0]
+
+        if cache_type == "naive_cache":
+            kv_cache = self._naive_cache_update(
+                new_kv,
+                kv_cache=kv_cache,
+                layer=layer,
+                slice_dim=slice_dim,
+                layer_type=layer_type,
+                **kwargs,
+            )
+        elif cache_type == "sequence_parallel_attn_cache":
+            kv_cache = self._sequence_parallel_cache_update(
+                new_kv,
+                kv_cache=kv_cache,
+                layer=layer,
+                slice_dim=slice_dim,
+                layer_type=layer_type,
+                **kwargs,
+            )
+
+        if module_cache:
+            layer._xdit_kv_cache = kv_cache
+        else:
+            entry.tensors[0] = kv_cache
+
+        if return_list:
+            return torch.chunk(kv_cache, 2, dim=-1)
+        return kv_cache
 
     def _naive_cache_update(
         self,
         new_kv: Union[torch.Tensor, List[torch.Tensor]],
+        kv_cache: Optional[torch.Tensor],
         layer,
         slice_dim: int = 1,
         layer_type: str = "attn",
@@ -118,7 +143,6 @@ class CacheManager:
             or not get_runtime_state().patch_mode
         ):
             kv_cache = new_kv
-            self.cache[layer_type, layer].tensors[0] = kv_cache
         else:
             start_token_idx = get_runtime_state().pp_patches_token_start_idx_local[
                 get_runtime_state().pipeline_patch_idx
@@ -126,7 +150,6 @@ class CacheManager:
             end_token_idx = get_runtime_state().pp_patches_token_start_idx_local[
                 get_runtime_state().pipeline_patch_idx + 1
             ]
-            kv_cache = self.cache[layer_type, layer].tensors[0]
             kv_cache = self._update_kv_in_dim(
                 kv_cache=kv_cache,
                 new_kv=new_kv,
@@ -141,6 +164,7 @@ class CacheManager:
     def _sequence_parallel_cache_update(
         self,
         new_kv: torch.Tensor,
+        kv_cache: Optional[torch.Tensor],
         layer,
         slice_dim: int = 1,
         layer_type: str = "attn",
@@ -151,10 +175,7 @@ class CacheManager:
         )
 
         ulysses_world_size = get_ulysses_parallel_world_size()
-        if (
-            not runtime_state_is_initialized()
-            or get_runtime_state().num_pipeline_patch == 1
-        ):
+        if not runtime_state_is_initialized() or get_runtime_state().num_pipeline_patch == 1:
             return new_kv
         elif not get_runtime_state().patch_mode:
             pp_patches_token_num = get_runtime_state().pp_patches_token_num
@@ -170,22 +191,14 @@ class CacheManager:
                 ],
                 dim=slice_dim,
             )
-            self.cache[layer_type, layer].tensors[0] = kv_cache
         else:
-            pp_patches_token_start_idx_local = (
-                get_runtime_state().pp_patches_token_start_idx_local
-            )
+            pp_patches_token_start_idx_local = get_runtime_state().pp_patches_token_start_idx_local
             pp_patch_idx = get_runtime_state().pipeline_patch_idx
-            start_token_idx = (
-                ulysses_world_size * pp_patches_token_start_idx_local[pp_patch_idx]
-            )
-            end_token_idx = (
-                ulysses_world_size * pp_patches_token_start_idx_local[pp_patch_idx + 1]
-            )
+            start_token_idx = ulysses_world_size * pp_patches_token_start_idx_local[pp_patch_idx]
+            end_token_idx = ulysses_world_size * pp_patches_token_start_idx_local[pp_patch_idx + 1]
             # pp_patches_token_num = get_runtime_state().pp_patches_token_num
             # start_token_idx = ulysses_world_size * sum(pp_patches_token_num[:get_runtime_state().pipeline_patch_idx])
             # end_token_idx = ulysses_world_size * sum(pp_patches_token_num[:get_runtime_state().pipeline_patch_idx + 1])
-            kv_cache = self.cache[layer_type, layer].tensors[0]
             kv_cache = self._update_kv_in_dim(
                 kv_cache=kv_cache,
                 new_kv=new_kv,
@@ -207,9 +220,7 @@ class CacheManager:
         if dim < 0:
             dim += kv_cache.dim()
         if dim > kv_cache.dim():
-            raise ValueError(
-                f"'dim' argument {dim} can not bigger or equal than kv cache dimemsions: {kv_cache.dim()}"
-            )
+            raise ValueError(f"'dim' argument {dim} can not bigger or equal than kv cache dimemsions: {kv_cache.dim()}")
 
         if dim == 0:
             kv_cache[start_idx:end_idx, ...] = new_kv

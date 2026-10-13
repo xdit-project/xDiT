@@ -420,3 +420,42 @@ def test_profile_supports_simple_hybrid_schedule(runtime, high_format):
     )
 
     config._validate_gemm_quantization_flags()
+
+
+@pytest.mark.parametrize(
+    "pattern_flag",
+    ["fp8_precision_override_prefix_patterns", "fp8_precision_override_suffix_patterns"],
+)
+@pytest.mark.parametrize("profile", [None, "none", "fp4", "fp8", "fp6", "a6w4", "int8"])
+def test_fp8_override_patterns_require_a_tiered_profile(runtime, pattern_flag, profile):
+    config = _args(runtime, gemm_quantization=profile, **{pattern_flag: "transformer.proj_out"})
+
+    with pytest.raises(ValueError, match="Precision override patterns require a tiered GEMM quantization profile"):
+        config._validate_gemm_quantization_flags()
+
+
+# low=fp4,high=fp6 routes the override patterns to MXFP6, so the check must not require FP8.
+@pytest.mark.parametrize("high_format", ["fp8", "fp6", "a6w4"])
+@pytest.mark.parametrize(
+    "pattern_flag",
+    ["fp8_precision_override_prefix_patterns", "fp8_precision_override_suffix_patterns"],
+)
+def test_fp8_override_patterns_are_accepted_with_a_high_tier(runtime, high_format, pattern_flag):
+    config = _args(
+        runtime,
+        gemm_quantization=f"low=fp4,high={high_format}",
+        **{pattern_flag: "transformer.proj_out"},
+    )
+
+    config._validate_gemm_quantization_flags()
+
+
+def test_legacy_fp4_profile_still_accepts_override_patterns(runtime):
+    config = _args(
+        runtime,
+        use_fp4_gemms=True,
+        fp8_precision_override_prefix_patterns="transformer.blocks",
+        fp8_precision_override_suffix_patterns="proj_out",
+    )
+
+    config._validate_gemm_quantization_flags()

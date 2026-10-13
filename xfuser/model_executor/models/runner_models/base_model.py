@@ -1080,13 +1080,29 @@ class xFuserModel(abc.ABC):
                 )
                 capture_args = copy.deepcopy(compile_args)
                 pipeline_warmup_steps = self.engine_config.runtime_config.warmup_steps
+                capture_warmup_steps = min(pipeline_warmup_steps, 1)
                 capture_args["num_inference_steps"] = max(
                     2,
-                    pipeline_warmup_steps + 1,
+                    capture_warmup_steps + 1,
                 )
-                capture = PipeFusionCompileCapture(replay_components, get_runtime_state())
-                with capture.hooks():
-                    self._run_timed_pipe(capture_args)
+                runtime_state = get_runtime_state()
+                capture = PipeFusionCompileCapture(replay_components, runtime_state)
+                runtime_configs = {
+                    id(config): config
+                    for config in (
+                        self.engine_config.runtime_config,
+                        getattr(runtime_state, "runtime_config", self.engine_config.runtime_config),
+                    )
+                }
+                configured_warmups = {config_id: config.warmup_steps for config_id, config in runtime_configs.items()}
+                try:
+                    for config in runtime_configs.values():
+                        config.warmup_steps = capture_warmup_steps
+                    with capture.hooks():
+                        self._run_timed_pipe(capture_args)
+                finally:
+                    for config_id, config in runtime_configs.items():
+                        config.warmup_steps = configured_warmups[config_id]
                 if capture.calls:
                     log(
                         f"Captured {len(capture.calls)} PipeFusion stage signature(s).",

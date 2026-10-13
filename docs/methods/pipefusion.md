@@ -55,11 +55,11 @@ The PipeFusion pipeline workflow when $M$ = $N$ =4 is shown in the following pic
   reuses isolated alternating steps, and computes the final two correction
   steps. Dynamic policies continue to compute Fn and use residual similarity.
 - `--memory_efficient_replicated_load` has a PipeFusion-specific meaning on
-  runners that support stage-local meta construction (currently the FLUX
-  family): each rank constructs and streams only its local transformer blocks.
-  Replicated pipeline components remain eager. SD3.5's composition wrapper
-  cannot construct a stage-local transformer on meta and explicitly rejects
-  this option.
+  runners that support stage-local meta construction (currently the FLUX and
+  Qwen Image families): each rank constructs and streams only its local
+  transformer blocks. Replicated pipeline components remain eager. SD3.5's
+  composition wrapper cannot construct a stage-local transformer on meta and
+  explicitly rejects this option.
 - A stage-local transformer cannot also be FSDP-wrapped because pipeline ranks
   own different blocks. Configuration therefore requires
   `--fully_shard_components` whenever FSDP and PipeFusion are combined, and the
@@ -71,6 +71,14 @@ The PipeFusion pipeline workflow when $M$ = $N$ =4 is shown in the following pic
 - FLUX.2 reference-image conditioning uses a mixed generated/reference patch
   layout. Static reference tokens participate in transformer attention while
   scheduler feedback updates and returns only generated tokens.
+- Qwen Image uses token-row patches. The original Qwen Image Edit checkpoint
+  appends fixed reference-image tokens to that layout while scheduler feedback
+  updates only generated tokens. Qwen Image Edit Plus 2509/2511 is not yet
+  supported because its multi-reference layout differs from the original
+  checkpoint. Qwen PipeFusion currently supports pure PP and CFG-parallel x PP;
+  composing it with sequence parallelism is rejected. Step-end callbacks are
+  also rejected because callback replacement and interruption state cannot be
+  applied consistently across pipeline stages.
 
 ### `torch.compile` warmup
 

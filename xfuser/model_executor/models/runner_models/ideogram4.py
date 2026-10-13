@@ -309,10 +309,12 @@ class xFuserIdeogram4Model(xFuserModel):
         mod_value=16,
         resolution_divisor=16,
         gemm_targets=GemmTargets(
-            transformer=Select(modules=(
-                "transformer.layers",
-                "unconditional_transformer.layers",
-            )),
+            transformer=Select(
+                modules=(
+                    "transformer.layers",
+                    "unconditional_transformer.layers",
+                )
+            ),
         ),
         fsdp_strategy={
             "transformer": {"wrap_attrs": ["layers"]},

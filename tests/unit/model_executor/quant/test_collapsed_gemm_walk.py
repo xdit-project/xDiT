@@ -39,14 +39,10 @@ BLOCK_COUNT = 4
 
 
 def _leaves_under(root):
-    return tuple(
-        f"{root}.{index}.{leaf}" for index in range(BLOCK_COUNT) for leaf in LEAVES
-    )
+    return tuple(f"{root}.{index}.{leaf}" for index in range(BLOCK_COUNT) for leaf in LEAVES)
 
 
-ALL_LEAVES = tuple(
-    leaf for root in BLOCKS + (TEXT_ENCODER,) for leaf in _leaves_under(root)
-)
+ALL_LEAVES = tuple(leaf for root in BLOCKS + (TEXT_ENCODER,) for leaf in _leaves_under(root))
 
 
 class _Recorder:
@@ -112,13 +108,7 @@ def _loader(raw, *, text_encoder=True, fp8_before_move=True, targets=TARGETS):
         config=config,
         # Blocks as well as block lists: a carve-out named by prefix makes the
         # walk start at one block, so it has to be reachable on the pipe.
-        pipe=_pipe(
-            tuple(
-                f"{root}.{index}"
-                for root in BLOCKS + (TEXT_ENCODER,)
-                for index in range(BLOCK_COUNT)
-            )
-        ),
+        pipe=_pipe(tuple(f"{root}.{index}" for root in BLOCKS + (TEXT_ENCODER,) for index in range(BLOCK_COUNT))),
     )
     primary = _Recorder("format")
     blockwise = _Recorder("blockwise_fp8", before_device_move=fp8_before_move)
@@ -131,11 +121,7 @@ def _loader(raw, *, text_encoder=True, fp8_before_move=True, targets=TARGETS):
     backends.adapter_for = lambda fmt: (
         backends.fp6
         if fmt == "fp6"
-        else (
-            (backends.fp8 or backends.blockwise_fp8)
-            if fmt == "fp8"
-            else backends.format
-        )
+        else ((backends.fp8 or backends.blockwise_fp8) if fmt == "fp8" else backends.format)
     )
     loader = SimpleNamespace(
         model=model,
@@ -148,9 +134,7 @@ def _loader(raw, *, text_encoder=True, fp8_before_move=True, targets=TARGETS):
     # could pair differently from the one under test.
     backends.model = model
     backends.loader = loader
-    backends.hybrid_companion = partial(
-        QuantizationBackends.hybrid_companion, backends
-    )
+    backends.hybrid_companion = partial(QuantizationBackends.hybrid_companion, backends)
     return loader
 
 
@@ -166,9 +150,7 @@ def _no_real_descriptor(monkeypatch):
 
 
 def _run(loader, **kwargs):
-    placement.setup_gemm_quantization(
-        loader, local_rank=0, offload_requested=False, **kwargs
-    )
+    placement.setup_gemm_quantization(loader, local_rank=0, offload_requested=False, **kwargs)
 
 
 def _block_leaves():
@@ -266,12 +248,8 @@ def test_a_suffix_carve_out_reaches_the_placement_walk():
     _run(loader, before_device_move=False)
 
     root = "transformer.transformer_blocks"
-    assert loader.backends.blockwise_fp8.kept == sorted(
-        f"{root}.{index}.ff.net.2" for index in range(BLOCK_COUNT)
-    )
-    assert loader.backends.format.kept == sorted(
-        leaf for leaf in _leaves_under(root) if not leaf.endswith("ff.net.2")
-    )
+    assert loader.backends.blockwise_fp8.kept == sorted(f"{root}.{index}.ff.net.2" for index in range(BLOCK_COUNT))
+    assert loader.backends.format.kept == sorted(leaf for leaf in _leaves_under(root) if not leaf.endswith("ff.net.2"))
 
 
 def test_a_block_prefix_carve_out_reaches_the_placement_walk():
@@ -285,9 +263,7 @@ def test_a_block_prefix_carve_out_reaches_the_placement_walk():
     _run(loader, before_device_move=False)
 
     root = "transformer.transformer_blocks"
-    assert loader.backends.blockwise_fp8.kept == sorted(
-        f"{root}.3.{leaf}" for leaf in LEAVES
-    )
+    assert loader.backends.blockwise_fp8.kept == sorted(f"{root}.3.{leaf}" for leaf in LEAVES)
     assert loader.backends.format.kept == sorted(
         leaf for leaf in _leaves_under(root) if not leaf.startswith(f"{root}.3.")
     )
@@ -331,9 +307,7 @@ def _kept(recorder, block_path, leaves):
 
 def test_a_whole_block_goes_to_one_converter():
     loader = _shard_loader("low=fp4,high=fp8")
-    fn = shard.build_block_quantize_fn(
-        loader, "transformer", ["transformer_blocks"], local_rank=0
-    )
+    fn = shard.build_block_quantize_fn(loader, "transformer", ["transformer_blocks"], local_rank=0)
     fn(object(), 3)
     path = "transformer.transformer_blocks.3"
     leaves = ["attn.to_qkv", "ff.net.0.proj"]
@@ -351,9 +325,7 @@ def test_a_block_split_by_keep_high_stays_disjoint():
         keep_high=Select(modules=("transformer.transformer_blocks.3.attn",)),
     )
     loader = _shard_loader("low=fp4,high=fp8", targets=split, text_encoder=False)
-    fn = shard.build_block_quantize_fn(
-        loader, "transformer", ["transformer_blocks"], local_rank=0
-    )
+    fn = shard.build_block_quantize_fn(loader, "transformer", ["transformer_blocks"], local_rank=0)
     fn(object(), 3)
 
     leaves = ["attn.to_qkv", "ff.net.0.proj"]
@@ -373,9 +345,7 @@ def test_a_suffix_carve_out_survives_sharding():
         keep_high=Select(suffixes=("ff.net.2",)),
     )
     loader = _shard_loader("low=fp4,high=fp8", targets=scattered, text_encoder=False)
-    fn = shard.build_block_quantize_fn(
-        loader, "transformer", ["transformer_blocks"], local_rank=0
-    )
+    fn = shard.build_block_quantize_fn(loader, "transformer", ["transformer_blocks"], local_rank=0)
     fn(object(), 2)
 
     path = "transformer.transformer_blocks.2"
@@ -386,19 +356,12 @@ def test_a_suffix_carve_out_survives_sharding():
 
 def test_an_untargeted_component_gets_no_callable():
     loader = _shard_loader("fp4", text_encoder=False)
-    assert (
-        shard.build_block_quantize_fn(loader, "vae", ["decoder"], local_rank=0) is None
-    )
+    assert shard.build_block_quantize_fn(loader, "vae", ["decoder"], local_rank=0) is None
 
 
 def test_an_unquantized_run_gets_no_callable():
     loader = _shard_loader("none")
-    assert (
-        shard.build_block_quantize_fn(
-            loader, "transformer", ["transformer_blocks"], local_rank=0
-        )
-        is None
-    )
+    assert shard.build_block_quantize_fn(loader, "transformer", ["transformer_blocks"], local_rank=0) is None
 
 
 # ---------------------------------------------------------------------------

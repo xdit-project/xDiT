@@ -67,21 +67,19 @@ def _plan_conversion_filter(plan, module_path, format_name, already_quantized):
     return filter_fn
 
 
-def setup_gemm_quantization(
-    loader, local_rank, *, offload_requested, before_device_move
-) -> None:
+def setup_gemm_quantization(loader, local_rank, *, offload_requested, before_device_move) -> None:
     """Quantize every declared target to the format the plan gives it.
 
-    One walk per format over the declared subtrees. Which converter owns a leaf
-    follows from its format, and which side of the device move a walk runs on
-    follows from its converter, so neither is a branch here. Called once before
-    the move and once after; each call skips the adapters belonging to the other
-    side.
+        One walk per format over the declared subtrees. Which converter owns a leaf
+        follows from its format, and which side of the device move a walk runs on
+        follows from its converter, so neither is a branch here. Called once before
+        the move and once after; each call skips the adapters belonging to the other
+        side.
 
-Each walk starts where ``walk_roots`` says -- the subtrees that format owns,
-    widened only when it has a carve-out with no subtree of its own -- and asks
-    ``format_for`` per leaf, which is the rule the sharded path applies too. A
-    leaf belongs to exactly one format, so the walks cannot collide.
+    Each walk starts where ``walk_roots`` says -- the subtrees that format owns,
+        widened only when it has a carve-out with no subtree of its own -- and asks
+        ``format_for`` per leaf, which is the rule the sharded path applies too. A
+        leaf belongs to exactly one format, so the walks cannot collide.
     """
 
     plan = loader.quantization_plan.gemm_plan
@@ -108,9 +106,7 @@ Each walk starts where ``walk_roots`` says -- the subtrees that format owns,
 
             convert_kwargs = {
                 "device": f"cuda:{local_rank}",
-                "filter_fn": _plan_conversion_filter(
-                    plan, module_name, format_name, already
-                ),
+                "filter_fn": _plan_conversion_filter(plan, module_name, format_name, already),
             }
             if before_device_move and offload_requested:
                 convert_kwargs["offload_to_cpu"] = True
@@ -133,14 +129,8 @@ Each walk starts where ``walk_roots`` says -- the subtrees that format owns,
                     "converted after the load rather than on the way in",
                 )
                 log(descriptor.log_message())
-            companion = loader.backends.hybrid_companion(
-                format_name, device=convert_kwargs["device"]
-            )
+            companion = loader.backends.hybrid_companion(format_name, device=convert_kwargs["device"])
             if companion is not None:
                 convert_kwargs["companion"] = companion
 
-            adapter.convert_module(
-                rgetattr(model.pipe, module_name), **convert_kwargs
-            )
-
-
+            adapter.convert_module(rgetattr(model.pipe, module_name), **convert_kwargs)

@@ -73,9 +73,7 @@ class QuantizationPlan:
         if getattr(self.model.config, "quantize_text_encoder", False):
             enable.append("text_encoder")
         config = self.model.config
-        sp_world_size = (getattr(config, "ulysses_degree", 1) or 1) * (
-            getattr(config, "ring_degree", 1) or 1
-        )
+        sp_world_size = (getattr(config, "ulysses_degree", 1) or 1) * (getattr(config, "ring_degree", 1) or 1)
         return resolve(
             targets,
             spec,
@@ -99,9 +97,7 @@ class QuantizationPlan:
         if plan is None:
             return None
         mine = [
-            root
-            for root in plan.declared_roots()
-            if root == component_name or root.startswith(f"{component_name}.")
+            root for root in plan.declared_roots() if root == component_name or root.startswith(f"{component_name}.")
         ]
         return plan.format_for(mine[0]) if mine else None
 

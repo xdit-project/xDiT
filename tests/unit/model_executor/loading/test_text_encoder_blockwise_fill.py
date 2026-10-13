@@ -72,12 +72,8 @@ def make_loader(
                 "text_encoder": {"wrap_attrs": list(wrap_attrs)},
             },
         ),
-        load_declaration=SimpleNamespace(
-            meta_text_encoders=tuple(meta_text_encoders)
-        ),
-        quantization_ledger=QuantizationLedger(
-            streamed_by_format={"fp8": {"text_encoder.model.layers"}}
-        ),
+        load_declaration=SimpleNamespace(meta_text_encoders=tuple(meta_text_encoders)),
+        quantization_ledger=QuantizationLedger(streamed_by_format={"fp8": {"text_encoder.model.layers"}}),
     )
     loader = object.__new__(meta_load.ModelLoader)
     loader.model = model
@@ -86,9 +82,7 @@ def make_loader(
     # The swap asks the plan which format this encoder takes, so a loader
     # built without __init__ still needs one. The ledger above is keyed by
     # that format, so the two have to agree.
-    loader.quantization_plan = SimpleNamespace(
-        component_format=lambda component_name: "fp8"
-    )
+    loader.quantization_plan = SimpleNamespace(component_format=lambda component_name: "fp8")
     loader._blockwise_sources = weakref.WeakKeyDictionary()
     loader._te_routes = None
     return loader

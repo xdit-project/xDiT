@@ -27,9 +27,7 @@ def test_a_tiered_fp6_run_takes_its_low_format_contract(raw):
     )
 
     assert backend is QuantizationBackend.AITER
-    assert format_ is (
-        QuantizationFormat.FP6 if raw == "fp6" else QuantizationFormat.FP4
-    )
+    assert format_ is (QuantizationFormat.FP6 if raw == "fp6" else QuantizationFormat.FP4)
 
 
 def test_wan22_reuses_existing_fp4_and_quality_targets_for_mxfp6():
@@ -78,9 +76,7 @@ def test_wan22_logs_an_explicit_fp4_and_fp6_mapping(monkeypatch):
         ),
         settings=SimpleNamespace(
             gemm_targets=GemmTargets(
-                transformer=Select(
-                    modules=("transformer.blocks", "transformer_2.blocks")
-                ),
+                transformer=Select(modules=("transformer.blocks", "transformer_2.blocks")),
                 keep_high=Select(modules=("transformer_2.blocks",)),
             ),
         ),
@@ -130,9 +126,7 @@ def test_wan22_mixed_mode_routes_primary_to_fp4_and_second_transformer_to_fp6(
         ),
         settings=SimpleNamespace(
             gemm_targets=GemmTargets(
-                transformer=Select(
-                    modules=("transformer.blocks", "transformer_2.blocks")
-                ),
+                transformer=Select(modules=("transformer.blocks", "transformer_2.blocks")),
                 keep_high=Select(modules=("transformer_2.blocks",)),
             ),
         ),
@@ -142,18 +136,12 @@ def test_wan22_mixed_mode_routes_primary_to_fp4_and_second_transformer_to_fp6(
         ),
     )
     backends = SimpleNamespace(
-        format=SimpleNamespace(
-            convert_module=lambda module, **kwargs: calls.append(("fp4", module))
-        ),
-        fp6=SimpleNamespace(
-            convert_module=lambda module, **kwargs: calls.append(("fp6", module))
-        ),
+        format=SimpleNamespace(convert_module=lambda module, **kwargs: calls.append(("fp4", module))),
+        fp6=SimpleNamespace(convert_module=lambda module, **kwargs: calls.append(("fp6", module))),
         fp8=None,
         blockwise_fp8=None,
     )
-    backends.adapter_for = lambda format_name: (
-        backends.fp6 if format_name == "fp6" else backends.format
-    )
+    backends.adapter_for = lambda format_name: (backends.fp6 if format_name == "fp6" else backends.format)
     loader = SimpleNamespace(
         model=model,
         backends=backends,
@@ -165,14 +153,10 @@ def test_wan22_mixed_mode_routes_primary_to_fp4_and_second_transformer_to_fp6(
     # could pair differently from the one under test.
     backends.model = model
     backends.loader = loader
-    backends.hybrid_companion = partial(
-        QuantizationBackends.hybrid_companion, backends
-    )
+    backends.hybrid_companion = partial(QuantizationBackends.hybrid_companion, backends)
 
     for before in (True, False):
-        placement.setup_gemm_quantization(
-            loader, local_rank=0, offload_requested=False, before_device_move=before
-        )
+        placement.setup_gemm_quantization(loader, local_rank=0, offload_requested=False, before_device_move=before)
 
     assert calls == [("fp4", fp4_blocks), ("fp6", fp6_blocks)]
 
@@ -273,9 +257,7 @@ def test_fp4_hybrid_builds_whatever_companion_it_is_given(monkeypatch):
 
     runner_utils.replace_linears(
         model,
-        runner_utils.mxfp4_layer_factory(
-            "cpu", companion=runner_utils.packed_layer_factory(StubFP6, "cpu")
-        ),
+        runner_utils.mxfp4_layer_factory("cpu", companion=runner_utils.packed_layer_factory(StubFP6, "cpu")),
     )
 
     assert isinstance(model[0], xFuserHybridLinear)

@@ -184,9 +184,7 @@ def test_roots_narrow_to_one_component_for_loaders_that_split_them():
         GemmQuantizationSpec.parse("fp8"),
         enable=("transformer", "text_encoder"),
     )
-    assert plan.roots("fp8", component="text_encoder") == (
-        "text_encoder.encoder.block",
-    )
+    assert plan.roots("fp8", component="text_encoder") == ("text_encoder.encoder.block",)
     assert BLOCKS in plan.roots("fp8", component="transformer")
     assert plan.roots("fp8", component="vae") == ()
 
@@ -232,9 +230,7 @@ def test_two_formats_split_along_keep_high(low, high):
 def test_the_text_encoder_obeys_the_same_two_rules():
     """Stated separately because it is the component that used to differ."""
     pure = resolve(RULES_TARGETS, GemmQuantizationSpec.parse("fp4"), enable=BOTH)
-    tier = resolve(
-        RULES_TARGETS, GemmQuantizationSpec.parse("low=fp4,high=fp8"), enable=BOTH
-    )
+    tier = resolve(RULES_TARGETS, GemmQuantizationSpec.parse("low=fp4,high=fp8"), enable=BOTH)
     assert pure.format_for("text_encoder.layers.0.mlp") == "fp4"
     assert pure.format_for("text_encoder.layers.7.mlp") == "fp4"
     assert tier.format_for("text_encoder.layers.0.mlp") == "fp8"
@@ -334,9 +330,7 @@ REFINERS = GemmTargets(
 
 
 def _resolved(raw, *, sp_world_size, targets=REFINERS):
-    return resolve(
-        targets, GemmQuantizationSpec.parse(raw), sp_world_size=sp_world_size
-    )
+    return resolve(targets, GemmQuantizationSpec.parse(raw), sp_world_size=sp_world_size)
 
 
 def test_a_short_module_keeps_its_format_without_sequence_parallelism():
@@ -369,9 +363,7 @@ def test_the_dropped_module_is_gone_from_every_consumer():
 def test_a_tiered_run_asks_the_format_the_module_would_have_taken():
     """Held high at fp8, the floor never applies however low the run goes."""
     targets = GemmTargets(
-        transformer=Select(
-            modules=("transformer.layers", "transformer.context_refiner")
-        ),
+        transformer=Select(modules=("transformer.layers", "transformer.context_refiner")),
         keep_high=Select(modules=("transformer.context_refiner",)),
         short_sequence=Select(modules=("transformer.context_refiner",)),
     )
@@ -424,9 +416,7 @@ def test_the_log_names_a_suffix_carve_out():
 
     targets = GemmTargets(
         transformer=Select(modules=("transformer.blocks",)),
-        keep_high=Select(
-            prefixes=("transformer.blocks.0",), suffixes=("net.0.proj", "net.2")
-        ),
+        keep_high=Select(prefixes=("transformer.blocks.0",), suffixes=("net.0.proj", "net.2")),
     )
     plan = resolve(targets, GemmQuantizationSpec.parse("low=fp4,high=fp8"))
 
@@ -442,13 +432,11 @@ def test_the_log_names_a_suffix_carve_out():
     finally:
         quantization_plan.log = original
 
-    header = [l for l in lines if l.startswith("GEMM high-precision tier:")]
+    header = [line for line in lines if line.startswith("GEMM high-precision tier:")]
     assert len(header) == 1
     assert "transformer.blocks.0" in header[0]
     assert "net.0.proj" in header[0] and "net.2" in header[0]
-    assert (
-        "GEMM quantization: transformer.blocks -> FP4; selected layers -> FP8" in lines
-    )
+    assert "GEMM quantization: transformer.blocks -> FP4; selected layers -> FP8" in lines
 
 
 # ---------------------------------------------------------------------------
@@ -534,9 +522,7 @@ def test_a_pin_outranks_a_carve_out_the_loaders_cannot_place():
 
     assert dict(plan.pinned) == {"text_encoder": "fp8"}
     assert plan.format_for(ENCODER_LEAF) == "fp8"
-    assert plan.format_for(f"{BLOCKS}.0.attn.to_q") == "fp4", (
-        "the transformer keeps the tier it was given"
-    )
+    assert plan.format_for(f"{BLOCKS}.0.attn.to_q") == "fp4", "the transformer keeps the tier it was given"
 
 
 def test_a_pin_puts_its_format_in_play():

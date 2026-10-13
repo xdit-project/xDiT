@@ -9,18 +9,10 @@ from types import SimpleNamespace
 import pytest
 
 ROOT = Path(__file__).resolve().parents[4]
-BACKENDS_PATH = (
-    ROOT / "xfuser/model_executor/models/runner_models/loading/backends.py"
-)
-CONTRACTS_PATH = (
-    ROOT / "xfuser/model_executor/models/runner_models/loading/contracts.py"
-)
-ADAPTER_PATH = (
-    ROOT / "xfuser/model_executor/models/runner_models/loading/quant_adapter.py"
-)
-SELECTION_PATH = (
-    ROOT / "xfuser/model_executor/models/runner_models/loading/backend_selection.py"
-)
+BACKENDS_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/backends.py"
+CONTRACTS_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/contracts.py"
+ADAPTER_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/quant_adapter.py"
+SELECTION_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/backend_selection.py"
 GEMM_PATH = ROOT / "xfuser/config/gemm.py"
 
 
@@ -33,9 +25,7 @@ _PKG = "format_adapter_pkg"
 
 def _package():
     if _PKG not in sys.modules:
-        package = importlib.util.module_from_spec(
-            importlib.machinery.ModuleSpec(_PKG, None, is_package=True)
-        )
+        package = importlib.util.module_from_spec(importlib.machinery.ModuleSpec(_PKG, None, is_package=True))
         package.__path__ = [str(BACKENDS_PATH.parent)]
         sys.modules[_PKG] = package
     return sys.modules[_PKG]
@@ -144,9 +134,7 @@ def test_nvfp4_requires_blackwell_before_adapter_selection(modules):
         modules.contracts.UnsupportedLoadContract,
         match=r"capability.*10.0",
     ):
-        modules.adapter.build_adapter(
-            "fp4", "torchao", capability=capabilities.of("fp4", "torchao")
-        )
+        modules.adapter.build_adapter("fp4", "torchao", capability=capabilities.of("fp4", "torchao"))
 
 
 def test_rocm_aiter_mxfp4_hybrid_remains_supported(modules):
@@ -165,9 +153,7 @@ def test_rocm_aiter_mxfp4_hybrid_remains_supported(modules):
         else pytest.fail(f"must not probe {config_kind} FSDP on ROCm"),
     )
 
-    adapter = modules.adapter.build_adapter(
-        "fp4", "aiter", capability=capabilities.of("fp4", "aiter"), hybrid=True
-    )
+    adapter = modules.adapter.build_adapter("fp4", "aiter", capability=capabilities.of("fp4", "aiter"), hybrid=True)
 
     assert isinstance(adapter, b.AiterMxfp4BackendAdapter)
 
@@ -181,9 +167,7 @@ def test_rocm_aiter_mxfp4_hybrid_remains_supported(modules):
         cuda_capability_probe=lambda: None,
         a6w4_probe=lambda: (True, None),
     )
-    companion = modules.adapter.build_adapter(
-        "a6w4", "aiter", capability=a6w4_capabilities.of("a6w4", "aiter")
-    )
+    companion = modules.adapter.build_adapter("a6w4", "aiter", capability=a6w4_capabilities.of("a6w4", "aiter"))
     assert isinstance(companion, b.AiterA6W4BackendAdapter)
     assert companion.builds_one_layer()
     # ...and cannot lead one: the kernel pairs a leaf's FP4 weight with its own
@@ -425,11 +409,7 @@ def test_component_root_target_aligns_with_blockwise_wrapped_paths(modules):
 
 def test_eager_blockwise_fallback_accepts_owned_single_rank_target(modules):
     b = modules.backends
-    prepared = SimpleNamespace(
-        descriptor=SimpleNamespace(
-            materialization_mode="post_load", fills_blocks_locally=True
-        )
-    )
+    prepared = SimpleNamespace(descriptor=SimpleNamespace(materialization_mode="post_load", fills_blocks_locally=True))
 
     plan = b.plan_eager_blockwise_fallback(
         prepared=prepared,
@@ -465,9 +445,7 @@ def test_eager_blockwise_fallback_rejects_unsafe_plan(
 ):
     plan = modules.backends.plan_eager_blockwise_fallback(
         prepared=SimpleNamespace(
-            descriptor=SimpleNamespace(
-                materialization_mode=prepared_mode, fills_blocks_locally=True
-            )
+            descriptor=SimpleNamespace(materialization_mode=prepared_mode, fills_blocks_locally=True)
         ),
         targets=targets,
         wrap_attrs=wrap_attrs,
@@ -527,9 +505,7 @@ def test_nvfp4_native_streaming_excludes_only_precision_overrides(modules, monke
         component_name="transformer",
         targets=("blocks",),
         stream_quant=True,
-        residual_match=lambda name: (
-            name.startswith("blocks.0.attn") or name.endswith(".out_proj")
-        ),
+        residual_match=lambda name: (name.startswith("blocks.0.attn") or name.endswith(".out_proj")),
         hybrid=False,
         model_factory=FakeModel,
     )
@@ -558,9 +534,7 @@ def test_nvfp4_native_streaming_excludes_only_precision_overrides(modules, monke
         ("TorchaoInt8BackendAdapter", "TORCHAO", "INT8"),
     ],
 )
-def test_native_streaming_rejects_hybrid_ownership(
-    modules, adapter_name, backend_name, format_name
-):
+def test_native_streaming_rejects_hybrid_ownership(modules, adapter_name, backend_name, format_name):
     """Every implementation, not just the one that happened to be low first.
 
     A streamed load quantizes each targeted leaf on the way in; the per-step
@@ -644,9 +618,7 @@ def test_descriptor_declares_storage_sharding_and_trainability(modules):
         ("a6w4", "aiter", False),
     ],
 )
-def test_fsdp_placement_follows_the_record_for_every_pair(
-    modules, format_name, impl, shardable
-):
+def test_fsdp_placement_follows_the_record_for_every_pair(modules, format_name, impl, shardable):
     """One rule, no ladder: the record says, the adapter names what it stores."""
     a = modules.adapter
     capability = a.FormatCapability(
@@ -685,9 +657,7 @@ def test_fsdp_placement_is_skipped_when_nothing_shards_it(modules):
         ("int8", "torchao"),
     ],
 )
-def test_every_implementation_can_be_either_half_of_a_per_step_pair(
-    modules, format_name, impl
-):
+def test_every_implementation_can_be_either_half_of_a_per_step_pair(modules, format_name, impl):
     """Composing is the base class's job, so no format is excluded by age.
 
     The pairing used to live inside the MXFP4 factory, which made MXFP4 the
@@ -722,19 +692,15 @@ def test_an_implementation_with_no_single_leaf_seam_is_still_refused(modules):
 
 def test_a_companion_reaches_the_converter_rather_than_being_dropped(modules):
     """A dropped companion would silently lose the run's second precision."""
-    a, b = modules.adapter, modules.backends
+    b = modules.backends
     adapter = b.TorchaoNvfp4BackendAdapter(
         backend=modules.contracts.QuantizationBackend.TORCHAO,
         format_=modules.contracts.QuantizationFormat.FP4,
     )
     seen = []
-    adapter._single_layer_factory = lambda *, device: (
-        lambda spec: seen.append("low")
-    )
+    adapter._single_layer_factory = lambda *, device: (lambda spec: seen.append("low"))
 
-    paired = adapter.layer_factory(
-        device=None, companion=lambda spec: seen.append("high")
-    )
+    paired = adapter.layer_factory(device=None, companion=lambda spec: seen.append("high"))
     paired(object())
 
     # Low first, as it was when only MXFP4 composed.
@@ -768,18 +734,14 @@ def test_a_companion_reaches_the_converter_rather_than_being_dropped(modules):
         ("fp4", "aiter", "streams_by_exclusion", False),
     ],
 )
-def test_the_loader_reads_these_as_attributes_not_as_a_backend_name(
-    modules, format_name, impl, attribute, expected
-):
+def test_the_loader_reads_these_as_attributes_not_as_a_backend_name(modules, format_name, impl, attribute, expected):
     """Each replaced an `adapter.backend.value == "..."` branch in the loader.
 
     Pinned per pair, because the loader now trusts the declaration: a wrong one
     is silently wrong at load time rather than caught by the branch it replaced.
     """
     a = modules.adapter
-    adapter = a.build_adapter(
-        format_name, impl, capability=a.FormatCapability(available=True)
-    )
+    adapter = a.build_adapter(format_name, impl, capability=a.FormatCapability(available=True))
 
     assert getattr(adapter, attribute) is expected
 
@@ -799,18 +761,12 @@ def test_probing_is_narrowed_to_what_the_plan_will_place(modules, in_play, expec
     That a pin reaches `formats_in_play` at all is pinned next door, in
     tests/quant/test_gemm_targets.py.
     """
-    backends = modules.selection.QuantizationBackends.__new__(
-        modules.selection.QuantizationBackends
-    )
+    backends = modules.selection.QuantizationBackends.__new__(modules.selection.QuantizationBackends)
     backends.model = SimpleNamespace(
-        config=SimpleNamespace(
-            gemm_quantization_spec=modules.gemm.GemmQuantizationSpec.parse("fp4")
-        )
+        config=SimpleNamespace(gemm_quantization_spec=modules.gemm.GemmQuantizationSpec.parse("fp4"))
     )
     backends.loader = SimpleNamespace(
-        quantization_plan=SimpleNamespace(
-            gemm_plan=SimpleNamespace(formats_in_play=in_play)
-        )
+        quantization_plan=SimpleNamespace(gemm_plan=SimpleNamespace(formats_in_play=in_play))
     )
 
     assert sorted(backends._formats_requested()) == expected
@@ -818,19 +774,11 @@ def test_probing_is_narrowed_to_what_the_plan_will_place(modules, in_play, expec
 
 def test_an_unmigrated_model_still_narrows_by_what_it_asked_for(modules):
     """No declared targets means no plan, and then the spec is all there is."""
-    backends = modules.selection.QuantizationBackends.__new__(
-        modules.selection.QuantizationBackends
-    )
+    backends = modules.selection.QuantizationBackends.__new__(modules.selection.QuantizationBackends)
     backends.model = SimpleNamespace(
-        config=SimpleNamespace(
-            gemm_quantization_spec=modules.gemm.GemmQuantizationSpec.parse(
-                "low=fp4,high=fp6"
-            )
-        )
+        config=SimpleNamespace(gemm_quantization_spec=modules.gemm.GemmQuantizationSpec.parse("low=fp4,high=fp6"))
     )
-    backends.loader = SimpleNamespace(
-        quantization_plan=SimpleNamespace(gemm_plan=None)
-    )
+    backends.loader = SimpleNamespace(quantization_plan=SimpleNamespace(gemm_plan=None))
 
     assert sorted(backends._formats_requested()) == ["fp4", "fp6"]
 
@@ -838,11 +786,7 @@ def test_an_unmigrated_model_still_narrows_by_what_it_asked_for(modules):
 def test_the_encoder_formats_are_read_off_the_registry(modules):
     """Not a list kept somewhere: wiring up a new encoder format should be
     flipping one attribute on the one class that gained the wiring."""
-    declared = {
-        format_name
-        for (format_name, _), cls in modules.adapter.REGISTRY.items()
-        if cls.places_text_encoder
-    }
+    declared = {format_name for (format_name, _), cls in modules.adapter.REGISTRY.items() if cls.places_text_encoder}
 
     assert set(modules.adapter.text_encoder_formats()) == declared
     assert declared == {"fp8"}, (
@@ -856,15 +800,11 @@ def test_every_pair_claiming_an_encoder_has_a_framework_branch(modules):
     implementation. The dispatch is the claim's only backing, so read it."""
     import ast
 
-    source = (
-        ROOT
-        / "xfuser/model_executor/models/runner_models/loading/text_encoder_adapter.py"
-    ).read_text()
+    source = (ROOT / "xfuser/model_executor/models/runner_models/loading/text_encoder_adapter.py").read_text()
     dispatch = next(
         node
         for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "component_quantization_config"
+        if isinstance(node, ast.FunctionDef) and node.name == "component_quantization_config"
     )
     wired = {
         value.value
@@ -873,14 +813,9 @@ def test_every_pair_claiming_an_encoder_has_a_framework_branch(modules):
         for value in node.comparators
         if isinstance(value, ast.Constant) and isinstance(value.value, str)
     }
-    claimed = {
-        impl
-        for (_, impl), cls in modules.adapter.REGISTRY.items()
-        if cls.places_text_encoder
-    }
+    claimed = {impl for (_, impl), cls in modules.adapter.REGISTRY.items() if cls.places_text_encoder}
 
     assert claimed, "nothing declares text-encoder wiring any more"
     assert claimed <= wired, (
-        f"{sorted(claimed - wired)} declare a text encoder, but "
-        "component_quantization_config has no branch for them"
+        f"{sorted(claimed - wired)} declare a text encoder, but component_quantization_config has no branch for them"
     )

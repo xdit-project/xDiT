@@ -18,10 +18,7 @@ from dataclasses import dataclass, field
 def component_target_paths(component_name, targets):
     """Targets are component-relative; the walks match against full pipeline paths."""
 
-    return {
-        component_name if not target else f"{component_name}.{target}"
-        for target in targets
-    }
+    return {component_name if not target else f"{component_name}.{target}" for target in targets}
 
 
 @dataclass

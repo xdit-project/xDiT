@@ -108,14 +108,8 @@ class GemmTargets:
         return {name: select for name, select in found if select}
 
     def __post_init__(self) -> None:
-        targeted = [
-            root for select in self.components.values() for root in select.roots()
-        ]
-        stray = [
-            root
-            for root in self.keep_high.roots()
-            if not any(_is_under(root, t) for t in targeted)
-        ]
+        targeted = [root for select in self.components.values() for root in select.roots()]
+        stray = [root for root in self.keep_high.roots() if not any(_is_under(root, t) for t in targeted)]
         if stray:
             raise ValueError(
                 f"keep_high selects modules outside the target set: {stray}. "
@@ -248,8 +242,7 @@ class GemmPlan:
             return True
         declared = self.declared_roots()
         return any(
-            root not in declared and any(_is_under(root, d) for d in declared)
-            for root in self.keep_high.roots()
+            root not in declared and any(_is_under(root, d) for d in declared) for root in self.keep_high.roots()
         )
 
     def format_for(self, path: str) -> Optional[str]:
@@ -272,9 +265,7 @@ class GemmPlan:
             return self.low
         return None
 
-    def roots(
-        self, format_name: str, *, component: Optional[str] = None
-    ) -> Tuple[str, ...]:
+    def roots(self, format_name: str, *, component: Optional[str] = None) -> Tuple[str, ...]:
         """Declared paths quantized to `format_name`, for consumers that walk a
         subtree rather than test one module.
 
@@ -315,9 +306,7 @@ class GemmPlan:
         return tuple(dict.fromkeys(found))
 
 
-def _format_at(
-    path: str, keep_high: Select, low: Optional[str], high: Optional[str]
-) -> Optional[str]:
+def _format_at(path: str, keep_high: Select, low: Optional[str], high: Optional[str]) -> Optional[str]:
     """The format a declared root takes, before any narrowing."""
     if low is None:
         return None
@@ -335,9 +324,7 @@ def _without(select: Select, dropped: Tuple[str, ...]) -> Select:
     )
 
 
-def _component_format(
-    select: Select, keep_high: Select, low: Optional[str], high: Optional[str]
-) -> Optional[str]:
+def _component_format(select: Select, keep_high: Select, low: Optional[str], high: Optional[str]) -> Optional[str]:
     """The format a whole component takes before any pin.
 
     The high tier when the declaration carves the entire component out, the low
@@ -378,9 +365,7 @@ def _pins(
             continue
         if _component_format(select, keep_high, low, high) in allowed:
             continue
-        pinned[name] = next(
-            (fmt for fmt in (low, high) if fmt in allowed), allowed[0]
-        )
+        pinned[name] = next((fmt for fmt in (low, high) if fmt in allowed), allowed[0])
     return pinned
 
 
@@ -409,17 +394,12 @@ def resolve(
     enable = tuple(enable)
     unknown = [name for name in enable if name not in COMPONENTS]
     if unknown:
-        raise ValueError(
-            f"unknown GEMM component(s) {unknown}; expected one of "
-            + ", ".join(COMPONENTS)
-        )
+        raise ValueError(f"unknown GEMM component(s) {unknown}; expected one of " + ", ".join(COMPONENTS))
 
     low = None if spec.low == "none" else spec.low
     high = spec.high if low is not None else None
 
-    targeted = {
-        name: select for name, select in targets.components.items() if name in enable
-    }
+    targeted = {name: select for name, select in targets.components.items() if name in enable}
     if sp_world_size > 1 and targets.short_sequence:
         # Sequence parallelism can chunk these modules below the M their
         # format's kernel accepts, so that format leaves them in bf16. The
@@ -431,18 +411,12 @@ def resolve(
             if _format_at(root, targets.keep_high, low, high) in MIN_M_FORMATS
         )
         if dropped:
-            targeted = {
-                name: narrowed
-                for name, select in targeted.items()
-                if (narrowed := _without(select, dropped))
-            }
+            targeted = {name: narrowed for name, select in targeted.items() if (narrowed := _without(select, dropped))}
 
     return GemmPlan(
         targeted=targeted,
         keep_high=targets.keep_high,
         low=low,
         high=high,
-        pinned=MappingProxyType(
-            _pins(targeted, targets.keep_high, low, high, component_formats or {})
-        ),
+        pinned=MappingProxyType(_pins(targeted, targets.keep_high, low, high, component_formats or {})),
     )

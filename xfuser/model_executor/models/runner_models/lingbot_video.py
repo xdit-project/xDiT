@@ -240,6 +240,7 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
         # Quantize refiner linears (same path as base transformer)
         if self._quantizes_blocks():
             from xfuser.model_executor.models.transformers.transformer_lingbot_video import _patch_block_bulk_dtype
+
             # Cache bulk dtype before quantization replaces nn.Linear
             for block in refiner_transformer.blocks:
                 if hasattr(block, "attn") and hasattr(block.attn, "to_q"):

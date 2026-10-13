@@ -153,9 +153,7 @@ def _record_native_quantization(ledger, adapter, component_name, prepared, targe
     # A load that held a residual back narrows the streamed set; one that did
     # not owns everything it was given.
     streamed = prepared.streamed_targets or targets
-    ledger.record_streamed(
-        component_name, streamed, format_name=adapter.format.value
-    )
+    ledger.record_streamed(component_name, streamed, format_name=adapter.format.value)
 
 
 def load_transformer(
@@ -201,9 +199,7 @@ def load_transformer(
                 component_name,
                 targets,
                 wrap_attrs,
-                blockwise_transformer_descriptor(
-                    adapter, component_name, targets, wrap_attrs
-                ),
+                blockwise_transformer_descriptor(adapter, component_name, targets, wrap_attrs),
                 **_blockwise_remainder(loader, component_name),
             )
         return loader.build_meta_transformer(wrapper_cls, request, init_kwargs, **build_kwargs)
@@ -215,9 +211,7 @@ def load_transformer(
             component_name=component_name,
             targets=targets,
             stream_quant=stream_quant,
-            model_factory=lambda: build_transformer_structure(
-                wrapper_cls, request, init_kwargs
-            ),
+            model_factory=lambda: build_transformer_structure(wrapper_cls, request, init_kwargs),
             plan=loader.quantization_plan.gemm_plan,
             hybrid=model.config.use_hybrid_gemm_schedule,
         )
@@ -229,9 +223,7 @@ def load_transformer(
                 component_name,
                 targets,
                 wrap_attrs,
-                blockwise_transformer_descriptor(
-                    adapter, component_name, targets, wrap_attrs
-                ),
+                blockwise_transformer_descriptor(adapter, component_name, targets, wrap_attrs),
                 **_blockwise_remainder(loader, component_name),
             )
             component = loader.build_meta_transformer(wrapper_cls, request, init_kwargs, **build_kwargs)

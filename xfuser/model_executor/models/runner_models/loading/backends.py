@@ -128,10 +128,7 @@ def _probe_torchao_config(kind: str) -> tuple[bool, str | None]:
             )
             # Conversion goes through these two as well, so a build carrying
             # the config class but not them still cannot store FP8.
-            if not all(
-                callable(getattr(quant, name, None))
-                for name in ("quantize_", "_is_linear")
-            ):
+            if not all(callable(getattr(quant, name, None)) for name in ("quantize_", "_is_linear")):
                 return False, "TorchAO FP8 conversion APIs are not callable"
         elif kind == "nvfp4":
             module = import_module("torchao.prototype.mx_formats.inference_workflow")
@@ -216,13 +213,10 @@ def _probe_torchao_fp8_accelerator(
     except Exception as exc:
         return (
             False,
-            f"cannot query CUDA capability for TorchAO FP8: "
-            f"{type(exc).__name__}: {exc}",
+            f"cannot query CUDA capability for TorchAO FP8: {type(exc).__name__}: {exc}",
         )
     if capability is None or capability < (8, 9):
-        observed = (
-            "unknown" if capability is None else f"{capability[0]}.{capability[1]}"
-        )
+        observed = "unknown" if capability is None else f"{capability[0]}.{capability[1]}"
         return (
             False,
             f"TorchAO FP8 requires CUDA capability >= 8.9; observed {observed}",
@@ -278,17 +272,12 @@ def _probe_torchao_text_encoder_streaming() -> tuple[bool, str | None]:
         )
         return (
             available,
-            (
-                None
-                if available
-                else "Transformers TorchAO quantize-on-load methods are unavailable"
-            ),
+            (None if available else "Transformers TorchAO quantize-on-load methods are unavailable"),
         )
     except Exception as exc:
         return (
             False,
-            "TorchAO text-encoder framework API probe failed: "
-            f"{type(exc).__name__}: {exc}",
+            f"TorchAO text-encoder framework API probe failed: {type(exc).__name__}: {exc}",
         )
 
 
@@ -456,8 +445,7 @@ def _probe_aiter_a6w4_apis(
     if actual_fp4 != expected_fp4 or actual_fp6 != expected_fp6:
         return (
             False,
-            "AITER mixed-MXFP packed-layout ABI mismatch: "
-            f"fp4={actual_fp4}, fp6={actual_fp6}",
+            f"AITER mixed-MXFP packed-layout ABI mismatch: fp4={actual_fp4}, fp6={actual_fp6}",
         )
 
     arch = (gcn_arch_probe or _gcn_arch_name)()
@@ -546,9 +534,7 @@ def _probe_fsdp_support(kind: str) -> tuple[bool, str | None]:
         )
         weight = module.weight
         methods = ("fsdp_pre_all_gather", "fsdp_post_all_gather")
-        missing = [
-            name for name in methods if not callable(getattr(weight, name, None))
-        ]
+        missing = [name for name in methods if not callable(getattr(weight, name, None))]
         if missing:
             return False, "INT8 tensor subclass is missing " + ", ".join(missing)
     except Exception as exc:
@@ -662,15 +648,9 @@ def probe_backend_capabilities(
     nvfp4_probe = nvfp4_probe or (lambda: _probe_torchao_config("nvfp4"))
     int8_probe = int8_probe or (lambda: _probe_torchao_config("int8"))
     torchao_fp8_probe = torchao_fp8_probe or _probe_torchao_fp8_conversion_api
-    torchao_fp8_accelerator_probe = (
-        torchao_fp8_accelerator_probe or _probe_torchao_fp8_accelerator
-    )
-    torchao_text_encoder_probe = (
-        torchao_text_encoder_probe or _probe_torchao_text_encoder_streaming
-    )
-    aiter_transformers_probe = (
-        aiter_transformers_probe or _probe_aiter_transformers_streaming
-    )
+    torchao_fp8_accelerator_probe = torchao_fp8_accelerator_probe or _probe_torchao_fp8_accelerator
+    torchao_text_encoder_probe = torchao_text_encoder_probe or _probe_torchao_text_encoder_streaming
+    aiter_transformers_probe = aiter_transformers_probe or _probe_aiter_transformers_streaming
     diffusers_probe = diffusers_probe or _probe_diffusers_config
     fsdp_probe = fsdp_probe or _probe_fsdp_support
 
@@ -759,19 +739,13 @@ def probe_backend_capabilities(
     else:
         aiter_fp8 = bool(_result(aiter_fp8_probe())[0])
         aiter_fp8_reason = None if aiter_fp8 else "AITER FP8 requires RDNA4"
-        aiter_te = (
-            _result(aiter_transformers_probe())
-            if aiter_fp8
-            else (False, "AITER FP8 backend is unavailable")
-        )
+        aiter_te = _result(aiter_transformers_probe()) if aiter_fp8 else (False, "AITER FP8 backend is unavailable")
         accelerator_ok, accelerator_reason = _result(torchao_fp8_accelerator_probe())
         if accelerator_ok:
             torchao_fp8, torchao_fp8_reason = _result(torchao_fp8_probe())
         else:
             torchao_fp8 = False
-            torchao_fp8_reason = (
-                accelerator_reason or "TorchAO FP8 requires CUDA or HIP/ROCm"
-            )
+            torchao_fp8_reason = accelerator_reason or "TorchAO FP8 requires CUDA or HIP/ROCm"
 
     return Capabilities(
         {
@@ -797,12 +771,8 @@ def probe_backend_capabilities(
                 streams=lambda: diffusers_probe("nvfp4"),
                 fsdp=lambda: fsdp_probe("nvfp4"),
             ),
-            ("fp4", "aiter"): derived(
-                mxfp4, mxfp4_reason, fsdp=lambda: fsdp_probe("mxfp4")
-            ),
-            ("fp6", "aiter"): derived(
-                mxfp6, mxfp6_reason, fsdp=lambda: fsdp_probe("mxfp6")
-            ),
+            ("fp4", "aiter"): derived(mxfp4, mxfp4_reason, fsdp=lambda: fsdp_probe("mxfp4")),
+            ("fp6", "aiter"): derived(mxfp6, mxfp6_reason, fsdp=lambda: fsdp_probe("mxfp6")),
             ("a6w4", "aiter"): derived(
                 a6w4,
                 a6w4_reason,
@@ -852,14 +822,10 @@ class AiterFp8BackendAdapter(QuantAdapter):
 
         return stream_config(list(targets))
 
-    def transformer_stream_plan(
-        self, targets, *, model_factory=None, residual_match=None
-    ):
+    def transformer_stream_plan(self, targets, *, model_factory=None, residual_match=None):
         """Built from the targets themselves; this one needs no model structure."""
         targets = tuple(targets)
-        return self._stream_config_factory(targets), LinearOwnership(
-            exclusions=(), streamed=targets
-        )
+        return self._stream_config_factory(targets), LinearOwnership(exclusions=(), streamed=targets)
 
     def _single_layer_factory(self, *, device):
         from xfuser.core.utils.runner_utils import packed_layer_factory
@@ -916,9 +882,7 @@ class TorchaoFp8BackendAdapter(QuantAdapter):
         companion=None,
     ):
         if offload_to_cpu:
-            raise ValueError(
-                "torchao FP8 conversion does not support immediate CPU offload"
-            )
+            raise ValueError("torchao FP8 conversion does not support immediate CPU offload")
         if companion is not None:
             from xfuser.core.utils.runner_utils import replace_linears
 
@@ -947,9 +911,7 @@ class TorchaoNvfp4BackendAdapter(QuantAdapter):
 
         return torchao_layer_factory(_torchao_quant_config("nvfp4"), device)
 
-    def convert_module(
-        self, module, *, device, filter_fn=None, offload_to_cpu=False, companion=None
-    ):
+    def convert_module(self, module, *, device, filter_fn=None, offload_to_cpu=False, companion=None):
         if companion is not None:
             from xfuser.core.utils.runner_utils import replace_linears
 
@@ -961,9 +923,7 @@ class TorchaoNvfp4BackendAdapter(QuantAdapter):
             )
         from xfuser.core.utils.runner_utils import quantize_linear_layers_to_nvfp4
 
-        return quantize_linear_layers_to_nvfp4(
-            module, device=device, filter_fn=filter_fn
-        )
+        return quantize_linear_layers_to_nvfp4(module, device=device, filter_fn=filter_fn)
 
 
 @stores("fp4", "aiter")
@@ -977,8 +937,7 @@ class AiterMxfp4BackendAdapter(QuantAdapter):
     group_offload_refusal = {
         "pinned": "torch cannot pin a Float4_e2m1fn_x2 tensor",
         "unpinned": (
-            "AITER binds a device from the parameter it is given, and a host "
-            "parameter resolves to an invalid ordinal"
+            "AITER binds a device from the parameter it is given, and a host parameter resolves to an invalid ordinal"
         ),
     }
     storage_semantics = "aiter_mxfp4_per_1x32"
@@ -992,9 +951,7 @@ class AiterMxfp4BackendAdapter(QuantAdapter):
 
         return mxfp4_layer_factory(device)
 
-    def convert_module(
-        self, module, *, device, filter_fn=None, offload_to_cpu=False, companion=None
-    ):
+    def convert_module(self, module, *, device, filter_fn=None, offload_to_cpu=False, companion=None):
         from xfuser.core.utils.runner_utils import replace_linears
 
         return replace_linears(
@@ -1067,9 +1024,7 @@ class AiterA6W4BackendAdapter(QuantAdapter):
 
         return packed_layer_factory(xFuserA6W4Linear, device)
 
-    def convert_module(
-        self, module, *, device, filter_fn=None, offload_to_cpu=False, **kwargs
-    ):
+    def convert_module(self, module, *, device, filter_fn=None, offload_to_cpu=False, **kwargs):
         from xfuser.core.utils.runner_utils import replace_linears
 
         return replace_linears(
@@ -1095,9 +1050,7 @@ class TorchaoInt8BackendAdapter(QuantAdapter):
 
         return torchao_layer_factory(_torchao_quant_config("int8"), device)
 
-    def convert_module(
-        self, module, *, device, filter_fn=None, companion=None, **kwargs
-    ):
+    def convert_module(self, module, *, device, filter_fn=None, companion=None, **kwargs):
         if companion is not None:
             from xfuser.core.utils.runner_utils import replace_linears
 
@@ -1121,9 +1074,7 @@ def _torchao_stream_config(kind: str, exclusions):
 
     from diffusers import TorchAoConfig
 
-    return TorchAoConfig(
-        _torchao_quant_config(kind), modules_to_not_convert=list(exclusions)
-    )
+    return TorchAoConfig(_torchao_quant_config(kind), modules_to_not_convert=list(exclusions))
 
 
 def _torchao_quant_config(kind: str):
@@ -1211,29 +1162,18 @@ def plan_eager_blockwise_fallback(
     if prepared.descriptor.materialization_mode != "post_load":
         return EagerBlockwisePlan(False, "native loading already owns materialization")
     if not prepared.descriptor.fills_blocks_locally:
-        return EagerBlockwisePlan(
-            False, "this format requires ordinary eager post-load conversion"
-        )
+        return EagerBlockwisePlan(False, "this format requires ordinary eager post-load conversion")
     if world_size != 1:
         return EagerBlockwisePlan(False, "local blockwise loading requires one rank")
     if not standard_loader:
-        return EagerBlockwisePlan(
-            False, "loader does not expose the standard checkpoint seam"
-        )
+        return EagerBlockwisePlan(False, "loader does not expose the standard checkpoint seam")
     if offload_requested:
-        return EagerBlockwisePlan(
-            False, "local blockwise loading does not support offload"
-        )
+        return EagerBlockwisePlan(False, "local blockwise loading does not support offload")
     targets = tuple(targets)
     wrap_attrs = tuple(wrap_attrs)
     if not targets or not wrap_attrs:
-        return EagerBlockwisePlan(
-            False, "quantization targets or wrap attributes are empty"
-        )
-    if not all(
-        any(module_path_is_covered(target, attr) for attr in wrap_attrs)
-        for target in targets
-    ):
+        return EagerBlockwisePlan(False, "quantization targets or wrap attributes are empty")
+    if not all(any(module_path_is_covered(target, attr) for attr in wrap_attrs) for target in targets):
         return EagerBlockwisePlan(
             False,
             "quantization targets are not fully owned by streamed transformer blocks",
@@ -1261,36 +1201,31 @@ def prepare_text_encoder_load(
         fallback = "streaming disabled by the runner"
     elif not adapter.uses_native_text_encoder_streaming:
         fallback = (
-            adapter.text_encoder_unavailable_reason
-            or "text-encoder framework quantize-on-load API is unavailable"
+            adapter.text_encoder_unavailable_reason or "text-encoder framework quantize-on-load API is unavailable"
         )
     else:
         try:
             exclusions = ()
             if adapter.streams_by_exclusion:
                 if model_factory is None:
-                    raise TargetMappingUnavailable(
-                        "target mapping unavailable: no text-encoder "
-                        "structure factory"
-                    )
+                    raise TargetMappingUnavailable("target mapping unavailable: no text-encoder structure factory")
                 try:
                     model = model_factory()
                 except Exception as exc:
-                    raise TargetMappingUnavailable(
-                        "target mapping unavailable: " f"{type(exc).__name__}: {exc}"
-                    ) from exc
+                    raise TargetMappingUnavailable(f"target mapping unavailable: {type(exc).__name__}: {exc}") from exc
                 exclusions = derive_linear_ownership(model, targets).exclusions
             if framework_config_factory is None:
                 from .text_encoder_adapter import TextEncoderFrameworkAdapter
 
                 framework = TextEncoderFrameworkAdapter()
-                framework_config_factory = lambda backend, targets, exclusions: (
-                    framework.component_quantization_config(
+
+                def framework_config_factory(backend, targets, exclusions):
+                    return framework.component_quantization_config(
                         backend=backend,
                         targets=targets,
                         exclusions=exclusions,
                     )
-                )
+
             config = framework_config_factory(
                 adapter.backend.value,
                 targets,
@@ -1299,10 +1234,7 @@ def prepare_text_encoder_load(
         except TargetMappingUnavailable as exc:
             fallback = str(exc)
         except Exception as exc:
-            fallback = (
-                "text-encoder framework config unavailable: "
-                f"{type(exc).__name__}: {exc}"
-            )
+            fallback = f"text-encoder framework config unavailable: {type(exc).__name__}: {exc}"
         else:
             return PreparedQuantLoad(
                 descriptor=descriptor_for(adapter, component_name, "streaming"),
@@ -1312,9 +1244,5 @@ def prepare_text_encoder_load(
     if supports_post_load is None:
         supports_post_load = adapter.supports_text_encoder_post_load
     if targets and not supports_post_load:
-        raise RuntimeError(
-            f"{component_name} {label} cannot fall back before allocation: {fallback}"
-        )
-    return PreparedQuantLoad(
-        descriptor=descriptor_for(adapter, component_name, "post_load", fallback)
-    )
+        raise RuntimeError(f"{component_name} {label} cannot fall back before allocation: {fallback}")
+    return PreparedQuantLoad(descriptor=descriptor_for(adapter, component_name, "post_load", fallback))

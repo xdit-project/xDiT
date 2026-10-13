@@ -1,6 +1,6 @@
 """Regression tests for mutually-owned generic FP8/FP4 GEMM modes."""
 
-from types import MethodType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 
@@ -283,9 +283,5 @@ def test_every_known_format_has_a_registered_adapter():
         REGISTRY,
     )
 
-    declared = {
-        (format_name, impl)
-        for format_name, impls in _IMPL_PREFERENCE.items()
-        for impl in impls
-    }
+    declared = {(format_name, impl) for format_name, impls in _IMPL_PREFERENCE.items() for impl in impls}
     assert declared == set(REGISTRY)

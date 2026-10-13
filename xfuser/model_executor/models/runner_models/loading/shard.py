@@ -202,12 +202,7 @@ def build_block_quantize_fn(
     by_format = {name: plan.walk_roots(name) for name in formats}
 
     paths = [f"{component_name}.{attr}" for attr in wrap_attrs]
-    if not any(
-        module_paths_overlap(path, root)
-        for path in paths
-        for roots in by_format.values()
-        for root in roots
-    ):
+    if not any(module_paths_overlap(path, root) for path in paths for roots in by_format.values() for root in roots):
         return None
 
     # Resolved once rather than per block: a format this run named needs a
@@ -218,17 +213,10 @@ def build_block_quantize_fn(
             continue
         adapter = loader.backends.adapter_for(format_name)
         if adapter is None:
-            raise RuntimeError(
-                f"{format_name.upper()} block conversion requested without "
-                "a selected backend"
-            )
+            raise RuntimeError(f"{format_name.upper()} block conversion requested without a selected backend")
         adapters[format_name] = adapter
 
-    block_paths = (
-        _wrapped_block_paths(component, component_name, wrap_attrs)
-        if component is not None
-        else None
-    )
+    block_paths = _wrapped_block_paths(component, component_name, wrap_attrs) if component is not None else None
     if block_paths is None and len(wrap_attrs) != 1:
         raise ValueError("multiple wrap_attrs require the component to resolve flattened block indices")
 
@@ -245,9 +233,7 @@ def build_block_quantize_fn(
         for format_name in present:
             adapter = adapters[format_name]
             convert_kwargs = {}
-            companion = loader.backends.hybrid_companion(
-                format_name, device=device
-            )
+            companion = loader.backends.hybrid_companion(format_name, device=device)
             if companion is not None:
                 convert_kwargs.update(companion=companion)
             adapter.convert_block(
@@ -268,5 +254,3 @@ def _plan_target_filter(plan, block_path, format_name):
         return plan.format_for(path) == format_name
 
     return filter_fn
-
-

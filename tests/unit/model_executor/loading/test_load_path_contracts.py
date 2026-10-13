@@ -12,11 +12,7 @@ ROOT = Path(__file__).resolve().parents[4]
 
 
 def _class(tree, name):
-    return next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.ClassDef) and node.name == name
-    )
+    return next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == name)
 
 
 def test_no_profile_gate_names_a_format_outside_the_registry():
@@ -34,8 +30,7 @@ def test_no_profile_gate_names_a_format_outside_the_registry():
     validate = next(
         node
         for node in args_class.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "_validate_gemm_quantization_flags"
+        if isinstance(node, ast.FunctionDef) and node.name == "_validate_gemm_quantization_flags"
     )
     source = ast.get_source_segment(args_source, validate)
     for refusal in ("INT8 cannot be ", "cannot be\n                tiered"):
@@ -46,9 +41,7 @@ def test_no_profile_gate_names_a_format_outside_the_registry():
     base_tree = ast.parse(base_source)
     base_class = _class(base_tree, "xFuserModel")
     base_validate = next(
-        node
-        for node in base_class.body
-        if isinstance(node, ast.FunctionDef) and node.name == "_validate_config"
+        node for node in base_class.body if isinstance(node, ast.FunctionDef) and node.name == "_validate_config"
     )
     base = ast.get_source_segment(base_source, base_validate)
     assert "Cannot use int8 gemms with fp8 or fp4 gemms." not in base
@@ -97,10 +90,7 @@ def test_the_text_encoder_format_is_resolved_only_when_an_encoder_needs_it():
     So the lookup must sit inside the loop, after the guard that skips an
     encoder with no targets.
     """
-    path = (
-        ROOT
-        / "xfuser/model_executor/models/runner_models/loading/text_encoder_plan.py"
-    )
+    path = ROOT / "xfuser/model_executor/models/runner_models/loading/text_encoder_plan.py"
     source = path.read_text()
     plan = next(
         node
@@ -112,17 +102,11 @@ def test_the_text_encoder_format_is_resolved_only_when_an_encoder_needs_it():
     lookups = [
         node
         for node in ast.walk(plan)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "adapter_for"
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "adapter_for"
     ]
     assert lookups, "nothing resolves the text encoder's adapter any more"
 
-    guard = min(
-        node.lineno
-        for node in ast.walk(loop)
-        if isinstance(node, ast.Continue)
-    )
+    guard = min(node.lineno for node in ast.walk(loop) if isinstance(node, ast.Continue))
     for call in lookups:
         assert loop.lineno < call.lineno, (
             "the text encoder's adapter is resolved before the loop, so a run "

@@ -23,6 +23,7 @@ def _use_aiter_fp8_rdna4() -> bool:
         return False
     return PACKAGES_CHECKER._on_rdna4()
 
+
 def log(message: str, debug=False, log_from_all_processes: bool = False) -> None:
     """Log message. By default, only from the last process to avoid duplicates."""
     if log_from_all_processes or is_last_process():
@@ -31,10 +32,12 @@ def log(message: str, debug=False, log_from_all_processes: bool = False) -> None
         else:
             logger.info(message)
 
+
 def log_error(message: str, log_from_all_processes: bool = False) -> None:
     """Log error. By default, only from the last process to avoid duplicates."""
     if log_from_all_processes or is_last_process():
         logger.error(message)
+
 
 def is_last_process() -> bool:
     """
@@ -46,52 +49,55 @@ def is_last_process() -> bool:
     world_size = int(os.environ.get("WORLD_SIZE"))
     return rank == world_size - 1
 
+
 def resize_image_to_max_area(image: Image, input_height: int, input_width: int, mod_value: int) -> Image:
-    """ Resize image to fit within max area while retaining aspect ratio """
+    """Resize image to fit within max area while retaining aspect ratio"""
 
     max_area = input_height * input_width
     width, height = image.size
     aspect_ratio = image.height / image.width
     height = round(np.sqrt(max_area * aspect_ratio)) // mod_value * mod_value
-    width = round(np.sqrt(max_area /aspect_ratio)) // mod_value * mod_value
+    width = round(np.sqrt(max_area / aspect_ratio)) // mod_value * mod_value
 
     image = image.resize((width, height))
     log(f"Resized image to {image.width}x{image.height} to fit within max area {width}x{height}")
     return image
 
+
 def resize_and_crop_image(image: Image, target_height: int, target_width: int, mod_value: int) -> Image:
-        """ Resize and center-crop image to target dimensions """
+    """Resize and center-crop image to target dimensions"""
 
-        target_height_aligned = target_height // mod_value * mod_value
-        target_width_aligned = target_width // mod_value * mod_value
+    target_height_aligned = target_height // mod_value * mod_value
+    target_width_aligned = target_width // mod_value * mod_value
 
-        log("Force output size mode enabled.")
-        log(f"Input image resolution: {image.height}x{image.width}")
-        log(f"Requested output resolution: {target_height}x{target_width}")
-        log(f"Aligned output resolution (multiple of {mod_value}): {target_height_aligned}x{target_width_aligned}")
+    log("Force output size mode enabled.")
+    log(f"Input image resolution: {image.height}x{image.width}")
+    log(f"Requested output resolution: {target_height}x{target_width}")
+    log(f"Aligned output resolution (multiple of {mod_value}): {target_height_aligned}x{target_width_aligned}")
 
-        # Step 1: Resize image maintaining aspect ratio so both dimensions >= target
-        img_width, img_height = image.size
+    # Step 1: Resize image maintaining aspect ratio so both dimensions >= target
+    img_width, img_height = image.size
 
-        # Calculate scale factor to ensure both dimensions are at least target size
-        scale_width = target_width_aligned / img_width
-        scale_height = target_height_aligned / img_height
-        scale = max(scale_width, scale_height)  # Use max to ensure both dims are >= target
+    # Calculate scale factor to ensure both dimensions are at least target size
+    scale_width = target_width_aligned / img_width
+    scale_height = target_height_aligned / img_height
+    scale = max(scale_width, scale_height)  # Use max to ensure both dims are >= target
 
-        # Resize with aspect ratio preserved
-        new_width = int(img_width * scale)
-        new_height = int(img_height * scale)
-        image = image.resize((new_width, new_height))
+    # Resize with aspect ratio preserved
+    new_width = int(img_width * scale)
+    new_height = int(img_height * scale)
+    image = image.resize((new_width, new_height))
 
-        log(f"Resized image to: {new_height}x{new_width} (maintaining aspect ratio)")
+    log(f"Resized image to: {new_height}x{new_width} (maintaining aspect ratio)")
 
-        # Step 2: Crop from center to get exact target dimensions
-        left = (new_width - target_width_aligned) // 2
-        top = (new_height - target_height_aligned) // 2
-        image = image.crop((left, top, left + target_width_aligned, top + target_height_aligned))
+    # Step 2: Crop from center to get exact target dimensions
+    left = (new_width - target_width_aligned) // 2
+    top = (new_height - target_height_aligned) // 2
+    image = image.crop((left, top, left + target_width_aligned, top + target_height_aligned))
 
-        log(f"Cropped from center to: {target_height_aligned}x{target_width_aligned}")
-        return image
+    log(f"Cropped from center to: {target_height_aligned}x{target_width_aligned}")
+    return image
+
 
 def _get_fp8_kernel_preference():
     """Select FP8 kernel preference based on GPU architecture.
@@ -100,6 +106,7 @@ def _get_fp8_kernel_preference():
     under torch.compile, so we force TORCH (_scaled_mm) on Blackwell+.
     """
     from torchao.quantization.quantize_.common import KernelPreference
+
     if torch.cuda.is_available() and _is_cuda() and torch.cuda.get_device_capability()[0] >= 10:
         return KernelPreference.TORCH
     return KernelPreference.AUTO
@@ -140,7 +147,7 @@ def _patch_torchao_float8_fsdp2() -> list[str]:
        the param-management ops FSDP2 calls during _init_sharded_param.
 
     2. Forward-time subclass loss:
-       FSDP2 all-gather reconstructs sharded params as plain torch.Tensors, 
+       FSDP2 all-gather reconstructs sharded params as plain torch.Tensors,
        stripping the Float8Tensor subclass. F.linear then sees raw fp8 bytes
        interpreted as bf16, resulting in garbage output. Fix: implement
        fsdp_pre/post_all_gather so FSDP2 gathers qdata and reconstructs a proper
@@ -158,10 +165,8 @@ def _patch_torchao_float8_fsdp2() -> list[str]:
     def _make_float8(tensor, new_qdata, new_block_size=None):
         _, attr_dict = tensor.__tensor_flatten__()
         if new_block_size is not None:
-            attr_dict = {**attr_dict, 'block_size': new_block_size}
-        return Float8Tensor.__tensor_unflatten__(
-            {'qdata': new_qdata, 'scale': tensor.scale}, attr_dict, None, None
-        )
+            attr_dict = {**attr_dict, "block_size": new_block_size}
+        return Float8Tensor.__tensor_unflatten__({"qdata": new_qdata, "scale": tensor.scale}, attr_dict, None, None)
 
     # aten.split.Tensor: torch.chunk passes dim as kwarg; existing handler
     # expects 3 positional args which raises a ValueError. Also handles PerTensor
@@ -178,6 +183,7 @@ def _patch_torchao_float8_fsdp2() -> list[str]:
             return tuple(_make_float8(tensor, qd, list(qd.shape)) for qd in new_qdatas)
         if _orig_split is not None:
             return _orig_split(func, types, args, kwargs)
+
         # Fall back to the same unwrap-and-dispatch behavior as _patched_dispatch
         # for anything not special-cased above (matches the pre-existing fallthrough).
         # Limitation: for a Float8Tensor with a non-scalar (block/row) scale this
@@ -187,6 +193,7 @@ def _patch_torchao_float8_fsdp2() -> list[str]:
         # revisit if block-scaled weights are ever sharded via FSDP2.
         def _unwrap(t):
             return t.qdata if isinstance(t, Float8Tensor) else t
+
         return func(
             *torch.utils._pytree.tree_map(_unwrap, args),
             **torch.utils._pytree.tree_map(_unwrap, kwargs),
@@ -201,6 +208,7 @@ def _patch_torchao_float8_fsdp2() -> list[str]:
         size = list(args[1]) if len(args) > 1 else list(kwargs.get("size", []))
         new_qdata = tensor.qdata.new_empty(size, pin_memory=kwargs.get("pin_memory", False))
         return _make_float8(tensor, new_qdata, size if size else [0])
+
     table[aten.new_empty.default] = _new_empty
     patched.append("aten.new_empty.default")
 
@@ -210,6 +218,7 @@ def _patch_torchao_float8_fsdp2() -> list[str]:
         size = list(args[1]) if len(args) > 1 else list(kwargs.get("size", []))
         new_qdata = tensor.qdata.new_zeros(size, pin_memory=kwargs.get("pin_memory", False))
         return _make_float8(tensor, new_qdata, size)
+
     table[aten.new_zeros.default] = _new_zeros
     patched.append("aten.new_zeros.default")
 
@@ -218,12 +227,14 @@ def _patch_torchao_float8_fsdp2() -> list[str]:
         dst, src = args[0], args[1]
         dst.qdata.copy_(src.qdata if isinstance(src, Float8Tensor) else src)
         return dst
+
     table[aten.copy_.default] = _copy_
     patched.append("aten.copy_.default")
 
     # aten.view.default: existing handler only supports 2D↔3D; FSDP2 may call
     # view(-1) to flatten to 1D before sharding.
     _orig_view = table.get(aten.view.default)
+
     def _view(func, types, args, kwargs):
         tensor, size = args
         if len(size) == 1:
@@ -232,6 +243,7 @@ def _patch_torchao_float8_fsdp2() -> list[str]:
         if _orig_view is not None:
             return _orig_view(func, types, args, kwargs)
         raise NotImplementedError(f"Float8Tensor view patch: unhandled {tensor.shape} -> {size}")
+
     table[aten.view.default] = _view
     patched.append("aten.view.default")
 
@@ -242,6 +254,7 @@ def _patch_torchao_float8_fsdp2() -> list[str]:
         storage_offset = args[3] if len(args) > 3 else kwargs.get("storage_offset", 0)
         new_qdata = aten.as_strided.default(tensor.qdata, size, stride, storage_offset)
         return _make_float8(tensor, new_qdata, list(size))
+
     table[aten.as_strided.default] = _as_strided
     patched.append("aten.as_strided.default")
 
@@ -255,11 +268,14 @@ def _patch_torchao_float8_fsdp2() -> list[str]:
         inner_table = _float8_tensor_op_table(cls)
         if func in inner_table:
             return inner_table[func](func, types, args, kwargs)
+
         def _unwrap(t):
             return t.qdata if isinstance(t, cls) else t
+
         unwrapped_args = torch.utils._pytree.tree_map(_unwrap, args)
         unwrapped_kwargs = torch.utils._pytree.tree_map(_unwrap, kwargs)
         return func(*unwrapped_args, **unwrapped_kwargs)
+
     Float8Tensor.__torch_dispatch__ = _patched_dispatch
     patched.append("__torch_dispatch__ fallthrough")
 
@@ -280,17 +296,13 @@ def _patch_torchao_float8_fsdp2() -> list[str]:
             if isinstance(out, Float8Tensor):
                 out.qdata.copy_(qdata)
                 return
-            raise RuntimeError(
-                f"fsdp_post_all_gather: out must be Float8Tensor, got {type(out)}"
-            )
+            raise RuntimeError(f"fsdp_post_all_gather: out must be Float8Tensor, got {type(out)}")
         # attr_dict was captured before sharding, so block_size reflects the 1D
         # shard shape. Patch it to the all-gathered shape before reconstructing.
-        attr_dict = {**attr_dict, 'block_size': list(qdata.shape)}
+        attr_dict = {**attr_dict, "block_size": list(qdata.shape)}
         # Return (tensor, inner_tensors): FSDP2 keeps inner_tensors alive until
         # reshard; without this second element FSDP2 unpacks the tensor itself.
-        fp8 = Float8Tensor.__tensor_unflatten__(
-            {'qdata': qdata, 'scale': scale}, attr_dict, None, None
-        )
+        fp8 = Float8Tensor.__tensor_unflatten__({"qdata": qdata, "scale": scale}, attr_dict, None, None)
         return fp8, (qdata,)
 
     Float8Tensor.fsdp_pre_all_gather = _fsdp_pre_all_gather
@@ -326,15 +338,14 @@ except Exception as e:
 def torchao_float8_fsdp2_patches_available() -> tuple[bool, str | None]:
     """Report whether every tensor-subclass patch required by FSDP2 applied."""
 
-    missing = _REQUIRED_TORCHAO_FLOAT8_FSDP2_PATCHES.difference(
-        _TORCHAO_FLOAT8_FSDP2_PATCHES
-    )
+    missing = _REQUIRED_TORCHAO_FLOAT8_FSDP2_PATCHES.difference(_TORCHAO_FLOAT8_FSDP2_PATCHES)
     if missing:
         return (
             False,
             "missing TorchAO FSDP patches: " + ", ".join(sorted(missing)),
         )
     return True, None
+
 
 def _weight_is_torchao_quantized(module) -> bool:
     """Whether ``module.weight`` is one of torchao's quantized tensor subclasses.
@@ -455,10 +466,7 @@ def quantize_with_torchao(
             return False
         if requested_filter is not None and not requested_filter(mod, fqn):
             return False
-        return (
-            min_layer_size <= 0
-            or min(mod.out_features, mod.in_features) >= min_layer_size
-        )
+        return min_layer_size <= 0 or min(mod.out_features, mod.in_features) >= min_layer_size
 
     if isinstance(module_or_module_list, torch.nn.Module):
         module_or_module_list = [module_or_module_list]
@@ -467,23 +475,26 @@ def quantize_with_torchao(
 
 
 def load_dataset_prompts(dataset_path: str) -> list[str]:
-    """ load prompts from a csv dataset file """
+    """load prompts from a csv dataset file"""
     prompts = []
-    with open(dataset_path, 'r', encoding='utf-8') as csvfile:
+    with open(dataset_path, "r", encoding="utf-8") as csvfile:
         reader = csv.DictReader(csvfile)
         for row in reader:
-            prompts.append(row['prompt'])
+            prompts.append(row["prompt"])
     log(f"Loaded {len(prompts)} prompts from dataset at {dataset_path}")
     return prompts
 
+
 def rsetattr(obj: object, attr: str, value: object) -> None:
-    """ Recursive setattr to set nested attributes """
-    pre, _, post = attr.rpartition('.')
+    """Recursive setattr to set nested attributes"""
+    pre, _, post = attr.rpartition(".")
     return setattr(rgetattr(obj, pre) if pre else obj, post, value)
 
+
 def rgetattr(obj: object, attr: str) -> object:
-    """ Recursive getattr to get nested attributes """
+    """Recursive getattr to get nested attributes"""
     return functools.reduce(getattr, [obj] + attr.split("."))
+
 
 def quantize_linear_layers_to_nvfp4(
     module_or_module_list_to_quantize,
@@ -631,9 +642,7 @@ def paired_layer_factory(low_factory, companion=None):
 
     def make_layer(spec: LinearSpec):
         low = low_factory(spec)
-        return xFuserHybridLinear(
-            high_precision_linear=companion(spec), low_precision_linear=low
-        )
+        return xFuserHybridLinear(high_precision_linear=companion(spec), low_precision_linear=low)
 
     return make_layer
 
@@ -658,9 +667,7 @@ def mxfp4_layer_factory(device, companion=None):
     return paired_layer_factory(make_layer, companion)
 
 
-def _tokenizer_directory(
-    model_name_or_path, component_name, from_pretrained_kwargs
-) -> str | None:
+def _tokenizer_directory(model_name_or_path, component_name, from_pretrained_kwargs) -> str | None:
     """The directory holding a tokenizer, when its own fast tokenizer file is there to load.
 
     Reloading by the model's own name makes transformers v5 parse the *root* config.json for an
@@ -681,11 +688,7 @@ def _tokenizer_directory(
     request = CheckpointRequest(
         model_name_or_path,
         subfolder=component_name,
-        **{
-            key: value
-            for key, value in from_pretrained_kwargs.items()
-            if key in hub_keys
-        },
+        **{key: value for key, value in from_pretrained_kwargs.items() if key in hub_keys},
     )
     try:
         resolved = resolve_checkpoint_file(request, "tokenizer.json")
@@ -707,6 +710,7 @@ def fix_llama_tokenizer_pretokenizer(pipeline, model_name_or_path, **from_pretra
     """
     import transformers
     from xfuser.compat import version_at_least
+
     if not version_at_least(transformers.__version__, "5.0.0"):
         return
 
@@ -719,24 +723,29 @@ def fix_llama_tokenizer_pretokenizer(pipeline, model_name_or_path, **from_pretra
         if "Llama" not in type(component).__name__:
             continue
 
-        log(f"Replacing tokenizer '{component_name}' (type={type(component).__name__}) "
-            f"with PreTrainedTokenizerFast...", debug=True)
-
-        source, source_kwargs = model_name_or_path, {
-            "subfolder": component_name,
-            **from_pretrained_kwargs,
-        }
-        local_dir = _tokenizer_directory(
-            model_name_or_path, component_name, from_pretrained_kwargs
+        log(
+            f"Replacing tokenizer '{component_name}' (type={type(component).__name__}) with PreTrainedTokenizerFast...",
+            debug=True,
         )
+
+        source, source_kwargs = (
+            model_name_or_path,
+            {
+                "subfolder": component_name,
+                **from_pretrained_kwargs,
+            },
+        )
+        local_dir = _tokenizer_directory(model_name_or_path, component_name, from_pretrained_kwargs)
         if local_dir is not None:
             source, source_kwargs = local_dir, {}
 
         fixed = PreTrainedTokenizerFast.from_pretrained(source, **source_kwargs)
         setattr(pipeline, component_name, fixed)
 
-        log(f"Fixed tokenizer '{component_name}': "
-            f"reloaded as PreTrainedTokenizerFast (transformers v5 LlamaTokenizer bug workaround)")
+        log(
+            f"Fixed tokenizer '{component_name}': "
+            f"reloaded as PreTrainedTokenizerFast (transformers v5 LlamaTokenizer bug workaround)"
+        )
 
 
 def convert_model_convs_to_channels_last(model: torch.nn.Module) -> None:

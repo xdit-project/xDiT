@@ -9,18 +9,10 @@ from types import SimpleNamespace
 import pytest
 
 ROOT = Path(__file__).resolve().parents[4]
-ADAPTER_PATH = (
-    ROOT / "xfuser/model_executor/models/runner_models/loading/text_encoder_adapter.py"
-)
-BACKENDS_PATH = (
-    ROOT / "xfuser/model_executor/models/runner_models/loading/backends.py"
-)
-CONTRACTS_PATH = (
-    ROOT / "xfuser/model_executor/models/runner_models/loading/contracts.py"
-)
-QUANT_ADAPTER_PATH = (
-    ROOT / "xfuser/model_executor/models/runner_models/loading/quant_adapter.py"
-)
+ADAPTER_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/text_encoder_adapter.py"
+BACKENDS_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/backends.py"
+CONTRACTS_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/contracts.py"
+QUANT_ADAPTER_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/quant_adapter.py"
 
 
 #: A synthetic package over the loading directory. These modules are meant to
@@ -32,9 +24,7 @@ _PKG = "te_framework_pkg"
 
 def _package():
     if _PKG not in sys.modules:
-        package = importlib.util.module_from_spec(
-            importlib.machinery.ModuleSpec(_PKG, None, is_package=True)
-        )
+        package = importlib.util.module_from_spec(importlib.machinery.ModuleSpec(_PKG, None, is_package=True))
         package.__path__ = [str(BACKENDS_PATH.parent)]
         sys.modules[_PKG] = package
     return sys.modules[_PKG]
@@ -201,9 +191,7 @@ def test_torchao_te_native_plan_derives_safe_negative_mapping(modules, monkeypat
     monkeypatch.setattr(
         b,
         "derive_linear_ownership",
-        lambda model, targets: SimpleNamespace(
-            exclusions=("shared", "lm_head"), streamed=(), residual=()
-        ),
+        lambda model, targets: SimpleNamespace(exclusions=("shared", "lm_head"), streamed=(), residual=()),
     )
 
     prepared = b.prepare_text_encoder_load(

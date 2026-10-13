@@ -73,9 +73,7 @@ class Capabilities:
 
         return self.records.get(
             (format_name, impl),
-            FormatCapability(
-                reason=f"no {impl} implementation of {format_name} was probed"
-            ),
+            FormatCapability(reason=f"no {impl} implementation of {format_name} was probed"),
         )
 
     def merged(self, other: "Capabilities") -> "Capabilities":
@@ -114,11 +112,7 @@ def text_encoder_formats() -> Tuple[str, ...]:
     return tuple(
         format_name
         for format_name, impls in IMPL_PREFERENCE.items()
-        if any(
-            REGISTRY[(format_name, impl)].places_text_encoder
-            for impl in impls
-            if (format_name, impl) in REGISTRY
-        )
+        if any(REGISTRY[(format_name, impl)].places_text_encoder for impl in impls if (format_name, impl) in REGISTRY)
     )
 
 
@@ -138,14 +132,10 @@ def build_adapter(format_name: str, impl: str, *, capability, hybrid: bool = Fal
 
     cls = REGISTRY.get((format_name, impl))
     if cls is None:
-        raise UnsupportedLoadContract(
-            f"no {impl} implementation of {format_name} exists"
-        )
+        raise UnsupportedLoadContract(f"no {impl} implementation of {format_name} exists")
     if not capability.available:
         reason = capability.reason or "backend unavailable"
-        raise UnsupportedLoadContract(
-            f"{impl} {format_name} is unavailable on this machine: {reason}"
-        )
+        raise UnsupportedLoadContract(f"{impl} {format_name} is unavailable on this machine: {reason}")
     if hybrid and not cls.leads_a_pair():
         raise UnsupportedLoadContract(
             f"{impl} {format_name} cannot install a pair at a leaf, so it "
@@ -222,10 +212,7 @@ def derive_linear_ownership(
             ) from exc
 
     def targeted(name):
-        return any(
-            not target or name == target or name.startswith(f"{target}.")
-            for target in targets
-        )
+        return any(not target or name == target or name.startswith(f"{target}.") for target in targets)
 
     exclusions = []
     streamed = []
@@ -233,10 +220,7 @@ def derive_linear_ownership(
     for name, module in model.named_modules():
         if not name or not is_linear(module):
             continue
-        too_small = (
-            min_layer_size > 0
-            and min(module.in_features, module.out_features) < min_layer_size
-        )
+        too_small = min_layer_size > 0 and min(module.in_features, module.out_features) < min_layer_size
         if not targeted(name) or too_small:
             exclusions.append(name)
         elif residual_match is not None and residual_match(name):
@@ -379,9 +363,7 @@ class QuantAdapter:
         self.text_encoder_unavailable_reason = text_encoder_unavailable_reason
 
     def _stream_config_factory(self, exclusions):
-        raise TargetMappingUnavailable(
-            f"{type(self).__name__} cannot build a native streaming config"
-        )
+        raise TargetMappingUnavailable(f"{type(self).__name__} cannot build a native streaming config")
 
     def transformer_stream_plan(
         self,
@@ -393,19 +375,13 @@ class QuantAdapter:
         """The native config for this component, and which leaves it owns."""
 
         if not self.uses_native_transformer_streaming:
-            raise TargetMappingUnavailable(
-                self.native_unavailable_reason or self.default_unavailable_reason
-            )
+            raise TargetMappingUnavailable(self.native_unavailable_reason or self.default_unavailable_reason)
         if model_factory is None:
-            raise TargetMappingUnavailable(
-                "target mapping unavailable: no model structure factory"
-            )
+            raise TargetMappingUnavailable("target mapping unavailable: no model structure factory")
         try:
             model = model_factory()
         except Exception as exc:
-            raise TargetMappingUnavailable(
-                f"target mapping unavailable: {type(exc).__name__}: {exc}"
-            ) from exc
+            raise TargetMappingUnavailable(f"target mapping unavailable: {type(exc).__name__}: {exc}") from exc
         ownership = derive_linear_ownership(
             model,
             targets,
@@ -417,9 +393,7 @@ class QuantAdapter:
         except TargetMappingUnavailable:
             raise
         except Exception as exc:
-            raise TargetMappingUnavailable(
-                f"{self.default_unavailable_reason}: {type(exc).__name__}: {exc}"
-            ) from exc
+            raise TargetMappingUnavailable(f"{self.default_unavailable_reason}: {type(exc).__name__}: {exc}") from exc
         return config, ownership
 
     def transformer_stream_config(self, targets, *, model_factory=None):
@@ -450,9 +424,7 @@ class QuantAdapter:
 
         from xfuser.core.utils.runner_utils import paired_layer_factory
 
-        return paired_layer_factory(
-            self._single_layer_factory(device=device), companion
-        )
+        return paired_layer_factory(self._single_layer_factory(device=device), companion)
 
     @classmethod
     def builds_one_layer(cls) -> bool:
@@ -540,8 +512,7 @@ def prepare_native_load(
         # half when the schedule was written, so every other low format
         # streamed and the schedule it asked for was never built.
         fallback = (
-            "a per-step pair needs both precisions built from each leaf, and "
-            "a streamed load has already quantized them"
+            "a per-step pair needs both precisions built from each leaf, and a streamed load has already quantized them"
         )
     else:
         try:
@@ -550,9 +521,7 @@ def prepare_native_load(
                 model_factory=model_factory,
                 # Only a converter that can hold leaves back at another format
                 # has a residual to keep out of the stream.
-                residual_match=(
-                    residual_match if adapter.supports_precision_overrides else None
-                ),
+                residual_match=(residual_match if adapter.supports_precision_overrides else None),
             )
         except Exception as exc:
             fallback = str(exc)
@@ -560,14 +529,10 @@ def prepare_native_load(
             return PreparedQuantLoad(
                 descriptor=descriptor_for(adapter, component_name, "streaming"),
                 quantization_config=config,
-                streamed_targets=(
-                    ownership.streamed if ownership.residual else targets
-                ),
+                streamed_targets=(ownership.streamed if ownership.residual else targets),
                 residual_targets=ownership.residual,
             )
-    return PreparedQuantLoad(
-        descriptor=descriptor_for(adapter, component_name, "post_load", fallback)
-    )
+    return PreparedQuantLoad(descriptor=descriptor_for(adapter, component_name, "post_load", fallback))
 
 
 def describe_blockwise_load(
@@ -588,9 +553,7 @@ def describe_blockwise_load(
             "post_load",
             f"{component_name} has no {adapter.format.value.upper()} targets",
         )
-    if not wrap_attrs or not any(
-        module_paths_overlap(target, attr) for target in targets for attr in wrap_attrs
-    ):
+    if not wrap_attrs or not any(module_paths_overlap(target, attr) for target in targets for attr in wrap_attrs):
         return descriptor_for(
             adapter,
             component_name,

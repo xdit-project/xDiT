@@ -5,8 +5,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from xfuser.model_executor.models.runner_models import base_model
-from xfuser.model_executor.models.runner_models.base_model import xFuserModel
 from xfuser.model_executor.quant.targets import GemmTargets, Select
 from xfuser.model_executor.models.runner_models.loading.quant_adapter import (
     Capabilities,
@@ -23,13 +21,13 @@ from xfuser.model_executor.models.runner_models.loading.quantization_ledger impo
 from xfuser.model_executor.models.runner_models.loading.backend_selection import (
     QuantizationBackends,
 )
-from xfuser.model_executor.models.runner_models.loading import backends
 from xfuser.model_executor.models.runner_models.loading import quant_adapter
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     MaterializationMode,
     QuantizationBackend,
     QuantizationFormat,
 )
+
 
 def _streamed_ledger(component, targets, format_name):
     ledger = QuantizationLedger()
@@ -48,9 +46,7 @@ def backends(model):
     selected = QuantizationBackends(loader)
     # Seed the resolution cache by format rather than probe: these fixtures say
     # what the selector does with an adapter, not which one the machine offers.
-    fp8 = getattr(model, "fp8_backend", None) or getattr(
-        model, "blockwise_fp8_backend", None
-    )
+    fp8 = getattr(model, "fp8_backend", None) or getattr(model, "blockwise_fp8_backend", None)
     if fp8 is not None:
         selected._adapters["fp8"] = fp8
     low = getattr(model, "format_backend", None)
@@ -103,30 +99,19 @@ class _StubPlan:
             for target in low
         )
         suffixes = tuple(
-            entry.lstrip(".")
-            for entry in (
-                getattr(settings, "fp8_precision_override_suffixes", None) or ()
-            )
+            entry.lstrip(".") for entry in (getattr(settings, "fp8_precision_override_suffixes", None) or ())
         )
         keep_high = Select(modules=tuple(held), prefixes=prefixes, suffixes=suffixes)
 
         high_name = None
         if low_name != "fp8" and (held or prefixes or suffixes):
-            high_name = "fp6" if getattr(
-                self.model.config, "use_fp6_gemms", False
-            ) else "fp8"
-        spec = (
-            GemmQuantizationSpec(low_name, high_name)
-            if high_name
-            else GemmQuantizationSpec(low_name)
-        )
+            high_name = "fp6" if getattr(self.model.config, "use_fp6_gemms", False) else "fp8"
+        spec = GemmQuantizationSpec(low_name, high_name) if high_name else GemmQuantizationSpec(low_name)
 
         targets = GemmTargets(
             transformer=Select(
                 modules=tuple(dict.fromkeys(low + fp8)),
-                only=tuple(
-                    getattr(settings, "fp8_gemm_include_suffixes", None) or ()
-                ),
+                only=tuple(getattr(settings, "fp8_gemm_include_suffixes", None) or ()),
             ),
             keep_high=keep_high if high_name else Select(),
         )
@@ -190,11 +175,8 @@ def runtime(model):
     # could pair differently from the one under test.
     backends.model = model
     backends.loader = loader
-    backends.hybrid_companion = partial(
-        QuantizationBackends.hybrid_companion, backends
-    )
+    backends.hybrid_companion = partial(QuantizationBackends.hybrid_companion, backends)
     return loader
-
 
 
 class RecordingAdapter:
@@ -295,11 +277,7 @@ def test_native_fp8_streaming_is_disabled_for_suffix_restricted_targets(
     from xfuser.model_executor.quant.targets import GemmTargets, Select, resolve
 
     narrowed = resolve(
-        GemmTargets(
-            transformer=Select(
-                modules=("transformer.blocks",), only=("attn.to_qkv",)
-            )
-        ),
+        GemmTargets(transformer=Select(modules=("transformer.blocks",), only=("attn.to_qkv",))),
         GemmQuantizationSpec.parse("fp8"),
     )
 
@@ -321,16 +299,10 @@ def test_the_hybrid_schedule_only_blocks_streaming_where_it_must(monkeypatch):
     def prepare(_adapter, **kwargs):
         observed.update(kwargs)
 
-    from xfuser.model_executor.models.runner_models.loading import backends
-
     monkeypatch.setattr(
         quant_adapter,
         "prepare_native_load",
         prepare,
-    )
-    model = SimpleNamespace(
-        settings=SimpleNamespace(gemm_targets=None),
-        config=SimpleNamespace(use_hybrid_gemm_schedule=True),
     )
 
     transformer_load._prepare_native_load(
@@ -386,8 +358,7 @@ def test_no_adapter_streams_under_the_hybrid_schedule():
             hybrid=True,
         )
         assert prepared.descriptor.materialization_mode == "post_load", (
-            f"{impl} {format_name} streamed under the hybrid schedule, so the "
-            "pair was never built"
+            f"{impl} {format_name} streamed under the hybrid schedule, so the pair was never built"
         )
         assert prepared.quantization_config is None
 
@@ -695,9 +666,7 @@ def test_eager_fp4_with_fp8_only_target_preflights_component_backend():
         ("low=int8,high=fp8", ["int8", "fp8"]),
     ],
 )
-def test_preflight_resolves_every_format_the_run_names(
-    monkeypatch, profile, expected
-):
+def test_preflight_resolves_every_format_the_run_names(monkeypatch, profile, expected):
     """Startup resolves the formats in play, whatever pair they are.
 
     Resolving them here is what makes "this cannot be sharded" a startup
@@ -720,12 +689,8 @@ def test_preflight_resolves_every_format_the_run_names(
         ),
         GemmQuantizationSpec.parse(profile),
     )
-    selected.loader = SimpleNamespace(
-        quantization_plan=SimpleNamespace(gemm_plan=plan)
-    )
-    selected.model = SimpleNamespace(
-        config=SimpleNamespace(use_hybrid_gemm_schedule=False)
-    )
+    selected.loader = SimpleNamespace(quantization_plan=SimpleNamespace(gemm_plan=plan))
+    selected.model = SimpleNamespace(config=SimpleNamespace(use_hybrid_gemm_schedule=False))
 
     selected.preflight()
 
@@ -966,9 +931,7 @@ def test_fsdp_boundary_has_no_global_fp8_patch_assertion(monkeypatch):
         ("neither", False, False, None),
     ],
 )
-def test_the_first_available_implementation_wins(
-    platform, aiter_fp8, torchao_fp8, expected
-):
+def test_the_first_available_implementation_wins(platform, aiter_fp8, torchao_fp8, expected):
     """The preference order picks; each probe gates itself to its hardware.
 
     AITER block-scale probes available only on RDNA4, so naming it first is
@@ -978,12 +941,8 @@ def test_the_first_available_implementation_wins(
     selected = _measured(
         model,
         {
-            ("fp8", "aiter"): FormatCapability(
-                available=aiter_fp8, reason="not RDNA4"
-            ),
-            ("fp8", "torchao"): FormatCapability(
-                available=torchao_fp8, reason="torchao is not installed"
-            ),
+            ("fp8", "aiter"): FormatCapability(available=aiter_fp8, reason="not RDNA4"),
+            ("fp8", "torchao"): FormatCapability(available=torchao_fp8, reason="torchao is not installed"),
         },
     )
 
@@ -1011,9 +970,7 @@ def test_a_format_nothing_can_store_says_what_each_implementation_measured():
         (True, "pin"),
     ],
 )
-def test_group_offload_is_refused_by_the_implementation_that_cannot_survive_it(
-    low_cpu_mem, expected_in_reason
-):
+def test_group_offload_is_refused_by_the_implementation_that_cannot_survive_it(low_cpu_mem, expected_in_reason):
     """Both legs fail below Python, one by abort, so neither can be caught there."""
     model = _fsdp_patch_model(strategy={}, fully_shard_degree=1)
     model.config.enable_group_cpu_offload = True
@@ -1107,6 +1064,8 @@ def test_an_aiter_carve_out_under_fsdp_needs_no_torchao_patches():
 
     assert selected.places_under_fsdp2("fp8")
     assert selected.adapter_for("fp8").backend is QuantizationBackend.AITER
+
+
 def test_streamed_fp8_target_does_not_skip_disjoint_target_in_component(
     monkeypatch,
 ):

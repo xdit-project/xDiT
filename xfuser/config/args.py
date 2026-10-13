@@ -364,10 +364,8 @@ class xFuserArgs:
         "use_fp4_gemms": "--gemm_quantization fp4",
         "use_int8_gemms": "--gemm_quantization int8",
         "use_fp8_text_encoder": "--quantize_text_encoder",
-        "fp8_precision_override_prefix_patterns":
-            "--gemm_config with gemm_high_precision_prefix_patterns",
-        "fp8_precision_override_suffix_patterns":
-            "--gemm_config with gemm_high_precision_suffix_patterns",
+        "fp8_precision_override_prefix_patterns": "--gemm_config with gemm_high_precision_prefix_patterns",
+        "fp8_precision_override_suffix_patterns": "--gemm_config with gemm_high_precision_suffix_patterns",
     }
 
     def _refuse_removed_gemm_options(self) -> None:
@@ -997,11 +995,11 @@ class xFuserArgs:
             "--quantize_text_encoder",
             action="store_true",
             help="Also quantize the text encoder's linear layers (selected models only). "
-                 "The encoder takes the run's format where its loaders can place it and FP8 "
-                 "otherwise, and the resolved GEMM plan logs which. Frees several GB for "
-                 "large bf16 text encoders, at whatever output-quality cost that format "
-                 "carries for the encoder; off by default because that is a quality "
-                 "trade-off, not a free win.",
+            "The encoder takes the run's format where its loaders can place it and FP8 "
+            "otherwise, and the resolved GEMM plan logs which. Frees several GB for "
+            "large bf16 text encoders, at whatever output-quality cost that format "
+            "carries for the encoder; off by default because that is a quality "
+            "trade-off, not a free win.",
         )
         parser.add_argument(
             "--use_fp8_text_encoder",
@@ -1407,10 +1405,7 @@ class xFuserArgs:
         if self.hybrid_gemm_schedule is not None:
             scheduled_formats = {token.strip().lower() for token in self.hybrid_gemm_schedule.split(",")}
             if scheduled_formats - spec.formats:
-                raise ValueError(
-                    "YAML hybrid_gemm_schedule entries must match "
-                    f"--gemm_quantization {spec}."
-                )
+                raise ValueError(f"YAML hybrid_gemm_schedule entries must match --gemm_quantization {spec}.")
         # No list of acceptable pairs. Whether a format can be stored here is
         # one registry lookup at load time, and whether its implementation can
         # drive a per-step schedule is an attribute on that implementation --
@@ -1454,8 +1449,7 @@ class xFuserArgs:
 
         if self.group_offload_low_cpu_mem and not self.enable_group_cpu_offload:
             raise ValueError(
-                "--group_offload_low_cpu_mem only affects group CPU offload; pass "
-                "--enable_group_cpu_offload too."
+                "--group_offload_low_cpu_mem only affects group CPU offload; pass --enable_group_cpu_offload too."
             )
 
         model_config = ModelConfig(

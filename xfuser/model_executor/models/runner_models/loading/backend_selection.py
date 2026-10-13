@@ -136,8 +136,7 @@ class QuantizationBackends:
         impl = self.impl_for(format_name)
         if impl is None:
             raise UnsupportedLoadContract(
-                f"this run asked for {format_name}, which nothing here can "
-                "store: " + self.why_not(format_name)
+                f"this run asked for {format_name}, which nothing here can store: " + self.why_not(format_name)
             )
         capability = self.capabilities.of(format_name, impl)
         plan = self.loader.quantization_plan.gemm_plan
@@ -147,11 +146,7 @@ class QuantizationBackends:
             capability=capability,
             # Only the format a step actually runs in bf16-vs-quantized pairs
             # can refuse the schedule; the companion never drives it.
-            hybrid=(
-                plan is not None
-                and format_name == plan.low
-                and bool(self.model.config.use_hybrid_gemm_schedule)
-            ),
+            hybrid=(plan is not None and format_name == plan.low and bool(self.model.config.use_hybrid_gemm_schedule)),
         )
         validate_fsdp_placement(
             adapter,
@@ -165,10 +160,7 @@ class QuantizationBackends:
         tried = _IMPL_PREFERENCE.get(format_name)
         if not tried:
             return f"{format_name} is not a GEMM format this build knows"
-        return "; ".join(
-            f"{impl}: {self.capabilities.of(format_name, impl).reason or 'unavailable'}"
-            for impl in tried
-        )
+        return "; ".join(f"{impl}: {self.capabilities.of(format_name, impl).reason or 'unavailable'}" for impl in tried)
 
     def assert_offload_is_compatible(self) -> None:
         """Refuse an offload mode an implementation in play cannot survive.
@@ -184,11 +176,7 @@ class QuantizationBackends:
         config = self.model.config
         if not getattr(config, "enable_group_cpu_offload", False):
             return
-        leg = (
-            "pinned"
-            if getattr(config, "group_offload_low_cpu_mem", False)
-            else "unpinned"
-        )
+        leg = "pinned" if getattr(config, "group_offload_low_cpu_mem", False) else "unpinned"
         for format_name in self._formats_in_play():
             adapter = self.adapter_for(format_name)
             refusal = getattr(adapter, "group_offload_refusal", None)
@@ -246,9 +234,7 @@ class QuantizationBackends:
             return set()
         return {
             f"{component_name}.{wrap_attr}"
-            for component_name, strategy in (
-                self.model.settings.fsdp_strategy or {}
-            ).items()
+            for component_name, strategy in (self.model.settings.fsdp_strategy or {}).items()
             for wrap_attr in strategy.get("wrap_attrs", ())
         }
 
@@ -272,16 +258,9 @@ class QuantizationBackends:
             # Only the high format is installed everywhere the low walk goes.
             # Asking for both widened the low format onto subtrees it never
             # touches, which could refuse a placement that was always fine.
-            paired=(
-                bool(self.model.config.use_hybrid_gemm_schedule)
-                and format_name == plan.high
-            ),
+            paired=(bool(self.model.config.use_hybrid_gemm_schedule) and format_name == plan.high),
         )
-        return any(
-            module_paths_overlap(root, fsdp_path)
-            for root in roots
-            for fsdp_path in fsdp_target_paths
-        )
+        return any(module_paths_overlap(root, fsdp_path) for root in roots for fsdp_path in fsdp_target_paths)
 
     def transformer_adapter(self, component_name: str):
         """The adapter and component-relative targets owning one transformer.

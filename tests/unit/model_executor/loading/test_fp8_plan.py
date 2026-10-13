@@ -95,9 +95,7 @@ def test_nothing_is_targeted_when_the_model_declares_nothing(monkeypatch):
 def test_every_format_sees_the_same_declared_targets(monkeypatch):
     """A model declares which modules, never which modules per format."""
     for raw in ("fp8", "fp4", "fp6", "int8"):
-        plan = make_plan(
-            monkeypatch, transformer_targets=["transformer.blocks"], raw=raw
-        )
+        plan = make_plan(monkeypatch, transformer_targets=["transformer.blocks"], raw=raw)
         gemm_plan = plan.gemm_plan
         assert gemm_plan.roots(raw) == ("transformer.blocks",), raw
 
@@ -138,16 +136,14 @@ def test_targets_are_stripped_of_the_component_prefix(monkeypatch):
         te_targets=["text_encoder.model.language_model.layers"],
         quantize_text_encoder=True,
     ).gemm_plan
-    assert plan.relative_to(
-        "text_encoder", plan.declared_roots(component="text_encoder")
-    ) == ("model.language_model.layers",)
+    assert plan.relative_to("text_encoder", plan.declared_roots(component="text_encoder")) == (
+        "model.language_model.layers",
+    )
 
 
 def test_prefix_match_does_not_leak_across_sibling_components(monkeypatch):
     """ "transformer_2.blocks" must not count as a target of "transformer"."""
-    plan = make_plan(
-        monkeypatch, transformer_targets=["transformer.blocks", "transformer_2.blocks"]
-    ).gemm_plan
+    plan = make_plan(monkeypatch, transformer_targets=["transformer.blocks", "transformer_2.blocks"]).gemm_plan
     roots = plan.declared_roots()
     assert plan.relative_to("transformer", roots) == ("blocks",)
     assert plan.relative_to("transformer_2", roots) == ("blocks",)
@@ -194,11 +190,7 @@ def test_no_runner_hides_a_text_encoder_in_the_always_on_list():
         targets = cls.settings.gemm_targets
         if targets is None:
             continue
-        stray = [
-            entry
-            for entry in targets.transformer.roots()
-            if "text_encoder" in entry.partition(".")[0]
-        ]
+        stray = [entry for entry in targets.transformer.roots() if "text_encoder" in entry.partition(".")[0]]
         if stray:
             leaks[cls.__name__] = stray
 

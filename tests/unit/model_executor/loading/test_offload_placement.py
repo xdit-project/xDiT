@@ -25,9 +25,7 @@ from xfuser.model_executor.models.runner_models.loading.quant_adapter import (
 
 def _adapter(format_name, impl):
     """A real adapter, so the test reads the declaration rather than a stub's."""
-    return build_adapter(
-        format_name, impl, capability=FormatCapability(available=True)
-    )
+    return build_adapter(format_name, impl, capability=FormatCapability(available=True))
 
 
 @pytest.fixture(autouse=True)
@@ -118,9 +116,7 @@ def test_group_offload_onloads_to_this_ranks_device(monkeypatch, local_rank):
         "enable_group_cpu_offload",
     ],
 )
-def test_a_converter_that_packs_on_the_host_loads_there_under_offload(
-    monkeypatch, offload_flag
-):
+def test_a_converter_that_packs_on_the_host_loads_there_under_offload(monkeypatch, offload_flag):
     monkeypatch.setattr(
         transformer_load,
         "get_world_group",
@@ -136,17 +132,13 @@ def test_a_converter_that_packs_on_the_host_loads_there_under_offload(
     ("format_name", "backend_name"),
     [("fp4", "aiter"), ("int8", "torchao"), ("fp8", "torchao")],
 )
-def test_every_other_converter_stays_on_the_accelerator_under_offload(
-    monkeypatch, format_name, backend_name
-):
+def test_every_other_converter_stays_on_the_accelerator_under_offload(monkeypatch, format_name, backend_name):
     monkeypatch.setattr(
         transformer_load,
         "get_world_group",
         lambda: SimpleNamespace(local_rank=3),
     )
-    model = SimpleNamespace(
-        config=SimpleNamespace(enable_model_cpu_offload=True)
-    )
+    model = SimpleNamespace(config=SimpleNamespace(enable_model_cpu_offload=True))
     adapter = _adapter(format_name, backend_name)
 
     assert transformer_load.native_quantization_device_map(model, adapter) == {"": 3}

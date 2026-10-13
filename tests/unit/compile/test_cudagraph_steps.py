@@ -40,9 +40,7 @@ def _model(mode: str, *, fully_shard_degree: int):
         transformer=transformer,
         scheduler=SimpleNamespace(config=SimpleNamespace(shift_terminal=None)),
     )
-    model.settings = SimpleNamespace(
-        fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}}
-    )
+    model.settings = SimpleNamespace(fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}})
     model._enable_compute_comm_overlap = lambda: None
     model._get_compile_mode = lambda: mode
     model._get_compile_dynamic = lambda: False

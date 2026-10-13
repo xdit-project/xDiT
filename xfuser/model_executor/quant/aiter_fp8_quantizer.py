@@ -58,9 +58,7 @@ AITER_FP8_BLOCKSCALE_QUANT_METHOD = AiterQuantMethod.AITER_FP8_BLOCKSCALE
 AITER_FP8_BLOCKSCALE_TE_QUANT_METHOD = "aiter_fp8_blockscale_te"
 
 
-def _swap_linears_to_fp8(
-    module: nn.Module, *, preshuffle: bool = True, add_scale_buffer: bool = False
-) -> None:
+def _swap_linears_to_fp8(module: nn.Module, *, preshuffle: bool = True, add_scale_buffer: bool = False) -> None:
     """Recursively replace nn.Linear children with meta xFuserFP8BlockScaleLinear placeholders.
 
     Weights stay on meta (no quant here) — the framework quantizer fills them as they stream.
@@ -105,20 +103,18 @@ def _swap_linears_to_fp8(
                 )
             setattr(module, name, fp8_layer)
         elif next(child.children(), None) is not None:
-            _swap_linears_to_fp8(
-                child, preshuffle=preshuffle, add_scale_buffer=add_scale_buffer
-            )
+            _swap_linears_to_fp8(child, preshuffle=preshuffle, add_scale_buffer=add_scale_buffer)
 
 
 # --------------------------------------------------------------------------------------
 # diffusers path (DiT)
 # --------------------------------------------------------------------------------------
 
-from diffusers.quantizers.base import DiffusersQuantizer
-from diffusers.quantizers.quantization_config import (
+from diffusers.quantizers.base import DiffusersQuantizer  # noqa: E402
+from diffusers.quantizers.quantization_config import (  # noqa: E402
     QuantizationConfigMixin as DiffusersQuantizationConfigMixin,
 )
-from diffusers.utils import get_module_from_name as _diffusers_get_module_from_name
+from diffusers.utils import get_module_from_name as _diffusers_get_module_from_name  # noqa: E402
 
 
 class AiterFp8BlockScaleConfig(DiffusersQuantizationConfigMixin):
@@ -162,9 +158,7 @@ class AiterFp8BlockScaleQuantizer(DiffusersQuantizer):
         from xfuser.core.utils.runner_utils import _use_aiter_fp8_rdna4
 
         if not _use_aiter_fp8_rdna4():
-            raise RuntimeError(
-                "AiterFp8BlockScaleQuantizer requires AITER FP8 on RDNA4 (ROCm gfx1200/gfx1201)."
-            )
+            raise RuntimeError("AiterFp8BlockScaleQuantizer requires AITER FP8 on RDNA4 (ROCm gfx1200/gfx1201).")
 
     def _process_model_before_weight_loading(self, model, **kwargs):
         """Swap every nn.Linear under a target sub-module for a meta xFuserFP8BlockScaleLinear."""
@@ -232,11 +226,11 @@ class AiterFp8BlockScaleQuantizer(DiffusersQuantizer):
 # transformers path (text encoders)
 # --------------------------------------------------------------------------------------
 
-from transformers.quantizers.base import HfQuantizer
-from transformers.quantizers.quantizers_utils import (
+from transformers.quantizers.base import HfQuantizer  # noqa: E402
+from transformers.quantizers.quantizers_utils import (  # noqa: E402
     get_module_from_name as _transformers_get_module_from_name,
 )
-from transformers.utils.quantization_config import (
+from transformers.utils.quantization_config import (  # noqa: E402
     QuantizationConfigMixin as TransformersQuantizationConfigMixin,
 )
 
@@ -270,7 +264,7 @@ def _has_transformers_conversion_ops() -> bool:
     return probe_transformers_streaming_loader().available
 
 
-from xfuser.model_executor.models.runner_models.loading.text_encoder_adapter import (
+from xfuser.model_executor.models.runner_models.loading.text_encoder_adapter import (  # noqa: E402
     transformers_streaming_requirement,
 )
 
@@ -308,9 +302,7 @@ def _quantize_op_cls() -> type:
                 tensor = value[0] if isinstance(value, list) else value
                 base = key[: -len(".weight")] if key.endswith(".weight") else key
                 orig_device = tensor.device
-                w_q, w_scale = quantize_weight_to_fp8_blockscale_plain(
-                    tensor, device=compute_device
-                )
+                w_q, w_scale = quantize_weight_to_fp8_blockscale_plain(tensor, device=compute_device)
                 if orig_device.type != "cuda":
                     w_q = w_q.to(orig_device)
                     w_scale = w_scale.to(orig_device)
@@ -336,9 +328,7 @@ class AiterFp8BlockScaleTEQuantizer(HfQuantizer):
         from xfuser.core.utils.runner_utils import _use_aiter_fp8_rdna4
 
         if not _use_aiter_fp8_rdna4():
-            raise RuntimeError(
-                "AiterFp8BlockScaleTEQuantizer requires AITER FP8 on RDNA4 (ROCm gfx1200/gfx1201)."
-            )
+            raise RuntimeError("AiterFp8BlockScaleTEQuantizer requires AITER FP8 on RDNA4 (ROCm gfx1200/gfx1201).")
         # from_pretrained calls this before touching weights, so an unsupported transformers
         # fails here with an actionable message instead of an ImportError mid-load.
         if not _has_transformers_conversion_ops():
@@ -346,9 +336,7 @@ class AiterFp8BlockScaleTEQuantizer(HfQuantizer):
 
     def _process_model_before_weight_loading(self, model, **kwargs):
         for target in self.target_modules:
-            _swap_linears_to_fp8(
-                model.get_submodule(target), preshuffle=False, add_scale_buffer=True
-            )
+            _swap_linears_to_fp8(model.get_submodule(target), preshuffle=False, add_scale_buffer=True)
 
     def param_needs_quantization(self, model, param_name: str, **kwargs) -> bool:
         if self.pre_quantized or not param_name.endswith(".weight"):
@@ -403,12 +391,8 @@ def register_diffusers_fp8_quantizer() -> None:
         AUTO_QUANTIZATION_CONFIG_MAPPING as DIFFUSERS_CONFIG_MAPPING,
     )
 
-    DIFFUSERS_QUANTIZER_MAPPING[AITER_FP8_BLOCKSCALE_QUANT_METHOD] = (
-        AiterFp8BlockScaleQuantizer
-    )
-    DIFFUSERS_CONFIG_MAPPING[AITER_FP8_BLOCKSCALE_QUANT_METHOD] = (
-        AiterFp8BlockScaleConfig
-    )
+    DIFFUSERS_QUANTIZER_MAPPING[AITER_FP8_BLOCKSCALE_QUANT_METHOD] = AiterFp8BlockScaleQuantizer
+    DIFFUSERS_CONFIG_MAPPING[AITER_FP8_BLOCKSCALE_QUANT_METHOD] = AiterFp8BlockScaleConfig
 
 
 @functools.lru_cache(maxsize=1)
@@ -420,9 +404,5 @@ def register_transformers_fp8_quantizer() -> None:
         AUTO_QUANTIZATION_CONFIG_MAPPING as TRANSFORMERS_CONFIG_MAPPING,
     )
 
-    TRANSFORMERS_QUANTIZER_MAPPING[AITER_FP8_BLOCKSCALE_TE_QUANT_METHOD] = (
-        AiterFp8BlockScaleTEQuantizer
-    )
-    TRANSFORMERS_CONFIG_MAPPING[AITER_FP8_BLOCKSCALE_TE_QUANT_METHOD] = (
-        AiterFp8BlockScaleTEConfig
-    )
+    TRANSFORMERS_QUANTIZER_MAPPING[AITER_FP8_BLOCKSCALE_TE_QUANT_METHOD] = AiterFp8BlockScaleTEQuantizer
+    TRANSFORMERS_CONFIG_MAPPING[AITER_FP8_BLOCKSCALE_TE_QUANT_METHOD] = AiterFp8BlockScaleTEConfig

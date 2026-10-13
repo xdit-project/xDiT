@@ -46,15 +46,10 @@ class GemmQuantizationSpec:
         object.__setattr__(self, "low", low)
         object.__setattr__(self, "high", high)
 
-        unknown = [
-            name
-            for name in (low, high)
-            if name is not None and name not in _KNOWN_FORMATS
-        ]
+        unknown = [name for name in (low, high) if name is not None and name not in _KNOWN_FORMATS]
         if unknown:
             raise ValueError(
-                f"unknown GEMM quantization format(s) {unknown}; expected one of "
-                f"{', '.join(sorted(_KNOWN_FORMATS))}"
+                f"unknown GEMM quantization format(s) {unknown}; expected one of {', '.join(sorted(_KNOWN_FORMATS))}"
             )
         if high is None:
             return
@@ -62,8 +57,7 @@ class GemmQuantizationSpec:
             raise ValueError("GEMM low and high quantization formats must differ")
         if "none" in (low, high):
             raise ValueError(
-                "a GEMM tier names a format to quantize to; use "
-                "--gemm_quantization none to quantize nothing"
+                "a GEMM tier names a format to quantize to; use --gemm_quantization none to quantize nothing"
             )
 
     @classmethod
@@ -73,9 +67,7 @@ class GemmQuantizationSpec:
         if value is None:
             return cls()
         if not isinstance(value, str):
-            raise TypeError(
-                "gemm_quantization must be a string or GemmQuantizationSpec"
-            )
+            raise TypeError("gemm_quantization must be a string or GemmQuantizationSpec")
 
         raw = value.strip().lower()
         if not raw:
@@ -83,8 +75,7 @@ class GemmQuantizationSpec:
         if "=" not in raw:
             if "," in raw:
                 raise ValueError(
-                    "pure GEMM quantization accepts one format; tiered "
-                    "quantization must use low=<format>,high=<format>"
+                    "pure GEMM quantization accepts one format; tiered quantization must use low=<format>,high=<format>"
                 )
             return cls(low=raw)
 
@@ -92,14 +83,10 @@ class GemmQuantizationSpec:
         for token in raw.split(","):
             token = token.strip()
             if not token or token.count("=") != 1:
-                raise ValueError(
-                    "tiered GEMM quantization must use " "low=<format>,high=<format>"
-                )
+                raise ValueError("tiered GEMM quantization must use low=<format>,high=<format>")
             key, format_name = (part.strip() for part in token.split("=", 1))
             if key not in {"low", "high"}:
-                raise ValueError(
-                    f"unknown GEMM quantization tier {key!r}; expected low or high"
-                )
+                raise ValueError(f"unknown GEMM quantization tier {key!r}; expected low or high")
             if key in values:
                 raise ValueError(f"duplicate GEMM quantization tier {key!r}")
             if not format_name:
@@ -109,8 +96,7 @@ class GemmQuantizationSpec:
         missing = {"low", "high"} - values.keys()
         if missing:
             raise ValueError(
-                "tiered GEMM quantization requires both low and high; missing "
-                + ", ".join(sorted(missing))
+                "tiered GEMM quantization requires both low and high; missing " + ", ".join(sorted(missing))
             )
         return cls(low=values["low"], high=values["high"])
 
@@ -170,8 +156,7 @@ def _normalize_config_setting(key: str, value):
             schedulable = _KNOWN_FORMATS - {"none"}
             if not tokens or any(token not in schedulable for token in tokens):
                 raise ValueError(
-                    f"{key} entries must name a quantization format "
-                    f"({', '.join(sorted(schedulable))}), got {value!r}"
+                    f"{key} entries must name a quantization format ({', '.join(sorted(schedulable))}), got {value!r}"
                 )
             return ",".join(tokens)
         return value
@@ -195,14 +180,9 @@ def load_gemm_config(path: str) -> GemmAdvancedConfig:
 
     unknown = set(raw) - _CONFIG_SETTING_KEYS
     if unknown:
-        raise ValueError(
-            f"GEMM config {resolved} contains unknown key(s): "
-            + ", ".join(sorted(unknown))
-        )
+        raise ValueError(f"GEMM config {resolved} contains unknown key(s): " + ", ".join(sorted(unknown)))
     try:
-        settings = {
-            key: _normalize_config_setting(key, value) for key, value in raw.items()
-        }
+        settings = {key: _normalize_config_setting(key, value) for key, value in raw.items()}
     except (TypeError, ValueError) as exc:
         raise type(exc)(f"GEMM config {resolved}: {exc}") from exc
     return GemmAdvancedConfig(

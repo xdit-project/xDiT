@@ -9,15 +9,9 @@ from types import SimpleNamespace
 import pytest
 
 ROOT = Path(__file__).resolve().parents[4]
-BACKENDS_PATH = (
-    ROOT / "xfuser/model_executor/models/runner_models/loading/backends.py"
-)
-CONTRACTS_PATH = (
-    ROOT / "xfuser/model_executor/models/runner_models/loading/contracts.py"
-)
-ADAPTER_PATH = (
-    ROOT / "xfuser/model_executor/models/runner_models/loading/quant_adapter.py"
-)
+BACKENDS_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/backends.py"
+CONTRACTS_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/contracts.py"
+ADAPTER_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/quant_adapter.py"
 
 
 #: A synthetic package over the loading directory. These modules are meant to
@@ -29,9 +23,7 @@ _PKG = "fp8_adapter_pkg"
 
 def _package():
     if _PKG not in sys.modules:
-        package = importlib.util.module_from_spec(
-            importlib.machinery.ModuleSpec(_PKG, None, is_package=True)
-        )
+        package = importlib.util.module_from_spec(importlib.machinery.ModuleSpec(_PKG, None, is_package=True))
         package.__path__ = [str(BACKENDS_PATH.parent)]
         sys.modules[_PKG] = package
     return sys.modules[_PKG]
@@ -57,13 +49,11 @@ def modules():
 def _adapter(modules, impl, **measured):
     """The adapter one implementation gives, from a measured record."""
     a = modules.adapter
-    return a.build_adapter(
-        "fp8", impl, capability=a.FormatCapability(available=True, **measured)
-    )
+    return a.build_adapter("fp8", impl, capability=a.FormatCapability(available=True, **measured))
 
 
 def test_an_adapter_is_built_from_its_measured_record(modules):
-    c, a = modules.contracts, modules.adapter
+    c = modules.contracts
 
     selected = _adapter(modules, "aiter")
 
@@ -132,9 +122,7 @@ def test_text_encoder_probe_does_not_require_diffusers_transformer_quantizer(mod
     monkeypatch.setattr(
         b,
         "_probe_diffusers_config",
-        lambda kind: pytest.fail(
-            "text-encoder routing must probe PipelineQuantizationConfig directly"
-        ),
+        lambda kind: pytest.fail("text-encoder routing must probe PipelineQuantizationConfig directly"),
     )
     monkeypatch.setattr(b, "_probe_torchao_fp8_conversion_api", lambda: (True, None))
 
@@ -248,9 +236,7 @@ def test_torchao_preflight_preserves_exact_unavailability_reason(modules):
             False,
             "Diffusers TorchAoConfig unavailable",
         ),
-        fsdp_probe=lambda kind: pytest.fail(
-            "FSDP probe must not run when TorchAO is unavailable"
-        ),
+        fsdp_probe=lambda kind: pytest.fail("FSDP probe must not run when TorchAO is unavailable"),
     )
 
     torchao = capabilities.of("fp8", "torchao")
@@ -325,8 +311,6 @@ def test_a_shardable_parameter_kind_passes_the_same_check(modules):
 
 
 def test_derive_exclusions_preserves_only_declared_target_prefixes(modules):
-    b = modules.backends
-
     class FakeModel:
         def named_modules(self):
             return [
@@ -372,7 +356,6 @@ def test_missing_target_makes_native_mapping_unavailable(modules):
 
 
 def test_torchao_native_config_uses_structure_derived_exclusions(modules, monkeypatch):
-    c, b = modules.contracts, modules.backends
     adapter = _adapter(modules, "torchao", streams=True)
     sentinel = object()
     captured = []
@@ -420,7 +403,6 @@ def test_torchao_native_config_uses_structure_derived_exclusions(modules, monkey
 
 
 def test_torchao_without_native_diffusers_api_is_explicit_fallback(modules):
-    c, b = modules.contracts, modules.backends
     adapter = _adapter(modules, "torchao")
 
     prepared = modules.adapter.prepare_native_load(
@@ -439,7 +421,6 @@ def test_torchao_without_native_diffusers_api_is_explicit_fallback(modules):
 
 
 def test_untargeted_transformer_does_not_claim_streaming(modules):
-    c, b = modules.contracts, modules.backends
     adapter = _adapter(modules, "torchao")
 
     prepared = modules.adapter.prepare_native_load(
@@ -455,7 +436,6 @@ def test_untargeted_transformer_does_not_claim_streaming(modules):
 
 
 def test_blockwise_paths_quantize_on_the_way_in(modules):
-    c, b = modules.contracts, modules.backends
     adapter = _adapter(modules, "torchao")
 
     descriptor = modules.adapter.describe_blockwise_load(
@@ -472,7 +452,6 @@ def test_blockwise_paths_quantize_on_the_way_in(modules):
 
 
 def test_aiter_keeps_native_quantize_on_load_config(modules, monkeypatch):
-    c, b = modules.contracts, modules.backends
     adapter = _adapter(modules, "aiter", streams=True)
     sentinel = object()
     monkeypatch.setattr(
@@ -494,7 +473,6 @@ def test_installed_native_config_matches_existing_torchao_fp8_semantics(
     pytest.importorskip("torchao")
     from torchao.quantization.granularity import PerTensor
 
-    c, b = modules.contracts, modules.backends
     adapter = _adapter(modules, "torchao", streams=True)
 
     config = adapter._stream_config_factory(["input_proj"])
@@ -529,7 +507,6 @@ def test_native_diffusers_load_quantizes_only_targeted_linears(modules, tmp_path
             self.blocks = torch.nn.ModuleList([torch.nn.Linear(32, 32)])
             self.input_proj = torch.nn.Linear(32, 32)
 
-    c, b = modules.contracts, modules.backends
     adapter = _adapter(modules, "torchao", streams=True)
     original = TinyTransformer().to(torch.bfloat16)
     original.save_pretrained(tmp_path)

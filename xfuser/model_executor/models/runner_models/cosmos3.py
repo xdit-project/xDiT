@@ -97,10 +97,7 @@ class xFuserCosmos3SuperModel(xFuserModel):
             # than the middle ones, so a tiered run holds them at the better
             # format. Absolute paths, matched on segment boundaries, so
             # layers.5 cannot take layers.54 with it.
-            keep_high=Select(prefixes=tuple(
-                f"transformer.layers.{index}"
-                for index in (*range(10), *range(54, 64))
-            )),
+            keep_high=Select(prefixes=tuple(f"transformer.layers.{index}" for index in (*range(10), *range(54, 64)))),
         ),
         fsdp_strategy=COSMOS3_FSDP_STRATEGY,
     )

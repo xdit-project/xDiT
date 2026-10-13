@@ -147,11 +147,13 @@ class xFuserZImageModel(xFuserModel):
             },
         },
         gemm_targets=GemmTargets(
-            transformer=Select(modules=(
-                "transformer.layers",
-                "transformer.noise_refiner",
-                "transformer.context_refiner",
-            )),
+            transformer=Select(
+                modules=(
+                    "transformer.layers",
+                    "transformer.noise_refiner",
+                    "transformer.context_refiner",
+                )
+            ),
             text_encoder=Select(modules=("text_encoder.layers",)),
             # context_refiner refines the caption embeddings, and sequence
             # parallelism chunks that sequence before those layers run, so
@@ -246,11 +248,13 @@ class xFuserZImageTurboModel(xFuserModel):
             },
         },
         gemm_targets=GemmTargets(
-            transformer=Select(modules=(
-                "transformer.layers",
-                "transformer.noise_refiner",
-                "transformer.context_refiner",
-            )),
+            transformer=Select(
+                modules=(
+                    "transformer.layers",
+                    "transformer.noise_refiner",
+                    "transformer.context_refiner",
+                )
+            ),
             text_encoder=Select(modules=("text_encoder.layers",)),
             # context_refiner refines the caption embeddings, and sequence
             # parallelism chunks that sequence before those layers run, so

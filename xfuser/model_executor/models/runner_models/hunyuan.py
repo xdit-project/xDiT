@@ -78,10 +78,12 @@ class xFuserHunyuanvideoModel(xFuserModel):
         model_output_type="video",
         fps=24,
         gemm_targets=GemmTargets(
-            transformer=Select(modules=(
-                "transformer.transformer_blocks",
-                "transformer.single_transformer_blocks",
-            )),
+            transformer=Select(
+                modules=(
+                    "transformer.transformer_blocks",
+                    "transformer.single_transformer_blocks",
+                )
+            ),
             text_encoder=Select(modules=("text_encoder.layers",)),
         ),
         # guidance embedded into timestep conditioning (1 forward pass per step, no separate cfg).

@@ -409,9 +409,7 @@ def test_offload_that_was_measured_working_is_allowed(contracts, flags, shard_de
         ("fp6", "aiter", ("FP6", "AITER")),
     ],
 )
-def test_the_contract_names_the_low_format_and_what_stores_it(
-    contracts, raw, impl, expected
-):
+def test_the_contract_names_the_low_format_and_what_stores_it(contracts, raw, impl, expected):
     from xfuser.config.gemm import GemmQuantizationSpec
 
     requested, backend = contracts.select_runtime_quantization(

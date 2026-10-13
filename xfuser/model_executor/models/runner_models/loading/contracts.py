@@ -28,7 +28,6 @@ IMPL_PREFERENCE = {
 }
 
 
-
 class QuantizationBackend(str, Enum):
     NONE = "none"
     AITER = "aiter"
@@ -53,9 +52,7 @@ class LoadRoute(Flag):
     LOCAL_BLOCKWISE = auto()
 
 
-STANDARD_LOAD_ROUTES = (
-    LoadRoute.STANDARD_COLLECTIVES | LoadRoute.LOCAL_BLOCKWISE
-)
+STANDARD_LOAD_ROUTES = LoadRoute.STANDARD_COLLECTIVES | LoadRoute.LOCAL_BLOCKWISE
 
 
 @dataclass(frozen=True)
@@ -99,34 +96,22 @@ class LoadDeclaration:
     replicated_meta_transformers: tuple[str, ...] = ()
     local_meta_transformers: tuple[str, ...] = ()
     meta_text_encoders: tuple[str, ...] = ()
-    materialization_modes: FrozenSet[MaterializationMode] = frozenset(
-        {MaterializationMode.EAGER}
-    )
+    materialization_modes: FrozenSet[MaterializationMode] = frozenset({MaterializationMode.EAGER})
     construction_seam: ConstructionSeam | None = None
     routes: LoadRoute = STANDARD_LOAD_ROUTES
-    quantization_formats: FrozenSet[QuantizationFormat] = frozenset(
-        {QuantizationFormat.NONE}
+    quantization_formats: FrozenSet[QuantizationFormat] = frozenset({QuantizationFormat.NONE})
+    quantization_backends: FrozenSet[QuantizationBackend] = frozenset({QuantizationBackend.NONE})
+    quantization_contracts: FrozenSet[tuple[QuantizationFormat, QuantizationBackend]] = frozenset(
+        {(QuantizationFormat.NONE, QuantizationBackend.NONE)}
     )
-    quantization_backends: FrozenSet[QuantizationBackend] = frozenset(
-        {QuantizationBackend.NONE}
-    )
-    quantization_contracts: FrozenSet[
-        tuple[QuantizationFormat, QuantizationBackend]
-    ] = frozenset({(QuantizationFormat.NONE, QuantizationBackend.NONE)})
 
     @property
     def meta_transformers(self) -> tuple[str, ...]:
-        return tuple(
-            dict.fromkeys(
-                self.fsdp_meta_transformers + self.replicated_meta_transformers
-            )
-        )
+        return tuple(dict.fromkeys(self.fsdp_meta_transformers + self.replicated_meta_transformers))
 
     @property
     def all_meta_transformers(self) -> tuple[str, ...]:
-        return tuple(
-            dict.fromkeys(self.meta_transformers + self.local_meta_transformers)
-        )
+        return tuple(dict.fromkeys(self.meta_transformers + self.local_meta_transformers))
 
     @classmethod
     def meta(
@@ -193,32 +178,19 @@ class LoadDeclaration:
         modes = {MaterializationMode.EAGER}
         seam = None
         strategy = fsdp_strategy or {}
-        standard_collectives = bool(
-            load_support.routes & LoadRoute.STANDARD_COLLECTIVES
-        )
+        standard_collectives = bool(load_support.routes & LoadRoute.STANDARD_COLLECTIVES)
         local_transformers = (
-            tuple(
-                name
-                for name in load_support.meta_transformers
-                if strategy.get(name, {}).get("wrap_attrs")
-            )
+            tuple(name for name in load_support.meta_transformers if strategy.get(name, {}).get("wrap_attrs"))
             if load_support.routes & LoadRoute.LOCAL_BLOCKWISE
             else ()
         )
         fsdp_transformers = (
-            tuple(
-                name
-                for name in load_support.meta_transformers
-                if strategy.get(name, {}).get("wrap_attrs")
-            )
-            if standard_collectives
-            and getattr(model_capabilities, "fully_shard_degree", False)
+            tuple(name for name in load_support.meta_transformers if strategy.get(name, {}).get("wrap_attrs"))
+            if standard_collectives and getattr(model_capabilities, "fully_shard_degree", False)
             else ()
         )
         replicated_transformers = (
-            tuple(load_support.meta_transformers)
-            if standard_collectives and load_support.replicated_meta
-            else ()
+            tuple(load_support.meta_transformers) if standard_collectives and load_support.replicated_meta else ()
         )
         if fsdp_transformers:
             modes.add(MaterializationMode.FSDP_META)
@@ -250,11 +222,7 @@ class LoadContract:
 
 
 def _splits_weights(config) -> bool:
-    return (
-        config.fully_shard_degree > 1
-        or config.pipefusion_parallel_degree > 1
-        or config.tensor_parallel_degree > 1
-    )
+    return config.fully_shard_degree > 1 or config.pipefusion_parallel_degree > 1 or config.tensor_parallel_degree > 1
 
 
 def select_effective_materialization_mode(
@@ -266,11 +234,7 @@ def select_effective_materialization_mode(
 
     if config.memory_efficient_sharding and config.fully_shard_degree > 1:
         return MaterializationMode.FSDP_META
-    if (
-        config.memory_efficient_replicated_load
-        and world_size > 1
-        and not _splits_weights(config)
-    ):
+    if config.memory_efficient_replicated_load and world_size > 1 and not _splits_weights(config):
         return MaterializationMode.REPLICATED_META
     return MaterializationMode.EAGER
 
@@ -348,9 +312,7 @@ def validate_materialization_contract(
     runner_name: str,
 ) -> None:
     if mode not in declaration.materialization_modes:
-        raise UnsupportedLoadContract(
-            f"{runner_name} does not support {mode.value} materialization"
-        )
+        raise UnsupportedLoadContract(f"{runner_name} does not support {mode.value} materialization")
     if mode is MaterializationMode.EAGER:
         return
     if not (declaration.routes & LoadRoute.STANDARD_COLLECTIVES):
@@ -359,29 +321,23 @@ def validate_materialization_contract(
             "the runner does not declare the standard collective load route"
         )
     if declaration.construction_seam is None:
-        raise UnsupportedLoadContract(
-            f"{runner_name} declares {mode.value} but no meta construction seam"
-        )
+        raise UnsupportedLoadContract(f"{runner_name} declares {mode.value} but no meta construction seam")
     components = (
         declaration.fsdp_meta_transformers
         if mode is MaterializationMode.FSDP_META
         else declaration.replicated_meta_transformers
     )
     if not components:
-        raise UnsupportedLoadContract(
-            f"{runner_name} declares {mode.value} but no meta transformers"
-        )
+        raise UnsupportedLoadContract(f"{runner_name} declares {mode.value} but no meta transformers")
     for component in components:
         strategy = fsdp_strategy.get(component)
         if strategy is None:
             raise UnsupportedLoadContract(
-                f"{runner_name} declares meta transformer '{component}', but it is "
-                "missing from fsdp_strategy"
+                f"{runner_name} declares meta transformer '{component}', but it is missing from fsdp_strategy"
             )
         if not strategy.get("wrap_attrs"):
             raise UnsupportedLoadContract(
-                f"{runner_name} meta transformer '{component}' needs non-empty "
-                "fsdp_strategy wrap_attrs"
+                f"{runner_name} meta transformer '{component}' needs non-empty fsdp_strategy wrap_attrs"
             )
 
 
@@ -401,16 +357,10 @@ def select_load_contract(
         selected_backend,
     ) not in declaration.quantization_contracts:
         raise UnsupportedLoadContract(
-            f"{selected_backend.name} backend for {requested_format.name} is not "
-            f"declared by {runner_name}"
+            f"{selected_backend.name} backend for {requested_format.name} is not declared by {runner_name}"
         )
-    if (requested_format is QuantizationFormat.NONE) != (
-        selected_backend is QuantizationBackend.NONE
-    ):
-        raise UnsupportedLoadContract(
-            f"{runner_name} cannot pair {requested_format.name} with "
-            f"{selected_backend.name}"
-        )
+    if (requested_format is QuantizationFormat.NONE) != (selected_backend is QuantizationBackend.NONE):
+        raise UnsupportedLoadContract(f"{runner_name} cannot pair {requested_format.name} with {selected_backend.name}")
     validate_materialization_contract(
         declaration,
         materialization_mode,
@@ -446,7 +396,6 @@ def select_runtime_quantization(
         # failed and why.
         detail = f": {why_not(spec.low)}" if why_not is not None else ""
         raise UnsupportedLoadContract(
-            f"--gemm_quantization {spec} asks for {spec.low}, which nothing "
-            f"here can store{detail}"
+            f"--gemm_quantization {spec} asks for {spec.low}, which nothing here can store{detail}"
         )
     return QuantizationFormat(spec.low), QuantizationBackend(impl)

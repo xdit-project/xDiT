@@ -12,6 +12,7 @@ from .schedules import (
     PipeFusionAsyncCallbacks,
     PipeFusionAsyncDriver,
     PipeFusionImagePatchSchedule,
+    PipeFusionPatchSchedulerBank,
     PipeFusionPatchForward,
     pipefusion_should_update_progress,
 )
@@ -25,6 +26,7 @@ __all__ = [
     "PipeFusionAsyncDriver",
     "PipeFusionImagePatchSchedule",
     "PipeFusionPatchLayout",
+    "PipeFusionPatchSchedulerBank",
     "PipeFusionPatchForward",
     "PipeFusionRuntimeSnapshot",
     "PipeFusionStagePayload",

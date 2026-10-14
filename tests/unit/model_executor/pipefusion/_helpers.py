@@ -19,6 +19,10 @@ class Group:
         self.sent = []
         self.works = []
         self.events = []
+        self.pipeline_shapes = None
+
+    def set_pipeline_tensor_shapes(self, name, recv_shapes, send_shapes):
+        self.pipeline_shapes = (name, recv_shapes, send_shapes)
 
     def add_pipeline_recv_task(self, index, name):
         self.queued.append((name, index))

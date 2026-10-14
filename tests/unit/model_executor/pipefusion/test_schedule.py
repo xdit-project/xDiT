@@ -1,11 +1,15 @@
+from copy import deepcopy
+
 import pytest
 import torch
+from diffusers import UniPCMultistepScheduler
 
 from xfuser.model_executor.pipefusion import (
     PipeFusionAsyncCallbacks,
     PipeFusionAsyncDriver,
     PipeFusionImagePatchSchedule,
     PipeFusionPatchLayout,
+    PipeFusionPatchSchedulerBank,
     PipeFusionTransport,
     pipefusion_should_update_progress,
 )
@@ -148,6 +152,89 @@ def test_image_schedule_updates_generated_tokens_and_preserves_reference_tokens(
     )
 
     torch.testing.assert_close(result, torch.tensor([[[12.0], [13.0], [14.0], [99.0]]]))
+
+
+@pytest.mark.parametrize(
+    ("scheduler_kwargs", "warmup_steps"),
+    [
+        ({}, 1),
+        (
+            {
+                "flow_shift": 3.0,
+                "prediction_type": "flow_prediction",
+                "use_flow_sigmas": True,
+                "final_sigmas_type": "zero",
+            },
+            2,
+        ),
+    ],
+)
+def test_patch_scheduler_bank_matches_full_unipc_after_synchronous_warmup(
+    scheduler_kwargs,
+    warmup_steps,
+):
+    scheduler = UniPCMultistepScheduler(
+        num_train_timesteps=20,
+        solver_order=2,
+        **scheduler_kwargs,
+    )
+    scheduler.set_timesteps(5)
+    full_scheduler = deepcopy(scheduler)
+    layout = PipeFusionPatchLayout(
+        split_dim=3,
+        split_sizes=(2, 2),
+        token_counts=(2, 2),
+    )
+    generator = torch.Generator().manual_seed(7)
+    initial_sample = torch.randn((1, 2, 3, 4, 2), generator=generator)
+    model_outputs = [torch.randn(initial_sample.shape, generator=generator) for _ in scheduler.timesteps]
+
+    sample = initial_sample
+    full_sample = initial_sample
+    for step_index in range(warmup_steps):
+        sample = scheduler.step(
+            model_outputs[step_index],
+            scheduler.timesteps[step_index],
+            sample,
+        ).prev_sample
+        full_sample = full_scheduler.step(
+            model_outputs[step_index],
+            full_scheduler.timesteps[step_index],
+            full_sample,
+        ).prev_sample
+    patch_schedulers = PipeFusionPatchSchedulerBank(
+        scheduler,
+        layout,
+        split_state_fields=("model_outputs", "last_sample"),
+    )
+    patch_samples = layout.split(sample)
+
+    for step_index in range(warmup_steps, len(scheduler.timesteps)):
+        full_sample = full_scheduler.step(
+            model_outputs[step_index],
+            full_scheduler.timesteps[step_index],
+            full_sample,
+        ).prev_sample
+        patch_outputs = layout.split(model_outputs[step_index])
+        patch_samples = [
+            patch_schedulers.step(
+                patch_index,
+                patch_outputs[patch_index],
+                scheduler.timesteps[step_index],
+                patch_sample,
+            ).prev_sample
+            for patch_index, patch_sample in enumerate(patch_samples)
+        ]
+        torch.testing.assert_close(
+            torch.cat(patch_samples, dim=layout.split_dim),
+            full_sample,
+        )
+        assert {patch_scheduler.step_index for patch_scheduler in patch_schedulers.schedulers} == {
+            full_scheduler.step_index
+        }
+        assert {patch_scheduler.lower_order_nums for patch_scheduler in patch_schedulers.schedulers} == {
+            full_scheduler.lower_order_nums
+        }
 
 
 @pytest.mark.parametrize(

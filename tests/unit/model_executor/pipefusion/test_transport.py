@@ -33,6 +33,25 @@ def test_transport_rejects_duplicate_receive_queuing():
         transport.queue_receives()
 
 
+def test_transport_preallocates_known_patch_shapes():
+    group = Group()
+
+    PipeFusionTransport(
+        group,
+        first_stage=False,
+        num_steps=1,
+        num_patches=2,
+        recv_shapes=(torch.Size((1, 4, 8)), torch.Size((1, 3, 8))),
+        send_shapes=(torch.Size((1, 4)), torch.Size((1, 3))),
+    )
+
+    assert group.pipeline_shapes == (
+        "latent",
+        [torch.Size((1, 4, 8)), torch.Size((1, 3, 8))],
+        [torch.Size((1, 4)), torch.Size((1, 3))],
+    )
+
+
 def test_transport_retains_contiguous_wire_tensor_until_drain():
     group = Group()
     transport = PipeFusionTransport(

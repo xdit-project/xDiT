@@ -125,12 +125,14 @@ def _split_rotary_emb(image_rotary_emb, num_text_tokens: int, num_image_tokens: 
 def _sp_padding_attention_kwargs(local_kv_len: int, sp_padding: int):
     """Exclude the image tokens padded for sequence parallelism from the keys.
 
-    The padding sits at the end of the last rank's shard, so after the Ulysses
-    all-to-all it is a uniform suffix of the gathered keys.
+    The padding sits at the end of the last sequence-parallel rank's shard, so
+    in the keys gathered across all Ulysses and ring ranks it is a uniform
+    suffix; USP drops it from the Ulysses-gathered keys or, with ring
+    attention, from the shard each ring step attends to.
     """
     if not sp_padding:
         return None
-    return {"valid_kv_len": get_ulysses_parallel_world_size() * local_kv_len - sp_padding}
+    return {"valid_kv_len": get_sequence_parallel_world_size() * local_kv_len - sp_padding}
 
 
 @xFuserAttentionProcessorRegister.register(FluxAttnProcessor)
@@ -404,13 +406,6 @@ class xFuserFlux1Transformer2DWrapper(FluxTransformer2DModel):
         sequence_length = hidden_states.shape[1]
         padding_length = (sp_world_size - (sequence_length % sp_world_size)) % sp_world_size
         if padding_length > 0:
-            if get_ring_parallel_world_size() > 1:
-                raise NotImplementedError(
-                    "USP supports padding with ring attention, but FLUX.1 image padding with "
-                    "ring_degree > 1 is not yet validated or supported here. "
-                    f"The image token count ({sequence_length}) must be divisible by "
-                    f"the sequence parallel degree ({sp_world_size})."
-                )
             if padding_length > (sequence_length + padding_length) // sp_world_size:
                 raise ValueError(
                     f"{sequence_length} image tokens are too few to shard across "

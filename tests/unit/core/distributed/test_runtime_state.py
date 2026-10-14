@@ -85,3 +85,22 @@ def test_wan_patch_tokens_include_the_full_temporal_extent(monkeypatch):
     assert state.pp_patches_token_num == [57040, 57040]
     assert state.pp_patches_token_start_idx_local == [0, 57040, 114080]
     assert state.pp_patches_token_start_end_idx_global == [[0, 57040], [57040, 114080]]
+
+
+def test_z_image_pipeline_uses_scalar_patch_size():
+    pipeline_type = type("xFuserZImagePipeFusionPipeline", (), {})
+    pipeline = pipeline_type()
+    pipeline.vae_scale_factor = 8
+    pipeline.transformer = SimpleNamespace(
+        config=SimpleNamespace(
+            all_patch_size=(2,),
+            in_channels=16,
+            n_heads=30,
+            axes_dims=(32, 48, 48),
+        )
+    )
+    state = DiTRuntimeState.__new__(DiTRuntimeState)
+
+    state._check_pipeline_class_name(pipeline, config=None)
+
+    assert state.backbone_patch_size == 2

@@ -2,6 +2,7 @@ import functools
 
 import torch
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
+from xfuser import xFuserArgs
 from xfuser.model_executor.cache import (
     DBCachePreset,
     CacheDitAdapterConfig,
@@ -100,6 +101,35 @@ def _set_effective_heads_for_ulysses(transformer, ulysses_degree: int) -> None:
     transformer.config.num_attention_heads = effective_heads
 
 
+Z_IMAGE_NUM_LAYERS = 30
+Z_IMAGE_FIRST_STAGE_BLOCK_EQUIVALENT = 2
+
+
+def _configure_z_image_pipefusion_stages(config: xFuserArgs) -> None:
+    pp_degree = config.pipefusion_parallel_degree
+    if pp_degree <= 1:
+        return
+    if config.ulysses_degree > 1 or config.ring_degree > 1:
+        raise ValueError("Z-Image PipeFusion does not yet compose with sequence parallelism.")
+    if pp_degree > Z_IMAGE_NUM_LAYERS:
+        raise ValueError(f"Z-Image PipeFusion cannot split {Z_IMAGE_NUM_LAYERS} layers across {pp_degree} stages.")
+    if config.attn_layer_num_for_pp is None:
+        effective_layers = Z_IMAGE_NUM_LAYERS + Z_IMAGE_FIRST_STAGE_BLOCK_EQUIVALENT
+        per_stage, remainder = divmod(effective_layers, pp_degree)
+        split = [per_stage + (stage < remainder) for stage in range(pp_degree)]
+        split[0] -= Z_IMAGE_FIRST_STAGE_BLOCK_EQUIVALENT
+        if split[0] <= 0:
+            per_stage, remainder = divmod(Z_IMAGE_NUM_LAYERS, pp_degree)
+            split = [per_stage + (stage < remainder) for stage in range(pp_degree)]
+        config.attn_layer_num_for_pp = split
+        return
+    split = config.attn_layer_num_for_pp
+    if len(split) != pp_degree or any(layers <= 0 for layers in split):
+        raise ValueError("Z-Image --attn_layer_num_for_pp must assign a positive layer count to every pipeline stage.")
+    if sum(split) != Z_IMAGE_NUM_LAYERS:
+        raise ValueError(f"Z-Image --attn_layer_num_for_pp must assign all {Z_IMAGE_NUM_LAYERS} transformer layers.")
+
+
 @register_model("Tongyi-MAI/Z-Image")
 @register_model("Z-Image")
 class xFuserZImageModel(xFuserModel):
@@ -123,6 +153,7 @@ class xFuserZImageModel(xFuserModel):
         routes=STANDARD_LOAD_ROUTES,
     )
     capabilities = ModelCapabilities(
+        pipefusion_parallel_degree=True,
         use_cfg_parallel=True,
         enable_tiling=True,
         enable_slicing=True,
@@ -172,8 +203,32 @@ class xFuserZImageModel(xFuserModel):
             self.settings.int8_gemm_module_list = [
                 m for m in self.settings.int8_gemm_module_list if m != "transformer.context_refiner"
             ]
+        _configure_z_image_pipefusion_stages(config)
 
     def _load_model(self) -> DiffusionPipeline:
+        if self.config.pipefusion_parallel_degree > 1:
+            from diffusers.models.transformers.transformer_z_image import ZImageTransformer2DModel
+
+            from xfuser.model_executor.pipelines.pipeline_z_image_pipefusion import (
+                xFuserZImagePipeFusionPipeline,
+            )
+
+            self.engine_config.runtime_config.dtype = torch.bfloat16
+            transformer, pipeline_kwargs = self.loader.plan_pipefusion_components(
+                ZImageTransformer2DModel,
+                torch_dtype=torch.bfloat16,
+            )
+            pipe = xFuserZImagePipeFusionPipeline.from_pretrained(
+                pretrained_model_name_or_path=self.settings.model_name,
+                torch_dtype=torch.bfloat16,
+                engine_config=self.engine_config,
+                **pipeline_kwargs,
+            )
+            if transformer is not None:
+                self.loader.mark_pipeline_stage_blockwise(pipe.transformer, transformer)
+            _keep_timesteps_host_resident(pipe)
+            return pipe
+
         from diffusers import ZImagePipeline
         from xfuser.model_executor.models.transformers.transformer_z_image import (
             xFuserZImageTransformer2DWrapper,
@@ -202,7 +257,8 @@ class xFuserZImageModel(xFuserModel):
             guidance_scale=input_args["guidance_scale"],
             generator=self._make_generator(input_args["seed"]),
         )
-        return DiffusionOutput(images=output.images, pipe_args=input_args)
+        images = output.images if output else []  # non-last PP ranks return None
+        return DiffusionOutput(images=images, pipe_args=input_args)
 
 
 @register_model("Tongyi-MAI/Z-Image-Turbo")

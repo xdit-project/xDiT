@@ -399,10 +399,13 @@ class DiTRuntimeState(RuntimeState):
                 backbone_inner_dim=pipeline.transformer.config.num_attention_heads
                 * pipeline.transformer.config.attention_head_dim,
             )
-        elif pipeline.__class__.__name__.startswith("ZImage"):
+        elif pipeline_name.startswith("ZImage"):
+            patch_size = pipeline.transformer.config.all_patch_size
+            if isinstance(patch_size, (list, tuple)):
+                patch_size = patch_size[0]
             self._set_model_parameters(
                 vae_scale_factor=pipeline.vae_scale_factor,
-                backbone_patch_size=pipeline.transformer.config.all_patch_size,
+                backbone_patch_size=patch_size,
                 backbone_in_channel=pipeline.transformer.config.in_channels,
                 backbone_inner_dim=pipeline.transformer.config.n_heads * pipeline.transformer.config.axes_dims[-1],
             )

@@ -64,10 +64,10 @@ The PipeFusion pipeline workflow when $M$ = $N$ =4 is shown in the following pic
   to compute Fn and use residual similarity.
 - `--memory_efficient_replicated_load` has a PipeFusion-specific meaning on
   runners that support stage-local meta construction (currently the FLUX,
-  Qwen Image, and Wan2.2 TI2V families): each rank constructs and streams only
-  its local transformer blocks. Replicated pipeline components remain eager.
-  SD3.5's composition wrapper cannot construct a stage-local transformer on
-  meta and explicitly rejects this option.
+  Qwen Image, Wan2.2 TI2V, and Z-Image families): each rank constructs and
+  streams only its local transformer blocks. Replicated pipeline components
+  remain eager. SD3.5's composition wrapper cannot construct a stage-local
+  transformer on meta and explicitly rejects this option.
 - A stage-local transformer cannot also be FSDP-wrapped because pipeline ranks
   own different blocks. Configuration therefore requires
   `--fully_shard_components` whenever FSDP and PipeFusion are combined, and the

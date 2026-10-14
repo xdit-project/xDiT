@@ -9,7 +9,7 @@ qwenimage21 = pytest.importorskip(
 )
 
 from xfuser.core.attention.spec import AttentionBackendType
-from xfuser.model_executor.layers import usp
+from xfuser.model_executor.layers import fused_qk_rope_flydsl, usp
 from xfuser.model_executor.models.transformers import transformer_qwenimage21 as xfuser_qwenimage21
 
 
@@ -76,9 +76,34 @@ def xfuser_sdpa_calls(monkeypatch):
     return calls
 
 
-def _set_processor(model, processor_cls):
-    for block in model.transformer_blocks:
+def _xfuser_model(stock, processor_cls):
+    wrapper = xfuser_qwenimage21.xFuserQwenImage21TransformerWrapper.from_config(stock.config).eval()
+    wrapper.load_state_dict(stock.state_dict())
+    for block in wrapper.transformer_blocks:
         block.attn.set_processor(processor_cls())
+    return wrapper
+
+
+def test_flydsl_qk_norm_rope_gets_tables_matching_diffusers(xfuser_sdpa_calls, monkeypatch):
+    """With FlyDSL available, QK-norm + RoPE goes to its fused kernel, given (cos, sin) tables that reproduce diffusers.
+
+    The kernel needs ROCm, so it is stubbed with the wrapper's own diffusers reference, which takes the same tables.
+    """
+    fused_calls = []
+
+    def fused_reference(query, key, norm_q, norm_k, rotary_emb):
+        fused_calls.append(query.shape)
+        return fused_qk_rope_flydsl._reference(query, key, norm_q, norm_k, rotary_emb)
+
+    monkeypatch.setattr(xfuser_qwenimage21, "_HAS_FLYDSL", True)
+    monkeypatch.setattr(xfuser_qwenimage21, "flydsl_fused_qk_norm_rope", fused_reference)
+    stock = _tiny_model()
+    reference = _prefill_then_decode(stock)
+    actual = _prefill_then_decode(_xfuser_model(stock, xfuser_qwenimage21.xFuserQwenImage21AttnProcessor))
+
+    assert len(fused_calls) == 2 * NUM_LAYERS
+    for ref, out in zip(reference, actual):
+        torch.testing.assert_close(out, ref, rtol=1e-4, atol=1e-5)
 
 
 @pytest.mark.parametrize(
@@ -86,15 +111,13 @@ def _set_processor(model, processor_cls):
     ["xFuserQwenImage21AttnProcessor", "xFuserQwenImage21FlexAttnProcessor"],
 )
 def test_decode_runs_on_xfuser_backend_and_matches_diffusers(xfuser_sdpa_calls, processor_name):
-    processor_cls = getattr(xfuser_qwenimage21, processor_name)
+    """At Ulysses degree 1 the wrapper and its processors must match stock diffusers."""
     if processor_name == "xFuserQwenImage21FlexAttnProcessor" and not qwenimage21._FLEX_AVAILABLE:
         pytest.skip("flex_attention unavailable")
 
-    model = _tiny_model()
-    reference = _prefill_then_decode(model)
-
-    _set_processor(model, processor_cls)
-    actual = _prefill_then_decode(model)
+    stock = _tiny_model()
+    reference = _prefill_then_decode(stock)
+    actual = _prefill_then_decode(_xfuser_model(stock, getattr(xfuser_qwenimage21, processor_name)))
 
     # Only the decode step reaches xDiT: one call per block, target-image queries only.
     assert len(xfuser_sdpa_calls) == NUM_LAYERS
@@ -104,34 +127,14 @@ def test_decode_runs_on_xfuser_backend_and_matches_diffusers(xfuser_sdpa_calls, 
 
 
 def test_padded_prompt_decode_falls_back_to_diffusers(xfuser_sdpa_calls):
-    model = _tiny_model()
+    stock = _tiny_model()
     mask = torch.ones(1, 7, dtype=torch.bool)
     mask[0, -1] = False
-    reference = _prefill_then_decode(model, encoder_hidden_states_mask=mask)
-
-    _set_processor(model, xfuser_qwenimage21.xFuserQwenImage21AttnProcessor)
-    actual = _prefill_then_decode(model, encoder_hidden_states_mask=mask)
+    reference = _prefill_then_decode(stock, encoder_hidden_states_mask=mask)
+    actual = _prefill_then_decode(
+        _xfuser_model(stock, xfuser_qwenimage21.xFuserQwenImage21AttnProcessor), encoder_hidden_states_mask=mask
+    )
 
     assert xfuser_sdpa_calls == []
-    for ref, out in zip(reference, actual):
-        torch.testing.assert_close(out, ref, rtol=1e-4, atol=1e-5)
-
-
-@pytest.mark.parametrize(
-    "processor_name",
-    ["xFuserQwenImage21AttnProcessor", "xFuserQwenImage21FlexAttnProcessor"],
-)
-def test_wrapper_forward_matches_diffusers(xfuser_sdpa_calls, processor_name):
-    """The wrapper copies diffusers' forward; at Ulysses degree 1 it must match it exactly."""
-    if processor_name == "xFuserQwenImage21FlexAttnProcessor" and not qwenimage21._FLEX_AVAILABLE:
-        pytest.skip("flex_attention unavailable")
-    stock = _tiny_model()
-    reference = _prefill_then_decode(stock)
-
-    wrapper = xfuser_qwenimage21.xFuserQwenImage21TransformerWrapper.from_config(stock.config).eval()
-    wrapper.load_state_dict(stock.state_dict())
-    _set_processor(wrapper, getattr(xfuser_qwenimage21, processor_name))
-    actual = _prefill_then_decode(wrapper)
-
     for ref, out in zip(reference, actual):
         torch.testing.assert_close(out, ref, rtol=1e-4, atol=1e-5)

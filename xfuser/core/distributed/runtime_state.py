@@ -376,17 +376,25 @@ class DiTRuntimeState(RuntimeState):
         self.cogvideox = False
         self.consisid = False
         self.hunyuan_video = False
-        if pipeline.__class__.__name__.startswith(("CogVideoX", "ConsisID", "HunyuanVideo", "Wan")):
-            if pipeline.__class__.__name__.startswith("CogVideoX"):
+        self.wan_video = False
+        pipeline_name = pipeline.__class__.__name__.removeprefix("xFuser")
+        if pipeline_name.startswith(("CogVideoX", "ConsisID", "HunyuanVideo", "Wan")):
+            if pipeline_name.startswith("CogVideoX"):
                 self.cogvideox = True
-            elif pipeline.__class__.__name__.startswith("ConsisID"):
+            elif pipeline_name.startswith("ConsisID"):
                 self.consisid = True
+            elif pipeline_name.startswith("Wan"):
+                self.wan_video = True
             else:
                 self.hunyuan_video = True
+            patch_size = pipeline.transformer.config.patch_size
+            if self.wan_video:
+                self.wan_temporal_patch_size = patch_size[0]
+                patch_size = patch_size[1]
             self._set_cogvideox_parameters(
                 vae_scale_factor_spatial=pipeline.vae_scale_factor_spatial,
                 vae_scale_factor_temporal=pipeline.vae_scale_factor_temporal,
-                backbone_patch_size=pipeline.transformer.config.patch_size,
+                backbone_patch_size=patch_size,
                 backbone_in_channel=pipeline.transformer.config.in_channels,
                 backbone_inner_dim=pipeline.transformer.config.num_attention_heads
                 * pipeline.transformer.config.attention_head_dim,
@@ -672,12 +680,27 @@ class DiTRuntimeState(RuntimeState):
             self._calc_cogvideox_patches_metadata()
         elif self.consisid:
             self._calc_consisid_patches_metadata()
+        elif self.wan_video:
+            self._calc_wan_patches_metadata()
         elif self.hunyuan_video:
             # TODO: implement the hunyuan video patches metadata
             pass
         else:
             self._calc_patches_metadata()
         self._reset_recv_buffer()
+
+    def _calc_wan_patches_metadata(self):
+        """Build height stripes while retaining every temporal token."""
+        self._calc_cogvideox_patches_metadata()
+        latent_frames = (self.input_config.num_frames - 1) // self.vae_scale_factor_temporal + 1
+        temporal_tokens = latent_frames // self.wan_temporal_patch_size
+        self.pp_patches_token_num = [count * temporal_tokens for count in self.pp_patches_token_num]
+        self.pp_patches_token_start_idx_local = [
+            sum(self.pp_patches_token_num[:index]) for index in range(len(self.pp_patches_token_num) + 1)
+        ]
+        self.pp_patches_token_start_end_idx_global = [
+            self.pp_patches_token_start_idx_local[index : index + 2] for index in range(len(self.pp_patches_token_num))
+        ]
 
     def _calc_patches_metadata(self, split_latents_by_rows: bool = True):
         num_sp_patches = get_sequence_parallel_world_size()

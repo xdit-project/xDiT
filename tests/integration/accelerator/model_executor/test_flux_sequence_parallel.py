@@ -128,6 +128,10 @@ def _flux_worker(
         # memory-efficient kernel needs to merge ring steps.
         pytest.param(1, 2, 34, 15, id="ring-replicated-text"),
         pytest.param(2, 2, 40, 6, id="ulysses-ring-replicated-text"),
+        pytest.param(1, 2, 57, 6, id="ring-padded-image"),
+        pytest.param(1, 2, 33, 15, id="ring-padded-image-replicated-text"),
+        pytest.param(2, 2, 59, 8, id="ulysses-ring-padded-image"),
+        pytest.param(2, 2, 39, 6, id="ulysses-ring-padded-image-replicated-text"),
     ],
 )
 def test_flux_sequence_parallel_matches_single_device(accelerator_ranks, ulysses, ring, image_tokens, text_tokens):
@@ -135,16 +139,6 @@ def test_flux_sequence_parallel_matches_single_device(accelerator_ranks, ulysses
         _flux_worker,
         world_size=ulysses * ring,
         args=(ulysses, ring, image_tokens, text_tokens, None),
-    )
-
-
-@pytest.mark.multi_gpu
-def test_flux_ring_rejects_unvalidated_image_padding(accelerator_ranks):
-    """USP supports padding; FLUX's padding wiring is validated only for Ulysses here."""
-    accelerator_ranks(
-        _flux_worker,
-        world_size=2,
-        args=(1, 2, 15, 8, NotImplementedError),
     )
 
 

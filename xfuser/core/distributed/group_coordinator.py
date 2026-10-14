@@ -741,6 +741,20 @@ class PipelineGroupCoordinator(GroupCoordinator):
             torch.zeros(*shape, dtype=dtype, device=self.device) for _ in range(num_buffers)
         ]
 
+    def set_pipeline_tensor_shapes(
+        self,
+        name: str,
+        recv_shapes: List[torch.Size],
+        send_shapes: List[torch.Size],
+    ) -> None:
+        """Preallocate pipeline buffers when every segment shape is known."""
+        self.recv_shape[name] = {index: torch.Size(shape) for index, shape in enumerate(recv_shapes)}
+        self.send_shape[name] = {index: torch.Size(shape) for index, shape in enumerate(send_shapes)}
+        self.recv_buffer[name] = {
+            index: torch.zeros(shape, device=self.device, dtype=self.dtype)
+            for index, shape in self.recv_shape[name].items()
+        }
+
     def _check_shape_and_buffer(
         self,
         tensor_send_to_next=None,

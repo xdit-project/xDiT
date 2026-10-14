@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Sequence
 
 import torch
 
@@ -35,6 +35,8 @@ class PipeFusionTransport:
         num_steps: int,
         num_patches: int,
         payload_name: str = "latent",
+        recv_shapes: Optional[Sequence[torch.Size]] = None,
+        send_shapes: Optional[Sequence[torch.Size]] = None,
     ):
         if num_steps < 1:
             raise ValueError("PipeFusion transport requires at least one timestep.")
@@ -49,6 +51,17 @@ class PipeFusionTransport:
         self._receives_queued = False
         self._send_tasks = {}
         self._send_tensors = {}
+        if (recv_shapes is None) != (send_shapes is None):
+            raise ValueError("PipeFusion transport shapes must provide both receive and send shapes.")
+        if recv_shapes is not None:
+            assert send_shapes is not None
+            if len(recv_shapes) != num_patches or len(send_shapes) != num_patches:
+                raise ValueError("PipeFusion transport requires one send and receive shape per patch.")
+            self.group.set_pipeline_tensor_shapes(
+                payload_name,
+                list(recv_shapes),
+                list(send_shapes),
+            )
 
     def queue_receives(self) -> None:
         if self._receives_queued:

@@ -406,8 +406,10 @@ class xFuserFlux1Transformer2DWrapper(FluxTransformer2DModel):
         if padding_length > 0:
             if get_ring_parallel_world_size() > 1:
                 raise NotImplementedError(
-                    f"FLUX.1 with ring_degree > 1 needs the image token count ({sequence_length}) "
-                    f"to be divisible by the sequence parallel degree ({sp_world_size})."
+                    "USP supports padding with ring attention, but FLUX.1 image padding with "
+                    "ring_degree > 1 is not yet validated or supported here. "
+                    f"The image token count ({sequence_length}) must be divisible by "
+                    f"the sequence parallel degree ({sp_world_size})."
                 )
             if padding_length > (sequence_length + padding_length) // sp_world_size:
                 raise ValueError(
@@ -419,7 +421,19 @@ class xFuserFlux1Transformer2DWrapper(FluxTransformer2DModel):
         assert hidden_states.shape[0] % get_classifier_free_guidance_world_size() == 0, (
             f"Cannot split dim 0 of hidden_states ({hidden_states.shape[0]}) into {get_classifier_free_guidance_world_size()} parts."
         )
-        if encoder_hidden_states.shape[-2] % get_sequence_parallel_world_size() != 0:
+        text_length = encoder_hidden_states.shape[-2]
+        if text_length % sp_world_size != 0:
+            # Replicated prompt joint tensors bypass FP8 all-to-all and calibration;
+            # fixed-scale communication would silently remain in bf16 as well.
+            if get_runtime_state().fp8_comms is not None:
+                raise ValueError(
+                    f"FLUX.1 --use_fp8_comms requires the prompt token count ({text_length}) "
+                    f"to be divisible by the sequence parallel degree ({sp_world_size}; "
+                    f"ulysses_degree={get_ulysses_parallel_world_size()}, "
+                    f"ring_degree={get_ring_parallel_world_size()}). "
+                    "Adjust --max_sequence_length or the parallel degrees, "
+                    "or disable --use_fp8_comms."
+                )
             get_runtime_state().split_text_embed_in_sp = False
         else:
             get_runtime_state().split_text_embed_in_sp = True

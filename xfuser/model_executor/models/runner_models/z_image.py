@@ -173,6 +173,15 @@ class xFuserZImageModel(xFuserModel):
                 m for m in self.settings.int8_gemm_module_list if m != "transformer.context_refiner"
             ]
 
+    def _validate_args(self, input_args: dict) -> None:
+        super()._validate_args(input_args)
+        # ZImagePipeline batches the negative prompt only when guidance_scale > 0.
+        if self.config.use_cfg_parallel and input_args["guidance_scale"] <= 0:
+            raise ValueError(
+                f"{self.settings.model_name} needs --guidance_scale > 0 with --use_cfg_parallel; without "
+                "guidance there is no negative branch to run on the second rank."
+            )
+
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import ZImagePipeline
         from xfuser.model_executor.models.transformers.transformer_z_image import (

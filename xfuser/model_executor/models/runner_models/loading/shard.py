@@ -37,6 +37,16 @@ def shard_pipeline_components(loader) -> None:
             f"strategy: {sorted(unknown)}. Available components: "
             f"{sorted(strategy_components)}"
         )
+    stage_local = {
+        name for name, component in model.pipe.components.items() if loader.is_pipeline_stage_blockwise(component)
+    }
+    invalid_stage_shards = sharded_components & stage_local
+    if invalid_stage_shards:
+        raise ValueError(
+            "PipeFusion stage-local components cannot also be FSDP-wrapped: "
+            f"{sorted(invalid_stage_shards)}. Use --fully_shard_components "
+            "to select only replicated components."
+        )
     if requested is None:
         loader.fill_eager_transformers()
     else:
@@ -156,7 +166,13 @@ def _give_cpu_offloaded_components_an_exec_device_hook(model, local_rank: int, s
 def _wrapped_block_paths(component, component_name, wrap_attrs):
     paths = []
     for attr in wrap_attrs:
-        paths.extend(f"{component_name}.{attr}.{index}" for index, _ in enumerate(rgetattr(component, attr)))
+        for index, block in enumerate(rgetattr(component, attr)):
+            checkpoint_fqn = getattr(
+                block,
+                "_xfuser_checkpoint_fqn",
+                f"{attr}.{index}",
+            )
+            paths.append(f"{component_name}.{checkpoint_fqn}")
     return tuple(paths)
 
 
@@ -264,7 +280,12 @@ def build_block_quantize_fn(
         if not use_fp4_block and not use_fp6_block and not use_fp8_block and not use_int8_block:
             return
 
-        block_prefix = f"{block_idx}."
+        policy_block_idx = getattr(
+            block,
+            "_xfuser_checkpoint_block_index",
+            block_idx,
+        )
+        block_prefix = f"{policy_block_idx}."
         # Strip the block-index prefix so the quantize functions see local FQN paths.
         local_fp8 = tuple(o[len(block_prefix) :] for o in fp8_overrides if o.startswith(block_prefix)) or None
         if use_fp4_block:

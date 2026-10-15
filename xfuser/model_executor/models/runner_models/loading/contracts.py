@@ -41,9 +41,7 @@ class LoadRoute(Flag):
     LOCAL_BLOCKWISE = auto()
 
 
-STANDARD_LOAD_ROUTES = (
-    LoadRoute.STANDARD_COLLECTIVES | LoadRoute.LOCAL_BLOCKWISE
-)
+STANDARD_LOAD_ROUTES = LoadRoute.STANDARD_COLLECTIVES | LoadRoute.LOCAL_BLOCKWISE
 
 
 @dataclass(frozen=True)
@@ -87,34 +85,22 @@ class LoadDeclaration:
     replicated_meta_transformers: tuple[str, ...] = ()
     local_meta_transformers: tuple[str, ...] = ()
     meta_text_encoders: tuple[str, ...] = ()
-    materialization_modes: FrozenSet[MaterializationMode] = frozenset(
-        {MaterializationMode.EAGER}
-    )
+    materialization_modes: FrozenSet[MaterializationMode] = frozenset({MaterializationMode.EAGER})
     construction_seam: ConstructionSeam | None = None
     routes: LoadRoute = STANDARD_LOAD_ROUTES
-    quantization_formats: FrozenSet[QuantizationFormat] = frozenset(
-        {QuantizationFormat.NONE}
+    quantization_formats: FrozenSet[QuantizationFormat] = frozenset({QuantizationFormat.NONE})
+    quantization_backends: FrozenSet[QuantizationBackend] = frozenset({QuantizationBackend.NONE})
+    quantization_contracts: FrozenSet[tuple[QuantizationFormat, QuantizationBackend]] = frozenset(
+        {(QuantizationFormat.NONE, QuantizationBackend.NONE)}
     )
-    quantization_backends: FrozenSet[QuantizationBackend] = frozenset(
-        {QuantizationBackend.NONE}
-    )
-    quantization_contracts: FrozenSet[
-        tuple[QuantizationFormat, QuantizationBackend]
-    ] = frozenset({(QuantizationFormat.NONE, QuantizationBackend.NONE)})
 
     @property
     def meta_transformers(self) -> tuple[str, ...]:
-        return tuple(
-            dict.fromkeys(
-                self.fsdp_meta_transformers + self.replicated_meta_transformers
-            )
-        )
+        return tuple(dict.fromkeys(self.fsdp_meta_transformers + self.replicated_meta_transformers))
 
     @property
     def all_meta_transformers(self) -> tuple[str, ...]:
-        return tuple(
-            dict.fromkeys(self.meta_transformers + self.local_meta_transformers)
-        )
+        return tuple(dict.fromkeys(self.meta_transformers + self.local_meta_transformers))
 
     @classmethod
     def meta(
@@ -137,10 +123,10 @@ class LoadDeclaration:
             (format_, backend)
             for format_ in formats
             for backend in backends
-            if (format_ is QuantizationFormat.NONE)
-            == (backend is QuantizationBackend.NONE)
+            if (format_ is QuantizationFormat.NONE) == (backend is QuantizationBackend.NONE)
             and (
-                format_ not in (
+                format_
+                not in (
                     QuantizationFormat.FP6,
                     QuantizationFormat.FP4_FP6,
                     QuantizationFormat.A6W4,
@@ -185,9 +171,7 @@ class LoadDeclaration:
                     (QuantizationFormat.FP4, QuantizationBackend.TORCHAO),
                 }
             )
-        if getattr(model_capabilities, "use_fp8_gemms", False) and getattr(
-            model_capabilities, "use_fp4_gemms", False
-        ):
+        if getattr(model_capabilities, "use_fp8_gemms", False) and getattr(model_capabilities, "use_fp4_gemms", False):
             contracts.update(
                 {
                     (
@@ -217,32 +201,19 @@ class LoadDeclaration:
         modes = {MaterializationMode.EAGER}
         seam = None
         strategy = fsdp_strategy or {}
-        standard_collectives = bool(
-            load_support.routes & LoadRoute.STANDARD_COLLECTIVES
-        )
+        standard_collectives = bool(load_support.routes & LoadRoute.STANDARD_COLLECTIVES)
         local_transformers = (
-            tuple(
-                name
-                for name in load_support.meta_transformers
-                if strategy.get(name, {}).get("wrap_attrs")
-            )
+            tuple(name for name in load_support.meta_transformers if strategy.get(name, {}).get("wrap_attrs"))
             if load_support.routes & LoadRoute.LOCAL_BLOCKWISE
             else ()
         )
         fsdp_transformers = (
-            tuple(
-                name
-                for name in load_support.meta_transformers
-                if strategy.get(name, {}).get("wrap_attrs")
-            )
-            if standard_collectives
-            and getattr(model_capabilities, "fully_shard_degree", False)
+            tuple(name for name in load_support.meta_transformers if strategy.get(name, {}).get("wrap_attrs"))
+            if standard_collectives and getattr(model_capabilities, "fully_shard_degree", False)
             else ()
         )
         replicated_transformers = (
-            tuple(load_support.meta_transformers)
-            if standard_collectives and load_support.replicated_meta
-            else ()
+            tuple(load_support.meta_transformers) if standard_collectives and load_support.replicated_meta else ()
         )
         if fsdp_transformers:
             modes.add(MaterializationMode.FSDP_META)
@@ -274,10 +245,15 @@ class LoadContract:
 
 
 def _splits_weights(config) -> bool:
-    return (
-        config.fully_shard_degree > 1
-        or config.pipefusion_parallel_degree > 1
-        or config.tensor_parallel_degree > 1
+    return config.fully_shard_degree > 1 or config.pipefusion_parallel_degree > 1 or config.tensor_parallel_degree > 1
+
+
+def uses_pipeline_stage_meta(config) -> bool:
+    """Whether PipeFusion builds only its local transformer stage on meta."""
+    return bool(
+        config is not None
+        and getattr(config, "memory_efficient_replicated_load", False)
+        and getattr(config, "pipefusion_parallel_degree", 1) > 1
     )
 
 
@@ -286,15 +262,15 @@ def select_effective_materialization_mode(
     *,
     world_size: int,
 ) -> MaterializationMode:
-    """Apply the same runtime exclusions used by memory-efficient loading."""
+    """Select whole-component materialization.
+
+    Stage-local PipeFusion transformer loading is orthogonal; replicated
+    pipeline components remain eager.
+    """
 
     if config.memory_efficient_sharding and config.fully_shard_degree > 1:
         return MaterializationMode.FSDP_META
-    if (
-        config.memory_efficient_replicated_load
-        and world_size > 1
-        and not _splits_weights(config)
-    ):
+    if config.memory_efficient_replicated_load and world_size > 1 and not _splits_weights(config):
         return MaterializationMode.REPLICATED_META
     return MaterializationMode.EAGER
 
@@ -302,9 +278,10 @@ def select_effective_materialization_mode(
 def assert_requested_materialization_is_honoured(config, *, world_size: int) -> None:
     """Refuse a memory-efficient request that the mode selection would quietly drop.
 
-    Replicated meta loading holds one full copy per rank, so it is defined only when nothing else
-    splits the weights. Asking for it alongside a degree that does split them selects an eager
-    load, which without this refusal reads as the feature being enabled and doing nothing.
+    Replicated meta loading holds one full copy per rank. Tensor/FSDP sharding
+    requests are contradictory and refused. PipeFusion instead uses this option
+    for stage-local blockwise transformer loading while replicated components
+    remain eager.
 
     A single-rank run is not such a case and is left alone: there is no peer to fill, so an eager
     load is correct, and refusing would stop the same command line working on one GPU.
@@ -312,14 +289,19 @@ def assert_requested_materialization_is_honoured(config, *, world_size: int) -> 
     if not config.memory_efficient_replicated_load:
         return
     if config.fully_shard_degree > 1:
-        raise UnsupportedLoadContract(
-            "--memory_efficient_replicated_load conflicts with --fully_shard_degree "
-            f"{config.fully_shard_degree}: replicated loading keeps a whole copy per rank, "
-            "while sharding splits it. Use --memory_efficient_sharding to shard."
+        targeted_pipefusion = config.pipefusion_parallel_degree > 1 and bool(
+            getattr(config, "fully_shard_components", None)
         )
-    if _splits_weights(config):
+        if not targeted_pipefusion:
+            raise UnsupportedLoadContract(
+                "--memory_efficient_replicated_load conflicts with "
+                f"--fully_shard_degree {config.fully_shard_degree}: replicated "
+                "loading keeps a whole copy per rank, while sharding splits it. "
+                "Use --memory_efficient_sharding to shard, or select only "
+                "replicated PipeFusion components with --fully_shard_components."
+            )
+    if config.tensor_parallel_degree > 1:
         splitters = {
-            "--pipefusion_parallel_degree": config.pipefusion_parallel_degree,
             "--tensor_parallel_degree": config.tensor_parallel_degree,
         }
         named = ", ".join(f"{flag} {value}" for flag, value in splitters.items() if value > 1)
@@ -386,8 +368,7 @@ def assert_offload_is_compatible_with_format(
     detail = (
         "torch cannot pin a Float4_e2m1fn_x2 tensor"
         if getattr(config, "group_offload_low_cpu_mem", False)
-        else "AITER binds a device from the parameter it is given, and a host "
-        "parameter resolves to an invalid ordinal"
+        else "AITER binds a device from the parameter it is given, and a host parameter resolves to an invalid ordinal"
     )
     raise UnsupportedLoadContract(
         f"--enable_group_cpu_offload cannot be combined with {requested_format.name} "
@@ -439,9 +420,7 @@ def validate_materialization_contract(
     runner_name: str,
 ) -> None:
     if mode not in declaration.materialization_modes:
-        raise UnsupportedLoadContract(
-            f"{runner_name} does not support {mode.value} materialization"
-        )
+        raise UnsupportedLoadContract(f"{runner_name} does not support {mode.value} materialization")
     if mode is MaterializationMode.EAGER:
         return
     if not (declaration.routes & LoadRoute.STANDARD_COLLECTIVES):
@@ -450,29 +429,23 @@ def validate_materialization_contract(
             "the runner does not declare the standard collective load route"
         )
     if declaration.construction_seam is None:
-        raise UnsupportedLoadContract(
-            f"{runner_name} declares {mode.value} but no meta construction seam"
-        )
+        raise UnsupportedLoadContract(f"{runner_name} declares {mode.value} but no meta construction seam")
     components = (
         declaration.fsdp_meta_transformers
         if mode is MaterializationMode.FSDP_META
         else declaration.replicated_meta_transformers
     )
     if not components:
-        raise UnsupportedLoadContract(
-            f"{runner_name} declares {mode.value} but no meta transformers"
-        )
+        raise UnsupportedLoadContract(f"{runner_name} declares {mode.value} but no meta transformers")
     for component in components:
         strategy = fsdp_strategy.get(component)
         if strategy is None:
             raise UnsupportedLoadContract(
-                f"{runner_name} declares meta transformer '{component}', but it is "
-                "missing from fsdp_strategy"
+                f"{runner_name} declares meta transformer '{component}', but it is missing from fsdp_strategy"
             )
         if not strategy.get("wrap_attrs"):
             raise UnsupportedLoadContract(
-                f"{runner_name} meta transformer '{component}' needs non-empty "
-                "fsdp_strategy wrap_attrs"
+                f"{runner_name} meta transformer '{component}' needs non-empty fsdp_strategy wrap_attrs"
             )
 
 
@@ -492,23 +465,19 @@ def select_load_contract(
         selected_backend,
     ) not in declaration.quantization_contracts:
         raise UnsupportedLoadContract(
-            f"{selected_backend.name} backend for {requested_format.name} is not "
-            f"declared by {runner_name}"
+            f"{selected_backend.name} backend for {requested_format.name} is not declared by {runner_name}"
         )
-    if (requested_format is QuantizationFormat.NONE) != (
-        selected_backend is QuantizationBackend.NONE
+    if (requested_format is QuantizationFormat.NONE) != (selected_backend is QuantizationBackend.NONE):
+        raise UnsupportedLoadContract(f"{runner_name} cannot pair {requested_format.name} with {selected_backend.name}")
+    if (
+        requested_format
+        in {
+            QuantizationFormat.A6W4,
+            QuantizationFormat.FP4_A6W4,
+        }
+        and materialization_mode is not MaterializationMode.EAGER
     ):
-        raise UnsupportedLoadContract(
-            f"{runner_name} cannot pair {requested_format.name} with "
-            f"{selected_backend.name}"
-        )
-    if requested_format in {
-        QuantizationFormat.A6W4,
-        QuantizationFormat.FP4_A6W4,
-    } and materialization_mode is not MaterializationMode.EAGER:
-        raise UnsupportedLoadContract(
-            f"{requested_format.value} currently requires eager materialization"
-        )
+        raise UnsupportedLoadContract(f"{requested_format.value} currently requires eager materialization")
     validate_materialization_contract(
         declaration,
         materialization_mode,
@@ -536,32 +505,19 @@ def select_runtime_quantization(
     use_fp6 = bool(getattr(config, "use_fp6_gemms", False))
     use_a6w4 = bool(getattr(config, "use_a6w4_gemms", False))
     if use_a6w4 and (use_fp6 or use_fp8 or use_int8):
-        raise UnsupportedLoadContract(
-            "A6W4 cannot be combined with FP6, FP8, or INT8 modes"
-        )
+        raise UnsupportedLoadContract("A6W4 cannot be combined with FP6, FP8, or INT8 modes")
     if use_a6w4 and cuda_active:
-        raise UnsupportedLoadContract(
-            "AITER A6W4 requires ROCm gfx950; CUDA is not supported"
-        )
+        raise UnsupportedLoadContract("AITER A6W4 requires ROCm gfx950; CUDA is not supported")
 
     if use_fp6 and use_fp8:
-        raise UnsupportedLoadContract(
-            "FP8 cannot be combined with an FP6 mode; FP6 owns the declared "
-            "FP8 targets"
-        )
+        raise UnsupportedLoadContract("FP8 cannot be combined with an FP6 mode; FP6 owns the declared FP8 targets")
     if use_fp6 and use_int8:
         raise UnsupportedLoadContract("INT8 cannot be combined with an FP6 mode")
     if use_fp6 and cuda_active:
-        raise UnsupportedLoadContract(
-            "AITER MXFP6 requires ROCm gfx950; CUDA is not supported"
-        )
+        raise UnsupportedLoadContract("AITER MXFP6 requires ROCm gfx950; CUDA is not supported")
 
     if use_int8 and (use_fp8 or use_fp4):
-        others = (
-            "FP8 + FP4"
-            if (use_fp8 and use_fp4)
-            else ("FP8" if use_fp8 else "FP4")
-        )
+        others = "FP8 + FP4" if (use_fp8 and use_fp4) else ("FP8" if use_fp8 else "FP4")
         raise UnsupportedLoadContract(f"INT8 cannot be combined with {others}")
     if use_fp6:
         format_ = QuantizationFormat.FP4_FP6 if use_fp4 else QuantizationFormat.FP6
@@ -581,18 +537,12 @@ def select_runtime_quantization(
         return QuantizationFormat.NONE, QuantizationBackend.NONE
 
     if format_ is QuantizationFormat.FP8:
-        backend = (
-            QuantizationBackend.AITER
-            if aiter_fp8_active
-            else QuantizationBackend.TORCHAO
-        )
+        backend = QuantizationBackend.AITER if aiter_fp8_active else QuantizationBackend.TORCHAO
     elif format_ in (
         QuantizationFormat.FP4,
         QuantizationFormat.FP8_FP4,
     ):
-        backend = (
-            QuantizationBackend.TORCHAO if cuda_active else QuantizationBackend.AITER
-        )
+        backend = QuantizationBackend.TORCHAO if cuda_active else QuantizationBackend.AITER
     else:
         backend = QuantizationBackend.TORCHAO
     return format_, backend

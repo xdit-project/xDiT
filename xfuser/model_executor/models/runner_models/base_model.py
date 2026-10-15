@@ -6,7 +6,7 @@ import os
 from math import gcd
 from PIL.Image import Image
 from typing import Callable, List, Optional, Tuple, Generator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from torch.profiler import profile, record_function, ProfilerActivity
 import diffusers
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
@@ -31,7 +31,12 @@ from xfuser.model_executor.models.runner_models.vae_manager import (
     validate_vae_config,
 )
 
-from xfuser.model_executor.cache.presets import DBCacheSettings, ModelCacheConfig
+from xfuser.model_executor.cache.presets import (
+    DBCachePreset,
+    DBCacheSettings,
+    ModelCacheConfig,
+)
+from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from xfuser.core.distributed import (
     get_world_group,
     get_model_replica_group,
@@ -40,6 +45,8 @@ from xfuser.core.distributed import (
     get_sequence_parallel_rank,
     get_classifier_free_guidance_rank,
     get_pipeline_parallel_world_size,
+    get_pp_group,
+    is_pipeline_first_stage,
     initialize_runtime_state,
     get_runtime_state,
     runtime_state_is_initialized,
@@ -61,6 +68,7 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
 from xfuser.model_executor.models.runner_models.loading.quantization_plan import (
     apply_fp8_override_cli_to_settings,
 )
+from xfuser.model_executor.pipefusion import PipeFusionCompileCapture
 
 packages_info = PACKAGES_CHECKER.get_packages_info()
 
@@ -467,6 +475,14 @@ class xFuserModel(abc.ABC):
 
         self.loader.preflight(world_size=get_world_group().world_size)
         self.engine_config, _ = self.config.create_config()
+        # The runner applies these optimizations after loading, when its
+        # model-specific managers can select the correct implementation.
+        # Deferring prevents legacy pipeline wrappers from wrapping the same
+        # VAE decoder or transformer forward a second time.
+        self.engine_config.runtime_config.runner_managed_parallel_vae = True
+        self.engine_config.runtime_config.runner_managed_torch_compile = (
+            getattr(self.config, "pipefusion_parallel_degree", 1) > 1
+        )
         log("Loading model pipeline...")
         self.pipe = self._load_model_checked()
 
@@ -474,7 +490,7 @@ class xFuserModel(abc.ABC):
         initialize_runtime_state(self._get_runtime_state_pipeline(), self.engine_config)
 
         self._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
+        if self.config.use_parallel_vae and self.config.vae_parallel_size == 0:
             self._vae_manager.setup_parallel_vae(self._decoding_vaes())
         self._enable_options()
         fp8_comms = get_runtime_state().fp8_comms if runtime_state_is_initialized() else None
@@ -487,6 +503,24 @@ class xFuserModel(abc.ABC):
                 split_prompts_fn=self._split_prompts_for_dp,
                 batch_size=self.config.batch_size,
             )
+
+        pp_degree = getattr(self.config, "pipefusion_parallel_degree", 1)
+        if pp_degree > 1 and self.config.use_torch_compile:
+            # Materialize both directional P2P communicators before rank-local
+            # compilation can make the stages reach their first receive at
+            # different times.
+            group = get_pp_group()
+            token = torch.zeros(
+                1,
+                device=self._local_onload_device(),
+                dtype=self.engine_config.runtime_config.dtype,
+            )
+            if is_pipeline_first_stage():
+                group.pipeline_send(token, name="_xfuser_compile_prime", segment_idx=0)
+                group.pipeline_recv(idx=0, name="_xfuser_compile_prime")
+            else:
+                group.pipeline_recv(idx=0, name="_xfuser_compile_prime")
+                group.pipeline_send(token, name="_xfuser_compile_prime", segment_idx=0)
 
         # Compile and warm the original blocks before cache adapters replace or
         # patch them, keeping stateful cross-step cache logic out of traced graphs.
@@ -564,14 +598,27 @@ class xFuserModel(abc.ABC):
         from xfuser.model_executor.cache.adapters import apply_cache
 
         cache_method = self.config.cache_method
-        method_cfg = (self.settings.step_cache_config or {}).get(cache_method)
+        supported_methods = self.settings.step_cache_config or {}
+        method_cfg = supported_methods.get(cache_method)
+        if cache_method == "pipefusion" and method_cfg is None:
+            method_cfg = supported_methods.get("dbcache")
+        if (
+            cache_method == "pipefusion"
+            and isinstance(method_cfg, DBCacheSettings)
+            and isinstance(method_cfg.adapter, list)
+        ):
+            raise ValueError("--cache_method pipefusion does not yet support multi-transformer cache adapters.")
         # A configured FBCache entry uses cache-dit's DBCache engine with an
         # Fn=1 preset. None marks an in-tree FBCache adapter.
         engine_method = (
-            "dbcache" if cache_method == "fbcache" and isinstance(method_cfg, DBCacheSettings) else cache_method
+            "dbcache"
+            if (cache_method == "pipefusion" or (cache_method == "fbcache" and isinstance(method_cfg, DBCacheSettings)))
+            else cache_method
         )
         pp_size = get_pipeline_parallel_world_size()
-        if engine_method == "dbcache" and pp_size > 1:
+        if cache_method == "pipefusion" and pp_size <= 1:
+            raise ValueError("--cache_method pipefusion requires --pipefusion_parallel_degree greater than 1.")
+        if engine_method == "dbcache" and cache_method != "pipefusion" and pp_size > 1:
             raise ValueError(
                 f"dbcache is incompatible with PipeFusion (PP={pp_size}): "
                 "the residual-diff skip decision is computed via a collective that only runs on the "
@@ -590,11 +637,23 @@ class xFuserModel(abc.ABC):
             )
         if cache_method == "teacache" and get_tensor_model_parallel_world_size() > 1:
             raise RuntimeError("teacache requires TP=1")
+        preset = method_cfg.preset if method_cfg else None
+        if cache_method == "pipefusion":
+            if isinstance(preset, list):
+                preset = [
+                    replace(item, share_pipefusion_decisions=True) if isinstance(item, DBCachePreset) else item
+                    for item in preset
+                ]
+            elif isinstance(preset, DBCachePreset):
+                preset = replace(
+                    preset,
+                    share_pipefusion_decisions=True,
+                )
         apply_cache(
             cache_method=engine_method,
             num_steps=self.config.num_inference_steps,
             pipe=self.pipe,
-            preset_kwargs=method_cfg.preset if method_cfg else None,
+            preset_kwargs=preset,
             adapter_config=method_cfg.adapter if method_cfg else None,
             cache_config=self.config.cache_config,
             transformer_attr=self.settings.transformer_attr_names[0],
@@ -680,7 +739,15 @@ class xFuserModel(abc.ABC):
             if not self.capabilities.supports_step_caching:
                 raise ValueError(f"Model {self.settings.model_name} does not support step caching.")
             supported_methods = self.settings.step_cache_config or {}
-            if config.cache_method not in supported_methods:
+            pipefusion_supported = (
+                config.cache_method == "pipefusion"
+                and isinstance(supported_methods.get("dbcache"), DBCacheSettings)
+                and not isinstance(
+                    supported_methods["dbcache"].adapter,
+                    list,
+                )
+            )
+            if config.cache_method not in supported_methods and not pipefusion_supported:
                 raise ValueError(
                     f"Model {self.settings.model_name} does not support --cache_method {config.cache_method}. "
                     f"Supported: {', '.join(supported_methods)}"
@@ -805,7 +872,7 @@ class xFuserModel(abc.ABC):
         # CUDA graphs are slow on RDNA4.
         return "default"  # TODO: Configurable
 
-    def _get_compile_dynamic(self) -> Optional[bool]:
+    def _get_compile_dynamic(self, input_args=None) -> Optional[bool]:
         return None  # torch default (auto)
 
     def _prefer_blockwise_compile(self) -> bool:
@@ -840,6 +907,36 @@ class xFuserModel(abc.ABC):
     def _get_compile_warmup_steps(self, input_args: dict) -> Optional[int]:
         return 2  # None = skip step reduction, run full warmup cycle
 
+    def _get_pipefusion_recompile_limit(self) -> Optional[int]:
+        """Return the Dynamo budget needed by this rank's PP specializations."""
+        pp_degree = getattr(
+            self.config,
+            "pipefusion_parallel_degree",
+            1,
+        )
+        if pp_degree <= 1:
+            return None
+
+        num_patches = getattr(self.config, "num_pipeline_patch", 1)
+        local_block_count = 0
+        component_names = (
+            self._get_compiled_pipe_components() if hasattr(self, "pipe") and hasattr(self, "settings") else ()
+        )
+        for component_name in component_names:
+            component = getattr(self.pipe, component_name, None)
+            if component is None:
+                continue
+            wrap_attrs = self.settings.fsdp_strategy.get(component_name, {}).get("wrap_attrs", [])
+            for attr in wrap_attrs:
+                try:
+                    local_block_count += len(rgetattr(component, attr))
+                except (AttributeError, TypeError):
+                    continue
+        return max(
+            2 * num_patches + 4,
+            max(local_block_count, 1) * (num_patches + 1) + 4,
+        )
+
     def _enable_compute_comm_overlap(self) -> None:
         """Enables compute-communication overlap for the model while caring for
         pipeline-parallel models that don't respect the SPMD assumption and could
@@ -863,33 +960,168 @@ class xFuserModel(abc.ABC):
             if _ado is not None and hasattr(_ado, "spmd_check"):
                 _ado.spmd_check = False
 
-    def _compile_model(self, input_args: dict) -> None:
-        """Compile pipe components with torch.compile.
+    def _reset_pipefusion_compile_state(self, components) -> None:
+        """Remove state mutated by eager capture or rank-local compile replay."""
+        get_cache_manager().clear()
+        state = get_runtime_state()
+        state.set_patched_mode(False)
+        get_pp_group().reset_buffer()
+        for component in components.values():
+            reset = getattr(component, "reset_pipefusion_state", None)
+            if reset is not None:
+                reset()
 
-        When FSDP is active, compiles each FSDP-wrapped component's block lists
-        individually (read from fsdp_strategy wrap_attrs)
-        to avoid dynamo tracing through FSDP2 forward_pre_hooks and fragmenting
-        the graph at every block boundary.
+    def _compile_model(self, input_args: dict) -> None:
+        """Apply the runner's ``torch.compile`` policy and warm every graph.
+
+        The method first enables Inductor compute/communication overlap.
+        Pipeline runs disable Inductor's SPMD graph-consistency collective
+        (pipeline stages intentionally compile different graphs) and size
+        Dynamo's recompile limit for every local block's full-sequence and
+        patch-index specializations. The larger budget remains active through
+        execution warmup because step-cache adapters are installed after this
+        method and can introduce their final specializations there. ``run`` or
+        ``profile`` restores the caller's original budget on exit.
+
+        Compilation is deliberately runner-managed because pipeline wrapping,
+        FSDP, and step-cache adapters all change the safe graph boundary:
+
+        * A non-sharded PipeFusion stage keeps its outer component eager so P2P
+          boundaries and mutable patch/KV state remain visible. Before wrapping,
+          a short eager pipeline pass captures that rank's real full-sequence
+          and per-patch component calls. The block lists declared by
+          ``fsdp_strategy[*]["wrap_attrs"]`` are then compiled and the captured
+          calls are replayed locally on all pipeline ranks concurrently. A
+          barrier and state reset precede one normal end-to-end validation
+          warmup. If no block list is declared, only the stage's bound
+          ``forward`` is compiled.
+        * FSDP components compile those same declared block lists individually.
+          This avoids tracing through FSDP2 forward-pre-hooks and prevents a
+          graph break at every wrapped block.
+        * A step-cache target transformer outside PipeFusion is also compiled
+          blockwise so the adapter's transformer-forward patch remains outside
+          the compiled region. Requesting caching without declared block lists
+          on that transformer is an error. Uncached components such as text
+          encoders keep their normal whole-component policy.
+        * Other components are replaced by a whole-component compiled wrapper.
+
+        Every wrapper uses the compile mode and dynamic-shape policy selected by
+        the runner hooks. Blockwise CUDA-graph modes install an explicit step
+        marker. The warmup step count may be reduced by
+        ``_get_compile_warmup_steps``; ``None`` preserves the caller's full
+        cycle. This method runs before step-cache adapters are applied, so
+        compilation always sees the original blocks.
         """
+        original_recompile_limit = torch._dynamo.config.recompile_limit
+        required_recompile_limit = self._get_pipefusion_recompile_limit()
+        if required_recompile_limit is not None:
+            self._dynamo_recompile_limit_to_restore = getattr(
+                self,
+                "_dynamo_recompile_limit_to_restore",
+                original_recompile_limit,
+            )
+            torch._dynamo.config.recompile_limit = max(
+                original_recompile_limit,
+                required_recompile_limit,
+            )
+        try:
+            return self._compile_model_unscoped(input_args)
+        except Exception:
+            self._restore_dynamo_recompile_limit()
+            raise
+
+    def _restore_dynamo_recompile_limit(self) -> None:
+        original = getattr(
+            self,
+            "_dynamo_recompile_limit_to_restore",
+            None,
+        )
+        if original is not None:
+            torch._dynamo.config.recompile_limit = original
+            del self._dynamo_recompile_limit_to_restore
+
+    def _compile_model_unscoped(self, input_args: dict) -> None:
         self._enable_compute_comm_overlap()
 
         mode = self._get_compile_mode()
-        dynamic = self._get_compile_dynamic()
-        for component_name in self._get_compiled_pipe_components():
-            component = getattr(self.pipe, component_name, None)
-            if component is None:
-                continue
-            requested_shards = getattr(
-                self.config,
-                "fully_shard_components",
-                None,
-            )
-            component_is_sharded = (
+        pp_degree = getattr(self.config, "pipefusion_parallel_degree", 1)
+        dynamic = self._get_compile_dynamic(input_args) if pp_degree > 1 else self._get_compile_dynamic()
+        component_names = self._get_compiled_pipe_components()
+        cache_component_names = set(self.settings.transformer_attr_names if self.config.cache_method else ())
+        requested_shards = getattr(
+            self.config,
+            "fully_shard_components",
+            None,
+        )
+
+        def component_is_sharded(component_name):
+            return (
                 self.config.fully_shard_degree > 1
                 and component_name in self.settings.fsdp_strategy
                 and (requested_shards is None or component_name in requested_shards)
             )
-            if component_is_sharded or self.config.cache_method or self._prefer_blockwise_compile():
+
+        compile_args = copy.deepcopy(input_args)
+        warmup_steps = self._get_compile_warmup_steps(input_args)
+        if warmup_steps is not None:
+            compile_args["num_inference_steps"] = warmup_steps
+
+        capture = None
+        if pp_degree > 1 and runtime_state_is_initialized():
+            replay_components = {
+                name: getattr(self.pipe, name)
+                for name in component_names
+                if getattr(self.pipe, name, None) is not None and not component_is_sharded(name)
+            }
+            if replay_components:
+                log(
+                    "Capturing eager PipeFusion stage inputs for concurrent compile replay...",
+                    log_from_all_processes=True,
+                )
+                capture_args = copy.deepcopy(compile_args)
+                pipeline_warmup_steps = self.engine_config.runtime_config.warmup_steps
+                capture_args["num_inference_steps"] = max(
+                    2,
+                    pipeline_warmup_steps + 1,
+                )
+                capture = PipeFusionCompileCapture(replay_components, get_runtime_state())
+                with capture.hooks():
+                    self._run_timed_pipe(capture_args)
+                if capture.calls:
+                    log(
+                        f"Captured {len(capture.calls)} PipeFusion stage signature(s).",
+                        log_from_all_processes=True,
+                    )
+                    self._reset_pipefusion_compile_state(replay_components)
+
+        for component_name in component_names:
+            component = getattr(self.pipe, component_name, None)
+            if component is None:
+                continue
+            compile_kwargs = {"mode": mode, "dynamic": dynamic}
+            is_sharded = component_is_sharded(component_name)
+            cache_requires_blockwise = component_name in cache_component_names
+            if pp_degree > 1 and not is_sharded:
+                # Keep the stage wrapper eager: it owns PipeFusion's mutable KV
+                # state and stage-boundary behavior. Compile only the retained
+                # local blocks, as step caching does, to avoid tracing one huge
+                # stage graph while downstream ranks wait in pipeline_recv().
+                wrap_attrs = self.settings.fsdp_strategy.get(component_name, {}).get("wrap_attrs", [])
+                compiled_any = False
+                for attr in wrap_attrs:
+                    try:
+                        block_list = rgetattr(component, attr)
+                    except AttributeError:
+                        block_list = None
+                    if block_list is not None:
+                        for i in range(len(block_list)):
+                            block_list[i] = torch.compile(block_list[i], **compile_kwargs)
+                        compiled_any = compiled_any or len(block_list) > 0
+                if compiled_any and mode in self.CUDAGRAPH_COMPILE_MODES:
+                    self._mark_cudagraph_steps(component)
+                if not compiled_any:
+                    component.forward = torch.compile(component.forward, **compile_kwargs)
+            elif is_sharded or cache_requires_blockwise or self._prefer_blockwise_compile():
                 # Per-block compile: leaves transformer as original object so cache-dit's
                 # transformer.forward patch remains visible during compiled execution.
                 wrap_attrs = self.settings.fsdp_strategy.get(component_name, {}).get("wrap_attrs", [])
@@ -901,11 +1133,11 @@ class xFuserModel(abc.ABC):
                         block_list = None
                     if block_list is not None:
                         for i in range(len(block_list)):
-                            block_list[i] = torch.compile(block_list[i], mode=mode, dynamic=dynamic)
+                            block_list[i] = torch.compile(block_list[i], **compile_kwargs)
                         compiled_any = True
                 if compiled_any and mode in self.CUDAGRAPH_COMPILE_MODES:
                     self._mark_cudagraph_steps(component)
-                if not compiled_any and self.config.cache_method:
+                if not compiled_any and cache_requires_blockwise:
                     # Compiling the whole component would put the step cache's
                     # transformer.forward patch behind (or inside) the compiled graph.
                     raise ValueError(
@@ -915,13 +1147,34 @@ class xFuserModel(abc.ABC):
                         f"fsdp_strategy[{component_name!r}]['wrap_attrs'] of {type(self).__name__}."
                     )
                 if not compiled_any:
-                    setattr(self.pipe, component_name, torch.compile(component, mode=mode, dynamic=dynamic))
+                    setattr(self.pipe, component_name, torch.compile(component, **compile_kwargs))
             else:
-                setattr(self.pipe, component_name, torch.compile(component, mode=mode, dynamic=dynamic))
-        compile_args = copy.deepcopy(input_args)
-        warmup_steps = self._get_compile_warmup_steps(input_args)
-        if warmup_steps is not None:
-            compile_args["num_inference_steps"] = warmup_steps
+                setattr(self.pipe, component_name, torch.compile(component, **compile_kwargs))
+
+        if capture is not None and capture.calls:
+            replica = get_model_replica_group()
+            replica.barrier()
+            log(
+                f"Compiling {len(capture.calls)} captured PipeFusion stage signature(s) locally...",
+                log_from_all_processes=True,
+            )
+            local_error = None
+            try:
+                capture.replay(self._local_onload_device())
+                torch.cuda.synchronize()
+            except Exception as error:
+                local_error = f"{type(error).__name__}: {error}"
+            failures = replica.all_gather_object(local_error)
+            if any(failure is not None for failure in failures):
+                self._reset_pipefusion_compile_state(capture.components)
+                capture.clear()
+                details = "; ".join(
+                    f"rank {rank}: {failure}" for rank, failure in enumerate(failures) if failure is not None
+                )
+                raise RuntimeError(f"PipeFusion rank-local compile replay failed collectively: {details}")
+            log("Concurrent PipeFusion compile replay completed.", log_from_all_processes=True)
+            self._reset_pipefusion_compile_state(capture.components)
+            capture.clear()
         self._run_compile_warmup(compile_args)
 
     def _save_determinism_check_failed_outputs(
@@ -986,6 +1239,12 @@ class xFuserModel(abc.ABC):
         the first timed output and sets the failure count at which the failure
         handler starts being called.
         """
+        try:
+            return self._run_with_compile_budget(input_args)
+        finally:
+            self._restore_dynamo_recompile_limit()
+
+    def _run_with_compile_budget(self, input_args: dict) -> Tuple[DiffusionOutput, list]:
         self._validate_args(input_args)
         input_args = self._split_prompts_for_dp(input_args)
         timings = []
@@ -1107,6 +1366,14 @@ class xFuserModel(abc.ABC):
 
     def profile(self, input_args: dict) -> Tuple[DiffusionOutput, list, torch.profiler.profiler.profile]:
         """Profile the model execution"""
+        try:
+            return self._profile_with_compile_budget(input_args)
+        finally:
+            self._restore_dynamo_recompile_limit()
+
+    def _profile_with_compile_budget(
+        self, input_args: dict
+    ) -> Tuple[DiffusionOutput, list, torch.profiler.profiler.profile]:
         self._validate_args(input_args)
         input_args = self._split_prompts_for_dp(input_args)
 

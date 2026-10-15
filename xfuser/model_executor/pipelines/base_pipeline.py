@@ -743,10 +743,15 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             input_shape = torch.zeros(latents_shape_len[0], dtype=torch.int, device=device)
         get_world_group().broadcast(input_shape, src=src)
 
+        # broadcast latents dtype: the pipeline may compute in a dtype other than the
+        # engine config's or the VAE's, and earlier PipeFusion stages hold no latents
+        dtypes = (torch.float32, torch.float16, torch.bfloat16)
+        dtype_code = torch.tensor([dtypes.index(latents.dtype) if rank == src else 0], dtype=torch.int, device=device)
+        get_world_group().broadcast(dtype_code, src=src)
+
         # broadcast latents
         if rank != src:
-            dtype = get_runtime_state().runtime_config.dtype
-            latents = torch.zeros(torch.Size(input_shape), dtype=dtype, device=device)
+            latents = torch.zeros(torch.Size(input_shape), dtype=dtypes[int(dtype_code)], device=device)
         get_world_group().broadcast(latents, src=src)
 
         return latents

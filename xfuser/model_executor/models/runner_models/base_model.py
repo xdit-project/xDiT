@@ -27,6 +27,7 @@ from xfuser.core.utils.runner_utils import (
     rgetattr,
 )
 from xfuser.model_executor.models.runner_models.image_postprocess import enable_fast_pil_postprocess
+from xfuser.model_executor.pipelines.base_pipeline import xFuserPipelineBaseWrapper
 from xfuser.model_executor.models.runner_models.vae_manager import (
     VAEManager,
     validate_vae_config,
@@ -393,6 +394,9 @@ class xFuserModel(abc.ABC):
     # model's support has not been released yet, and leave None when no floor is known.
     min_diffusers_version: Optional[str] = None
 
+    # The pipeline when it is a legacy xFuserPipelineBaseWrapper, set by initialize().
+    _legacy_pipe: Optional[xFuserPipelineBaseWrapper] = None
+
     def __init__(self, config: xFuserArgs) -> None:
         self.settings = copy.deepcopy(self.__class__.settings)
         self._customize_settings(config)
@@ -471,12 +475,15 @@ class xFuserModel(abc.ABC):
         log("Loading model pipeline...")
         self.pipe = self._load_model_checked()
         enable_fast_pil_postprocess([self.pipe, getattr(self, "second_pipe", None)])
+        self._legacy_pipe = self.pipe if isinstance(self.pipe, xFuserPipelineBaseWrapper) else None
+        if self._legacy_pipe is not None:
+            self._legacy_pipe.prompts_split_by_caller = True
 
         log("Initializing runtime state...")
         initialize_runtime_state(self._get_runtime_state_pipeline(), self.engine_config)
 
         self._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
+        if self.config.use_parallel_vae and not self._wrapper_parallelizes_vae():
             self._vae_manager.setup_parallel_vae(self._decoding_vaes())
         self._enable_options()
         fp8_comms = get_runtime_state().fp8_comms if runtime_state_is_initialized() else None
@@ -1417,6 +1424,13 @@ class xFuserModel(abc.ABC):
         split_args["negative_prompt"] = local_negative_prompts
         return split_args
 
+    def _wrapper_parallelizes_vae(self) -> bool:
+        """Return whether a legacy wrapper decodes with its own parallel VAE.
+
+        Such a wrapper shards its decoder at construction, so the runner must not shard it again.
+        """
+        return self._legacy_pipe is not None and self._legacy_pipe.parallelizes_vae()
+
     def _gather_dp_outputs(self, output: DiffusionOutput) -> Optional[DiffusionOutput]:
         """
         Gathers DiffusionOutput objects from all DP groups onto the last rank.
@@ -1425,14 +1439,21 @@ class xFuserModel(abc.ABC):
         Only the first rank in the SP group sends the real payload,
         the other ranks send None to keep the collective valid.
 
+        A legacy pipeline wrapper returns images only on the ranks its own
+        ``is_dp_last_group()`` selects, so those ranks send instead.
         """
-        if self.config.data_parallel_degree == 1:
+        # Without DP the output is already on the saving rank, unless a legacy
+        # wrapper decodes with a parallel VAE and so returns it on rank 0.
+        if self.config.data_parallel_degree == 1 and not self._wrapper_parallelizes_vae():
             return output
 
         world_group = get_world_group()
         last_rank = world_group.world_size - 1
 
-        is_representative = get_sequence_parallel_rank() == 0 and get_classifier_free_guidance_rank() == 0
+        if self._legacy_pipe is not None:
+            is_representative = self._legacy_pipe.is_dp_last_group()
+        else:
+            is_representative = get_sequence_parallel_rank() == 0 and get_classifier_free_guidance_rank() == 0
         send_obj = output if is_representative else None
 
         gather_list = [None] * world_group.world_size if world_group.rank == last_rank else None

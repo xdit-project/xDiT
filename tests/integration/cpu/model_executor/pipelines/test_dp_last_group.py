@@ -1,7 +1,5 @@
 """Gathering final latents across data-parallel ranks reuses one process group."""
 
-import queue
-import time
 import traceback
 from unittest.mock import patch
 
@@ -64,40 +62,12 @@ def _gather_worker(rank, world_size, init_method, result_queue):
             dist.destroy_process_group()
 
 
-def _run_spawned(torch, worker, init_method, *, world_size, timeout):
-    context = torch.multiprocessing.get_context("spawn")
-    result_queue = context.Queue()
-    processes = [
-        context.Process(target=worker, args=(rank, world_size, init_method, result_queue)) for rank in range(world_size)
-    ]
-    for process in processes:
-        process.start()
-
-    deadline = time.monotonic() + timeout
-    for process in processes:
-        process.join(max(0.0, deadline - time.monotonic()))
-
-    hung = [process.pid for process in processes if process.is_alive()]
-    for process in processes:
-        if process.is_alive():
-            process.kill()
-            process.join(5)
-
-    results = []
-    while len(results) < world_size:
-        try:
-            results.append(result_queue.get(timeout=1))
-        except queue.Empty:
-            break
-    return processes, hung, results
-
-
-def test_repeated_requests_create_the_dp_last_group_once(tmp_path):
+def test_repeated_requests_create_the_dp_last_group_once(tmp_path, run_spawned):
     torch = pytest.importorskip("torch")
     if not torch.distributed.is_available() or not torch.distributed.is_gloo_available():
         pytest.skip("torch.distributed with the gloo backend is unavailable")
 
-    processes, hung, results = _run_spawned(
+    processes, hung, _, results = run_spawned(
         torch,
         _gather_worker,
         f"file://{tmp_path / 'dp-last-group-init'}",

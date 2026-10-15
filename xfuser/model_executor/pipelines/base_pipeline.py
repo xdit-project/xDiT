@@ -161,6 +161,10 @@ class xFuserVAEWrapper:
 
 
 class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
+    # The xFuserModel runner gives each DP group its own prompts and sets this so
+    # enable_data_parallel does not split them a second time.
+    prompts_split_by_caller = False
+
     def __init__(
         self,
         pipeline: DiffusionPipeline,
@@ -244,6 +248,8 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
     def enable_data_parallel(func):
         @wraps(func)
         def data_parallel_fn(self, *args, **kwargs):
+            if self.prompts_split_by_caller:
+                return func(self, *args, **kwargs)
             prompt = kwargs.get("prompt", None)
             negative_prompt = kwargs.get("negative_prompt", "")
             # dp_degree <= batch_size
@@ -627,11 +633,15 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             raise ValueError("Invalid classifier free guidance rank")
         return embeds, embeds_mask
 
+    def parallelizes_vae(self):
+        """Return True if this wrapper decodes with a parallel VAE across the ranks."""
+        return get_runtime_state().runtime_config.use_parallel_vae and not self.use_naive_forward()
+
     def is_dp_last_group(self):
         """Return True if in the last data parallel group, False otherwise.
         Also include parallel vae situation.
         """
-        if get_runtime_state().runtime_config.use_parallel_vae and not self.use_naive_forward():
+        if self.parallelizes_vae():
             return get_world_group().rank == 0
         else:
             return is_dp_last_group()
@@ -639,7 +649,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
     def gather_latents_for_vae(self, latents: torch.Tensor):
         """gather latents from dp last group"""
         # Only gather if we're using parallel VAE and not using naive forward
-        if not (get_runtime_state().runtime_config.use_parallel_vae and not self.use_naive_forward()):
+        if not self.parallelizes_vae():
             return latents
 
         rank = get_world_group().rank

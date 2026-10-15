@@ -176,3 +176,52 @@ def test_the_head_dim_refusal_names_fallback_or_a_hard_stop():
 
     with pytest.raises(ValueError, match="would be refused"):
         base_model._validate_attention_head_dims(model, _HeadDimConfig("AITER_FP8_SPARGE"))
+
+
+def _gather_dp_outputs(monkeypatch, *, dp_degree, legacy_pipe, rank=0, sp_rank=0):
+    """Run ``_gather_dp_outputs`` on a non-saving rank and return what it sent, or "not gathered"."""
+    sent = []
+    monkeypatch.setattr(base_model, "get_world_group", lambda: SimpleNamespace(world_size=2, rank=rank))
+    monkeypatch.setattr(base_model, "get_sequence_parallel_rank", lambda: sp_rank)
+    monkeypatch.setattr(base_model, "get_classifier_free_guidance_rank", lambda: 0)
+    monkeypatch.setattr(base_model.torch.distributed, "gather_object", lambda obj, *args, **kwargs: sent.append(obj))
+    model = object.__new__(_StubModel)
+    model.config = SimpleNamespace(data_parallel_degree=dp_degree)
+    model._legacy_pipe = legacy_pipe
+
+    model._gather_dp_outputs("output")
+    return sent or "not gathered"
+
+
+def _legacy_pipe(*, parallelizes_vae, is_dp_last_group):
+    return SimpleNamespace(parallelizes_vae=lambda: parallelizes_vae, is_dp_last_group=lambda: is_dp_last_group)
+
+
+def test_legacy_wrapper_without_dp_or_parallel_vae_keeps_its_output(monkeypatch):
+    legacy_pipe = _legacy_pipe(parallelizes_vae=False, is_dp_last_group=True)
+
+    assert _gather_dp_outputs(monkeypatch, dp_degree=1, legacy_pipe=legacy_pipe) == "not gathered"
+
+
+@pytest.mark.parametrize(
+    ("dp_degree", "parallelizes_vae"),
+    [
+        (2, False),
+        (1, True),  # the wrapper's images are on rank 0, the saving rank is the last
+    ],
+)
+def test_legacy_wrapper_sends_from_the_ranks_its_own_decode_selects(monkeypatch, dp_degree, parallelizes_vae):
+    for is_dp_last_group, expected in ((True, ["output"]), (False, [None])):
+        legacy_pipe = _legacy_pipe(parallelizes_vae=parallelizes_vae, is_dp_last_group=is_dp_last_group)
+
+        # The SP rank would pick the opposite sender: it must not matter for a legacy wrapper.
+        sent = _gather_dp_outputs(
+            monkeypatch, dp_degree=dp_degree, legacy_pipe=legacy_pipe, sp_rank=int(is_dp_last_group)
+        )
+
+        assert sent == expected
+
+
+@pytest.mark.parametrize(("sp_rank", "expected"), [(0, ["output"]), (1, [None])])
+def test_other_runners_send_from_the_first_sequence_parallel_rank(monkeypatch, sp_rank, expected):
+    assert _gather_dp_outputs(monkeypatch, dp_degree=2, legacy_pipe=None, sp_rank=sp_rank) == expected

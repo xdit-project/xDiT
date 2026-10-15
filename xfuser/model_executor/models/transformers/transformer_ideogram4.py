@@ -1,7 +1,9 @@
 import torch
 import torch.nn.functional as F
 
+from xfuser.core.attention import registry as attention_registry
 from xfuser.core.distributed import (
+    get_runtime_state,
     get_sequence_parallel_rank,
     get_sequence_parallel_world_size,
 )
@@ -13,6 +15,21 @@ from xfuser.model_executor.models.transformers.transformers_utils import (
     chunk_and_pad_sequence,
     gather_and_unpad,
 )
+
+
+def _refuse_padding_under_low_precision_backend(pad_amount: int, backend) -> None:
+    """Refuse a padded shard when the backend quantises with a scale shared across rows.
+
+    The pad rows are not zeroed after each block and stay in the query rows that
+    set those scales (AITER FP8 takes one Q scale per tensor), which is neither
+    tested nor measured, so refuse instead of running with coarser scales.
+    """
+    if pad_amount and backend in attention_registry.types_where(low_precision=True):
+        raise NotImplementedError(
+            f"Ideogram 4 pads the sequence by {pad_amount} token(s) to split it across the sequence-parallel "
+            f"ranks, which --attention_backend {backend.name} does not support. Use a non-quantising attention "
+            "backend or a sequence-parallel degree that divides the text + image token count."
+        )
 
 
 def _rotate_half(hidden_states: torch.Tensor) -> torch.Tensor:
@@ -27,9 +44,12 @@ def _make_xfuser_ideogram4_attention_processor():
 
     @xFuserAttentionProcessorRegister.register(Ideogram4AttnProcessor)
     class xFuserIdeogram4AttnProcessor(Ideogram4AttnProcessor):
-        def __init__(self) -> None:
+        def __init__(self, attention_kwargs: dict | None = None) -> None:
             super().__init__()
             self.attention_function = USP
+            # Shared with the transformer, which sets ``valid_kv_len`` when the
+            # sequence is zero-padded to split evenly across ranks.
+            self.attention_kwargs = attention_kwargs
 
         def __call__(
             self,
@@ -64,6 +84,7 @@ def _make_xfuser_ideogram4_attention_processor():
                 query.transpose(1, 2),
                 key.transpose(1, 2),
                 value.transpose(1, 2),
+                attention_kwargs=self.attention_kwargs,
             ).transpose(1, 2)
             hidden_states = hidden_states.flatten(2, 3).type_as(query)
             return attn.to_out[0](hidden_states)
@@ -84,8 +105,10 @@ def _make_xfuser_ideogram4_transformer_wrapper():
 
     class xFuserIdeogram4Transformer2DWrapper(Ideogram4Transformer2DModel):
         def _install_xfuser_processors(self) -> None:
+            # The key is always present because torch.compile guards on the key set.
+            self._usp_attention_kwargs = {"valid_kv_len": None}
             for layer in self.layers:
-                layer.attention.set_processor(processor_class())
+                layer.attention.set_processor(processor_class(attention_kwargs=self._usp_attention_kwargs))
 
         @classmethod
         def from_pretrained(cls, *args, **kwargs):
@@ -218,6 +241,11 @@ def _make_xfuser_ideogram4_transformer_wrapper():
 
             sequence_length = num_text_tokens + num_image_tokens
             pad_amount = (sp_size - sequence_length % sp_size) % sp_size
+            if pad_amount:
+                _refuse_padding_under_low_precision_backend(pad_amount, get_runtime_state().attention_backend)
+            # Diffusers attends only within the real tokens; publishing the real
+            # length lets USP drop the padded keys (also of each ring step).
+            self._usp_attention_kwargs["valid_kv_len"] = sequence_length if pad_amount else None
             hidden_states = chunk_and_pad_sequence(
                 hidden_states,
                 sp_rank,

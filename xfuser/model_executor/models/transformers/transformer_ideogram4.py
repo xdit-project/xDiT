@@ -139,9 +139,7 @@ def _make_xfuser_ideogram4_transformer_wrapper():
                 and torch.equal(image_counts, image_counts[:1].expand_as(image_counts))
                 and torch.equal(pad_counts, pad_counts[:1].expand_as(pad_counts))
             ):
-                raise ValueError(
-                    "Ideogram 4 xDiT requires prompts in the same batch to have equal token lengths."
-                )
+                raise ValueError("Ideogram 4 xDiT requires prompts in the same batch to have equal token lengths.")
 
             layout = (
                 int(pad_counts[0].item()),
@@ -168,13 +166,9 @@ def _make_xfuser_ideogram4_transformer_wrapper():
 
             batch_size, _, in_channels = hidden_states.shape
             if in_channels != self.in_channels:
-                raise ValueError(
-                    f"Expected last dim {self.in_channels}, got {in_channels}."
-                )
+                raise ValueError(f"Expected last dim {self.in_channels}, got {in_channels}.")
 
-            num_pad_tokens, num_text_tokens, num_image_tokens = (
-                self._get_sequence_layout(indicator)
-            )
+            num_pad_tokens, num_text_tokens, num_image_tokens = self._get_sequence_layout(indicator)
             text_start = num_pad_tokens
             image_start = text_start + num_text_tokens
 

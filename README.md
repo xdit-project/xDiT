@@ -127,6 +127,7 @@ The following open-sourced DiT Models are released with xDiT in day 1.
 | [🟡 Lumina-Image-2.0](https://huggingface.co/Alpha-VLLM/Lumina-Image-2.0) | ✔️ | ✔️ | ❎ | ❎ | ❎ | NA |
 | [🔴 Z-Image Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🟠 Flux 2 klein](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
+| [🟠 Flux 3 Image klein](https://huggingface.co/black-forest-labs/flux-3-image-klein) | NA | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🟠 Flux 2](https://huggingface.co/black-forest-labs/FLUX.2-dev) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🟠 Flux](https://huggingface.co/black-forest-labs/FLUX.1-schnell) | NA | ✔️ | ✔️ | ❎ | ✔️ | [Report](./docs/performance/flux.md) |
 | [🟠 Flux Kontext](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) | ❎ | ✔️ |  ❎ | ❎ | ✔️ | NA |

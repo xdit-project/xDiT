@@ -15,6 +15,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     xFuserModel,
 )
+from xfuser.model_executor.quant.targets import GemmTargets, Select
 from xfuser.model_executor.models.runner_models.loading.checkpoint import (
     CheckpointManifest,
     DerivedTensor,
@@ -289,8 +290,7 @@ class xFuserIdeogram4Model(xFuserModel):
         ulysses_degree=True,
         ring_degree=True,
         use_cfg_parallel=True,
-        use_fp8_gemms=True,
-        use_fp4_gemms=True,
+        gemm_formats=frozenset({"fp8", "fp4"}),
         fully_shard_degree=True,
         use_parallel_vae=True,
         enable_tiling=True,
@@ -308,14 +308,14 @@ class xFuserIdeogram4Model(xFuserModel):
         model_output_type="image",
         mod_value=16,
         resolution_divisor=16,
-        fp8_gemm_module_list=[
-            "transformer.layers",
-            "unconditional_transformer.layers",
-        ],
-        fp4_gemm_module_list=[
-            "transformer.layers",
-            "unconditional_transformer.layers",
-        ],
+        gemm_targets=GemmTargets(
+            transformer=Select(
+                modules=(
+                    "transformer.layers",
+                    "unconditional_transformer.layers",
+                )
+            ),
+        ),
         fsdp_strategy={
             "transformer": {"wrap_attrs": ["layers"]},
             "unconditional_transformer": {"wrap_attrs": ["layers"]},

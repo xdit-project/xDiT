@@ -16,6 +16,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
     ModelSettings,
 )
+from xfuser.model_executor.quant.targets import GemmTargets, Select
 from xfuser import xFuserArgs
 from xfuser.core.distributed import get_runtime_state
 from xfuser.core.utils.runner_utils import log
@@ -48,8 +49,8 @@ class xFuserQwenImageEditModel(xFuserModel):
         ring_degree=True,
         use_cfg_parallel=True,
         fully_shard_degree=True,
-        use_fp8_gemms=True,
-        use_fp8_text_encoder=True,
+        gemm_formats=frozenset({"fp8"}),
+        quantize_text_encoder=True,
         use_fp8_comms=True,
         use_parallel_vae=True,
         use_parallel_vae_encoder=True,
@@ -74,7 +75,10 @@ class xFuserQwenImageEditModel(xFuserModel):
                 "wrap_attrs": ["model.language_model.layers"],
             },
         },
-        fp8_gemm_module_list=["transformer.transformer_blocks"],
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=("transformer.transformer_blocks",)),
+            text_encoder=Select(modules=("text_encoder.model.language_model.layers",)),
+        ),
         step_cache_config={
             "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
@@ -84,7 +88,6 @@ class xFuserQwenImageEditModel(xFuserModel):
                 preset=DBCachePreset(Fn_compute_blocks=6, residual_diff_threshold=0.12, scm_policy="ultra"),
             ),
         },
-        fp8_text_encoder_module_list=["text_encoder.model.language_model.layers"],
     )
 
     def _customize_settings(self, config: xFuserArgs) -> None:
@@ -173,9 +176,9 @@ class xFuserQwenImageModel(xFuserModel):
         ulysses_degree=True,
         ring_degree=True,
         fully_shard_degree=True,
-        use_fp8_gemms=True,
+        gemm_formats=frozenset({"fp8"}),
         supports_step_caching=True,
-        use_fp8_text_encoder=True,
+        quantize_text_encoder=True,
         use_fp8_comms=True,
         use_parallel_vae=True,
         enable_tiling=True,
@@ -191,8 +194,10 @@ class xFuserQwenImageModel(xFuserModel):
         model_name="Qwen/Qwen-Image",
         output_name="qwen_image",
         model_output_type="image",
-        fp8_gemm_module_list=["transformer.transformer_blocks"],
-        fp8_text_encoder_module_list=["text_encoder.model.language_model.layers"],
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=("transformer.transformer_blocks",)),
+            text_encoder=Select(modules=("text_encoder.model.language_model.layers",)),
+        ),
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks"],
@@ -276,7 +281,7 @@ class xFuserQwenImage21Model(xFuserModel):
         ulysses_degree=True,
         ring_degree=False,
         fully_shard_degree=True,
-        use_fp8_gemms=True,
+        gemm_formats=frozenset({"fp8"}),
         enable_tiling=True,
         enable_slicing=True,
     )
@@ -292,7 +297,12 @@ class xFuserQwenImage21Model(xFuserModel):
         model_name="Qwen/Qwen-Image-2.1",
         output_name="qwen_image_21",
         model_output_type="image",
-        fp8_gemm_module_list=["transformer.transformer_blocks"],
+        gemm_targets=GemmTargets(
+            # No text-encoder target: this runner does not declare the
+            # quantize_text_encoder capability, so the flag is refused and a
+            # declared encoder target could never be reached.
+            transformer=Select(modules=("transformer.transformer_blocks",)),
+        ),
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks"],

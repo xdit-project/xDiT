@@ -125,9 +125,7 @@ def test_runner_declaration_derives_quantization_contracts(contracts):
         "ModelCapabilities",
         (),
         {
-            "use_fp8_gemms": True,
-            "use_fp4_gemms": False,
-            "use_int8_gemms": True,
+            "gemm_formats": frozenset({"fp8", "int8"}),
         },
     )()
 
@@ -170,9 +168,7 @@ def test_runner_declaration_does_not_allow_cross_product_backend_pairs(contracts
         "ModelCapabilities",
         (),
         {
-            "use_fp8_gemms": False,
-            "use_fp4_gemms": False,
-            "use_int8_gemms": True,
+            "gemm_formats": frozenset({"int8"}),
         },
     )()
     declaration = contracts.LoadDeclaration.for_runner(model_capabilities)
@@ -196,40 +192,35 @@ def test_fp8_fp4_hybrid_is_an_explicit_valid_contract(contracts):
         "ModelCapabilities",
         (),
         {
-            "use_fp8_gemms": True,
-            "use_fp4_gemms": True,
-            "use_int8_gemms": False,
+            "gemm_formats": frozenset({"fp8", "fp4"}),
             "fully_shard_degree": False,
         },
     )()
     declaration = contracts.LoadDeclaration.for_runner(model_capabilities)
 
+    # FP8 and FP4 are separate contracts: a tiered run takes the FP4 one and
+    # places its FP8 tier through the blockwise converter.
     assert (
-        contracts.QuantizationFormat.FP8_FP4,
+        contracts.QuantizationFormat.FP4,
         contracts.QuantizationBackend.AITER,
     ) in declaration.quantization_contracts
     assert (
-        contracts.QuantizationFormat.FP8_FP4,
+        contracts.QuantizationFormat.FP8,
         contracts.QuantizationBackend.TORCHAO,
     ) in declaration.quantization_contracts
 
 
-def test_int8_still_conflicts_with_hybrid_quantization(contracts):
-    config = type(
-        "Config",
-        (),
-        {
-            "use_fp8_gemms": True,
-            "use_fp4_gemms": True,
-            "use_int8_gemms": True,
-        },
-    )()
+def test_any_distinct_pair_is_accepted():
+    """No list of acceptable combinations anywhere.
 
-    with pytest.raises(
-        contracts.UnsupportedLoadContract,
-        match=r"INT8.*FP8.*FP4",
-    ):
-        contracts.select_runtime_quantization(config, aiter_fp8_active=True, cuda_active=False)
+    Whether a format can be stored is a registry lookup against what was
+    probed, so a pair nobody has tried is allowed and unverified rather than
+    refused by a hardcoded list.
+    """
+    from xfuser.config.args import xFuserArgs
+
+    args = xFuserArgs(model="m", gemm_quantization="low=int8,high=fp8")
+    args._validate_gemm_quantization_flags()
 
 
 def test_fsdp_and_replicated_meta_support_are_derived_separately(contracts):
@@ -237,9 +228,7 @@ def test_fsdp_and_replicated_meta_support_are_derived_separately(contracts):
         "ModelCapabilities",
         (),
         {
-            "use_fp8_gemms": False,
-            "use_fp4_gemms": False,
-            "use_int8_gemms": False,
+            "gemm_formats": frozenset({}),
             "fully_shard_degree": True,
         },
     )()
@@ -247,9 +236,7 @@ def test_fsdp_and_replicated_meta_support_are_derived_separately(contracts):
         "ModelCapabilities",
         (),
         {
-            "use_fp8_gemms": False,
-            "use_fp4_gemms": False,
-            "use_int8_gemms": False,
+            "gemm_formats": frozenset({}),
             "fully_shard_degree": False,
         },
     )()
@@ -368,58 +355,10 @@ def _offload_config(**flags):
     return type("Config", (), {**defaults, **flags})()
 
 
-@pytest.mark.parametrize(
-    ("low_cpu_mem", "expected_in_reason"),
-    [
-        (False, "invalid ordinal"),
-        (True, "pin"),
-    ],
-)
-def test_group_offload_with_aiter_fp4_is_refused(contracts, low_cpu_mem, expected_in_reason):
-    """Both legs of the offload fail below Python, one by abort, so neither can be caught."""
-    config = _offload_config(enable_group_cpu_offload=True, group_offload_low_cpu_mem=low_cpu_mem)
-
-    with pytest.raises(contracts.UnsupportedLoadContract) as refusal:
-        contracts.assert_offload_is_compatible_with_format(
-            config,
-            requested_format=contracts.QuantizationFormat.FP4,
-            selected_backend=contracts.QuantizationBackend.AITER,
-        )
-
-    assert expected_in_reason in str(refusal.value)
-
-
-def test_the_mixed_schedule_carries_the_fp4_half_into_the_refusal(contracts):
-    """FP8_FP4 quantizes part of the model to FP4, so the same weights cannot be offloaded."""
-    config = _offload_config(enable_group_cpu_offload=True)
-
-    with pytest.raises(contracts.UnsupportedLoadContract) as refusal:
-        contracts.assert_offload_is_compatible_with_format(
-            config,
-            requested_format=contracts.QuantizationFormat.FP8_FP4,
-            selected_backend=contracts.QuantizationBackend.AITER,
-        )
-
-    assert "FP8_FP4" in str(refusal.value)
-
-
-@pytest.mark.parametrize(
-    ("format_name", "backend_name", "offload"),
-    [
-        ("FP4", "AITER", False),
-        ("FP8", "AITER", True),
-        ("FP4", "TORCHAO", True),
-    ],
-)
-def test_an_offload_this_has_no_measurement_for_is_left_alone(contracts, format_name, backend_name, offload):
-    """Refusing CUDA FP4 offload would assert a claim nothing here has tested."""
-    config = _offload_config(enable_group_cpu_offload=offload)
-
-    contracts.assert_offload_is_compatible_with_format(
-        config,
-        requested_format=getattr(contracts.QuantizationFormat, format_name),
-        selected_backend=getattr(contracts.QuantizationBackend, backend_name),
-    )
+# Which offload a format's storage survives is the adapter's answer now:
+# `group_offload_refusal` carries the measured reason, and the loop that reads
+# it is tested in test_fp8_blockwise_hybrid_routing.py, where an adapter exists.
+# The compound FP4_FP6 contract that needed a claim here no longer exists.
 
 
 @pytest.mark.parametrize(
@@ -455,64 +394,37 @@ def test_offload_that_was_measured_working_is_allowed(contracts, flags, shard_de
 
 
 @pytest.mark.parametrize(
-    ("flags", "aiter_fp8", "cuda", "expected"),
+    ("raw", "impl", "expected"),
     [
-        (
-            {},
-            False,
-            False,
-            ("NONE", "NONE"),
-        ),
-        (
-            {"use_fp8_gemms": True},
-            True,
-            False,
-            ("FP8", "AITER"),
-        ),
-        (
-            {"use_fp8_gemms": True},
-            False,
-            True,
-            ("FP8", "TORCHAO"),
-        ),
-        (
-            {"use_fp4_gemms": True},
-            False,
-            False,
-            ("FP4", "AITER"),
-        ),
-        (
-            {"use_fp4_gemms": True},
-            False,
-            True,
-            ("FP4", "TORCHAO"),
-        ),
-        (
-            {"use_fp8_gemms": True, "use_fp4_gemms": True},
-            True,
-            False,
-            ("FP8_FP4", "AITER"),
-        ),
-        (
-            {"use_int8_gemms": True},
-            False,
-            True,
-            ("INT8", "TORCHAO"),
-        ),
+        ("none", "torchao", ("NONE", "NONE")),
+        ("fp8", "aiter", ("FP8", "AITER")),
+        ("fp8", "torchao", ("FP8", "TORCHAO")),
+        ("fp4", "aiter", ("FP4", "AITER")),
+        ("fp4", "torchao", ("FP4", "TORCHAO")),
+        # Only the low format reaches the contract; the high tier is resolved
+        # by name wherever the plan puts it.
+        ("low=fp4,high=fp8", "aiter", ("FP4", "AITER")),
+        ("low=int8,high=fp8", "torchao", ("INT8", "TORCHAO")),
+        ("int8", "torchao", ("INT8", "TORCHAO")),
+        ("fp6", "aiter", ("FP6", "AITER")),
     ],
 )
-def test_runtime_quantization_selection(contracts, flags, aiter_fp8, cuda, expected):
-    config = type(
-        "Config",
-        (),
-        {
-            "use_fp8_gemms": False,
-            "use_fp4_gemms": False,
-            "use_int8_gemms": False,
-            **flags,
-        },
-    )()
+def test_the_contract_names_the_low_format_and_what_stores_it(contracts, raw, impl, expected):
+    from xfuser.config.gemm import GemmQuantizationSpec
 
-    requested, backend = contracts.select_runtime_quantization(config, aiter_fp8_active=aiter_fp8, cuda_active=cuda)
+    requested, backend = contracts.select_runtime_quantization(
+        GemmQuantizationSpec.parse(raw),
+        impl_for=lambda _format: impl,
+    )
 
     assert (requested.name, backend.name) == expected
+
+
+def test_a_format_nothing_can_store_is_refused_before_the_contract(contracts):
+    from xfuser.config.gemm import GemmQuantizationSpec
+
+    with pytest.raises(contracts.UnsupportedLoadContract, match="nothing here"):
+        contracts.select_runtime_quantization(
+            GemmQuantizationSpec.parse("fp6"),
+            impl_for=lambda _format: None,
+        )

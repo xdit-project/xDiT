@@ -14,6 +14,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
     ModelSettings,
 )
+from xfuser.model_executor.quant.targets import GemmTargets, Select
 from xfuser.envs import PACKAGES_CHECKER
 from xfuser.core.utils.runner_utils import (
     resize_and_crop_image,
@@ -44,8 +45,8 @@ class xFuserFluxModel(xFuserModel):
         ulysses_degree=True,
         ring_degree=True,
         pipefusion_parallel_degree=True,
-        use_fp8_gemms=True,
-        use_fp8_text_encoder=True,
+        gemm_formats=frozenset({"fp8"}),
+        quantize_text_encoder=True,
         use_parallel_vae=True,
         enable_tiling=True,
         enable_slicing=True,
@@ -66,13 +67,15 @@ class xFuserFluxModel(xFuserModel):
         model_name="black-forest-labs/FLUX.1-dev",
         output_name="flux_1_dev",
         model_output_type="image",
-        fp8_gemm_module_list=[
-            "transformer.transformer_blocks",
-            "transformer.single_transformer_blocks",
-        ],
-        fp8_text_encoder_module_list=[
-            "text_encoder_2.encoder.block",
-        ],
+        gemm_targets=GemmTargets(
+            transformer=Select(
+                modules=(
+                    "transformer.transformer_blocks",
+                    "transformer.single_transformer_blocks",
+                )
+            ),
+            text_encoder=Select(modules=("text_encoder_2.encoder.block",)),
+        ),
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
@@ -170,8 +173,8 @@ class xFuserFluxKontextModel(xFuserModel):
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
-        use_fp8_gemms=True,
-        use_fp8_text_encoder=True,
+        gemm_formats=frozenset({"fp8"}),
+        quantize_text_encoder=True,
         enable_tiling=True,
         enable_slicing=True,
         use_parallel_vae=True,
@@ -192,13 +195,15 @@ class xFuserFluxKontextModel(xFuserModel):
         output_name="flux_1_kontext_dev",
         model_output_type="image",
         mod_value=16,
-        fp8_gemm_module_list=[
-            "transformer.transformer_blocks",
-            "transformer.single_transformer_blocks",
-        ],
-        fp8_text_encoder_module_list=[
-            "text_encoder_2.encoder.block",
-        ],
+        gemm_targets=GemmTargets(
+            transformer=Select(
+                modules=(
+                    "transformer.transformer_blocks",
+                    "transformer.single_transformer_blocks",
+                )
+            ),
+            text_encoder=Select(modules=("text_encoder_2.encoder.block",)),
+        ),
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
@@ -302,9 +307,8 @@ class xFuserFlux2Model(xFuserModel):
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
-        use_fp8_gemms=True,
-        use_fp8_text_encoder=True,
-        use_fp4_gemms=True,
+        gemm_formats=frozenset({"fp8", "fp4"}),
+        quantize_text_encoder=True,
         fully_shard_degree=True,
         use_fp8_comms=True,
         enable_tiling=True,
@@ -327,17 +331,19 @@ class xFuserFlux2Model(xFuserModel):
         output_name="flux_2_dev",
         model_output_type="image",
         mod_value=16,
-        fp8_gemm_module_list=[
-            "transformer.transformer_blocks",
-            "transformer.single_transformer_blocks",
-        ],
-        fp8_text_encoder_module_list=[
-            "text_encoder.model.language_model.layers",
-        ],
-        fp4_gemm_module_list=[
-            "transformer.transformer_blocks",
-            "transformer.single_transformer_blocks",
-        ],
+        gemm_targets=GemmTargets(
+            transformer=Select(
+                modules=(
+                    "transformer.transformer_blocks",
+                    "transformer.single_transformer_blocks",
+                )
+            ),
+            text_encoder=Select(modules=("text_encoder.model.language_model.layers",)),
+            # The text encoder is held at the better precision: it is
+            # quantized to save host RAM at load, not to chase the smallest
+            # format, and a tiered run should not drag it down with the DiT.
+            keep_high=Select(modules=("text_encoder.model.language_model.layers",)),
+        ),
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
@@ -451,8 +457,8 @@ class xFuserFlux2Klein9BModel(xFuserModel):
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
-        use_fp8_gemms=True,
-        use_fp8_text_encoder=True,
+        gemm_formats=frozenset({"fp8"}),
+        quantize_text_encoder=True,
         enable_tiling=True,
         enable_slicing=True,
         use_parallel_vae=True,
@@ -475,13 +481,15 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         output_name="flux_2_klein_9b",
         model_output_type="image",
         mod_value=16,
-        fp8_gemm_module_list=[
-            "transformer.transformer_blocks",
-            "transformer.single_transformer_blocks",
-        ],
-        fp8_text_encoder_module_list=[
-            "text_encoder.model.layers",
-        ],
+        gemm_targets=GemmTargets(
+            transformer=Select(
+                modules=(
+                    "transformer.transformer_blocks",
+                    "transformer.single_transformer_blocks",
+                )
+            ),
+            text_encoder=Select(modules=("text_encoder.model.layers",)),
+        ),
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
@@ -582,13 +590,15 @@ class xFuserFlux2Klein4BModel(xFuserFlux2Klein9BModel):
         output_name="flux_2_klein_4b",
         model_output_type="image",
         mod_value=16,
-        fp8_gemm_module_list=[
-            "transformer.transformer_blocks",
-            "transformer.single_transformer_blocks",
-        ],
-        fp8_text_encoder_module_list=[
-            "text_encoder.model.layers",
-        ],
+        gemm_targets=GemmTargets(
+            transformer=Select(
+                modules=(
+                    "transformer.transformer_blocks",
+                    "transformer.single_transformer_blocks",
+                )
+            ),
+            text_encoder=Select(modules=("text_encoder.model.layers",)),
+        ),
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],

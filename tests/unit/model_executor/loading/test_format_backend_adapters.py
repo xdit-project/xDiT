@@ -1,5 +1,6 @@
 """Dependency-light contracts for FP4 and INT8 materialization backends."""
 
+import importlib.machinery
 import importlib.util
 from pathlib import Path
 import sys
@@ -8,23 +9,58 @@ from types import SimpleNamespace
 import pytest
 
 ROOT = Path(__file__).resolve().parents[4]
-BACKENDS_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/format_backends.py"
+BACKENDS_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/backends.py"
 CONTRACTS_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/contracts.py"
+ADAPTER_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/quant_adapter.py"
+SELECTION_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/backend_selection.py"
+TEXT_ENCODER_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/text_encoder_adapter.py"
+GEMM_PATH = ROOT / "xfuser/config/gemm.py"
+
+
+#: A synthetic package over the loading directory. These modules are meant to
+#: be importable without the rest of the app, and they share a dependency-light
+#: base, so the loader gives relative imports somewhere to resolve rather than
+#: forcing the shared code to be duplicated or imported absolutely.
+_PKG = "format_adapter_pkg"
+
+
+def _package():
+    if _PKG not in sys.modules:
+        package = importlib.util.module_from_spec(importlib.machinery.ModuleSpec(_PKG, None, is_package=True))
+        package.__path__ = [str(BACKENDS_PATH.parent)]
+        sys.modules[_PKG] = package
+    return sys.modules[_PKG]
 
 
 def _load_module(path, name):
-    spec = importlib.util.spec_from_file_location(name, path)
+    _package()
+    spec = importlib.util.spec_from_file_location(f"{_PKG}.{name}", path)
     module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
+    sys.modules[f"{_PKG}.{name}"] = module
     spec.loader.exec_module(module)
     return module
 
 
 @pytest.fixture(scope="module")
 def modules():
-    contracts = _load_module(CONTRACTS_PATH, "format_adapter_contracts")
+    contracts = _load_module(CONTRACTS_PATH, "contracts")
+    adapter = _load_module(ADAPTER_PATH, "quant_adapter")
     backends = _load_module(BACKENDS_PATH, "format_adapter_backends")
-    return SimpleNamespace(contracts=contracts, backends=backends)
+    selection = _load_module(SELECTION_PATH, "backend_selection")
+    text_encoder = _load_module(TEXT_ENCODER_PATH, "text_encoder_adapter")
+    # By path like the rest: importing xfuser.config.gemm would execute the
+    # package root, which imports torch.
+    gemm = _load_module(GEMM_PATH, "gemm_config")
+    # One module registers every pair, so `backends` answers for all of them.
+    return SimpleNamespace(
+        contracts=contracts,
+        backends=backends,
+        adapter=adapter,
+        fp8=backends,
+        selection=selection,
+        text_encoder=text_encoder,
+        gemm=gemm,
+    )
 
 
 def _contract(modules, format_name, backend_name, mode_name="EAGER"):
@@ -63,7 +99,8 @@ def test_hardware_routing_matrix_is_injectable(
     adapter_name,
 ):
     b = modules.backends
-    capabilities = b.probe_format_backend_capabilities(
+    capabilities = b.probe_backend_capabilities(
+        wanted={"fp4", "int8"},
         cuda_probe=lambda: cuda,
         hip_probe=lambda: hip,
         cuda_capability_probe=lambda: capability,
@@ -74,17 +111,18 @@ def test_hardware_routing_matrix_is_injectable(
         fsdp_probe=lambda config_kind: (True, None),
     )
 
-    adapter = b.select_format_backend(
-        _contract(modules, format_name, backend_name),
-        capabilities=capabilities,
-    )
+    fmt, impl = format_name.lower(), backend_name.lower()
+    record = capabilities.of(fmt, impl)
+    assert record.available, record.reason
+    adapter = modules.adapter.build_adapter(fmt, impl, capability=record)
 
     assert type(adapter).__name__ == adapter_name
 
 
 def test_nvfp4_requires_blackwell_before_adapter_selection(modules):
     b = modules.backends
-    capabilities = b.probe_format_backend_capabilities(
+    capabilities = b.probe_backend_capabilities(
+        wanted={"fp4", "int8"},
         cuda_probe=lambda: True,
         hip_probe=lambda: False,
         cuda_capability_probe=lambda: (9, 0),
@@ -97,52 +135,15 @@ def test_nvfp4_requires_blackwell_before_adapter_selection(modules):
 
     with pytest.raises(
         modules.contracts.UnsupportedLoadContract,
-        match=r"NVFP4.*capability.*10.0",
+        match=r"capability.*10.0",
     ):
-        b.select_format_backend(
-            _contract(modules, "FP4", "TORCHAO"),
-            capabilities=capabilities,
-        )
+        modules.adapter.build_adapter("fp4", "torchao", capability=capabilities.of("fp4", "torchao"))
 
 
-def test_cuda_nvfp4_hybrid_is_rejected_before_backend_use(modules):
+def test_rocm_aiter_mxfp4_hybrid_remains_supported(modules):
     b = modules.backends
-    capabilities = b.probe_format_backend_capabilities(
-        cuda_probe=lambda: True,
-        hip_probe=lambda: False,
-        cuda_capability_probe=lambda: (10, 0),
-        mxfp4_probe=lambda: pytest.fail("must not probe AITER on CUDA"),
-        nvfp4_probe=lambda: (True, None),
-        int8_probe=lambda: (True, None),
-        diffusers_probe=lambda config_kind: (True, None),
-        fsdp_probe=lambda config_kind: (True, None),
-    )
-
-    with pytest.raises(
-        modules.contracts.UnsupportedLoadContract,
-        match=r"CUDA NVFP4.*hybrid.*ROCm.*AITER",
-    ):
-        b.select_format_backend(
-            _contract(modules, "FP4", "TORCHAO"),
-            capabilities=capabilities,
-            hybrid=True,
-        )
-
-
-def test_nvfp4_adapter_never_silently_ignores_hybrid(modules):
-    b = modules.backends
-    adapter = b.TorchaoNvfp4BackendAdapter(
-        backend=modules.contracts.QuantizationBackend.TORCHAO,
-        format_=modules.contracts.QuantizationFormat.FP4,
-    )
-
-    with pytest.raises(RuntimeError, match=r"NVFP4.*hybrid"):
-        adapter.convert_module(object(), device="cuda:0", hybrid=True)
-
-
-def test_rocm_aiter_mxfp4_hybrid_adapters_remain_supported(modules):
-    b = modules.backends
-    capabilities = b.probe_format_backend_capabilities(
+    capabilities = b.probe_backend_capabilities(
+        wanted={"fp4", "int8"},
         cuda_probe=lambda: False,
         hip_probe=lambda: True,
         cuda_capability_probe=lambda: None,
@@ -155,24 +156,26 @@ def test_rocm_aiter_mxfp4_hybrid_adapters_remain_supported(modules):
         else pytest.fail(f"must not probe {config_kind} FSDP on ROCm"),
     )
 
-    adapter = b.select_format_backend(
-        _contract(modules, "FP4", "AITER"),
-        capabilities=capabilities,
-        hybrid=True,
-    )
+    adapter = modules.adapter.build_adapter("fp4", "aiter", capability=capabilities.of("fp4", "aiter"), hybrid=True)
 
     assert isinstance(adapter, b.AiterMxfp4BackendAdapter)
 
-    a6w4_adapter = b.select_format_backend(
-        _contract(modules, "FP4_A6W4", "AITER"),
-        capabilities=b.FormatBackendCapabilities(
-            aiter_mxfp4=True,
-            aiter_a6w4=True,
-        ),
-        hybrid=True,
+    # The high half of a tiered FP4 profile arrives through the registry
+    # rather than through a flag on the low one, so A6W4 is built like any
+    # other format and FP4 leads the pair unchanged.
+    a6w4_capabilities = b.probe_backend_capabilities(
+        wanted={"a6w4"},
+        cuda_probe=lambda: False,
+        hip_probe=lambda: True,
+        cuda_capability_probe=lambda: None,
+        a6w4_probe=lambda: (True, None),
     )
-    assert isinstance(a6w4_adapter, b.AiterMxfp4BackendAdapter)
-    assert a6w4_adapter.use_a6w4_for_overrides
+    companion = modules.adapter.build_adapter("a6w4", "aiter", capability=a6w4_capabilities.of("a6w4", "aiter"))
+    assert isinstance(companion, b.AiterA6W4BackendAdapter)
+    assert companion.builds_one_layer()
+    # ...and cannot lead one: the kernel pairs a leaf's FP4 weight with its own
+    # FP6 activation, leaving no seam to hang a second layer on.
+    assert not companion.leads_a_pair()
 
 
 @pytest.mark.parametrize(
@@ -284,7 +287,8 @@ def test_aiter_fp4_kernel_probe_accepts_only_archs_with_fp4_kernels(
 def test_aiter_mxfp4_capability_preserves_symbol_probe_reason(modules):
     b = modules.backends
     calls = []
-    capabilities = b.probe_format_backend_capabilities(
+    capabilities = b.probe_backend_capabilities(
+        wanted={"fp4", "int8"},
         cuda_probe=lambda: False,
         hip_probe=lambda: True,
         cuda_capability_probe=lambda: None,
@@ -300,8 +304,9 @@ def test_aiter_mxfp4_capability_preserves_symbol_probe_reason(modules):
     )
 
     assert calls == ["mxfp4"]
-    assert capabilities.aiter_mxfp4 is False
-    assert capabilities.aiter_mxfp4_reason == "missing required AITER MXFP4 API: aiter.gemm_a4w4"
+    record = capabilities.of("fp4", "aiter")
+    assert record.available is False
+    assert record.reason == "missing required AITER MXFP4 API: aiter.gemm_a4w4"
 
 
 def test_int8_exclusions_preserve_targets_and_minimum_layer_size(modules):
@@ -353,7 +358,7 @@ def test_module_path_overlap_is_ancestor_aware_and_boundary_safe(
     right,
     expected,
 ):
-    assert modules.backends.module_paths_overlap(left, right) is expected
+    assert modules.adapter.module_paths_overlap(left, right) is expected
 
 
 def test_component_root_target_preserves_int8_minimum_size_exclusions(modules):
@@ -394,7 +399,7 @@ def test_component_root_target_aligns_with_blockwise_wrapped_paths(modules):
         format_=modules.contracts.QuantizationFormat.INT8,
     )
 
-    descriptor = b.describe_blockwise_format_load(
+    descriptor = modules.adapter.describe_blockwise_load(
         adapter,
         component_name="transformer",
         targets=("",),
@@ -407,7 +412,7 @@ def test_component_root_target_aligns_with_blockwise_wrapped_paths(modules):
 
 def test_eager_blockwise_fallback_accepts_owned_single_rank_target(modules):
     b = modules.backends
-    prepared = SimpleNamespace(descriptor=SimpleNamespace(materialization_mode="post_load"))
+    prepared = SimpleNamespace(descriptor=SimpleNamespace(materialization_mode="post_load", fills_blocks_locally=True))
 
     plan = b.plan_eager_blockwise_fallback(
         prepared=prepared,
@@ -442,7 +447,9 @@ def test_eager_blockwise_fallback_rejects_unsafe_plan(
     offload,
 ):
     plan = modules.backends.plan_eager_blockwise_fallback(
-        prepared=SimpleNamespace(descriptor=SimpleNamespace(materialization_mode=prepared_mode)),
+        prepared=SimpleNamespace(
+            descriptor=SimpleNamespace(materialization_mode=prepared_mode, fills_blocks_locally=True)
+        ),
         targets=targets,
         wrap_attrs=wrap_attrs,
         world_size=world_size,
@@ -496,13 +503,12 @@ def test_nvfp4_native_streaming_excludes_only_precision_overrides(modules, monke
         lambda exclusions: captured.append(list(exclusions)) or sentinel,
     )
 
-    prepared = b.prepare_native_transformer_format_load(
+    prepared = modules.adapter.prepare_native_load(
         adapter,
         component_name="transformer",
         targets=("blocks",),
         stream_quant=True,
-        precision_prefixes=("0.attn",),
-        precision_suffixes=(".out_proj",),
+        residual_match=lambda name: (name.startswith("blocks.0.attn") or name.endswith(".out_proj")),
         hybrid=False,
         model_factory=FakeModel,
     )
@@ -522,27 +528,41 @@ def test_nvfp4_native_streaming_excludes_only_precision_overrides(modules, monke
     )
 
 
-def test_nvfp4_native_streaming_rejects_hybrid_ownership(modules):
+@pytest.mark.parametrize(
+    ("adapter_name", "backend_name", "format_name"),
+    [
+        ("TorchaoNvfp4BackendAdapter", "TORCHAO", "FP4"),
+        ("TorchaoFp8BackendAdapter", "TORCHAO", "FP8"),
+        ("AiterFp8BackendAdapter", "AITER", "FP8"),
+        ("TorchaoInt8BackendAdapter", "TORCHAO", "INT8"),
+    ],
+)
+def test_native_streaming_rejects_hybrid_ownership(modules, adapter_name, backend_name, format_name):
+    """Every implementation, not just the one that happened to be low first.
+
+    A streamed load quantizes each targeted leaf on the way in; the per-step
+    pair needs them in bf16 to build both precisions from. Nothing about that
+    is format-specific, and while it was a per-adapter declaration the other
+    low formats streamed and built no pair at all.
+    """
     b = modules.backends
-    adapter = b.TorchaoNvfp4BackendAdapter(
-        backend=modules.contracts.QuantizationBackend.TORCHAO,
-        format_=modules.contracts.QuantizationFormat.FP8_FP4,
+    adapter = getattr(b, adapter_name)(
+        backend=getattr(modules.contracts.QuantizationBackend, backend_name),
+        format_=getattr(modules.contracts.QuantizationFormat, format_name),
         native_transformer_streaming=True,
     )
 
-    prepared = b.prepare_native_transformer_format_load(
+    prepared = modules.adapter.prepare_native_load(
         adapter,
         component_name="transformer",
         targets=("blocks",),
         stream_quant=True,
-        precision_prefixes=(),
-        precision_suffixes=(),
         hybrid=True,
         model_factory=lambda: pytest.fail("must not inspect structure"),
     )
 
     assert prepared.descriptor.materialization_mode == "post_load"
-    assert "hybrid" in prepared.descriptor.fallback_reason
+    assert "streamed load" in prepared.descriptor.fallback_reason
 
 
 def test_mxfp4_never_claims_per_weight_streaming(modules):
@@ -553,7 +573,7 @@ def test_mxfp4_never_claims_per_weight_streaming(modules):
         native_unavailable_reason=b.MXFP4_STREAMING_FALLBACK,
     )
 
-    prepared = b.prepare_native_transformer_format_load(
+    prepared = modules.adapter.prepare_native_load(
         adapter,
         component_name="transformer",
         targets=("blocks",),
@@ -573,7 +593,7 @@ def test_descriptor_declares_storage_sharding_and_trainability(modules):
         format_=modules.contracts.QuantizationFormat.FP4,
     )
 
-    descriptor = b.describe_blockwise_format_load(
+    descriptor = modules.adapter.describe_blockwise_load(
         adapter,
         component_name="transformer",
         targets=("blocks",),
@@ -591,204 +611,213 @@ def test_descriptor_declares_storage_sharding_and_trainability(modules):
     assert "storage=aiter_mxfp4_per_1x32" in message
 
 
-@pytest.mark.parametrize("format_name", ["FP4", "INT8"])
-def test_fsdp_tensor_subclass_validation_is_format_specific(modules, format_name):
-    b = modules.backends
-    capabilities = b.FormatBackendCapabilities(
-        torchao_nvfp4=True,
-        torchao_int8=True,
-        torchao_nvfp4_fsdp=False,
-        torchao_int8_fsdp=(format_name == "INT8"),
-        torchao_nvfp4_fsdp_reason="NVFP4 lacks gather support",
-        torchao_int8_fsdp_reason="INT8 lacks gather support",
+@pytest.mark.parametrize(
+    ("format_name", "impl", "shardable"),
+    [
+        ("fp4", "torchao", False),
+        ("int8", "torchao", True),
+        ("fp4", "aiter", False),
+        ("fp6", "aiter", True),
+        ("a6w4", "aiter", False),
+    ],
+)
+def test_fsdp_placement_follows_the_record_for_every_pair(modules, format_name, impl, shardable):
+    """One rule, no ladder: the record says, the adapter names what it stores."""
+    a = modules.adapter
+    capability = a.FormatCapability(
+        available=True,
+        fsdp_safe=shardable,
+        fsdp_reason=None if shardable else "torch is too old",
     )
-    adapter_cls = b.TorchaoNvfp4BackendAdapter if format_name == "FP4" else b.TorchaoInt8BackendAdapter
-    adapter = adapter_cls(
-        backend=modules.contracts.QuantizationBackend.TORCHAO,
-        format_=getattr(modules.contracts.QuantizationFormat, format_name),
-    )
+    adapter = a.build_adapter(format_name, impl, capability=capability)
 
-    if format_name == "FP4":
-        with pytest.raises(
-            modules.contracts.UnsupportedLoadContract,
-            match=r"NVFP4.*gather support",
-        ):
-            b.validate_format_fsdp_placement(
-                _contract(modules, format_name, "TORCHAO", "FSDP_META"),
-                adapter,
-                capabilities=capabilities,
-                required=True,
-            )
-    else:
-        b.validate_format_fsdp_placement(
-            _contract(modules, format_name, "TORCHAO", "FSDP_META"),
-            adapter,
-            capabilities=capabilities,
-            required=True,
-        )
-
-
-@pytest.mark.parametrize("fsdp_supported", [False, True])
-def test_mxfp4_fsdp_placement_follows_the_packed_parameter_capability(modules, fsdp_supported):
-    b = modules.backends
-    capabilities = b.FormatBackendCapabilities(
-        aiter_mxfp4=True,
-        aiter_mxfp4_fsdp=fsdp_supported,
-        aiter_mxfp4_fsdp_reason=None if fsdp_supported else "torch is too old",
-    )
-    adapter = b.AiterMxfp4BackendAdapter(
-        backend=modules.contracts.QuantizationBackend.AITER,
-        format_=modules.contracts.QuantizationFormat.FP4,
-    )
-    contract = _contract(modules, "FP4", "AITER", "FSDP_META")
-
-    if fsdp_supported:
-        b.validate_format_fsdp_placement(contract, adapter, capabilities=capabilities, required=True)
+    if shardable:
+        a.validate_fsdp_placement(adapter, capability=capability, required=True)
         return
 
     with pytest.raises(
         modules.contracts.UnsupportedLoadContract,
-        match=r"AITER MXFP4 packed weight cannot be placed under FSDP2: torch is too old",
+        match=rf"{adapter.parameter_semantics}.*{impl} {format_name}.*"
+        r"FSDP2: torch is too old",
     ):
-        b.validate_format_fsdp_placement(contract, adapter, capabilities=capabilities, required=True)
+        a.validate_fsdp_placement(adapter, capability=capability, required=True)
 
 
-def test_mxfp4_fsdp_placement_is_skipped_when_fsdp_is_not_required(modules):
-    b = modules.backends
-    capabilities = b.FormatBackendCapabilities(aiter_mxfp4=True, aiter_mxfp4_fsdp=False)
-    adapter = b.AiterMxfp4BackendAdapter(
-        backend=modules.contracts.QuantizationBackend.AITER,
-        format_=modules.contracts.QuantizationFormat.FP4,
-    )
+def test_fsdp_placement_is_skipped_when_nothing_shards_it(modules):
+    a = modules.adapter
+    capability = a.FormatCapability(available=True, fsdp_safe=False)
+    adapter = a.build_adapter("fp4", "aiter", capability=capability)
 
-    b.validate_format_fsdp_placement(
-        _contract(modules, "FP4", "AITER"),
-        adapter,
-        capabilities=capabilities,
-        required=False,
-    )
+    a.validate_fsdp_placement(adapter, capability=capability, required=False)
 
 
 @pytest.mark.parametrize(
-    ("source", "expected"),
+    ("format_name", "impl"),
     [
-        ("self.sharded_param = nn.Parameter(self.to_sharded_dtensor(p))", False),
-        (
-            "self.sharded_param = nn.Parameter(\n    self.to_sharded_dtensor(p), requires_grad=param.requires_grad\n)",
-            True,
-        ),
+        ("fp4", "aiter"),
+        ("fp6", "aiter"),
+        ("fp4", "torchao"),
+        ("int8", "torchao"),
     ],
 )
-def test_fsdp_non_float_probe_reads_the_sharded_parameter_call_site(modules, monkeypatch, source, expected):
+def test_every_implementation_can_be_either_half_of_a_per_step_pair(modules, format_name, impl):
+    """Composing is the base class's job, so no format is excluded by age.
+
+    The pairing used to live inside the MXFP4 factory, which made MXFP4 the
+    only possible low side -- not because another kernel could not hold two
+    precisions at a leaf, but because no other factory was ever handed the
+    companion.
+    """
+    a = modules.adapter
+    capability = a.FormatCapability(available=True)
+
+    adapter = a.build_adapter(format_name, impl, capability=capability)
+    assert adapter.builds_one_layer()
+
+    # Accepted as the low side rather than refused.
+    a.build_adapter(format_name, impl, capability=capability, hybrid=True)
+
+
+def test_an_implementation_with_no_single_leaf_seam_is_still_refused(modules):
+    """The refusal remains for a future adapter that can only convert a tree."""
+    a = modules.adapter
+
+    class TreeOnly(a.QuantAdapter):
+        pass
+
+    assert not TreeOnly.builds_one_layer()
+    with pytest.raises(
+        modules.contracts.UnsupportedLoadContract,
+        match="cannot install one layer at a time",
+    ):
+        TreeOnly(backend=None, format_=None)._single_layer_factory(device=None)
+
+
+def test_a_companion_reaches_the_converter_rather_than_being_dropped(modules):
+    """A dropped companion would silently lose the run's second precision."""
     b = modules.backends
-    fake_inspect = SimpleNamespace(getsource=lambda fn: source)
-    fake_param_module = SimpleNamespace(FSDPParam=SimpleNamespace(_init_sharded_param=object()))
-    monkeypatch.setattr(
-        b,
-        "import_module",
-        lambda name: {
-            "inspect": fake_inspect,
-            "torch.distributed.fsdp._fully_shard._fsdp_param": fake_param_module,
-        }[name],
+    adapter = b.TorchaoNvfp4BackendAdapter(
+        backend=modules.contracts.QuantizationBackend.TORCHAO,
+        format_=modules.contracts.QuantizationFormat.FP4,
     )
+    seen = []
+    adapter._single_layer_factory = lambda *, device: (lambda spec: seen.append("low"))
 
-    available, reason = b._probe_fsdp_non_float_parameters()
+    paired = adapter.layer_factory(device=None, companion=lambda spec: seen.append("high"))
+    paired(object())
 
-    assert available is expected
-    if expected:
-        assert reason is None
-    else:
-        assert "177948" in reason
+    # Low first, as it was when only MXFP4 composed.
+    assert seen == ["low", "high"]
 
 
 @pytest.mark.parametrize(
-    ("torch_version", "expected"),
-    [("2.9.1+gitff65f5b", False), ("2.12.0", True)],
+    ("format_name", "impl", "attribute", "expected"),
+    [
+        # Packed weight plus a scale buffer: the layout a meta component
+        # already has, and the one a host-side pack can build under offload.
+        ("fp8", "aiter", "meta_layout_matches_storage", True),
+        ("fp4", "aiter", "meta_layout_matches_storage", True),
+        ("fp6", "aiter", "meta_layout_matches_storage", True),
+        ("a6w4", "aiter", "meta_layout_matches_storage", True),
+        # A6W4 reads a leaf's FP4 weight against its own FP6 activation, so a
+        # block-local fill has nothing to hand it and the eager fallback must
+        # not claim it.
+        ("a6w4", "aiter", "fills_blocks_locally", False),
+        ("fp6", "aiter", "fills_blocks_locally", True),
+        ("fp8", "torchao", "meta_layout_matches_storage", False),
+        ("fp4", "torchao", "meta_layout_matches_storage", False),
+        ("fp8", "aiter", "loads_to_host_under_offload", True),
+        ("fp4", "aiter", "loads_to_host_under_offload", False),
+        ("fp8", "torchao", "loads_to_host_under_offload", False),
+        # A config that lists what NOT to convert needs the model's structure;
+        # one that takes the targets positively does not.
+        ("fp8", "torchao", "streams_by_exclusion", True),
+        ("int8", "torchao", "streams_by_exclusion", True),
+        ("fp8", "aiter", "streams_by_exclusion", False),
+        ("fp4", "aiter", "streams_by_exclusion", False),
+    ],
 )
-def test_fsdp_non_float_probe_falls_back_to_the_torch_version(modules, monkeypatch, torch_version, expected):
-    b = modules.backends
+def test_the_loader_reads_these_as_attributes_not_as_a_backend_name(modules, format_name, impl, attribute, expected):
+    """Each replaced an `adapter.backend.value == "..."` branch in the loader.
 
-    def import_module(name):
-        if name == "torch":
-            return SimpleNamespace(__version__=torch_version)
-        raise ImportError(name)
+    Pinned per pair, because the loader now trusts the declaration: a wrong one
+    is silently wrong at load time rather than caught by the branch it replaced.
+    """
+    a = modules.adapter
+    adapter = a.build_adapter(format_name, impl, capability=a.FormatCapability(available=True))
 
-    monkeypatch.setattr(b, "import_module", import_module)
-
-    available, reason = b._probe_fsdp_non_float_parameters()
-
-    assert available is expected
-    assert (reason is None) is expected
+    assert getattr(adapter, attribute) is expected
 
 
-def test_installed_diffusers_accepts_exact_nvfp4_and_int8_configs(modules):
-    pytest.importorskip("diffusers")
-    pytest.importorskip("torchao")
-    b = modules.backends
+@pytest.mark.parametrize(
+    ("in_play", "expected"),
+    [((), []), (("fp8",), ["fp8"]), (("fp4", "fp8"), ["fp4", "fp8"])],
+)
+def test_probing_is_narrowed_to_what_the_plan_will_place(modules, in_play, expected):
+    """Narrowed to the plan's formats, not the spec's.
 
-    nvfp4 = b.TorchaoNvfp4BackendAdapter(
-        backend=modules.contracts.QuantizationBackend.TORCHAO,
-        format_=modules.contracts.QuantizationFormat.FP4,
-        native_transformer_streaming=True,
-    )._stream_config_factory([])
-    int8 = b.TorchaoInt8BackendAdapter(
-        backend=modules.contracts.QuantizationBackend.TORCHAO,
-        format_=modules.contracts.QuantizationFormat.INT8,
-        native_transformer_streaming=True,
-    )._stream_config_factory([])
+    A pinned component places a format the spec never names -- the text
+    encoder, whose loaders carry one of their own. While this read the spec,
+    the probe told that one caller its format "was not requested" and the load
+    was refused, on every run of a model with declared encoder targets.
 
-    assert type(nvfp4.quant_type).__name__ == ("NVFP4DynamicActivationNVFP4WeightConfig")
-    assert nvfp4.quant_type.use_dynamic_per_tensor_scale is True
-    assert nvfp4.quant_type.use_triton_kernel is True
-    assert type(int8.quant_type).__name__ == ("Int8DynamicActivationInt8WeightConfig")
-    assert int8.quant_type.set_inductor_config is False
-
-
-@pytest.mark.accelerator
-@pytest.mark.parametrize("format_name", ["INT8", "FP4"])
-def test_native_diffusers_load_preserves_format_targets(
-    modules,
-    tmp_path,
-    format_name,
-):
-    torch = pytest.importorskip("torch")
-    pytest.importorskip("diffusers")
-    pytest.importorskip("torchao")
-    if not torch.cuda.is_available():
-        pytest.skip("native TorchAO load requires a CUDA accelerator")
-    if format_name == "FP4" and torch.cuda.get_device_capability() < (10, 0):
-        pytest.skip("NVFP4 integration requires Blackwell")
-
-    from diffusers import ConfigMixin, ModelMixin
-    from diffusers.configuration_utils import register_to_config
-    from torchao.utils import TorchAOBaseTensor
-
-    class TinyTransformer(ModelMixin, ConfigMixin):
-        @register_to_config
-        def __init__(self):
-            super().__init__()
-            self.blocks = torch.nn.ModuleList([torch.nn.Linear(512, 512)])
-            self.small = torch.nn.Linear(512, 256)
-            self.input_proj = torch.nn.Linear(512, 512)
-
-    b = modules.backends
-    adapter_cls = b.TorchaoNvfp4BackendAdapter if format_name == "FP4" else b.TorchaoInt8BackendAdapter
-    adapter = adapter_cls(
-        backend=modules.contracts.QuantizationBackend.TORCHAO,
-        format_=getattr(modules.contracts.QuantizationFormat, format_name),
-        native_transformer_streaming=True,
+    That a pin reaches `formats_in_play` at all is pinned next door, in
+    tests/quant/test_gemm_targets.py.
+    """
+    backends = modules.selection.QuantizationBackends.__new__(modules.selection.QuantizationBackends)
+    backends.model = SimpleNamespace(
+        config=SimpleNamespace(gemm_quantization_spec=modules.gemm.GemmQuantizationSpec.parse("fp4"))
     )
-    original = TinyTransformer().to(torch.bfloat16)
-    original.save_pretrained(tmp_path)
-    config = adapter.transformer_stream_config(("blocks",), model_factory=TinyTransformer)
-
-    loaded = TinyTransformer.from_pretrained(
-        tmp_path,
-        torch_dtype=torch.bfloat16,
-        quantization_config=config,
-        device_map={"": 0},
+    backends.loader = SimpleNamespace(
+        quantization_plan=SimpleNamespace(gemm_plan=SimpleNamespace(formats_in_play=in_play))
     )
 
-    assert isinstance(loaded.blocks[0].weight, TorchAOBaseTensor)
-    assert not isinstance(loaded.input_proj.weight, TorchAOBaseTensor)
-    assert not isinstance(loaded.small.weight, TorchAOBaseTensor)
+    assert sorted(backends._formats_requested()) == expected
+
+
+def test_an_unmigrated_model_still_narrows_by_what_it_asked_for(modules):
+    """No declared targets means no plan, and then the spec is all there is."""
+    backends = modules.selection.QuantizationBackends.__new__(modules.selection.QuantizationBackends)
+    backends.model = SimpleNamespace(
+        config=SimpleNamespace(gemm_quantization_spec=modules.gemm.GemmQuantizationSpec.parse("low=fp4,high=fp6"))
+    )
+    backends.loader = SimpleNamespace(quantization_plan=SimpleNamespace(gemm_plan=None))
+
+    assert sorted(backends._formats_requested()) == ["fp4", "fp6"]
+
+
+def test_the_encoder_formats_are_read_off_the_registry(modules):
+    """Not a list kept somewhere: wiring up a new encoder format should be
+    flipping one attribute on the one class that gained the wiring."""
+    declared = {format_name for (format_name, _), cls in modules.adapter.REGISTRY.items() if cls.places_text_encoder}
+
+    assert set(modules.adapter.text_encoder_formats()) == declared
+    assert declared == {"fp8"}, (
+        "a pair gained or lost text-encoder wiring; if that was deliberate, "
+        "check component_quantization_config has a branch for its backend"
+    )
+
+
+def test_every_pair_claiming_an_encoder_has_a_framework_branch(modules):
+    """`places_text_encoder` claims a framework config exists for that
+    implementation. The dispatch is the claim's only backing, so call it.
+
+    Stub factories stand in for the real ones so this stays a question about
+    which branches exist, not about whether torchao/transformers are installed.
+    """
+    built = object()
+    framework = modules.text_encoder.TextEncoderFrameworkAdapter(
+        torchao_config_factory=lambda exclusions: built,
+        aiter_config_factory=lambda targets: built,
+    )
+    claimed = {impl for (_, impl), cls in modules.adapter.REGISTRY.items() if cls.places_text_encoder}
+
+    assert claimed, "nothing declares text-encoder wiring any more"
+    for impl in sorted(claimed):
+        try:
+            config = framework.component_quantization_config(backend=impl, targets=("blocks",))
+        except ValueError as exc:
+            pytest.fail(
+                f"{impl} declares a text encoder, but component_quantization_config has no branch for it: {exc}"
+            )
+        assert config is built

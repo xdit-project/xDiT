@@ -1,7 +1,9 @@
 import torch
 from torch.nn.functional import scaled_dot_product_attention as sdpa
+from typing import Optional
 
 from xfuser.model_executor.layers.usp import USP, attention
+from xfuser.model_executor.models.transformers.transformers_utils import local_sp_pad_rows, zero_sp_pad_rows_hook
 from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
     get_sequence_parallel_rank,
@@ -16,6 +18,9 @@ class xFuserCosmos3AttnProcessor:
     Mirrors the stock Cosmos3AttnProcessor exactly (same RoPE, same tensor layout)
     but uses USP for distributed attention when SP is active.
     """
+
+    def __init__(self, attention_kwargs: Optional[dict] = None):
+        self.attention_kwargs = attention_kwargs
 
     def __call__(self, attn, und_seq, gen_seq, rotary_emb):
         cos_und, sin_und, cos_gen, sin_gen = rotary_emb
@@ -52,9 +57,10 @@ class xFuserCosmos3AttnProcessor:
             # gen_seq is pre-chunked (S/P tokens per rank).
             # USP all-to-all redistributes: [S/P, H, D] → [S, H/P, D]
             # so attention sees full gen sequence with fewer heads.
-            # und tokens are replicated (not chunked); we pre-concat
-            # them to gen KV so they go through the all-to-all too
-            # (small overhead, ~50 tokens).
+            # und tokens are replicated (not chunked), so they join as
+            # joint keys/values: each Ulysses rank takes its heads of them
+            # and attends to them once. Concatenated to the gen KV before
+            # the all-to-all, they would be gathered once per rank.
 
             # Transpose to BHSD for USP: [S, H, D] -> [1, H, S, D]
             q_und_b = q_und.unsqueeze(0).transpose(1, 2)
@@ -67,18 +73,19 @@ class xFuserCosmos3AttnProcessor:
             # AR pathway: causal self-attention (no SP, und tokens are short)
             causal_out = attention(q_und_b, k_und_b, v_und_b, dropout_p=0.0, is_causal=True)
 
-            # DM pathway: gen_q × [und_kv; gen_kv]
-            # Pre-concat und KV to gen KV. USP's all-to-all will
-            # redistribute the combined KV (splitting heads, gathering
-            # sequence). The output has the same seq dim as gen_q input.
-            k_full_b = torch.cat([k_und_b, k_gen_b], dim=2)
-            v_full_b = torch.cat([v_und_b, v_gen_b], dim=2)
+            # DM pathway: gen_q x [und_kv; gen_kv]. The gathered gen keys end
+            # with the gen padding, which USP drops before the und keys are
+            # prepended.
             full_out = USP(
                 q_gen_b,
-                k_full_b,
-                v_full_b,
+                k_gen_b,
+                v_gen_b,
                 dropout_p=0.0,
                 is_causal=False,
+                joint_key=k_und_b,
+                joint_value=v_und_b,
+                joint_strategy="front",
+                attention_kwargs=self.attention_kwargs,
             )
             causal_out = causal_out.squeeze(0).transpose(0, 1).flatten(-2, -1)
             full_out = full_out.squeeze(0).transpose(0, 1).flatten(-2, -1)
@@ -160,8 +167,12 @@ def _make_xfuser_cosmos3_transformer_wrapper():
 
     class xFuserCosmos3OmniTransformerWrapper(Cosmos3OmniTransformer):
         def _install_xfuser_processors(self):
+            self._self_attn_kwargs = {"valid_kv_len": None}
+            self._sp_pad = {"local_rows": 0}
             for layer in self.layers:
-                layer.self_attn.processor = xFuserCosmos3AttnProcessor()
+                layer.self_attn.processor = xFuserCosmos3AttnProcessor(attention_kwargs=self._self_attn_kwargs)
+                # Output 1 is the generation stream, [tokens, hidden]; the understanding stream is replicated.
+                layer.register_forward_hook(zero_sp_pad_rows_hook(self._sp_pad, index=1, dim=0))
 
         def _patch_time_embedder_for_fsdp(self):
             """Wrap time_embedder with auto-cast, fixing FSDP dtype mismatch."""
@@ -225,6 +236,8 @@ def _make_xfuser_cosmos3_transformer_wrapper():
                 sp_size = 1
 
             if sp_size <= 1:
+                self._self_attn_kwargs["valid_kv_len"] = None
+                self._sp_pad["local_rows"] = 0
                 # No sequence parallelism — delegate to parent forward.
                 # Our xFuserCosmos3AttnProcessor handles the attention
                 # correctly with USP (which falls through to direct attention
@@ -337,7 +350,9 @@ def _make_xfuser_cosmos3_transformer_wrapper():
             # Chunk gen_seq and gen rotary embeddings across SP ranks
             gen_len = gen_seq.shape[0]
             pad_amount = (sp_size - (gen_len % sp_size)) % sp_size
+            self._self_attn_kwargs["valid_kv_len"] = gen_len if pad_amount else None
             gen_seq = self._chunk_and_pad_sequence(gen_seq, sp_rank, sp_size, pad_amount, dim=0)
+            self._sp_pad["local_rows"] = local_sp_pad_rows(gen_len, gen_seq.shape[0], sp_rank)
             gen_cos = self._chunk_and_pad_sequence(gen_cos, sp_rank, sp_size, pad_amount, dim=0)
             gen_sin = self._chunk_and_pad_sequence(gen_sin, sp_rank, sp_size, pad_amount, dim=0)
 

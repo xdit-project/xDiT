@@ -183,11 +183,13 @@ class CacheManager:
                 kv.split(pp_patches_token_num, dim=slice_dim)
                 for kv in torch.chunk(new_kv, ulysses_world_size, dim=slice_dim)
             ]
+            # Store the cache patch-major ([p0r0, p0r1, p1r0, ...]) so patch
+            # mode can overwrite patch p in one contiguous slice.
             kv_cache = torch.cat(
                 [
                     kv_list[rank][pp_patch_idx]
-                    for rank in range(ulysses_world_size)
                     for pp_patch_idx in range(len(pp_patches_token_num))
+                    for rank in range(ulysses_world_size)
                 ],
                 dim=slice_dim,
             )
@@ -196,9 +198,6 @@ class CacheManager:
             pp_patch_idx = get_runtime_state().pipeline_patch_idx
             start_token_idx = ulysses_world_size * pp_patches_token_start_idx_local[pp_patch_idx]
             end_token_idx = ulysses_world_size * pp_patches_token_start_idx_local[pp_patch_idx + 1]
-            # pp_patches_token_num = get_runtime_state().pp_patches_token_num
-            # start_token_idx = ulysses_world_size * sum(pp_patches_token_num[:get_runtime_state().pipeline_patch_idx])
-            # end_token_idx = ulysses_world_size * sum(pp_patches_token_num[:get_runtime_state().pipeline_patch_idx + 1])
             kv_cache = self._update_kv_in_dim(
                 kv_cache=kv_cache,
                 new_kv=new_kv,

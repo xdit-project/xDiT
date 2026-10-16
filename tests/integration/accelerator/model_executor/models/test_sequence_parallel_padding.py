@@ -1,10 +1,10 @@
 """Sequence-parallel transformer wrappers match the single-device model for any token count.
 
 When the token count does not divide the sequence parallel degree, the wrappers
-zero-pad the sequence before sharding it. Every case here compares a parallel
-wrapper against the stock diffusers transformer with the same tiny random
-weights, so a padded token that leaks into the attention keys shows up as a
-mismatch.
+zero-pad the sequence before sharding it, and a batch of prompts of different
+lengths pads the shorter prompts. Every case here compares a parallel wrapper
+against the stock diffusers transformer with the same tiny random weights, so a
+padded token that leaks into the attention keys shows up as a mismatch.
 
 These need NCCL and xDiT's own process groups, which the wrappers read (`get_sp_group`);
 the gloo tests wire only USP by hand. USP's trimming with joint tokens, Ulysses and ring
@@ -46,7 +46,11 @@ def _hunyuan_video15(device, tokens):
         xFuserHunyuanVideo15Transformer3DWrapper,
     )
 
+    # text_tokens is a prompt length, or one per batch item; the shorter prompts
+    # are padded and masked as the pipeline does.
     (frames, height, width), text_tokens = tokens
+    prompt_lengths = text_tokens if isinstance(text_tokens, tuple) else (text_tokens,)
+    batch = len(prompt_lengths)
     config = dict(
         in_channels=4,
         out_channels=4,
@@ -67,16 +71,17 @@ def _hunyuan_video15(device, tokens):
     reference = HunyuanVideo15Transformer3DModel(**config)
     parallel = xFuserHunyuanVideo15Transformer3DWrapper(**config)
     generator = torch.Generator().manual_seed(0)
-    # Three conditioning streams whose lengths add up to text_tokens.
-    text, text_2 = text_tokens - 5, 3
+    # Three conditioning streams whose valid lengths add up to the prompt length.
+    text, text_2 = max(prompt_lengths) - 5, 3
+    text_lengths = torch.tensor(prompt_lengths)[:, None] - 5
     inputs = dict(
-        hidden_states=_randn(generator, device, 1, 4, frames, height, width),
-        timestep=torch.tensor([500.0], device=device),
-        encoder_hidden_states=_randn(generator, device, 1, text, 16),
-        encoder_attention_mask=torch.ones(1, text, device=device),
-        encoder_hidden_states_2=_randn(generator, device, 1, text_2, 8),
-        encoder_attention_mask_2=torch.ones(1, text_2, device=device),
-        image_embeds=_randn(generator, device, 1, 2, 8),
+        hidden_states=_randn(generator, device, batch, 4, frames, height, width),
+        timestep=torch.full((batch,), 500.0, device=device),
+        encoder_hidden_states=_randn(generator, device, batch, text, 16),
+        encoder_attention_mask=(torch.arange(text) < text_lengths).float().to(device),
+        encoder_hidden_states_2=_randn(generator, device, batch, text_2, 8),
+        encoder_attention_mask_2=torch.ones(batch, text_2, device=device),
+        image_embeds=_randn(generator, device, batch, 2, 8),
         return_dict=False,
     )
     return reference, parallel, inputs, inputs
@@ -134,7 +139,11 @@ def _qwen_image(device, tokens):
         xFuserQwenImageTransformerWrapper,
     )
 
+    # text_tokens is a prompt length, or one per batch item, padded to the
+    # longest and masked as the pipeline does.
     (height, width), text_tokens = tokens
+    prompt_lengths = text_tokens if isinstance(text_tokens, tuple) else (text_tokens,)
+    batch, text_len = len(prompt_lengths), max(prompt_lengths)
     config = dict(
         patch_size=2,
         in_channels=16,
@@ -149,12 +158,15 @@ def _qwen_image(device, tokens):
     parallel = xFuserQwenImageTransformerWrapper(**config)
     generator = torch.Generator().manual_seed(0)
     inputs = dict(
-        hidden_states=_randn(generator, device, 1, height * width, 16),
-        encoder_hidden_states=_randn(generator, device, 1, text_tokens, 16),
-        timestep=torch.tensor([0.5], device=device),
-        img_shapes=[[(1, height, width)]],
+        hidden_states=_randn(generator, device, batch, height * width, 16),
+        encoder_hidden_states=_randn(generator, device, batch, text_len, 16),
+        timestep=torch.full((batch,), 0.5, device=device),
+        img_shapes=[[(1, height, width)]] * batch,
         return_dict=False,
     )
+    if batch > 1:
+        lengths = torch.tensor(prompt_lengths)[:, None]
+        inputs["encoder_hidden_states_mask"] = (torch.arange(text_len) < lengths).to(device)
     return reference, parallel, inputs, inputs
 
 
@@ -205,7 +217,9 @@ def _z_image(device, tokens):
         xFuserZImageTransformer2DWrapper,
     )
 
+    # text_tokens is a caption length, or one per batch item.
     (height, width), text_tokens = tokens
+    caption_lengths = text_tokens if isinstance(text_tokens, tuple) else (text_tokens,)
     config = dict(
         all_patch_size=(2,),
         all_f_patch_size=(1,),
@@ -217,15 +231,16 @@ def _z_image(device, tokens):
         n_kv_heads=_HEADS,
         cap_feat_dim=16,
         axes_dims=[4, 6, 6],
-        axes_lens=[64, 64, 64],
+        # Long enough for the image positions after a 96-token caption.
+        axes_lens=[128, 64, 64],
     )
     reference = ZImageTransformer2DModel(**config)
     parallel = xFuserZImageTransformer2DWrapper(**config)
     generator = torch.Generator().manual_seed(0)
     inputs = dict(
-        x=[_randn(generator, device, 4, 1, 2 * height, 2 * width)],
-        t=torch.tensor([0.5], device=device),
-        cap_feats=[_randn(generator, device, text_tokens, 16)],
+        x=[_randn(generator, device, 4, 1, 2 * height, 2 * width) for _ in caption_lengths],
+        t=torch.full((len(caption_lengths),), 0.5, device=device),
+        cap_feats=[_randn(generator, device, length, 16) for length in caption_lengths],
         return_dict=False,
     )
     return reference, parallel, inputs, inputs
@@ -395,6 +410,14 @@ _PARITY_CASES = [
     pytest.param("hunyuan_video15", 2, ((3, 3, 3), 10), id="hunyuan_video15-padded-image"),
     pytest.param("hunyuan_video15", 2, ((3, 3, 3), 11), id="hunyuan_video15-padded-image-text"),
     pytest.param("hunyuan_video15", 3, ((2, 3, 4), 12), id="hunyuan_video15-divisible-u3"),
+    # Two prompts of different lengths: the shorter one is padded and masked. 10
+    # text tokens shard evenly; 11 do not, and a padded image leaves the text
+    # joint, so each of those keeps the prompt as joint keys behind the image.
+    pytest.param("hunyuan_video15", 2, ((2, 3, 4), (10, 7)), id="hunyuan_video15-batched"),
+    pytest.param("hunyuan_video15", 2, ((2, 3, 4), (10, 10)), id="hunyuan_video15-batched-equal-lengths"),
+    pytest.param("hunyuan_video15", 2, ((3, 3, 3), (10, 7)), id="hunyuan_video15-batched-padded-image"),
+    pytest.param("hunyuan_video15", 2, ((2, 3, 4), (11, 7)), id="hunyuan_video15-batched-replicated-text"),
+    pytest.param("hunyuan_video15", 3, ((2, 3, 4), (12, 8)), id="hunyuan_video15-batched-u3"),
     # LTX-2: video tokens = frames * height * width; audio and text replicated.
     pytest.param("ltx2", 2, (2, 3, 4), id="ltx2-divisible"),
     pytest.param("ltx2", 2, (3, 3, 3), id="ltx2-padded"),
@@ -405,6 +428,14 @@ _PARITY_CASES = [
     pytest.param("qwen_image", 2, ((5, 5), 8), id="qwen_image-padded-image"),
     pytest.param("qwen_image", 2, ((4, 6), 7), id="qwen_image-replicated-text"),
     pytest.param("qwen_image", 3, ((5, 5), 7), id="qwen_image-padded-image-replicated-text"),
+    # A batch of two prompts of different lengths, padded and masked.
+    pytest.param("qwen_image", 2, ((4, 6), (8, 5)), id="qwen_image-batched"),
+    # Prompts of equal length: the mask is all True and masks nothing.
+    pytest.param("qwen_image", 2, ((4, 6), (8, 8)), id="qwen_image-batched-equal-lengths"),
+    pytest.param("qwen_image", 2, ((5, 5), (8, 5)), id="qwen_image-batched-padded-image"),
+    pytest.param("qwen_image", 2, ((4, 6), (7, 3)), id="qwen_image-batched-replicated-text"),
+    pytest.param("qwen_image", 3, ((5, 5), (9, 4)), id="qwen_image-batched-padded-image-u3"),
+    pytest.param("qwen_image", 3, ((5, 5), (7, 4)), id="qwen_image-batched-padded-image-replicated-text-u3"),
     # FLUX.2: (image tokens, text tokens). A text that does not divide the degree is replicated.
     pytest.param("flux2", 2, (16, 8), id="flux2-divisible"),
     pytest.param("flux2", 2, (15, 8), id="flux2-padded"),
@@ -415,6 +446,12 @@ _PARITY_CASES = [
     # that do not divide 32 need sequence-parallel padding.
     pytest.param("z_image", 2, ((4, 4), 10), id="z_image-divisible"),
     pytest.param("z_image", 3, ((4, 4), 10), id="z_image-padded-u3"),
+    # Two captions of different lengths, 32 and 64 tokens once padded to a
+    # multiple of 32, or 32 and 96: the caption and unified streams are masked,
+    # and at Ulysses 3 one or both of them are padded as well.
+    pytest.param("z_image", 2, ((4, 4), (10, 40)), id="z_image-batched"),
+    pytest.param("z_image", 3, ((4, 4), (10, 40)), id="z_image-batched-padded-caption-u3"),
+    pytest.param("z_image", 3, ((4, 4), (10, 70)), id="z_image-batched-padded-unified-u3"),
     # Cosmos3: ((frames, height, width) gen tokens, und tokens). The und tokens
     # are replicated on every rank. One KV head per query head: the SDPA kernels
     # here are called without `enable_gqa`.

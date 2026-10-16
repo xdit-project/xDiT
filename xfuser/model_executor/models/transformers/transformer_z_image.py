@@ -8,6 +8,7 @@ from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
 
 from xfuser.model_executor.layers.usp import USP
+from xfuser.model_executor.models.transformers.transformers_utils import local_sp_pad_rows, zero_sp_pad_rows_hook
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
 from xfuser.model_executor.layers.fused_qk_rope_zimage_flydsl import (
     flydsl_fused_qk_norm_rope,
@@ -64,6 +65,9 @@ class xFuserZSingleStreamAttnProcessor:
     Processor for Z-Image single stream attention that adapts the existing Attention class to match the behavior of the
     original Z-ImageAttention module.
     """
+
+    def __init__(self, attention_kwargs: Optional[dict] = None):
+        self.attention_kwargs = attention_kwargs
 
     @staticmethod
     def _pad_heads(x: torch.Tensor, pad_heads: int) -> torch.Tensor:
@@ -126,6 +130,7 @@ class xFuserZSingleStreamAttnProcessor:
             dropout_p=0.0,
             is_causal=False,
             attn_layer=attn,
+            attention_kwargs=self.attention_kwargs,
         )
 
         if pad_heads:
@@ -160,8 +165,11 @@ def z_image_attn_modules(transformer) -> list[torch.nn.Module]:
 class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self._self_attn_kwargs = {"valid_kv_len": None}
+        self._sp_pad = {"local_rows": 0}
         for layer in self.layers + self.context_refiner + self.noise_refiner:
-            layer.attention.processor = xFuserZSingleStreamAttnProcessor()
+            layer.attention.processor = xFuserZSingleStreamAttnProcessor(attention_kwargs=self._self_attn_kwargs)
+            layer.register_forward_hook(zero_sp_pad_rows_hook(self._sp_pad))
         register_fp8_comms_eligible_modules(self, z_image_attn_modules(self))
 
     def _chunk_and_pad_sequence(
@@ -264,8 +272,11 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
             x_attn_mask[i, :seq_len] = 1
 
         # SP support
-        pad_amount = (sp_world_size - (x.shape[1] % sp_world_size)) % sp_world_size
+        seq_len = x.shape[1]
+        pad_amount = (sp_world_size - (seq_len % sp_world_size)) % sp_world_size
+        self._self_attn_kwargs["valid_kv_len"] = seq_len if pad_amount else None
         x = self._chunk_and_pad_sequence(x, sp_world_rank, sp_world_size, pad_amount, dim=-2)
+        self._sp_pad["local_rows"] = local_sp_pad_rows(seq_len, x.shape[1], sp_world_rank)
         x_attn_mask = self._chunk_and_pad_sequence(x_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1)
         x_freqs_cis_chunked = self._chunk_and_pad_sequence(
             x_freqs_cis, sp_world_rank, sp_world_size, pad_amount, dim=-2
@@ -304,8 +315,11 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
             cap_attn_mask[i, :seq_len] = 1
 
         # SP support
-        pad_amount = (sp_world_size - (cap_feats.shape[1] % sp_world_size)) % sp_world_size
+        seq_len = cap_feats.shape[1]
+        pad_amount = (sp_world_size - (seq_len % sp_world_size)) % sp_world_size
+        self._self_attn_kwargs["valid_kv_len"] = seq_len if pad_amount else None
         cap_feats = self._chunk_and_pad_sequence(cap_feats, sp_world_rank, sp_world_size, pad_amount, dim=-2)
+        self._sp_pad["local_rows"] = local_sp_pad_rows(seq_len, cap_feats.shape[1], sp_world_rank)
         cap_attn_mask = self._chunk_and_pad_sequence(cap_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1)
         cap_freqs_cis_chunked = self._chunk_and_pad_sequence(
             cap_freqs_cis, sp_world_rank, sp_world_size, pad_amount, dim=-2
@@ -340,8 +354,11 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
             unified_attn_mask[i, :seq_len] = 1
 
         # SP support
-        pad_amount = (sp_world_size - (unified.shape[1] % sp_world_size)) % sp_world_size
+        seq_len = unified.shape[1]
+        pad_amount = (sp_world_size - (seq_len % sp_world_size)) % sp_world_size
+        self._self_attn_kwargs["valid_kv_len"] = seq_len if pad_amount else None
         unified = self._chunk_and_pad_sequence(unified, sp_world_rank, sp_world_size, pad_amount, dim=-2)
+        self._sp_pad["local_rows"] = local_sp_pad_rows(seq_len, unified.shape[1], sp_world_rank)
         unified_attn_mask = self._chunk_and_pad_sequence(
             unified_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1
         )

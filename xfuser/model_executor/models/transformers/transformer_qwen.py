@@ -16,10 +16,16 @@ from diffusers.utils import (
 from xfuser.model_executor.layers.usp import USP
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
 from xfuser.core.distributed import (
+    get_runtime_state,
     get_sequence_parallel_rank,
     get_sequence_parallel_world_size,
 )
-from xfuser.model_executor.models.transformers.transformers_utils import chunk_and_pad_sequence, gather_and_unpad
+from xfuser.model_executor.models.transformers.transformers_utils import (
+    chunk_and_pad_sequence,
+    gather_and_unpad,
+    local_sp_pad_rows,
+    zero_sp_pad_rows_hook,
+)
 
 from xfuser.model_executor.layers.fused_qk_rope_flydsl import (
     flydsl_fused_qk_norm_rope,
@@ -43,6 +49,9 @@ def _qwen_cos_sin(freqs: torch.Tensor):
 
 
 class xFuserQwenDoubleStreamAttnProcessor:
+    def __init__(self, attention_kwargs=None):
+        self.attention_kwargs = attention_kwargs if attention_kwargs is not None else {}
+
     def __call__(
         self,
         attn,
@@ -51,7 +60,11 @@ class xFuserQwenDoubleStreamAttnProcessor:
         encoder_hidden_states_mask: torch.FloatTensor = None,
         attention_mask: Optional[torch.FloatTensor] = None,
         image_rotary_emb: Optional[torch.Tensor] = None,
+        sp_replicated_text: bool = False,
     ) -> torch.FloatTensor:
+        """With ``sp_replicated_text`` every rank holds the whole prompt rather than
+        a shard of it."""
+
         seq_txt = encoder_hidden_states.shape[1]
 
         # Compute QKV for image stream (sample projections)
@@ -105,24 +118,47 @@ class xFuserQwenDoubleStreamAttnProcessor:
                 txt_query = apply_rotary_emb_qwen(txt_query, txt_freqs, use_real=False)
                 txt_key = apply_rotary_emb_qwen(txt_key, txt_freqs, use_real=False)
 
-        # Concatenate for joint attention
-        # Order: [text, image]
-        joint_query = torch.cat([txt_query, img_query], dim=1)
-        joint_key = torch.cat([txt_key, img_key], dim=1)
-        joint_value = torch.cat([txt_value, img_value], dim=1)
+        if sp_replicated_text:
+            # Attend to the replicated prompt once, as joint tokens: left in the
+            # sharded sequence its keys would be gathered once per rank. The
+            # gathered image keys then end with the padding, which USP drops.
+            joint_hidden_states = USP(
+                img_query.transpose(1, 2),
+                img_key.transpose(1, 2),
+                img_value.transpose(1, 2),
+                dropout_p=0.0,
+                is_causal=False,
+                joint_query=txt_query.transpose(1, 2),
+                joint_key=txt_key.transpose(1, 2),
+                joint_value=txt_value.transpose(1, 2),
+                joint_strategy="front",
+                attn_layer=attn,
+                attention_kwargs=self.attention_kwargs,
+            ).transpose(1, 2)
+            joint_dtype = img_query.dtype
+        else:
+            # Concatenate for joint attention
+            # Order: [text, image]. Each rank holds [text shard, image shard], and
+            # only the last rank's image shard ends with padding, so the gathered
+            # keys end with it too.
+            joint_query = torch.cat([txt_query, img_query], dim=1)
+            joint_key = torch.cat([txt_key, img_key], dim=1)
+            joint_value = torch.cat([txt_value, img_value], dim=1)
 
-        joint_hidden_states = USP(
-            joint_query.transpose(1, 2),
-            joint_key.transpose(1, 2),
-            joint_value.transpose(1, 2),
-            dropout_p=0.0,
-            is_causal=False,
-            attn_layer=attn,
-        ).transpose(1, 2)
+            joint_hidden_states = USP(
+                joint_query.transpose(1, 2),
+                joint_key.transpose(1, 2),
+                joint_value.transpose(1, 2),
+                dropout_p=0.0,
+                is_causal=False,
+                attn_layer=attn,
+                attention_kwargs=self.attention_kwargs,
+            ).transpose(1, 2)
+            joint_dtype = joint_query.dtype
 
         # Reshape back
         joint_hidden_states = joint_hidden_states.flatten(2, 3)
-        joint_hidden_states = joint_hidden_states.to(joint_query.dtype)
+        joint_hidden_states = joint_hidden_states.to(joint_dtype)
 
         # Split attention outputs back
         txt_attn_output = joint_hidden_states[:, :seq_txt, :]  # Text part
@@ -169,8 +205,12 @@ class xFuserQwenImageTransformerWrapper(QwenImageTransformer2DModel):
             use_layer3d_rope=use_layer3d_rope,
         )
 
+        self._self_attn_kwargs = {"valid_kv_len": None}
+        self._sp_pad = {"local_rows": 0}
         for block in self.transformer_blocks:
-            block.attn.processor = xFuserQwenDoubleStreamAttnProcessor()
+            block.attn.processor = xFuserQwenDoubleStreamAttnProcessor(self._self_attn_kwargs)
+            # Qwen returns (encoder, image) and its text stream is never SP padded.
+            block.register_forward_hook(zero_sp_pad_rows_hook(self._sp_pad, index=1))
         register_fp8_comms_eligible_modules(self, [block.attn for block in self.transformer_blocks])
 
     def forward(
@@ -189,6 +229,30 @@ class xFuserQwenImageTransformerWrapper(QwenImageTransformer2DModel):
     ) -> Union[torch.Tensor, Transformer2DModelOutput]:
         sp_world_rank = get_sequence_parallel_rank()
         sp_world_size = get_sequence_parallel_world_size()
+
+        image_seq_len = hidden_states.shape[1]
+        full_text_seq_len = encoder_hidden_states.shape[1]
+        pad_amount = (sp_world_size - (image_seq_len % sp_world_size)) % sp_world_size
+        local_image_len = (image_seq_len + pad_amount) // sp_world_size
+        # Replicate a prompt that cannot split evenly without padded text keys.
+        # Also replicate it when image padding spans multiple shards: placing
+        # text shards between those image shards would make the pad nontrailing.
+        replicated_text = full_text_seq_len % sp_world_size != 0 or pad_amount > local_image_len
+        if replicated_text and get_runtime_state().fp8_comms is not None:
+            # The replicated prompt joins attention as joint tokens, which FP8
+            # communication does not handle: it would silently fall back to bf16.
+            if full_text_seq_len % sp_world_size != 0:
+                reason = (
+                    f"the prompt length ({full_text_seq_len} tokens) to be divisible by "
+                    f"the sequence parallel degree ({sp_world_size}). Change the prompt, "
+                    "--max_sequence_length or the parallel degrees"
+                )
+            else:
+                reason = (
+                    f"an image whose padding fits in one shard (got {image_seq_len} tokens at "
+                    f"sequence parallel degree {sp_world_size}). Use a larger image or smaller parallel degrees"
+                )
+            raise ValueError(f"--use_fp8_comms needs {reason}, or drop --use_fp8_comms.")
 
         if attention_kwargs is not None:
             attention_kwargs = attention_kwargs.copy()
@@ -233,21 +297,27 @@ class xFuserQwenImageTransformerWrapper(QwenImageTransformer2DModel):
 
         image_rotary_emb = self.pos_embed(img_shapes, max_txt_seq_len=text_seq_len, device=hidden_states.device)
 
-        pad_amount = (sp_world_size - (hidden_states.shape[1] % sp_world_size)) % sp_world_size
-        encoder_pad_amount = (sp_world_size - (encoder_hidden_states.shape[1] % sp_world_size)) % sp_world_size
         hidden_states = chunk_and_pad_sequence(hidden_states, sp_world_rank, sp_world_size, pad_amount, dim=1)
-        encoder_hidden_states = chunk_and_pad_sequence(
-            encoder_hidden_states, sp_world_rank, sp_world_size, encoder_pad_amount, dim=1
-        )
+        valid_kv_len = image_seq_len if replicated_text else image_seq_len + full_text_seq_len
+        self._self_attn_kwargs["valid_kv_len"] = valid_kv_len if pad_amount else None
+        self._sp_pad["local_rows"] = local_sp_pad_rows(image_seq_len, local_image_len, sp_world_rank)
+        txt_freqs = image_rotary_emb[1]
+        if not replicated_text:
+            encoder_hidden_states = chunk_and_pad_sequence(
+                encoder_hidden_states, sp_world_rank, sp_world_size, 0, dim=1
+            )
+            txt_freqs = chunk_and_pad_sequence(txt_freqs, sp_world_rank, sp_world_size, 0, dim=0)
 
         image_rotary_emb = [
             chunk_and_pad_sequence(image_rotary_emb[0], sp_world_rank, sp_world_size, pad_amount, dim=0),
-            chunk_and_pad_sequence(image_rotary_emb[1], sp_world_rank, sp_world_size, encoder_pad_amount, dim=0),
+            txt_freqs,
         ]
 
         # Construct joint attention mask once to avoid reconstructing in every block
         # This eliminates 60 GPU syncs during training while maintaining torch.compile compatibility
         block_attention_kwargs = attention_kwargs.copy() if attention_kwargs is not None else {}
+        if replicated_text:
+            block_attention_kwargs["sp_replicated_text"] = True
         if encoder_hidden_states_mask is not None:
             # Build joint mask: [text_mask, all_ones_for_image]
             batch_size, image_seq_len = hidden_states.shape[:2]
@@ -284,6 +354,9 @@ class xFuserQwenImageTransformerWrapper(QwenImageTransformer2DModel):
                 interval_control = len(self.transformer_blocks) / len(controlnet_block_samples)
                 interval_control = int(np.ceil(interval_control))
                 hidden_states = hidden_states + controlnet_block_samples[index_block // interval_control]
+                local_pad_rows = self._sp_pad["local_rows"]
+                if local_pad_rows:
+                    hidden_states[:, -local_pad_rows:] = 0
 
         if self.zero_cond_t:
             temb = temb.chunk(2, dim=0)[0]

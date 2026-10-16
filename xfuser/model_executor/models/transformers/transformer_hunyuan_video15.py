@@ -7,6 +7,9 @@ from diffusers.models.attention_processor import Attention
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
 from xfuser.model_executor.layers.usp import USP
+from xfuser.model_executor.models.transformers.transformers_utils import local_sp_pad_rows, zero_sp_pad_rows_hook
+from xfuser.core.attention import registry as attention_registry
+from xfuser.core.attention.spec import Sparsity
 from xfuser.core.distributed import (
     get_runtime_state,
     get_sequence_parallel_world_size,
@@ -15,9 +18,19 @@ from xfuser.core.distributed import (
 )
 
 
+def _uses_sparse_layout(attention_kwargs, backend):
+    configured = attention_kwargs.get("attn_sparse_type") in ("ssta", "sta", "moba")
+    if backend is None:
+        return configured
+    spec = attention_registry.find(backend)
+    return configured and spec is not None and spec.sparsity is Sparsity.SSTA
+
+
 class xFuserHunyuanVideo15AttnProcessor:
     def __init__(self, attention_kwargs: Optional[Dict[str, Any]] = None):
-        self.attention_kwargs = attention_kwargs
+        self.attention_kwargs = attention_kwargs if attention_kwargs is not None else {}
+        self.attention_kwargs.setdefault("valid_kv_len", None)
+        self.attention_kwargs.setdefault("sp_sparse_layout", None)
 
     def __call__(
         self,
@@ -60,50 +73,57 @@ class xFuserHunyuanVideo15AttnProcessor:
             if attn.norm_added_k is not None:
                 encoder_key = attn.norm_added_k(encoder_key)
 
-            query = torch.cat([query, encoder_query], dim=1)
-            key = torch.cat([key, encoder_key], dim=1)
-            value = torch.cat([value, encoder_value], dim=1)
-
         if encoder_hidden_states is not None:
             num_encoder_hidden_states_tokens = encoder_hidden_states.shape[1]
-            num_query_tokens = query.shape[1] - num_encoder_hidden_states_tokens
         else:
             num_encoder_hidden_states_tokens = get_runtime_state().max_condition_sequence_length
-            num_query_tokens = query.shape[1] - num_encoder_hidden_states_tokens
+
+        split_text = get_runtime_state().split_text_embed_in_sp
+        sparse = self.attention_kwargs["sp_sparse_layout"]
+        if sparse is None:
+            sparse = _uses_sparse_layout(self.attention_kwargs, getattr(get_runtime_state(), "attention_backend", None))
+        # Dense attention has no spatial layout constraint. Putting the text
+        # first keeps the image's SP padding at the end of the gathered keys.
+        # SSTA needs the symmetric [image, text] layout used by its tiling code.
+        text_first = split_text and not sparse
+        if encoder_hidden_states is not None and split_text:
+            if text_first:
+                query = torch.cat([encoder_query, query], dim=1)
+                key = torch.cat([encoder_key, key], dim=1)
+                value = torch.cat([encoder_value, value], dim=1)
+            else:
+                query = torch.cat([query, encoder_query], dim=1)
+                key = torch.cat([key, encoder_key], dim=1)
+                value = torch.cat([value, encoder_value], dim=1)
 
         query = query.transpose(1, 2)
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
 
         #! ---------------------------------------- ATTENTION ----------------------------------------
-        if self.attention_kwargs is not None:
-            self.attention_kwargs["encoder_sequence_length"] = num_encoder_hidden_states_tokens
-            self.attention_kwargs["text_mask"] = attention_mask
-        if get_sequence_parallel_world_size() > 1:
-            if get_runtime_state().split_text_embed_in_sp:
-                hidden_states = USP(
-                    query, key, value, dropout_p=0.0, is_causal=False, attention_kwargs=self.attention_kwargs
-                )
-            else:
-                query, encoder_query = query.split([num_query_tokens, num_encoder_hidden_states_tokens], dim=2)
-                key, encoder_key = key.split([num_query_tokens, num_encoder_hidden_states_tokens], dim=2)
-                value, encoder_value = value.split([num_query_tokens, num_encoder_hidden_states_tokens], dim=2)
-
-                hidden_states = USP(
-                    query,
-                    key,
-                    value,
-                    dropout_p=0.0,
-                    is_causal=False,
-                    joint_query=encoder_query,
-                    joint_key=encoder_key,
-                    joint_value=encoder_value,
-                    joint_strategy="rear",
-                    attention_kwargs=self.attention_kwargs,
-                )
+        self.attention_kwargs["encoder_sequence_length"] = num_encoder_hidden_states_tokens
+        self.attention_kwargs["text_mask"] = attention_mask
+        if encoder_hidden_states is not None and not split_text:
+            hidden_states = USP(
+                query,
+                key,
+                value,
+                dropout_p=0.0,
+                is_causal=False,
+                joint_query=encoder_query.transpose(1, 2),
+                joint_key=encoder_key.transpose(1, 2),
+                joint_value=encoder_value.transpose(1, 2),
+                joint_strategy="rear",
+                attention_kwargs=self.attention_kwargs,
+            )
         else:
             hidden_states = USP(
-                query, key, value, dropout_p=0.0, is_causal=False, attention_kwargs=self.attention_kwargs
+                query,
+                key,
+                value,
+                dropout_p=0.0,
+                is_causal=False,
+                attention_kwargs=self.attention_kwargs,
             )
 
         # Transpose back to original shape
@@ -114,10 +134,14 @@ class xFuserHunyuanVideo15AttnProcessor:
 
         # 6. Output projection
         if encoder_hidden_states is not None:
-            hidden_states, encoder_hidden_states = (
-                hidden_states[:, : -encoder_hidden_states.shape[1]],
-                hidden_states[:, -encoder_hidden_states.shape[1] :],
-            )
+            if text_first:
+                encoder_hidden_states, hidden_states = hidden_states.split(
+                    [num_encoder_hidden_states_tokens, hidden_states.shape[1] - num_encoder_hidden_states_tokens], dim=1
+                )
+            else:
+                hidden_states, encoder_hidden_states = hidden_states.split(
+                    [hidden_states.shape[1] - num_encoder_hidden_states_tokens, num_encoder_hidden_states_tokens], dim=1
+                )
 
             if getattr(attn, "to_out", None) is not None:
                 hidden_states = attn.to_out[0](hidden_states)
@@ -178,8 +202,16 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
             use_meanflow=use_meanflow,
         )
         self.attention_kwargs = attention_kwargs
+        self._self_attn_kwargs = attention_kwargs if attention_kwargs is not None else {}
+        self._self_attn_kwargs.setdefault("valid_kv_len", None)
+        self._self_attn_kwargs.setdefault("sp_sparse_layout", None)
+        self._is_sparse = self._self_attn_kwargs.get("attn_sparse_type") in ("ssta", "sta", "moba")
+        self._sp_pad = {"image_rows": 0, "text_rows": 0}
         for block in self.transformer_blocks:
-            block.attn.processor = xFuserHunyuanVideo15AttnProcessor(attention_kwargs=attention_kwargs)
+            block.attn.processor = xFuserHunyuanVideo15AttnProcessor(attention_kwargs=self._self_attn_kwargs)
+            # Diffusers' HunyuanVideo15TransformerBlock returns (image, text).
+            block.register_forward_hook(zero_sp_pad_rows_hook(self._sp_pad, index=0, rows_key="image_rows"))
+            block.register_forward_hook(zero_sp_pad_rows_hook(self._sp_pad, index=1, rows_key="text_rows"))
 
     def _chunk_and_pad_sequence(
         self, x: torch.Tensor, sp_world_rank: int, sp_world_size: int, pad_amount: int, dim: int
@@ -226,8 +258,14 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
         post_patch_num_frames = num_frames // p_t
         post_patch_height = height // p_h
         post_patch_width = width // p_w
-        if self.attention_kwargs is not None:
-            self.attention_kwargs["thw"] = (
+        # The step's scheduled backend is selected before this forward. Its
+        # dense steps need the same trailing-pad layout as a dense checkpoint.
+        sparse_layout = _uses_sparse_layout(
+            self._self_attn_kwargs, getattr(get_runtime_state(), "attention_backend", None)
+        )
+        self._self_attn_kwargs["sp_sparse_layout"] = sparse_layout
+        if self._is_sparse:
+            self._self_attn_kwargs["thw"] = (
                 post_patch_num_frames,
                 post_patch_height,
                 post_patch_width,
@@ -335,6 +373,7 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
 
         # sequence parallel
         hidden_states_pad_amount = (sp_world_size - (hidden_states.shape[1] % sp_world_size)) % sp_world_size
+        image_sequence_length = hidden_states.shape[1]
         hidden_states = self._chunk_and_pad_sequence(
             hidden_states, sp_world_rank, sp_world_size, hidden_states_pad_amount, dim=1
         )
@@ -342,19 +381,25 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
         cos = self._chunk_and_pad_sequence(cos, sp_world_rank, sp_world_size, hidden_states_pad_amount, dim=0)
         sin = self._chunk_and_pad_sequence(sin, sp_world_rank, sp_world_size, hidden_states_pad_amount, dim=0)
         image_rotary_emb = (cos, sin)
+        self._sp_pad["image_rows"] = local_sp_pad_rows(image_sequence_length, hidden_states.shape[1], sp_world_rank)
 
         any_valid = encoder_attention_mask.to(torch.bool).any(dim=0)
         encoder_hidden_states = encoder_hidden_states[:, any_valid, :]
         encoder_attention_mask = encoder_attention_mask.to(torch.bool)[:, any_valid]
 
-        if encoder_hidden_states.shape[1] % sp_world_size != 0:
-            if self.attention_kwargs is not None:
+        encoder_sequence_length = encoder_hidden_states.shape[1]
+        enc_pad = 0
+        # If a tiny image has pad rows on multiple ranks, interleaving each
+        # rank's [text, image] would put some pads between real text keys.
+        # Keep that prompt joint so USP's global trailing-length trim applies.
+        image_padding_spans_ranks = hidden_states_pad_amount > hidden_states.shape[1]
+        if encoder_sequence_length % sp_world_size != 0 or (not sparse_layout and image_padding_spans_ranks):
+            if sparse_layout:
                 # Sparse models requires symmetric [image, text] layout in Q/K/V.
                 # Pad text to be divisible by sp_world_size so it can be chunked,
                 # ensuring split_text_embed_in_sp=True and avoiding the asymmetric
                 # joint_strategy path which is not compatible.
-                enc_rem = encoder_hidden_states.shape[1] % sp_world_size
-                enc_pad = sp_world_size - enc_rem
+                enc_pad = (-encoder_sequence_length) % sp_world_size
                 encoder_hidden_states = F.pad(encoder_hidden_states, (0, 0, 0, enc_pad))
                 encoder_attention_mask = F.pad(encoder_attention_mask, (0, enc_pad), value=False)
                 get_runtime_state().split_text_embed_in_sp = True
@@ -364,6 +409,21 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
         else:
             get_runtime_state().split_text_embed_in_sp = True
             encoder_hidden_states = torch.chunk(encoder_hidden_states, sp_world_size, dim=1)[sp_world_rank]
+        if self._is_sparse:
+            # SSTA gathers the text after the image, so this padding ends the
+            # gathered text; SSTA drops it, as it does the image padding.
+            self._self_attn_kwargs["encoder_sp_padding"] = enc_pad
+        self._sp_pad["text_rows"] = (
+            local_sp_pad_rows(encoder_sequence_length, encoder_hidden_states.shape[1], sp_world_rank)
+            if get_runtime_state().split_text_embed_in_sp
+            else 0
+        )
+        # USP expects a global length, including sharded text in the dense
+        # [text, image] path, but excluding the separately joined prompt.
+        valid_kv_len = image_sequence_length
+        if get_runtime_state().split_text_embed_in_sp:
+            valid_kv_len += encoder_sequence_length
+        self._self_attn_kwargs["valid_kv_len"] = valid_kv_len if hidden_states_pad_amount or enc_pad else None
 
         # 4. Transformer blocks
         if torch.is_grad_enabled() and self.gradient_checkpointing:

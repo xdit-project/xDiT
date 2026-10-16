@@ -4,6 +4,7 @@ from typing import Optional
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
 from xfuser.model_executor.layers.usp import USP
+from xfuser.model_executor.models.transformers.transformers_utils import local_sp_pad_rows, zero_sp_pad_rows_hook
 from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
     get_sequence_parallel_rank,
@@ -28,7 +29,9 @@ def get_lingbot_video_classes():
     )
 
 
-def _usp_attention_forward(attn_module, x, rotary_emb, attention_mask=None, packed_indices=None, parallel_config=None):
+def _usp_attention_forward(
+    attn_module, x, rotary_emb, attention_mask=None, packed_indices=None, parallel_config=None, attention_kwargs=None
+):
     """Replacement forward for LingBotVideoAttention that uses USP for distributed attention.
 
     For single GPU (sp_world_size=1), USP routes through the configured attention backend
@@ -47,7 +50,9 @@ def _usp_attention_forward(attn_module, x, rotary_emb, attention_mask=None, pack
     q = q.transpose(1, 2)
     k = k.transpose(1, 2)
     v = v.transpose(1, 2)
-    out = USP(q, k, v)
+    # The joint [video; text] sequence is padded at its end for sequence
+    # parallelism, so the gathered keys end with the padding.
+    out = USP(q, k, v, attention_kwargs=attention_kwargs)
     out = out.transpose(1, 2)  # back to (B, S, H, D)
     return attn_module.to_out(out.flatten(2, 3).type_as(x))
 
@@ -227,9 +232,14 @@ class xFuserLingBotVideoTransformer3DWrapper:
             block.ffn._run_grouped_experts = _make_fast(block.ffn).__get__(block.ffn)
 
     def _install_usp_attention(self):
+        self._self_attn_kwargs = {"valid_kv_len": None}
+        self._sp_pad = {"local_rows": 0}
         for block in self.blocks:
             block.attn._original_forward = block.attn.forward
-            block.attn.forward = lambda *args, _attn=block.attn, **kw: _usp_attention_forward(_attn, *args, **kw)
+            block.attn.forward = lambda *args, _attn=block.attn, _kw=self._self_attn_kwargs, **kw: (
+                _usp_attention_forward(_attn, *args, attention_kwargs=_kw, **kw)
+            )
+            block.register_forward_hook(zero_sp_pad_rows_hook(self._sp_pad))
 
     def _chunk_and_pad_sequence(self, x, sp_world_rank, sp_world_size, pad_amount, dim):
         if pad_amount > 0:
@@ -258,6 +268,8 @@ class xFuserLingBotVideoTransformer3DWrapper:
         get_runtime_state().increment_step_counter()
 
         if sp_world_size <= 1:
+            self._self_attn_kwargs["valid_kv_len"] = None
+            self._sp_pad["local_rows"] = 0
             LingBotVideoTransformer3DModel = get_lingbot_video_classes()[0]
             return LingBotVideoTransformer3DModel.forward(
                 self,
@@ -297,7 +309,9 @@ class xFuserLingBotVideoTransformer3DWrapper:
 
         # SP chunking — chunk BEFORE computing temb6 to avoid full-seq allocations
         pad_amount = (sp_world_size - (joint_seq_len % sp_world_size)) % sp_world_size
+        self._self_attn_kwargs["valid_kv_len"] = joint_seq_len if pad_amount else None
         joint = self._chunk_and_pad_sequence(joint, sp_world_rank, sp_world_size, pad_amount, dim=1)
+        self._sp_pad["local_rows"] = local_sp_pad_rows(joint_seq_len, joint.shape[1], sp_world_rank)
         rotary = self._chunk_and_pad_sequence(rotary, sp_world_rank, sp_world_size, pad_amount, dim=1)
         local_seq_len = joint.shape[1]
         del x, text, patch_tokens

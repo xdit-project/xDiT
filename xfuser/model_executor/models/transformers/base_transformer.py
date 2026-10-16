@@ -1,13 +1,9 @@
 from abc import abstractmethod, ABCMeta
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Type
-import torch
+from typing import Dict, List, Tuple, Type
 import torch.nn as nn
 
 from xfuser.core.distributed import (
     get_pipeline_parallel_rank,
-    is_pipeline_first_stage,
-    is_pipeline_last_stage,
     get_pipeline_parallel_world_size,
     get_sequence_parallel_world_size,
     get_tensor_model_parallel_world_size,
@@ -57,13 +53,11 @@ class xFuserTransformerBaseWrapper(xFuserModelBaseWrapper, metaclass=ABCMeta):
             get_pipeline_parallel_world_size() == 1
             and get_sequence_parallel_world_size() == 1
             and get_tensor_model_parallel_world_size() == 1
-            and get_fast_attn_enable() == False
+            and not get_fast_attn_enable()
         ):
             return transformer
         else:
-            transformer = self._split_transformer_blocks(
-                transformer, transformer_blocks_name
-            )
+            transformer = self._split_transformer_blocks(transformer, transformer_blocks_name)
             transformer = self._wrap_layers(
                 model=transformer,
                 submodule_classes_to_wrap=submodule_classes_to_wrap,
@@ -80,37 +74,43 @@ class xFuserTransformerBaseWrapper(xFuserModelBaseWrapper, metaclass=ABCMeta):
     ):
         for block_name in blocks_name:
             if not hasattr(transformer, block_name):
-                raise AttributeError(
-                    f"'{transformer.__class__.__name__}' object has no attribute "
-                    f"'{block_name}'."
-                )
+                raise AttributeError(f"'{transformer.__class__.__name__}' object has no attribute '{block_name}'.")
 
         # transformer layer split
-        attn_layer_num_for_pp = (
-            get_runtime_state().parallel_config.pp_config.attn_layer_num_for_pp
-        )
+        attn_layer_num_for_pp = get_runtime_state().parallel_config.pp_config.attn_layer_num_for_pp
         pp_rank = get_pipeline_parallel_rank()
         pp_world_size = get_pipeline_parallel_world_size()
-        blocks_list = {
-            block_name: getattr(transformer, block_name) for block_name in blocks_name
-        }
+        if pp_world_size > 1:
+            transformer._xfuser_pipeline_stage_partial = True
+        blocks_list = {block_name: getattr(transformer, block_name) for block_name in blocks_name}
+        global_block_index = 0
+        for block_name, blocks in blocks_list.items():
+            for block_index, block in enumerate(blocks):
+                # Stage slicing renumbers retained ModuleLists. Keep the
+                # checkpoint path so blockwise/meta loaders stream the original
+                # global layer and quantize it before placement.
+                block._xfuser_checkpoint_fqn = f"{block_name}.{block_index}"
+                block._xfuser_checkpoint_block_index = global_block_index
+                global_block_index += 1
         num_blocks_list = [len(blocks) for blocks in blocks_list.values()]
         self.blocks_idx = {
-            name: [sum(num_blocks_list[:i]), sum(num_blocks_list[: i + 1])]
-            for i, name in enumerate(blocks_name)
+            name: [sum(num_blocks_list[:i]), sum(num_blocks_list[: i + 1])] for i, name in enumerate(blocks_name)
         }
         if attn_layer_num_for_pp is not None:
             assert sum(attn_layer_num_for_pp) == sum(num_blocks_list), (
-                "Sum of attn_layer_num_for_pp should be equal to the "
-                "number of all the transformer blocks"
+                "Sum of attn_layer_num_for_pp should be equal to the number of all the transformer blocks"
             )
             stage_block_start_idx = sum(attn_layer_num_for_pp[:pp_rank])
             stage_block_end_idx = sum(attn_layer_num_for_pp[: pp_rank + 1])
 
         else:
-            num_blocks_per_stage = (
-                sum(num_blocks_list) + pp_world_size - 1
-            ) // pp_world_size
+            if pp_rank == 0:
+                logger.warning(
+                    "PipeFusion stage split is using the naive equal-block "
+                    "fallback. Block runtime can vary substantially; benchmark "
+                    "and set --attn_layer_num_for_pp explicitly for production."
+                )
+            num_blocks_per_stage = (sum(num_blocks_list) + pp_world_size - 1) // pp_world_size
             stage_block_start_idx = pp_rank * num_blocks_per_stage
             stage_block_end_idx = min(
                 (pp_rank + 1) * num_blocks_per_stage,
@@ -118,13 +118,8 @@ class xFuserTransformerBaseWrapper(xFuserModelBaseWrapper, metaclass=ABCMeta):
             )
 
         self.stage_info = StageInfo()
-        for name, [blocks_start, blocks_end] in zip(
-            self.blocks_idx.keys(), self.blocks_idx.values()
-        ):
-            if (
-                blocks_end <= stage_block_start_idx
-                or stage_block_end_idx <= blocks_start
-            ):
+        for name, [blocks_start, blocks_end] in zip(self.blocks_idx.keys(), self.blocks_idx.values()):
+            if blocks_end <= stage_block_start_idx or stage_block_end_idx <= blocks_start:
                 setattr(transformer, name, nn.ModuleList([]))
                 self.stage_info.after_flags[name] = False
             elif stage_block_start_idx <= blocks_start:
@@ -149,11 +144,7 @@ class xFuserTransformerBaseWrapper(xFuserModelBaseWrapper, metaclass=ABCMeta):
                     setattr(
                         transformer,
                         name,
-                        blocks_list[name][
-                            stage_block_start_idx
-                            - blocks_start : stage_block_end_idx
-                            - blocks_end
-                        ],
+                        blocks_list[name][stage_block_start_idx - blocks_start : stage_block_end_idx - blocks_end],
                     )
                     self.stage_info.after_flags[name] = False
 
@@ -169,12 +160,7 @@ class xFuserTransformerBaseWrapper(xFuserModelBaseWrapper, metaclass=ABCMeta):
         width = get_runtime_state().input_config.width // patch_size // vae_scale_factor
 
         if get_runtime_state().patch_mode:
-            height = (
-                get_runtime_state().pp_patches_height[
-                    get_runtime_state().pipeline_patch_idx
-                ]
-                // patch_size
-            )
+            height = get_runtime_state().pp_patches_height[get_runtime_state().pipeline_patch_idx] // patch_size
         else:
             height = sum(get_runtime_state().pp_patches_height) // patch_size
         return height, width

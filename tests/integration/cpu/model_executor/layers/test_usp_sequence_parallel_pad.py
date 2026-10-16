@@ -6,6 +6,10 @@ attention sink. USP drops them given the real length (`valid_kv_len`); in ring
 attention it does so inside the step that attends to the last rank's shard.
 That needs the real Ulysses and ring exchanges, hence processes over gloo, and
 torch.compile has to trace it without a graph break.
+
+Replicated joint text must remain visible exactly once while the declared real
+length excludes only image padding. Check image and text queries independently
+of the compiler assertions against unpadded CPU attention.
 """
 
 import os
@@ -113,6 +117,42 @@ def _run_cases(torch, usp, rank, world_size, attention):
     return errors
 
 
+def _run_joint_cases(torch, usp, rank, world_size):
+    """A FLUX-style replicated prompt attends to the same unpadded image as local image queries."""
+    text_tokens = 7
+    generator = torch.Generator().manual_seed(17)
+    text = [torch.randn(1, HEADS, text_tokens, HEAD_DIM, generator=generator) for _ in range(3)]
+    chunk = PADDED_LEN // world_size
+    errors = {}
+    for name, real_len in (("no-pad", PADDED_LEN), ("declared-pad", 45)):
+        image = _inputs(torch, real_len)
+        local = [tensor[:, :, rank * chunk : (rank + 1) * chunk].contiguous() for tensor in image]
+        real_local_len = min(chunk, real_len - rank * chunk)
+        expected = torch.nn.functional.scaled_dot_product_attention(
+            torch.cat([text[0], local[0][:, :, :real_local_len]], dim=2),
+            torch.cat([text[1], image[1][:, :, :real_len]], dim=2),
+            torch.cat([text[2], image[2][:, :, :real_len]], dim=2),
+        )
+        output = usp.USP(
+            *local,
+            joint_query=text[0],
+            joint_key=text[1],
+            joint_value=text[2],
+            joint_strategy="front",
+            combine_qkv_a2a=True,
+            attention_kwargs={"valid_kv_len": real_len},
+        )
+        assert output.shape == (1, HEADS, text_tokens + chunk, HEAD_DIM)
+        errors[name] = {
+            "text": (output[:, :, :text_tokens] - expected[:, :, :text_tokens]).abs().max().item(),
+            "image": (output[:, :, text_tokens : text_tokens + real_local_len] - expected[:, :, text_tokens:])
+            .abs()
+            .max()
+            .item(),
+        }
+    return errors
+
+
 def _packed_keys_error(torch, usp, rank, world_size):
     """What USP raises for packed keys with ring attention, which it cannot slice per step."""
     local = _local_inputs(torch, rank, world_size, 45)
@@ -149,6 +189,7 @@ def _worker(rank, world_size, init_method, result_queue, ulysses, ring, compile_
             report["graph_breaks"][backend] = sum(torch._dynamo.utils.counters["graph_break"].values())
         if ring > 1:
             report["packed_keys_error"] = _packed_keys_error(torch, usp, rank, world_size)
+        report["joint_errors"] = _run_joint_cases(torch, usp, rank, world_size)
         result_queue.put(("returned", rank, report))
     except Exception:  # noqa: BLE001 - report arbitrary child failures to the parent
         result_queue.put(("error", rank, traceback.format_exc()))
@@ -214,3 +255,26 @@ def test_usp_matches_attention_over_the_real_tokens(tmp_path, mode):
         assert report["graph_breaks"] == {backend: 0 for backend in compile_backends}, f"rank {rank}"
         if ring > 1:
             assert report["packed_keys_error"] is not None and "valid_kv_len must be in" in report["packed_keys_error"]
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_usp_joint_text_and_padded_image_match_unpadded_attention(tmp_path, mode):
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("yunchang", reason="yunchang builds the Ulysses and ring process groups")
+    if not torch.distributed.is_gloo_available():
+        pytest.skip("torch.distributed gloo backend is unavailable")
+    ulysses, ring = MODES[mode]
+    world_size = ulysses * ring
+
+    exit_codes, results = _run_spawned(
+        torch, f"file://{tmp_path / 'usp-joint-init'}", world_size, (ulysses, ring, ()), timeout=900
+    )
+
+    errors = [result for result in results if result[0] == "error"]
+    assert not errors, "\n".join(result[2] for result in errors)
+    assert exit_codes == [0] * world_size
+    assert sorted(result[1] for result in results) == list(range(world_size))
+    for _, rank, report in results:
+        for case, streams in report["joint_errors"].items():
+            for stream, error in streams.items():
+                assert error <= TOLERANCE, f"rank {rank}, {case}, {stream}: max error {error:.3e}"

@@ -207,6 +207,14 @@ class xFuserCausalWanModel(xFuserModel):
         images = input_args.get("input_images", [])
         if task == "i2v" and len(images) != 1:
             raise ValueError("Exactly one input image is required for CausalWan I2V mode.")
+        # The pipeline rounds num_frames to 4k+1 and, with no local attention window, never evicts the KV cache.
+        latent_frames = input_args["num_frames"] // 4 + 1
+        if self._LOCAL_ATTN_SIZE == -1 and latent_frames > self._SLIDING_WINDOW_NUM_FRAMES:
+            raise ValueError(
+                f"{self.settings.model_name} generates {latent_frames} latent frames from --num_frames "
+                f"{input_args['num_frames']}, more than its KV cache holds ({self._SLIDING_WINDOW_NUM_FRAMES}); "
+                f"use --num_frames {(self._SLIDING_WINDOW_NUM_FRAMES - 1) * 4 + 1} or fewer."
+            )
 
     def _get_compiled_pipe_components(self):
         return ["transformer", "transformer_2"]

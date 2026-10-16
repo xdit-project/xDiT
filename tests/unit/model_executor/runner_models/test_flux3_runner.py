@@ -34,11 +34,21 @@ def _args(**overrides):
     return {**args, **overrides}
 
 
-@pytest.mark.parametrize("name", ["FLUX.3-image-klein", "flux-3-image-klein", "black-forest-labs/flux-3-image-klein"])
-def test_name_selects_the_klein_checkpoint(build_flux3, name):
+@pytest.mark.parametrize(
+    ("name", "checkpoint"),
+    [
+        ("FLUX.3-image-klein", "black-forest-labs/flux-3-image-klein"),
+        ("flux-3-image-klein", "black-forest-labs/flux-3-image-klein"),
+        ("black-forest-labs/flux-3-image-klein", "black-forest-labs/flux-3-image-klein"),
+        ("FLUX.3-image-klein-base", "black-forest-labs/flux-3-image-klein-base"),
+        ("flux-3-image-klein-base", "black-forest-labs/flux-3-image-klein-base"),
+        ("black-forest-labs/flux-3-image-klein-base", "black-forest-labs/flux-3-image-klein-base"),
+    ],
+)
+def test_name_selects_its_checkpoint(build_flux3, name, checkpoint):
     model = build_flux3(name)
 
-    assert model.loader.checkpoint_request().model_name_or_path == "black-forest-labs/flux-3-image-klein"
+    assert model.loader.checkpoint_request().model_name_or_path == checkpoint
 
 
 def test_batching_more_than_one_prompt_per_call_is_refused(build_flux3):
@@ -46,9 +56,21 @@ def test_batching_more_than_one_prompt_per_call_is_refused(build_flux3):
         build_flux3(batch_size=2)
 
 
-def test_cfg_parallel_is_refused(build_flux3):
+def test_the_distilled_model_refuses_cfg_parallel(build_flux3):
     with pytest.raises(ValueError, match="does not support use_cfg_parallel"):
         build_flux3(use_cfg_parallel=True)
+
+
+def test_the_base_model_validates_with_cfg_parallel(build_flux3):
+    # Construction validates the config and raises for a flag the model does not support.
+    build_flux3("FLUX.3-image-klein-base", use_cfg_parallel=True)
+
+
+def test_cfg_parallel_without_guidance_is_refused(build_flux3):
+    model = build_flux3("FLUX.3-image-klein-base", use_cfg_parallel=True)
+
+    with pytest.raises(ValueError, match="--guidance_scale 1 disables it"):
+        model._validate_args(_args(guidance_scale=1.0))
 
 
 def test_negative_prompt_is_refused(build_flux3):
@@ -133,6 +155,19 @@ def test_a_seed_draws_the_same_noise_as_a_cpu_generator(build_flux3):
     generator = model.pipe.calls[0]["generator"]
     assert generator.device.type == "cpu"
     assert torch.equal(torch.randn(4, generator=generator), torch.randn(4, generator=torch.Generator().manual_seed(7)))
+
+
+def test_the_base_model_runs_the_requested_guidance_and_negative_prompt(build_flux3):
+    model = build_flux3("FLUX.3-image-klein-base")
+    pipe = _RecordingPipe((1024, 1024))
+    pipe.guider = SimpleNamespace(guidance_scale=3.5)
+    model.pipe = pipe
+
+    model._run_pipe(_args(guidance_scale=5.0, negative_prompt="blurry", num_inference_steps=50))
+
+    assert pipe.guider.guidance_scale == 5.0
+    assert pipe.calls[0]["negative_prompt"] == "blurry"
+    assert pipe.calls[0]["num_inference_steps"] == 50
 
 
 class _Transformer(torch.nn.Module):

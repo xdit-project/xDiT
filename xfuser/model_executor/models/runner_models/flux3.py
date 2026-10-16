@@ -1,4 +1,6 @@
 import functools
+import math
+from dataclasses import replace
 from types import SimpleNamespace
 
 import torch
@@ -29,19 +31,42 @@ _TRANSFORMER_BLOCKS = [
 ]
 
 
-@register_model("black-forest-labs/flux-3-image-klein")
-@register_model("flux-3-image-klein")
-@register_model("FLUX.3-image-klein")
-class xFuserFlux3KleinModel(xFuserModel):
-    """FLUX.3 image klein: step-distilled (flow-map) text-to-image and image editing.
+def _settings(model_name: str, output_name: str) -> ModelSettings:
+    return ModelSettings(
+        model_name=model_name,
+        output_name=output_name,
+        model_output_type="image",
+        mod_value=16,
+        fp8_gemm_module_list=_TRANSFORMER_BLOCKS,
+        fsdp_strategy={
+            "transformer": {
+                "wrap_attrs": [
+                    "txt_mode_blocks",
+                    "mode_blocks.image",
+                    "mode_blocks.image_cond",
+                    "single_transformer_blocks",
+                ],
+                # Setting the dtype keeps the fp32 QK norms out of the FSDP units.
+                "dtype": torch.bfloat16,
+            },
+            "text_encoder": {
+                "wrap_attrs": ["model.language_model.layers"],
+            },
+        },
+    )
 
-    16 steps without classifier-free guidance. ``--input_images`` are reference images
-    (up to 10); without ``--height``/``--width`` an edit keeps the first reference's
-    aspect ratio at about 1024x1024 pixels. One prompt per pipeline call: a prompt
-    list runs one call per prompt.
+
+class _Flux3Model(xFuserModel):
+    """Shared FLUX.3 image klein runner: text-to-image and image editing.
+
+    ``--input_images`` are reference images (up to 10); without ``--height``/``--width``
+    an edit keeps the first reference's aspect ratio at about 1024x1024 pixels. One
+    prompt per pipeline call: a prompt list runs one call per prompt. Prompts are encoded
+    as given; the model expects full scene captions, which BFL's prompt upsampler
+    (black-forest-labs/flux-3-image-klein-pup) writes from a short request.
     """
 
-    # From the registered checkpoint's transformer config.
+    # From the registered checkpoints' transformer config.
     attention_heads = 24
 
     # Flux3Transformer2DModel and the FLUX.3 modular pipeline are in diffusers main
@@ -66,29 +91,6 @@ class xFuserFlux3KleinModel(xFuserModel):
         enable_slicing=True,
         use_parallel_vae=True,
     )
-    default_input_values = DefaultInputValues(num_inference_steps=16)
-    settings = ModelSettings(
-        model_name="black-forest-labs/flux-3-image-klein",
-        output_name="flux_3_image_klein",
-        model_output_type="image",
-        mod_value=16,
-        fp8_gemm_module_list=_TRANSFORMER_BLOCKS,
-        fsdp_strategy={
-            "transformer": {
-                "wrap_attrs": [
-                    "txt_mode_blocks",
-                    "mode_blocks.image",
-                    "mode_blocks.image_cond",
-                    "single_transformer_blocks",
-                ],
-                # Setting the dtype keeps the fp32 QK norms out of the FSDP units.
-                "dtype": torch.bfloat16,
-            },
-            "text_encoder": {
-                "wrap_attrs": ["model.language_model.layers"],
-            },
-        },
-    )
 
     def _validate_config(self, config: xFuserArgs) -> None:
         super()._validate_config(config)
@@ -100,26 +102,32 @@ class xFuserFlux3KleinModel(xFuserModel):
 
     def _validate_args(self, input_args: dict) -> None:
         super()._validate_args(input_args)
-        if input_args.get("negative_prompt"):
-            raise ValueError("FLUX.3 klein is guidance-distilled and does not accept a negative prompt.")
         height, width = input_args.get("height"), input_args.get("width")
         for name, value in (("height", height), ("width", width)):
             if value is not None and value % self.settings.mod_value != 0:
                 raise ValueError(f"FLUX.3 needs --{name} divisible by {self.settings.mod_value}, got {value}.")
-        if input_args.get("guidance_scale") is not None:
-            log("FLUX.3 klein is guidance-distilled; ignoring --guidance_scale.")
 
     def _load_model(self):
         from diffusers import ModularPipeline
         from xfuser.model_executor.models.transformers.transformer_flux3 import (
             xFuserFlux3Transformer2DWrapper,
         )
+        from xfuser.model_executor.pipelines.pipeline_flux3 import prepare_flux3_pipeline
 
         log(f"Loading {self.settings.model_name}")
         transformer = self.loader.load_transformer(xFuserFlux3Transformer2DWrapper)
-        pipe = ModularPipeline.from_pretrained(self.settings.model_name)
+        pipe = prepare_flux3_pipeline(
+            ModularPipeline.from_pretrained(self.settings.model_name), self.settings.model_name
+        )
         pipe.update_components(transformer=transformer)
-        pipe.load_components(dtype=torch.bfloat16)
+        if self.config.use_cfg_parallel:
+            from xfuser.model_executor.pipelines.guiders import xFuserCFGParallelGuidance
+
+            pipe.update_components(guider=xFuserCFGParallelGuidance.from_config(pipe.guider.config))
+        # By name: the checkpoints also list the prompt upsampler, a separate 9B model.
+        pipe.load_components(names=["text_encoder", "tokenizer"], dtype=torch.bfloat16)
+        # The VAE runs in fp32, as in BFL's reference and the diffusers FLUX.3 docs.
+        pipe.load_components(names=["vae"], dtype=torch.float32)
         return pipe
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
@@ -186,6 +194,9 @@ class xFuserFlux3KleinModel(xFuserModel):
             ]
         return input_args
 
+    def _extra_pipe_kwargs(self, input_args: dict) -> dict:
+        return {}
+
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         prompts = input_args["prompt"]
         if isinstance(prompts, str):
@@ -195,6 +206,7 @@ class xFuserFlux3KleinModel(xFuserModel):
             "width": input_args.get("width"),
             "num_inference_steps": input_args["num_inference_steps"],
             "output": "images",
+            **self._extra_pipe_kwargs(input_args),
         }
         if input_args.get("input_images"):
             pipe_kwargs["image"] = input_args["input_images"]
@@ -214,3 +226,57 @@ class xFuserFlux3KleinModel(xFuserModel):
             # Edits size the output from the reference unless told otherwise.
             args_per_image.append({**input_args, "prompt": prompt, "height": image.height, "width": image.width})
         return DiffusionOutput(images=images, pipe_args=args_per_image)
+
+
+@register_model("black-forest-labs/flux-3-image-klein")
+@register_model("flux-3-image-klein")
+@register_model("FLUX.3-image-klein")
+class xFuserFlux3KleinModel(_Flux3Model):
+    """FLUX.3 image klein: the step-distilled (flow-map) checkpoint, 16 steps without guidance."""
+
+    default_input_values = DefaultInputValues(num_inference_steps=16)
+    settings = _settings("black-forest-labs/flux-3-image-klein", "flux_3_image_klein")
+
+    # Both inputs are unused by the distilled model. A negative prompt is content the user
+    # expects to change the image, so it is refused; --guidance_scale is a sampling knob
+    # that scripts pass to every model, so it is only noted.
+    def _validate_args(self, input_args: dict) -> None:
+        super()._validate_args(input_args)
+        if input_args.get("negative_prompt"):
+            raise ValueError("FLUX.3 klein is guidance-distilled and does not accept a negative prompt.")
+
+    def preprocess_args(self, input_args: dict) -> dict:
+        args = super().preprocess_args(input_args)
+        if args.get("guidance_scale") is not None:
+            log("FLUX.3 klein is guidance-distilled; ignoring --guidance_scale.")
+        return args
+
+
+@register_model("black-forest-labs/flux-3-image-klein-base")
+@register_model("flux-3-image-klein-base")
+@register_model("FLUX.3-image-klein-base")
+class xFuserFlux3KleinBaseModel(_Flux3Model):
+    """FLUX.3 image klein base: the undistilled checkpoint, 50 steps with classifier-free guidance.
+
+    ``--use_cfg_parallel`` runs the conditional and unconditional branches on two rank
+    groups through xFuserCFGParallelGuidance. ``--negative_prompt`` sets the unconditional branch's prompt (empty by default).
+    """
+
+    capabilities = replace(_Flux3Model.capabilities, use_cfg_parallel=True)
+    default_input_values = DefaultInputValues(num_inference_steps=50, guidance_scale=3.5)
+    settings = _settings("black-forest-labs/flux-3-image-klein-base", "flux_3_image_klein_base")
+
+    def _validate_args(self, input_args: dict) -> None:
+        super()._validate_args(input_args)
+        guidance_scale = input_args.get("guidance_scale")
+        # The guider turns guidance off at a scale of 1 (math.isclose), leaving one branch.
+        if self.config.use_cfg_parallel and guidance_scale is not None and math.isclose(guidance_scale, 1.0):
+            raise ValueError("--use_cfg_parallel needs classifier-free guidance; --guidance_scale 1 disables it.")
+
+    def _extra_pipe_kwargs(self, input_args: dict) -> dict:
+        negative_prompt = input_args.get("negative_prompt")
+        return {"negative_prompt": negative_prompt} if negative_prompt else {}
+
+    def _run_pipe(self, input_args: dict) -> DiffusionOutput:
+        self.pipe.guider.guidance_scale = input_args["guidance_scale"]
+        return super()._run_pipe(input_args)

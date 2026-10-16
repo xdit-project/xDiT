@@ -1,3 +1,4 @@
+import functools
 from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
@@ -101,39 +102,12 @@ class xFuserFlux3Transformer2DWrapper(Flux3Transformer2DModel):
       exactly the upstream call.
     """
 
-    # The arguments are spelled out because diffusers reads the config keys to pass
-    # from this signature; behind **kwargs, flow_map would fall back to False.
-    def __init__(
-        self,
-        in_channels: int = 128,
-        cond_in_channels: int = 128,
-        num_layers: int = 5,
-        num_single_layers: int = 28,
-        attention_head_dim: int = 128,
-        num_attention_heads: int = 24,
-        joint_attention_dim: int = 20480,
-        timestep_channels: int = 256,
-        mlp_ratio: float = 3.0,
-        axes_dims_rope: Tuple[int, ...] = (32, 32, 32, 32),
-        rope_theta: int = 10000,
-        eps: float = 1e-6,
-        flow_map: bool = False,
-    ):
-        super().__init__(
-            in_channels=in_channels,
-            cond_in_channels=cond_in_channels,
-            num_layers=num_layers,
-            num_single_layers=num_single_layers,
-            attention_head_dim=attention_head_dim,
-            num_attention_heads=num_attention_heads,
-            joint_attention_dim=joint_attention_dim,
-            timestep_channels=timestep_channels,
-            mlp_ratio=mlp_ratio,
-            axes_dims_rope=axes_dims_rope,
-            rope_theta=rope_theta,
-            eps=eps,
-            flow_map=flow_map,
-        )
+    # ConfigMixin picks the config keys to pass from this signature. Wrapping upstream's
+    # __init__ shows it upstream's parameters; behind a bare **kwargs every key, flow_map
+    # included, would fall back to its default.
+    @functools.wraps(Flux3Transformer2DModel.__init__)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         self._txt_processor = xFuserFlux3AttnProcessor()
         self._image_processor = xFuserFlux3AttnProcessor()
         self._image_cond_processor = xFuserFlux3AttnProcessor()
@@ -294,13 +268,15 @@ class xFuserFlux3Transformer2DWrapper(Flux3Transformer2DModel):
                 image_rotary_emb=joint_rotary_emb,
             )
 
-        joint_states = torch.cat([context_states, content_states], dim=1)
-        joint_states = gather_and_unpad(joint_states, pad, dim=1)
-
-        # 7. Output layers on the image tokens only.
-        hidden_states = joint_states[:, txt_seq_len : txt_seq_len + image_seq_len]
-        hidden_states = self.norm_out(hidden_states, image_temb)
+        # 7. Output layers on this rank's image tokens, which follow its text tokens. They
+        #    are per token, so only the output channels need gathering. Every image token
+        #    has the same modulation, so any rows of image_temb serve.
+        local_image_len = min(max(txt_seq_len + image_seq_len - sp_rank * chunk_len, 0), chunk_len) - local_txt_len
+        hidden_states = content_states[:, :local_image_len]
+        hidden_states = self.norm_out(hidden_states, image_temb[:, :local_image_len])
         output = self.proj_out(hidden_states)
+        output = F.pad(output, (0, 0, local_txt_len, chunk_len - local_txt_len - local_image_len))
+        output = gather_and_unpad(output, pad, dim=1)[:, txt_seq_len : txt_seq_len + image_seq_len]
 
         if not return_dict:
             return (output,)

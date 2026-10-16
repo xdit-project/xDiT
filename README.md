@@ -127,8 +127,9 @@ The following open-sourced DiT Models are released with xDiT in day 1.
 | [🟡 Lumina-Image-2.0](https://huggingface.co/Alpha-VLLM/Lumina-Image-2.0) | ✔️ | ✔️ | ❎ | ❎ | ❎ | NA |
 | [🔴 Z-Image Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🟠 Flux 2 klein](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
-| [🟠 Flux 3 Image klein](https://huggingface.co/black-forest-labs/flux-3-image-klein) | NA | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🟠 Flux 2](https://huggingface.co/black-forest-labs/FLUX.2-dev) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
+| [🟠 Flux 3 Image klein](https://huggingface.co/black-forest-labs/flux-3-image-klein) | NA | ✔️ | ❎ | ❎ | ✔️ | NA |
+| [🟠 Flux 3 Image klein base](https://huggingface.co/black-forest-labs/flux-3-image-klein-base) | ✔️ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🟠 Flux](https://huggingface.co/black-forest-labs/FLUX.1-schnell) | NA | ✔️ | ✔️ | ❎ | ✔️ | [Report](./docs/performance/flux.md) |
 | [🟠 Flux Kontext](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) | ❎ | ✔️ |  ❎ | ❎ | ✔️ | NA |
 | [🟠 Chroma1-HD](https://huggingface.co/lodestones/Chroma1-HD) | ✔️ | ✔️ | ❎ | ❎ | ✔️ | NA |
@@ -350,6 +351,7 @@ Below is a list of validated diffusers version requirements. If the model is not
 | [Z-Image Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | >= 0.36.0 |
 | [Flux 2](https://huggingface.co/black-forest-labs/FLUX.2-dev) | >= 0.36.0 |
 | [Ideogram 4](https://huggingface.co/ideogram-ai/ideogram-4-fp8) | >= 0.39.0 |
+| [Flux 3 Image klein](https://huggingface.co/black-forest-labs/flux-3-image-klein) (and klein base) | from source (main; tested at `d42ebf9`) |
 | [Flux](https://huggingface.co/black-forest-labs/FLUX.1-dev) | >= 0.35.2 |
 | [Flux Kontext](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) | >= 0.35.2 |
 | [HunyuanVideo](https://github.com/Tencent/HunyuanVideo) | >= 0.35.2 |

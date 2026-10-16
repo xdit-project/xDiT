@@ -16,7 +16,7 @@ from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
 )
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
-from xfuser.model_executor.layers.usp import USP
+from xfuser.model_executor.layers.usp import USP, attention
 from xfuser.model_executor.models.transformers.transformers_utils import (
     chunk_and_pad_sequence,
     gather_and_unpad,
@@ -29,11 +29,13 @@ class xFuserFlux3AttnProcessor:
     Each sequence stage (text, image and reference-image modes, then the joint
     blocks) shares one instance. Before a stage runs, the transformer sets
     ``valid_kv_len`` to the stage's real length when the SP pad made the sequence
-    longer, so the pad keys are dropped after the all-to-all.
+    longer, so the pad keys are dropped after the all-to-all, and ``local`` when
+    every rank holds the whole stream, so attention runs without collectives.
     """
 
     def __init__(self):
         self.valid_kv_len: Optional[int] = None
+        self.local = False
 
     def __call__(
         self,
@@ -64,8 +66,13 @@ class xFuserFlux3AttnProcessor:
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
 
-        attention_kwargs = None if self.valid_kv_len is None else {"valid_kv_len": self.valid_kv_len}
-        hidden_states = USP(query, key, value, attn_layer=attn, attention_kwargs=attention_kwargs)
+        if self.local:
+            hidden_states = attention(query, key, value)
+        else:
+            attention_kwargs = None if self.valid_kv_len is None else {"valid_kv_len": self.valid_kv_len}
+            hidden_states = USP(
+                query, key, value, attn_layer=attn, attention_kwargs=attention_kwargs, combine_qkv_a2a=True
+            )
 
         hidden_states = hidden_states.transpose(1, 2).flatten(2, 3)
         hidden_states = hidden_states.to(query.dtype)
@@ -93,14 +100,20 @@ class xFuserFlux3Transformer2DWrapper(Flux3Transformer2DModel):
     evenly across ranks, so after the Ulysses all-to-all the pad is a uniform
     suffix that ``valid_kv_len`` removes:
 
-    - Per-mode blocks: the text, image and reference-image streams are sharded
-      and attended separately, then gathered.
+    - Per-mode blocks: the text, image and reference-image streams are attended
+      separately. The image and reference streams are sharded, then gathered. A
+      text stream of at most ``replicate_text_max_tokens`` runs whole on every
+      rank instead, which skips its collectives for a little repeated compute.
     - Joint blocks: ``[text, image, reference]`` is sharded as one sequence. A
       rank's chunk can straddle the text/content boundary, so each block gets
       the chunk's text part (possibly empty) as ``encoder_hidden_states`` and the
       rest as ``hidden_states``. The blocks run unmodified; with one rank this is
       exactly the upstream call.
     """
+
+    # Measured on 8x MI350X at 1024² (u8): replicating 80 or 400 text tokens saves about
+    # 1.5 ms per eager forward of 38 ms; under HIP graphs the difference vanishes.
+    replicate_text_max_tokens = 512
 
     # ConfigMixin picks the config keys to pass from this signature. Wrapping upstream's
     # __init__ shows it upstream's parameters; behind a bare **kwargs every key, flow_map
@@ -144,7 +157,15 @@ class xFuserFlux3Transformer2DWrapper(Flux3Transformer2DModel):
         hidden_states: torch.Tensor,
         temb_mod: torch.Tensor,
         rotary_emb: Tuple[torch.Tensor, torch.Tensor],
+        local: bool = False,
     ) -> torch.Tensor:
+        processor.local = local
+        if local:
+            processor.valid_kv_len = None
+            for block in blocks:
+                hidden_states = block(hidden_states, temb_mod, rotary_emb)
+            return hidden_states
+
         sp_world_size = get_sequence_parallel_world_size()
         seq_len = hidden_states.shape[1]
         pad = (sp_world_size - seq_len % sp_world_size) % sp_world_size
@@ -212,9 +233,17 @@ class xFuserFlux3Transformer2DWrapper(Flux3Transformer2DModel):
             image_cond_hidden_states = self.x_embedders["image_cond"](image_cond_hidden_states)
             cond_rotary_emb = self.pos_embed(image_cond_ids)
 
-        # 5. Per-mode blocks, each mode sharded across the SP ranks on its own.
+        # 5. Per-mode blocks, each mode attended on its own; short text runs whole on every rank.
+        replicate_text = (
+            get_sequence_parallel_world_size() > 1 and encoder_hidden_states.shape[1] <= self.replicate_text_max_tokens
+        )
         encoder_hidden_states = self._run_mode_blocks(
-            self.txt_mode_blocks, self._txt_processor, encoder_hidden_states, txt_early_mod, txt_rotary_emb
+            self.txt_mode_blocks,
+            self._txt_processor,
+            encoder_hidden_states,
+            txt_early_mod,
+            txt_rotary_emb,
+            local=replicate_text,
         )
         hidden_states = self._run_mode_blocks(
             self.mode_blocks["image"], self._image_processor, hidden_states, image_early_mod, image_rotary_emb

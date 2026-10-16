@@ -18,6 +18,9 @@ NUM_HEADS = 24
 TEXT_LEN = 7
 IMAGE_GRID = (3, 5)
 REFERENCE_GRIDS = ((2, 3), (1, 7))
+# Shapes that divide by 2, 4 and 8, so no stream or joint sequence is padded.
+EVEN_SHAPES = (16, (4, 8), ((2, 4), (2, 4)))
+LAYOUTS = {"padded": (TEXT_LEN, IMAGE_GRID, REFERENCE_GRIDS), "even": EVEN_SHAPES}
 
 
 def _tiny_model(device, flow_map=True):
@@ -58,24 +61,25 @@ def _ids(height, width, l_coord):
     return torch.stack(grid, dim=-1).reshape(-1, 4).float()
 
 
-def _inputs(device, with_references):
+def _inputs(device, layout, with_references):
     import torch
 
+    text_len, image_grid, reference_grids = LAYOUTS[layout]
     generator = torch.Generator().manual_seed(1)
-    image_len = IMAGE_GRID[0] * IMAGE_GRID[1]
+    image_len = image_grid[0] * image_grid[1]
     inputs = {
         "hidden_states": torch.randn(1, image_len, 8, generator=generator),
-        "encoder_hidden_states": torch.randn(1, TEXT_LEN, 32, generator=generator),
+        "encoder_hidden_states": torch.randn(1, text_len, 32, generator=generator),
         "timestep": torch.tensor([0.7]),
         "target_timestep": torch.tensor([0.5]),
-        "img_ids": _ids(*IMAGE_GRID, 0),
-        "txt_ids": _txt_ids(TEXT_LEN),
+        "img_ids": _ids(*image_grid, 0),
+        "txt_ids": _txt_ids(text_len),
     }
     if with_references:
-        reference_len = sum(h * w for h, w in REFERENCE_GRIDS)
+        reference_len = sum(h * w for h, w in reference_grids)
         inputs["image_cond_hidden_states"] = torch.randn(1, reference_len, 8, generator=generator)
         inputs["image_cond_ids"] = torch.cat(
-            [_ids(h, w, -(1 + index)) for index, (h, w) in enumerate(REFERENCE_GRIDS)], dim=0
+            [_ids(h, w, -(1 + index)) for index, (h, w) in enumerate(reference_grids)], dim=0
         )
     return {name: value.to(device) for name, value in inputs.items()}
 
@@ -130,18 +134,26 @@ def _sp_worker(rank, world_size, init_method, ulysses_degree, ring_degree):
         stock = _tiny_model(device)
         wrapper = _wrapper_of(stock, device)
 
-        for with_references in (False, True):
-            inputs = _inputs(device, with_references)
-            with torch.no_grad():
-                reference = stock(**inputs).sample
-                actual = wrapper(**inputs).sample
-            torch.testing.assert_close(
-                actual,
-                reference,
-                rtol=1e-4,
-                atol=1e-4,
-                msg=lambda m: f"Ulysses {ulysses_degree} x ring {ring_degree}, references={with_references}: {m}",
-            )
+        for layout in LAYOUTS:
+            for with_references in (False, True):
+                inputs = _inputs(device, layout, with_references)
+                with torch.no_grad():
+                    reference = stock(**inputs).sample
+                # The text stream either runs whole on every rank or is sharded.
+                for replicate_text in (True, False):
+                    wrapper.replicate_text_max_tokens = 512 if replicate_text else 0
+                    with torch.no_grad():
+                        actual = wrapper(**inputs).sample
+                    torch.testing.assert_close(
+                        actual,
+                        reference,
+                        rtol=1e-4,
+                        atol=1e-4,
+                        msg=lambda m: (
+                            f"Ulysses {ulysses_degree} x ring {ring_degree}, {layout} layout, "
+                            f"references={with_references}, replicated text={replicate_text}: {m}"
+                        ),
+                    )
     finally:
         destroy_model_parallel()
         destroy_distributed_environment()

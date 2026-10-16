@@ -124,12 +124,10 @@ def _flux_worker(
         pytest.param(2, 1, 15, 8, id="padded-image"),
         pytest.param(2, 1, 16, 7, id="replicated-text"),
         pytest.param(3, 1, 16, 8, id="padded-image-replicated-text"),
-        # Ring cases keep each rank's query length a multiple of 32, which the
-        # memory-efficient kernel needs to merge ring steps.
         pytest.param(1, 2, 34, 15, id="ring-replicated-text"),
         pytest.param(2, 2, 40, 6, id="ulysses-ring-replicated-text"),
         pytest.param(1, 2, 57, 6, id="ring-padded-image"),
-        pytest.param(1, 2, 33, 15, id="ring-padded-image-replicated-text"),
+        pytest.param(1, 2, 33, 7, id="ring-padded-image-replicated-text"),
         pytest.param(2, 2, 59, 8, id="ulysses-ring-padded-image"),
         pytest.param(2, 2, 39, 6, id="ulysses-ring-padded-image-replicated-text"),
     ],

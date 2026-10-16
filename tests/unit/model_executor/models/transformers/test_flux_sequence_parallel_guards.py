@@ -1,4 +1,4 @@
-"""FLUX refuses replicated prompts before bypassing requested FP8 communications."""
+"""FLUX refuses unsupported combinations of padding, prompt replication, and attention."""
 
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -9,6 +9,7 @@ import torch
 pytest.importorskip("diffusers.models.transformers.transformer_flux")
 
 from xfuser.core.distributed.fp8_comms import Fp8CommsState  # noqa: E402
+from xfuser.core.attention.spec import AttentionBackendType  # noqa: E402
 from xfuser.model_executor.models.transformers import transformer_flux as flux  # noqa: E402
 
 
@@ -16,8 +17,8 @@ from xfuser.model_executor.models.transformers import transformer_flux as flux  
 def forward_context(monkeypatch):
     """Stub distributed state and the third-party transformer at the wrapper boundary."""
 
-    def make(*, ulysses, ring, fp8_comms):
-        runtime = SimpleNamespace(fp8_comms=fp8_comms, split_text_embed_in_sp=True)
+    def make(*, ulysses, ring, fp8_comms, attention_backend=AttentionBackendType.SDPA):
+        runtime = SimpleNamespace(fp8_comms=fp8_comms, split_text_embed_in_sp=True, attention_backend=attention_backend)
         monkeypatch.setattr(flux, "get_runtime_state", lambda: runtime)
         monkeypatch.setattr(flux, "get_sequence_parallel_world_size", lambda: ulysses * ring)
         monkeypatch.setattr(flux, "get_sequence_parallel_rank", lambda: 1)
@@ -45,11 +46,11 @@ def forward_context(monkeypatch):
     return make
 
 
-def _inputs(text_tokens):
+def _inputs(text_tokens, image_tokens=16):
     return {
-        "hidden_states": torch.arange(128, dtype=torch.float32).reshape(1, 16, 8),
+        "hidden_states": torch.arange(image_tokens * 8, dtype=torch.float32).reshape(1, image_tokens, 8),
         "encoder_hidden_states": torch.arange(text_tokens * 12, dtype=torch.float32).reshape(1, text_tokens, 12),
-        "img_ids": torch.zeros(16, 3),
+        "img_ids": torch.arange(image_tokens * 3, dtype=torch.float32).reshape(image_tokens, 3),
         "txt_ids": torch.arange(text_tokens * 3, dtype=torch.float32).reshape(text_tokens, 3),
         "return_dict": False,
     }
@@ -99,8 +100,11 @@ def test_fp8_comms_accepts_divisible_prompt_and_forwards_its_local_shard(forward
     assert runtime.split_text_embed_in_sp is True
 
 
-def test_replicated_prompt_without_fp8_comms_reaches_transformer_in_full(forward_context):
-    model, runtime, transformer_forward, _ = forward_context(ulysses=2, ring=2, fp8_comms=None)
+@pytest.mark.parametrize("backend", [AttentionBackendType.SDPA, AttentionBackendType.AITER_VSA])
+def test_unpadded_replicated_prompt_reaches_transformer_in_full(forward_context, backend):
+    model, runtime, transformer_forward, _ = forward_context(
+        ulysses=2, ring=2, fp8_comms=None, attention_backend=backend
+    )
     inputs = _inputs(6)
 
     model(**inputs)
@@ -111,3 +115,44 @@ def test_replicated_prompt_without_fp8_comms_reaches_transformer_in_full(forward
     torch.testing.assert_close(forwarded_kwargs["txt_ids"], inputs["txt_ids"])
     assert forwarded_kwargs["joint_attention_kwargs"]["sp_text_tokens"] == 6
     assert runtime.split_text_embed_in_sp is False
+
+
+def test_vsa_rejects_padded_images_with_replicated_prompt_before_attention(forward_context):
+    model, runtime, transformer_forward, sp_gather = forward_context(
+        ulysses=2, ring=1, fp8_comms=None, attention_backend=AttentionBackendType.AITER_VSA
+    )
+
+    with pytest.raises(NotImplementedError, match="cannot pad 15 image tokens for 2 sequence parallel ranks") as caught:
+        model(**_inputs(7, image_tokens=15))
+
+    assert AttentionBackendType.AITER_VSA.value in str(caught.value)
+    assert "while the 7-token prompt is replicated" in str(caught.value)
+    assert "image token count or the prompt length divisible by the sequence parallel degree" in str(caught.value)
+    transformer_forward.assert_not_called()
+    sp_gather.assert_not_called()
+    assert runtime.split_text_embed_in_sp is True
+
+
+@pytest.mark.parametrize(
+    "backend, text_tokens, prompt_slice",
+    [
+        pytest.param(AttentionBackendType.AITER_VSA, 8, slice(4, 8), id="vsa-sharded-prompt"),
+        pytest.param(AttentionBackendType.SDPA, 7, slice(None), id="dense-replicated-prompt"),
+    ],
+)
+def test_supported_backends_forward_padded_images_and_ids_with_the_prompt(
+    forward_context, backend, text_tokens, prompt_slice
+):
+    model, _, transformer_forward, _ = forward_context(ulysses=2, ring=1, fp8_comms=None, attention_backend=backend)
+    inputs = _inputs(text_tokens, image_tokens=15)
+
+    model(**inputs)
+
+    forwarded_image, forwarded_prompt = transformer_forward.call_args.args
+    forwarded_kwargs = transformer_forward.call_args.kwargs
+    expected_image = torch.cat([inputs["hidden_states"][:, 8:], torch.zeros(1, 1, 8)], dim=1)
+    expected_ids = torch.cat([inputs["img_ids"][8:], torch.zeros(1, 3)], dim=0)
+    torch.testing.assert_close(forwarded_image, expected_image)
+    torch.testing.assert_close(forwarded_kwargs["img_ids"], expected_ids)
+    torch.testing.assert_close(forwarded_prompt, inputs["encoder_hidden_states"][:, prompt_slice])
+    torch.testing.assert_close(forwarded_kwargs["txt_ids"], inputs["txt_ids"][prompt_slice])

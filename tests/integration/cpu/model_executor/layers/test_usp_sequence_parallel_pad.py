@@ -11,6 +11,11 @@ Joint tokens (a replicated prompt joined after the exchange) are not part of
 the declared length. The kernel here crops K to `valid_kv_len` when the kwargs
 still carry it, as the dense fallback of AITER_VSA does, so a length that
 outlived the trim would cut the joint keys' share of K off again.
+
+A key-padding mask (`key_padding_mask_attention_kwargs`, for batched prompts of
+different lengths) is over the keys USP attends to: the trimmed main keys, with
+the joint keys where they are joined. Its cases check that order against SDPA
+over the same keys with the same mask, eagerly and under torch.compile.
 """
 
 import os
@@ -37,6 +42,13 @@ JOINT_CASES = {
     "joint-rear-declared-pad": dict(real_len=45, declared=True, joint="rear", joint_query=True),
     # Only the keys are joint, as for the understanding tokens of Cosmos3.
     "joint-front-keys-only": dict(real_len=45, declared=True, joint="front"),
+}
+# A mask hides keys 7-10 and the third from last of the keys USP attends to (joint ones included).
+KEY_MASK_CASES = {
+    "key-mask-no-pad": dict(real_len=PADDED_LEN, key_mask=True),
+    "key-mask-declared-pad": dict(real_len=45, declared=True, key_mask=True),
+    "key-mask-joint-front": dict(real_len=45, declared=True, joint="front", joint_query=True, key_mask=True),
+    "key-mask-joint-rear": dict(real_len=45, declared=True, joint="rear", joint_query=True, key_mask=True),
 }
 # (Ulysses, ring) degrees. At ring degree 4 only one of a rank's four steps attends to the pad.
 MODES = {"ulysses": (2, 1), "ring": (1, 2), "hybrid": (2, 2), "ring4": (1, 4), "hybrid-ring4": (2, 4)}
@@ -77,6 +89,10 @@ def _wire_usp_to_gloo(torch, ulysses, ring):
         valid_kv_len = call.attention_kwargs.get("valid_kv_len")
         if valid_kv_len is not None and valid_kv_len < key.shape[2]:
             key, value = key[:, :, :valid_kv_len], value[:, :, :valid_kv_len]
+        attn_mask = call.attention_kwargs.get("attn_mask")
+        if attn_mask is not None:
+            # Like SDPA, which USP routes masked calls to: no log-sum-exp, so no ring attention.
+            return torch.nn.functional.scaled_dot_product_attention(query, key, value, attn_mask=attn_mask), None
         return torch.ops.aten._scaled_dot_product_flash_attention_for_cpu(
             query, key, value, dropout_p=0.0, is_causal=call.is_causal
         )[:2]
@@ -106,6 +122,17 @@ def _joint_inputs(torch):
     return [torch.randn(1, HEADS, JOINT_LEN, HEAD_DIM, generator=generator) for _ in range(3)]
 
 
+def _key_mask(torch, case):
+    """The [1, keys] mask of a key-mask case over the keys USP attends to, or None."""
+    if not case.get("key_mask"):
+        return None
+    keys = case["real_len"] + (JOINT_LEN if case.get("joint") else 0)
+    mask = torch.ones(1, keys, dtype=torch.bool)
+    mask[:, 7:11] = False
+    mask[:, -3] = False
+    return mask
+
+
 def _real_rows_error(torch, rank, world_size, case, output):
     query, key, value = (tensor[:, :, : case["real_len"]] for tensor in _inputs(torch, case["real_len"]))
     if case.get("joint"):
@@ -118,9 +145,13 @@ def _real_rows_error(torch, rank, world_size, case, output):
         if case.get("joint_query"):
             # With joint queries the output also holds their rows, ahead of or behind the main ones.
             output = output[:, :, JOINT_LEN:] if front else output[:, :, :-JOINT_LEN]
-    expected = torch.ops.aten._scaled_dot_product_flash_attention_for_cpu(
-        query, key, value, is_causal=case.get("causal", False)
-    )[0]
+    mask = _key_mask(torch, case)
+    if mask is not None:
+        expected = torch.nn.functional.scaled_dot_product_attention(query, key, value, attn_mask=mask[:, None, None, :])
+    else:
+        expected = torch.ops.aten._scaled_dot_product_flash_attention_for_cpu(
+            query, key, value, is_causal=case.get("causal", False)
+        )[0]
     chunk = PADDED_LEN // world_size
     rows = range(rank * chunk, min((rank + 1) * chunk, case["real_len"]))
     if not rows:
@@ -145,9 +176,25 @@ def _run_cases(torch, usp, rank, world_size, attention, cases):
             joint = dict(joint_key=joint_key, joint_value=joint_value, joint_strategy=case["joint"])
             if case.get("joint_query"):
                 joint["joint_query"] = joint_query
-        output = attention(*local, is_causal=case.get("causal", False), attention_kwargs=attention_kwargs, **joint)
+        output = attention(
+            *local,
+            is_causal=case.get("causal", False),
+            attention_kwargs=attention_kwargs,
+            key_mask=_key_mask(torch, case),
+            **joint,
+        )
         errors[name] = _real_rows_error(torch, rank, world_size, case, output)
     return errors
+
+
+def _usp_with_key_mask(usp):
+    """USP as a wrapper calls it: the mask helper first, then USP with the backend and kwargs it returns."""
+
+    def call(query, key, value, key_mask=None, attention_kwargs=None, **kwargs):
+        attention_kwargs, backend = usp.key_padding_mask_attention_kwargs(key_mask, attention_kwargs)
+        return usp.USP(query, key, value, backend=backend, attention_kwargs=attention_kwargs, **kwargs)
+
+    return call
 
 
 def _packed_keys_error(torch, usp, rank, world_size):
@@ -177,11 +224,12 @@ def _worker(rank, world_size, init_method, result_queue, ulysses, ring, compile_
 
         dist.init_process_group("gloo", init_method=init_method, rank=rank, world_size=world_size)
         usp = _wire_usp_to_gloo(torch, ulysses, ring)
-        report = {"errors": {"eager": _run_cases(torch, usp, rank, world_size, usp.USP, cases)}, "graph_breaks": {}}
+        entry = _usp_with_key_mask(usp)
+        report = {"errors": {"eager": _run_cases(torch, usp, rank, world_size, entry, cases)}, "graph_breaks": {}}
         for backend in compile_backends:
             torch._dynamo.reset()
             torch._dynamo.utils.counters.clear()
-            compiled = torch.compile(usp.USP, backend=backend)
+            compiled = torch.compile(entry, backend=backend)
             report["errors"][backend] = _run_cases(torch, usp, rank, world_size, compiled, cases)
             report["graph_breaks"][backend] = sum(torch._dynamo.utils.counters["graph_break"].values())
         if ring > 1 and not any(case.get("joint") for case in cases.values()):
@@ -272,3 +320,30 @@ def test_usp_with_joint_tokens_attends_them_once_and_drops_only_the_main_pad(tmp
     for _, rank, report in results:
         for case, error in report["errors"]["eager"].items():
             assert error <= TOLERANCE, f"rank {rank}, {case}: max error {error:.3e}"
+
+
+def test_usp_with_a_key_padding_mask_attends_the_keys_in_the_order_the_mask_describes(tmp_path):
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("yunchang", reason="yunchang builds the Ulysses and ring process groups")
+    if not torch.distributed.is_gloo_available():
+        pytest.skip("torch.distributed gloo backend is unavailable")
+    ulysses, ring = MODES["ulysses"]
+    world_size = ulysses * ring
+    compile_backends = _compile_backends()
+
+    exit_codes, results = _run_spawned(
+        torch,
+        f"file://{tmp_path / 'usp-init'}",
+        world_size,
+        (ulysses, ring, compile_backends, KEY_MASK_CASES),
+        timeout=600,
+    )
+
+    errors = [result for result in results if result[0] == "error"]
+    assert not errors, "\n".join(result[2] for result in errors)
+    assert exit_codes == [0] * world_size
+    for _, rank, report in results:
+        for backend, backend_errors in report["errors"].items():
+            for case, error in backend_errors.items():
+                assert error <= TOLERANCE, f"rank {rank}, {backend}, {case}: max error {error:.3e}"
+        assert report["graph_breaks"] == {backend: 0 for backend in compile_backends}, f"rank {rank}"

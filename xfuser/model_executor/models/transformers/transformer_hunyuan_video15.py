@@ -6,12 +6,13 @@ from diffusers.models.embeddings import apply_rotary_emb
 from diffusers.models.attention_processor import Attention
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
-from xfuser.model_executor.layers.usp import USP
+from xfuser.model_executor.layers.usp import USP, key_padding_mask_attention_kwargs
 from xfuser.model_executor.models.transformers.transformers_utils import (
     chunk_and_pad_sequence,
     gather_and_unpad,
     local_sp_pad_rows,
     sp_pad_spans_ranks,
+    text_image_key_mask,
     zero_sp_pad_rows_hook,
 )
 from xfuser.core.attention import registry as attention_registry
@@ -108,7 +109,8 @@ class xFuserHunyuanVideo15AttnProcessor:
 
         #! ---------------------------------------- ATTENTION ----------------------------------------
         self.attention_kwargs["encoder_sequence_length"] = num_encoder_hidden_states_tokens
-        self.attention_kwargs["text_mask"] = attention_mask
+        # attention_mask is the wrapper's dense [batch, keys] mask, None when no key is masked.
+        attention_kwargs, backend = key_padding_mask_attention_kwargs(attention_mask, self.attention_kwargs)
         if encoder_hidden_states is not None and not split_text:
             hidden_states = USP(
                 query,
@@ -120,7 +122,8 @@ class xFuserHunyuanVideo15AttnProcessor:
                 joint_key=encoder_key.transpose(1, 2),
                 joint_value=encoder_value.transpose(1, 2),
                 joint_strategy="rear",
-                attention_kwargs=self.attention_kwargs,
+                backend=backend,
+                attention_kwargs=attention_kwargs,
             )
         else:
             hidden_states = USP(
@@ -129,7 +132,8 @@ class xFuserHunyuanVideo15AttnProcessor:
                 value,
                 dropout_p=0.0,
                 is_causal=False,
-                attention_kwargs=self.attention_kwargs,
+                backend=backend,
+                attention_kwargs=attention_kwargs,
             )
 
         # Transpose back to original shape
@@ -400,6 +404,20 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
             valid_kv_len += encoder_sequence_length
         self._self_attn_kwargs["valid_kv_len"] = valid_kv_len if hidden_states_pad_amount or enc_pad else None
 
+        # SSTA applies the per-sample text mask itself. A dense layout gets a [batch, keys] mask over the
+        # keys in the order the attention sees them, and only when prompts of different lengths leave
+        # padded text keys in the batch (a single prompt's padding was dropped above).
+        self._self_attn_kwargs["text_mask"] = encoder_attention_mask if sparse_layout else None
+        attention_mask = None
+        if not sparse_layout and batch_size > 1 and not encoder_attention_mask.all():
+            attention_mask = text_image_key_mask(
+                encoder_attention_mask,
+                image_sequence_length,
+                hidden_states_pad_amount,
+                sp_world_size,
+                joint_strategy=None if get_runtime_state().split_text_embed_in_sp else "rear",
+            )
+
         # 4. Transformer blocks
         if torch.is_grad_enabled() and self.gradient_checkpointing:
             for block in self.transformer_blocks:
@@ -408,7 +426,7 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
                     hidden_states,
                     encoder_hidden_states,
                     temb,
-                    encoder_attention_mask,
+                    attention_mask,
                     image_rotary_emb,
                 )
 
@@ -418,7 +436,7 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
                     hidden_states,
                     encoder_hidden_states,
                     temb,
-                    encoder_attention_mask,
+                    attention_mask,
                     image_rotary_emb,
                 )
 

@@ -1,9 +1,13 @@
-"""The block hook that clears sequence-parallel pad rows serves every wrapper's output layout."""
+"""The helpers the wrappers share: the pad-row hook fits every output layout, the prompt mask follows the keys."""
 
 import pytest
 import torch
 
-from xfuser.model_executor.models.transformers.transformers_utils import sp_pad_spans_ranks, zero_sp_pad_rows_hook
+from xfuser.model_executor.models.transformers.transformers_utils import (
+    sp_pad_spans_ranks,
+    text_image_key_mask,
+    zero_sp_pad_rows_hook,
+)
 
 
 def test_the_selected_output_is_cleared_and_the_other_streams_are_kept():
@@ -42,3 +46,34 @@ def test_the_tokens_are_the_second_to_last_dimension():
 )
 def test_the_pad_spans_ranks_when_it_is_longer_than_one_shard(seq_len, sp_size, spans):
     assert sp_pad_spans_ranks(seq_len, sp_size) is spans
+
+
+def _mask_rows(mask, keys, text_mask):
+    """Check each mask row against the key ids: text ids index the prompt, ids from 100 are image tokens."""
+    assert mask.shape == (text_mask.shape[0], len(keys))
+    for sample in range(text_mask.shape[0]):
+        for position, key in enumerate(keys):
+            assert bool(mask[sample, position]) == (key >= 100 or bool(text_mask[sample, key]))
+
+
+def test_a_sharded_prompt_mask_follows_the_keys_in_gathered_rank_order_without_the_image_padding():
+    # Four ranks, a prompt of 8 tokens (2 per rank) and 5 image tokens padded to 8 (2 per rank). Rank r holds
+    # [text_r, image_r]; the gathered keys are every rank's chunk in rank order and the last image rows are pad.
+    text_mask = torch.tensor([[1, 1, 1, 1, 1, 1, 0, 0], [1, 1, 1, 1, 1, 1, 1, 1]], dtype=torch.bool)
+    gathered = [key for rank in range(4) for key in (2 * rank, 2 * rank + 1, 100 + 2 * rank, 101 + 2 * rank)]
+
+    mask = text_image_key_mask(text_mask, image_tokens=5, sp_pad=3, sp_world_size=4)
+
+    _mask_rows(mask, gathered[:-3], text_mask)
+
+
+@pytest.mark.parametrize("joint_strategy, order", [("front", "text-first"), ("rear", "image-first")])
+def test_a_replicated_prompt_mask_joins_the_unpadded_image_keys_where_usp_joins_the_prompt(joint_strategy, order):
+    text_mask = torch.tensor([[1, 1, 1, 0, 0], [1, 1, 1, 1, 1]], dtype=torch.bool)
+    text, image = [0, 1, 2, 3, 4], [100, 101, 102]
+    keys = text + image if order == "text-first" else image + text
+
+    # The image padding is dropped by USP before it joins the prompt, so it is not in the keys.
+    mask = text_image_key_mask(text_mask, image_tokens=3, sp_pad=1, sp_world_size=2, joint_strategy=joint_strategy)
+
+    _mask_rows(mask, keys, text_mask)

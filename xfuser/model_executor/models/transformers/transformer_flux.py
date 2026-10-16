@@ -37,6 +37,8 @@ from xfuser.core.distributed import (
 from xfuser.core.distributed.parallel_state import _SP
 
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
+from xfuser.core.attention import registry as attention_registry
+from xfuser.core.attention.spec import Sparsity
 from xfuser.core.distributed.runtime_state import get_runtime_state
 
 from xfuser.logger import init_logger
@@ -385,7 +387,7 @@ class xFuserFlux1Transformer2DWrapper(FluxTransformer2DModel):
             block.attn.processor = xFuserFluxAttnProcessor()
         register_fp8_comms_eligible_modules(self, flux_attn_modules(self))
 
-    def pad_to_sp_divisible(self, tensor: torch.Tensor, padding_length: int, dim: int) -> torch.Tensor:
+    def _pad_to_sp_divisible(self, tensor: torch.Tensor, padding_length: int, dim: int) -> torch.Tensor:
         padding = torch.zeros(
             *tensor.shape[:dim], padding_length, *tensor.shape[dim + 1 :], dtype=tensor.dtype, device=tensor.device
         )
@@ -411,16 +413,17 @@ class xFuserFlux1Transformer2DWrapper(FluxTransformer2DModel):
                     f"{sequence_length} image tokens are too few to shard across "
                     f"{sp_world_size} sequence parallel ranks."
                 )
-            hidden_states = self.pad_to_sp_divisible(hidden_states, padding_length, dim=1)
-            img_ids = self.pad_to_sp_divisible(img_ids, padding_length, dim=0)
+            hidden_states = self._pad_to_sp_divisible(hidden_states, padding_length, dim=1)
+            img_ids = self._pad_to_sp_divisible(img_ids, padding_length, dim=0)
         assert hidden_states.shape[0] % get_classifier_free_guidance_world_size() == 0, (
             f"Cannot split dim 0 of hidden_states ({hidden_states.shape[0]}) into {get_classifier_free_guidance_world_size()} parts."
         )
         text_length = encoder_hidden_states.shape[-2]
         if text_length % sp_world_size != 0:
+            runtime_state = get_runtime_state()
             # Replicated prompt joint tensors bypass FP8 all-to-all and calibration;
             # fixed-scale communication would silently remain in bf16 as well.
-            if get_runtime_state().fp8_comms is not None:
+            if runtime_state.fp8_comms is not None:
                 raise ValueError(
                     f"FLUX.1 --use_fp8_comms requires the prompt token count ({text_length}) "
                     f"to be divisible by the sequence parallel degree ({sp_world_size}; "
@@ -429,7 +432,18 @@ class xFuserFlux1Transformer2DWrapper(FluxTransformer2DModel):
                     "Adjust --max_sequence_length or the parallel degrees, "
                     "or disable --use_fp8_comms."
                 )
-            get_runtime_state().split_text_embed_in_sp = False
+            attention_spec = attention_registry.find(runtime_state.attention_backend)
+            if padding_length > 0 and attention_spec is not None and attention_spec.sparsity == Sparsity.VSA:
+                # USP() now clears valid_kv_len after trimming joint calls (#851), so AITER_VSA's dense
+                # path no longer crops K/V again once the replicated prompt is joined. Remove this guard
+                # once that path is validated on AITER hardware.
+                raise NotImplementedError(
+                    f"FLUX.1 on {runtime_state.attention_backend.value} cannot pad "
+                    f"{sequence_length} image tokens for {sp_world_size} sequence parallel ranks "
+                    f"while the {text_length}-token prompt is replicated. Make the image token "
+                    "count or the prompt length divisible by the sequence parallel degree."
+                )
+            runtime_state.split_text_embed_in_sp = False
         else:
             get_runtime_state().split_text_embed_in_sp = True
 

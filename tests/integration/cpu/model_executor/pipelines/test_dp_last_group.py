@@ -44,7 +44,7 @@ def _gather_worker(rank, world_size, init_method, result_queue):
             parallel_state.initialize_model_parallel(backend="gloo", data_parallel_degree=world_size)
 
             state = DiTRuntimeState.__new__(DiTRuntimeState)
-            state.runtime_config = RuntimeConfig(dtype=torch.float32)
+            state.runtime_config = RuntimeConfig(dtype=torch.bfloat16)
             runtime_state._RUNTIME = state
 
             pipeline = _Pipeline.__new__(_Pipeline)
@@ -53,7 +53,12 @@ def _gather_worker(rank, world_size, init_method, result_queue):
                 for request_idx in range(_REQUESTS):
                     latents = torch.full((1, 4, 2, 2), float(10 * rank + request_idx))
                     latents = pipeline.gather_broadcast_latents(latents)
-                    gathered.append([float(sample.unique()) for sample in latents])
+                    gathered.append(
+                        (
+                            latents.dtype,
+                            [float(sample.unique()) for sample in latents],
+                        )
+                    )
                 new_group_calls = new_group.call_count
 
         result_queue.put(("returned", rank, new_group_calls, gathered))
@@ -110,7 +115,13 @@ def test_repeated_requests_create_the_dp_last_group_once(tmp_path):
     assert not errors, "\n".join(result[2] for result in errors)
     assert [process.exitcode for process in processes] == [0] * _WORLD_SIZE
     # Every rank receives both ranks' latents, in rank order, for every request.
-    expected = [[float(request_idx), float(10 + request_idx)] for request_idx in range(_REQUESTS)]
+    expected = [
+        (
+            torch.float32,
+            [float(request_idx), float(10 + request_idx)],
+        )
+        for request_idx in range(_REQUESTS)
+    ]
     assert {rank: (calls, gathered) for _, rank, calls, gathered in results} == {
         0: (1, expected),
         1: (1, expected),

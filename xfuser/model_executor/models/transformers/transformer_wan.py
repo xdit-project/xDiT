@@ -16,8 +16,13 @@ from xfuser.core.distributed import (
     get_sequence_parallel_rank,
     get_sp_group,
     get_runtime_state,
+    is_pipeline_first_stage,
+    is_pipeline_last_stage,
 )
+from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from xfuser.model_executor.layers.attention_processor import xFuserAttentionProcessorRegister
+from xfuser.model_executor.models.transformers.base_transformer import xFuserTransformerBaseWrapper
+from xfuser.model_executor.models.transformers.register import xFuserTransformerWrappersRegister
 from xfuser.envs import PACKAGES_CHECKER
 from xfuser.core.vsa_attention import jenga_scheduled_drop_rate
 from xfuser.model_executor.layers.fused_qk_norm_rope_wan_flydsl import (
@@ -465,3 +470,246 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
             return (output,)
 
         return Transformer2DModelOutput(sample=output)
+
+
+def wan_pipefusion_patch_major(tensor, *, grid, patch_rows):
+    """Reorder frame-major video tokens into contiguous height-stripe patches."""
+    frames, rows, width = grid
+    tensor = tensor.reshape(
+        tensor.shape[0],
+        frames,
+        rows,
+        width,
+        tensor.shape[-2],
+        tensor.shape[-1],
+    )
+    return torch.cat(
+        [stripe.flatten(1, 3) for stripe in tensor.split(patch_rows, dim=2)],
+        dim=1,
+    )
+
+
+class xFuserWanPipeFusionAttnProcessor(xFuserWanAttnProcessor):
+    """Wan self-attention backed by a full-video, patch-major stale-KV cache."""
+
+    def __call__(
+        self,
+        attn: "WanAttention",
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        rotary_emb: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> torch.Tensor:
+        if encoder_hidden_states is not None:
+            return super().__call__(attn, hidden_states, encoder_hidden_states, attention_mask, rotary_emb)
+
+        activation_dtype = hidden_states.dtype
+        query, key, value = self._get_qkv_projections(attn, hidden_states, None)
+        if _HAS_FLYDSL and rotary_emb is not None:
+            query, key = fused_qk_norm_rope(
+                query,
+                key,
+                attn.norm_q,
+                attn.norm_k,
+                rotary_emb[0],
+                rotary_emb[1],
+                attn.heads,
+            )
+            value = value.unflatten(2, (attn.heads, -1))
+        else:
+            query, key, value = self._qk_norm_rope_reference(attn, query, key, value, rotary_emb)
+
+        state = get_runtime_state()
+        if not state.patch_mode:
+            patch_rows = [height // attn._xfuser_wan_spatial_patch_size for height in state.pp_patches_height]
+            key = wan_pipefusion_patch_major(
+                key,
+                grid=attn._xfuser_wan_grid,
+                patch_rows=patch_rows,
+            )
+            value = wan_pipefusion_patch_major(
+                value,
+                grid=attn._xfuser_wan_grid,
+                patch_rows=patch_rows,
+            )
+
+        key, value = get_cache_manager().update_and_get_kv_cache(
+            new_kv=[key, value],
+            layer=attn,
+            slice_dim=1,
+            layer_type="attn",
+        )
+        hidden_states = self.attention_function(
+            query.transpose(1, 2),
+            key.transpose(1, 2),
+            value.transpose(1, 2),
+            attention_kwargs=self.attention_kwargs,
+            attn_layer=None,
+            head_balance_layer=attn,
+        ).transpose(1, 2)
+        hidden_states = hidden_states.flatten(2, 3).to(activation_dtype)
+        hidden_states = attn.to_out[0](hidden_states)
+        return attn.to_out[1](hidden_states)
+
+
+@xFuserTransformerWrappersRegister.register(WanTransformer3DModel)
+class xFuserWanPipeFusionTransformerWrapper(xFuserTransformerBaseWrapper):
+    """Stage-local Wan backbone operating on full-temporal height stripes."""
+
+    def __init__(self, transformer: WanTransformer3DModel):
+        for block in transformer.blocks:
+            block.attn1.processor = xFuserWanPipeFusionAttnProcessor()
+            block.attn2.processor = xFuserWanAttnProcessor(
+                use_ulysses_parallel_attention=False,
+                is_cross_attention=True,
+            )
+        super().__init__(
+            transformer=transformer,
+            transformer_blocks_name=["blocks"],
+        )
+        cache_manager = get_cache_manager()
+        for block in self.blocks:
+            if not cache_manager.has_cache_entry(block.attn1):
+                cache_manager.register_cache_entry(block.attn1, "attn")
+        register_fp8_comms_eligible_modules(self, [block.attn1 for block in self.blocks])
+
+    def pipefusion_compile_capture_forward(
+        self,
+        hidden_states,
+        timestep,
+        encoder_hidden_states,
+        *,
+        pipeline_hidden_states=None,
+        return_dict=True,
+        **kwargs,
+    ):
+        batch, _, frames, height, width = hidden_states.shape
+        p_t, p_h, p_w = self.config.patch_size
+        if is_pipeline_first_stage():
+            sequence = (frames // p_t) * (height // p_h) * (width // p_w)
+            output = hidden_states.new_zeros(
+                (batch, sequence, self.config.num_attention_heads * self.config.attention_head_dim)
+            )
+        else:
+            output = pipeline_hidden_states
+        if is_pipeline_last_stage():
+            output_batch = output.shape[0]
+            output = hidden_states.new_zeros((output_batch, self.config.out_channels, frames, height, width))
+        if not return_dict:
+            return (output,)
+        return Transformer2DModelOutput(sample=output)
+
+    def _rotary_emb(
+        self,
+        num_frames: int,
+        patch_height: int,
+        width: int,
+        patch_start_height: int,
+    ):
+        p_t, p_h, p_w = self.config.patch_size
+        frames = num_frames // p_t
+        rows = patch_height // p_h
+        columns = width // p_w
+        row_start = patch_start_height // p_h
+        split_sizes = (self.rope.t_dim, self.rope.h_dim, self.rope.w_dim)
+        cos_t, cos_h, cos_w = self.rope.freqs_cos.split(split_sizes, dim=1)
+        sin_t, sin_h, sin_w = self.rope.freqs_sin.split(split_sizes, dim=1)
+
+        def expand(t_freqs, h_freqs, w_freqs):
+            t_freqs = t_freqs[:frames].view(frames, 1, 1, -1).expand(frames, rows, columns, -1)
+            h_freqs = h_freqs[row_start : row_start + rows].view(1, rows, 1, -1).expand(frames, rows, columns, -1)
+            w_freqs = w_freqs[:columns].view(1, 1, columns, -1).expand(frames, rows, columns, -1)
+            return torch.cat((t_freqs, h_freqs, w_freqs), dim=-1).reshape(
+                1,
+                frames * rows * columns,
+                1,
+                -1,
+            )
+
+        return expand(cos_t, cos_h, cos_w), expand(sin_t, sin_h, sin_w)
+
+    @staticmethod
+    def _set_block_grid_metadata(block, grid, spatial_patch_size):
+        attention = getattr(block, "attn1", None)
+        if attention is not None:
+            attention._xfuser_wan_grid = grid
+            attention._xfuser_wan_spatial_patch_size = spatial_patch_size
+            return
+        for child in getattr(block, "transformer_blocks", ()):
+            xFuserWanPipeFusionTransformerWrapper._set_block_grid_metadata(
+                child,
+                grid,
+                spatial_patch_size,
+            )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        timestep: torch.LongTensor,
+        encoder_hidden_states: torch.Tensor,
+        encoder_hidden_states_image: Optional[torch.Tensor] = None,
+        pipeline_hidden_states: Optional[torch.Tensor] = None,
+        patch_start_height: int = 0,
+        return_dict: bool = True,
+        attention_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
+        batch_size, _, num_frames, height, width = hidden_states.shape
+        p_t, p_h, p_w = self.config.patch_size
+        rotary_emb = self._rotary_emb(num_frames, height, width, patch_start_height)
+
+        if timestep.ndim == 2:
+            timestep_seq_len = timestep.shape[1]
+            timestep = timestep.flatten()
+        else:
+            timestep_seq_len = None
+        temb, timestep_proj, encoder_hidden_states, encoder_hidden_states_image = self.condition_embedder(
+            timestep,
+            encoder_hidden_states,
+            encoder_hidden_states_image,
+            timestep_seq_len=timestep_seq_len,
+        )
+        if timestep_seq_len is not None:
+            timestep_proj = timestep_proj.unflatten(2, (6, -1))
+        else:
+            timestep_proj = timestep_proj.unflatten(1, (6, -1))
+        if encoder_hidden_states_image is not None:
+            encoder_hidden_states = torch.cat((encoder_hidden_states_image, encoder_hidden_states), dim=1)
+
+        if is_pipeline_first_stage():
+            states = self.patch_embedding(hidden_states).flatten(2).transpose(1, 2).contiguous()
+        else:
+            if pipeline_hidden_states is None:
+                raise ValueError("A non-first Wan PipeFusion stage requires pipeline_hidden_states.")
+            states = pipeline_hidden_states
+
+        grid = (num_frames // p_t, height // p_h, width // p_w)
+        for block in self.blocks:
+            self._set_block_grid_metadata(block, grid, p_h)
+            states = block(states, encoder_hidden_states, timestep_proj, rotary_emb)
+
+        if is_pipeline_last_stage():
+            if temb.ndim == 3:
+                shift, scale = (self.scale_shift_table.unsqueeze(0).to(temb.device) + temb.unsqueeze(2)).chunk(2, dim=2)
+                shift, scale = shift.squeeze(2), scale.squeeze(2)
+            else:
+                shift, scale = (self.scale_shift_table.to(temb.device) + temb.unsqueeze(1)).chunk(2, dim=1)
+            states = (self.norm_out(states.float()) * (1 + scale.to(states.device)) + shift.to(states.device)).type_as(
+                states
+            )
+            states = self.proj_out(states)
+            states = states.reshape(
+                batch_size,
+                num_frames // p_t,
+                height // p_h,
+                width // p_w,
+                p_t,
+                p_h,
+                p_w,
+                -1,
+            )
+            states = states.permute(0, 7, 1, 4, 2, 5, 3, 6)
+            states = states.flatten(6, 7).flatten(4, 5).flatten(2, 3)
+
+        if not return_dict:
+            return (states,)
+        return Transformer2DModelOutput(sample=states)

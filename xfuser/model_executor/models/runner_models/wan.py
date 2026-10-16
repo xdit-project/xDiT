@@ -57,6 +57,32 @@ COMMON_FSDP_STRATEGY = {
 }
 
 WAN_VSA_ACCURACY_FIRST_DROP_RATES = (0.25, 0.40)
+WAN_TI2V_NUM_LAYERS = 30
+
+
+def _configure_wan_ti2v_pipefusion_stages(config: "xFuserArgs") -> None:
+    pp_degree = config.pipefusion_parallel_degree
+    if pp_degree <= 1:
+        return
+    if config.task != "i2v":
+        raise ValueError("Wan2.2-TI2V PipeFusion supports only the i2v task.")
+    if config.ulysses_degree > 1 or config.ring_degree > 1:
+        raise ValueError("Wan2.2-TI2V PipeFusion does not yet compose with sequence parallelism.")
+    if pp_degree > WAN_TI2V_NUM_LAYERS:
+        raise ValueError(f"Wan2.2-TI2V PipeFusion cannot split {WAN_TI2V_NUM_LAYERS} blocks across {pp_degree} stages.")
+    if config.attn_layer_num_for_pp is None:
+        blocks_per_stage, remainder = divmod(WAN_TI2V_NUM_LAYERS, pp_degree)
+        config.attn_layer_num_for_pp = [blocks_per_stage + (stage < remainder) for stage in range(pp_degree)]
+    else:
+        split = config.attn_layer_num_for_pp
+        if len(split) != pp_degree or any(blocks <= 0 for blocks in split):
+            raise ValueError(
+                "Wan2.2-TI2V --attn_layer_num_for_pp must assign a positive block count to every pipeline stage."
+            )
+        if sum(split) != WAN_TI2V_NUM_LAYERS:
+            raise ValueError(
+                f"Wan2.2-TI2V --attn_layer_num_for_pp must assign all {WAN_TI2V_NUM_LAYERS} transformer blocks."
+            )
 
 
 def _build_attention_kwargs(config: "xFuserArgs") -> dict:
@@ -889,6 +915,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
+        pipefusion_parallel_degree=True,
         fully_shard_degree=True,
         use_cfg_parallel=True,
         use_fp8_gemms=True,
@@ -912,6 +939,10 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         super()._validate_config(config)
         if config.use_cfg_parallel and config.task != "i2v":
             raise ValueError("Wan2.2-TI2V supports CFG parallelism only for the i2v task.")
+
+    def _customize_settings(self, config: xFuserArgs) -> None:
+        super()._customize_settings(config)
+        _configure_wan_ti2v_pipefusion_stages(config)
 
     default_input_values = DefaultInputValues(
         height=736,
@@ -962,6 +993,28 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
     )
 
     def _load_model(self) -> DiffusionPipeline:
+        if self.config.pipefusion_parallel_degree > 1:
+            from diffusers.models.transformers.transformer_wan import WanTransformer3DModel
+
+            from xfuser.model_executor.pipelines.pipeline_wan_pipefusion import (
+                xFuserWanTI2VPipeFusionPipeline,
+            )
+
+            self.engine_config.runtime_config.dtype = torch.bfloat16
+            transformer, pipeline_kwargs = self.loader.plan_pipefusion_components(
+                WanTransformer3DModel,
+                torch_dtype=torch.bfloat16,
+            )
+            pipe = xFuserWanTI2VPipeFusionPipeline.from_pretrained(
+                pretrained_model_name_or_path=self.settings.model_name,
+                torch_dtype=torch.bfloat16,
+                engine_config=self.engine_config,
+                **pipeline_kwargs,
+            )
+            if transformer is not None:
+                self.loader.mark_pipeline_stage_blockwise(pipe.transformer, transformer)
+            return pipe
+
         from xfuser.model_executor.models.transformers.transformer_wan import (
             xFuserWanTransformer3DWrapper,
         )
@@ -998,10 +1051,16 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         if self.config.task == "i2v":
             kwargs["image"] = input_args["image"]
         output = self.pipe(**kwargs)
-        return DiffusionOutput(videos=output.frames, pipe_args=input_args)
+        return DiffusionOutput(videos=output.frames if output else [], pipe_args=input_args)
 
     def _get_compile_warmup_steps(self, input_args: dict) -> Optional[int]:
-        return None  # full warmup cycle
+        if (
+            self.config.pipefusion_parallel_degree > 1
+            and not get_runtime_state().has_attention_schedule()
+            and not get_runtime_state().has_gemm_schedule()
+        ):
+            return 2
+        return None  # scheduled backends still need a full warmup cycle
 
     def _preprocess_args_images(self, input_args: dict) -> dict:
         input_args = super()._preprocess_args_images(input_args)

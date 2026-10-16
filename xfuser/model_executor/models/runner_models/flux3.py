@@ -7,6 +7,7 @@ import torch
 
 from xfuser.config.args import xFuserArgs
 from xfuser.core.utils.runner_utils import log, resize_and_crop_image
+from xfuser.envs import PACKAGES_CHECKER
 from xfuser.model_executor.models.runner_models.base_model import (
     DIFFUSERS_FROM_SOURCE,
     DefaultInputValues,
@@ -157,6 +158,13 @@ class _Flux3Model(xFuserModel):
         # Compiling the blocks keeps the transformer object, and with it the forward
         # signature the denoise step reads, and leaves the SP shard and gather glue eager.
         return True
+
+    def _get_compile_mode(self) -> str:
+        # A sharded forward is launch-bound: graphs cut a compiled u8 1024² forward on
+        # MI350X from 22 to 17 ms. Graphs re-capture pathologically on RDNA4, as for FLUX.2.
+        if PACKAGES_CHECKER._on_rdna4():
+            return "default"
+        return "reduce-overhead"
 
     def _get_runtime_state_pipeline(self):
         # The transformer takes tokens the pipeline already packed 2x2, so it has no

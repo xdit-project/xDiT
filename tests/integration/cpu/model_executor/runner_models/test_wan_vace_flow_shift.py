@@ -44,6 +44,7 @@ def vace_runner(monkeypatch):
     monkeypatch.setattr(base_model, "initialize_runtime_state", lambda *args: None)
     monkeypatch.setattr(base_model, "runtime_state_is_initialized", lambda: False)
     monkeypatch.setattr(wan, "get_runtime_state", lambda: Mock())
+    monkeypatch.setattr(base_model, "get_runtime_state", lambda: Mock())
     # Bypass GPU timing only; all tensors and scheduler computation stay on CPU.
     monkeypatch.setattr(torch.cuda, "Event", lambda **kwargs: Mock(elapsed_time=lambda end: 1.0))
     monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)

@@ -70,6 +70,7 @@ def test_initialize_sets_up_every_parallel_vae_before_enabling_options(monkeypat
     class Runner:
         initialize = xFuserModel.initialize
         _decoding_vaes = xFuserModel._decoding_vaes
+        _wrapper_parallelizes_vae = xFuserModel._wrapper_parallelizes_vae
 
         def __init__(self):
             self.config = SimpleNamespace(

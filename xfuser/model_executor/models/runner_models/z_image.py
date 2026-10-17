@@ -30,6 +30,21 @@ def _normalize_prompt(prompt_input):
     raise TypeError(f"prompt must be str or list[str], got {type(prompt_input)}")
 
 
+def _check_negative_prompt_is_used(model, input_args: dict) -> None:
+    # ZImagePipeline only encodes the negative prompt when guidance_scale > 0.
+    if input_args["negative_prompt"] and input_args["guidance_scale"] <= 0:
+        raise ValueError(f"{model.settings.model_name} ignores --negative_prompt unless --guidance_scale is above 0.")
+
+
+def _negative_prompt_per_prompt(prompt: list, negative_prompt):
+    """ZImagePipeline wants one negative prompt per prompt, so a single one is repeated."""
+    if not negative_prompt:
+        return None
+    if isinstance(negative_prompt, str):
+        return [negative_prompt] * len(prompt)
+    return negative_prompt
+
+
 def _keep_timesteps_host_resident(pipe) -> None:
     """Elide the per-denoise-step device->host sync in ``ZImagePipeline.__call__``.
 
@@ -218,6 +233,7 @@ class xFuserZImageModel(_ZImageCompileMixin, xFuserModel):
                 f"{self.settings.model_name} needs --guidance_scale > 0 with --use_cfg_parallel; without "
                 "guidance there is no negative branch to run on the second rank."
             )
+        _check_negative_prompt_is_used(self, input_args)
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import ZImagePipeline
@@ -244,6 +260,7 @@ class xFuserZImageModel(_ZImageCompileMixin, xFuserModel):
             height=input_args["height"],
             width=input_args["width"],
             prompt=prompt,
+            negative_prompt=_negative_prompt_per_prompt(prompt, input_args["negative_prompt"]),
             num_inference_steps=input_args["num_inference_steps"],
             guidance_scale=input_args["guidance_scale"],
             generator=self._make_generator(input_args["seed"]),
@@ -333,12 +350,17 @@ class xFuserZImageTurboModel(_ZImageCompileMixin, xFuserModel):
         _keep_timesteps_host_resident(pipe)
         return pipe
 
+    def _validate_args(self, input_args: dict) -> None:
+        super()._validate_args(input_args)
+        _check_negative_prompt_is_used(self, input_args)
+
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         prompt = _normalize_prompt(input_args["prompt"])
         output = self.pipe(
             height=input_args["height"],
             width=input_args["width"],
             prompt=prompt,
+            negative_prompt=_negative_prompt_per_prompt(prompt, input_args["negative_prompt"]),
             num_inference_steps=input_args["num_inference_steps"],
             guidance_scale=input_args["guidance_scale"],
             generator=self._make_generator(input_args["seed"]),

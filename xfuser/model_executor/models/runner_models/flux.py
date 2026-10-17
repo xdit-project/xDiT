@@ -153,7 +153,7 @@ class xFuserFluxModel(xFuserModel):
         return DiffusionOutput(images=images, pipe_args=input_args)
 
 
-def _reject_flux2_pipefusion_parallel_vae(config) -> None:
+def _refuse_flux2_pipefusion_parallel_vae(config) -> None:
     """Refuse the FLUX.2 PipeFusion wrapper with --use_parallel_vae.
 
     That wrapper decodes only on its last pipeline stage, so a decoder sharded
@@ -387,7 +387,7 @@ class xFuserFlux2Model(xFuserModel):
 
     def _validate_config(self, config) -> None:
         super()._validate_config(config)
-        _reject_flux2_pipefusion_parallel_vae(config)
+        _refuse_flux2_pipefusion_parallel_vae(config)
 
     def _load_model(self) -> DiffusionPipeline:
         if self.config.pipefusion_parallel_degree > 1:
@@ -523,7 +523,7 @@ class xFuserFlux2Klein9BModel(xFuserModel):
 
     def _validate_config(self, config) -> None:
         super()._validate_config(config)
-        _reject_flux2_pipefusion_parallel_vae(config)
+        _refuse_flux2_pipefusion_parallel_vae(config)
 
     def _load_model(self) -> DiffusionPipeline:
         if self.config.pipefusion_parallel_degree > 1:

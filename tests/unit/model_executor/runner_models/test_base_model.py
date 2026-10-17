@@ -56,6 +56,24 @@ def test_too_few_prompts_for_the_data_parallel_groups_are_rejected(monkeypatch):
         model._split_prompts_for_dp({"prompt": ["a cat", "a dog"], "negative_prompt": None})
 
 
+@pytest.mark.parametrize(("parallelizes_vae", "prompt_count"), [(True, 3), (False, 3), (True, 4)])
+def test_a_wrapper_parallel_vae_needs_the_same_prompt_count_in_every_data_parallel_group(
+    monkeypatch, parallelizes_vae, prompt_count
+):
+    monkeypatch.setattr(base_model, "get_data_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(base_model, "get_data_parallel_rank", lambda: 0)
+    model = object.__new__(_StubModel)
+    model.config = SimpleNamespace(data_parallel_degree=2)
+    model._legacy_pipe = SimpleNamespace(parallelizes_vae=lambda: parallelizes_vae)
+    input_args = {"prompt": [str(i) for i in range(prompt_count)], "negative_prompt": None}
+
+    if parallelizes_vae and prompt_count % 2:
+        with pytest.raises(ValueError, match="3 prompts must divide evenly across --data_parallel_degree 2"):
+            model._split_prompts_for_dp(input_args)
+    else:
+        assert model._split_prompts_for_dp(input_args)["prompt"] == input_args["prompt"][0::2]
+
+
 def _model_class(**attributes):
     from xfuser.model_executor.models.runner_models.base_model import xFuserModel
 

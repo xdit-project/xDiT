@@ -1412,6 +1412,12 @@ class xFuserModel(abc.ABC):
                 f"Number of prompts ({len(prompts)}) is less than data_parallel_world_size ({dp_world_size}). "
             )
 
+        if self._wrapper_parallelizes_vae() and len(prompts) % dp_world_size:
+            raise ValueError(
+                f"--use_parallel_vae gathers the latents of every DP group, so the {len(prompts)} prompts "
+                f"must divide evenly across --data_parallel_degree {dp_world_size}."
+            )
+
         local_prompts = prompts[dp_rank::dp_world_size]
         if isinstance(negative_prompts, list) and len(negative_prompts) != 1:
             local_negative_prompts = negative_prompts[dp_rank::dp_world_size]

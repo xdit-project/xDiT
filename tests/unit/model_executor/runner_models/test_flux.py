@@ -48,3 +48,4 @@ def test_ulysses_runs_record_the_requested_size(monkeypatch, flux_runtime_state,
 
     assert output.images == ["image"]
     assert (state.input_config.height, state.input_config.width) == (size, size)
+    assert state.pp_patches_height is None  # the token sequence is sharded by the transformer, not by row patches

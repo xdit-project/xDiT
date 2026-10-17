@@ -408,7 +408,7 @@ class xFuserFlux1Transformer2DWrapper(FluxTransformer2DModel):
         sequence_length = hidden_states.shape[1]
         padding_length = (sp_world_size - (sequence_length % sp_world_size)) % sp_world_size
         if padding_length > 0:
-            if padding_length > (sequence_length + padding_length) // sp_world_size:
+            if padding_length >= (sequence_length + padding_length) // sp_world_size:
                 raise ValueError(
                     f"{sequence_length} image tokens are too few to shard across "
                     f"{sp_world_size} sequence parallel ranks."

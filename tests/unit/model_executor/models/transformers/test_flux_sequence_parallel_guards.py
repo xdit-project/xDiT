@@ -156,3 +156,25 @@ def test_supported_backends_forward_padded_images_and_ids_with_the_prompt(
     torch.testing.assert_close(forwarded_kwargs["img_ids"], expected_ids)
     torch.testing.assert_close(forwarded_prompt, inputs["encoder_hidden_states"][:, prompt_slice])
     torch.testing.assert_close(forwarded_kwargs["txt_ids"], inputs["txt_ids"][prompt_slice])
+    assert forwarded_kwargs["joint_attention_kwargs"]["sp_padding"] == 1
+
+
+@pytest.mark.parametrize(
+    "ulysses, ring, image_tokens",
+    [pytest.param(2, 1, 1, id="ulysses"), pytest.param(1, 4, 9, id="ring"), pytest.param(2, 2, 3, id="hybrid")],
+)
+def test_image_whose_last_rank_would_hold_only_padding_is_rejected(forward_context, ulysses, ring, image_tokens):
+    model, _, transformer_forward, sp_gather = forward_context(ulysses=ulysses, ring=ring, fp8_comms=None)
+
+    with pytest.raises(ValueError, match=f"{image_tokens} image tokens are too few to shard across {ulysses * ring}"):
+        model(**_inputs(8, image_tokens=image_tokens))
+
+    transformer_forward.assert_not_called()
+    sp_gather.assert_not_called()
+
+
+def test_pipefusion_rejects_padded_image_tokens(monkeypatch):
+    monkeypatch.setattr(flux, "get_runtime_state", lambda: SimpleNamespace(num_pipeline_patch=2))
+
+    with pytest.raises(NotImplementedError, match="PipeFusion does not support image tokens padded"):
+        flux.xFuserFluxAttnProcessor()(Mock(), torch.zeros(1, 4, 8), sp_padding=1)

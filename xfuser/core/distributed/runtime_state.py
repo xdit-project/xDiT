@@ -452,6 +452,11 @@ class DiTRuntimeState(RuntimeState):
             )
         return attn_steps or gemm_steps
 
+    def reset_step_counter(self) -> None:
+        """Restart an active per-step schedule at its first step."""
+        if self.step_counter is not None:
+            self.step_counter = torch.tensor(0, dtype=torch.int)
+
     def increment_step_counter(self):
         """
         Advance the denoising step and set per-step scheduled backends/modes when active.

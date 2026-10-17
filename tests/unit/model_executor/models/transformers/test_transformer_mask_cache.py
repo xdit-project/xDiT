@@ -54,6 +54,7 @@ def krea2():
             return_value=single_rank,
         ),
         mock.patch.object(transformer_krea2, "USP", _masked_attention),
+        mock.patch.object(transformer_krea2, "get_runtime_state"),
     ):
         yield model
 
@@ -66,6 +67,13 @@ def _krea2_inputs(text_len=6, image_len=4):
         timestep=torch.tensor([0.5]),
         position_ids=torch.randint(0, 4, (text_len + image_len, 3)),
     )
+
+
+@torch.no_grad()
+def test_krea2_forward_advances_the_hybrid_schedule_once(krea2):
+    krea2(**_krea2_inputs(), encoder_attention_mask=torch.ones(1, 6, dtype=torch.bool))
+
+    transformer_krea2.get_runtime_state().increment_step_counter.assert_called_once_with()
 
 
 @torch.no_grad()

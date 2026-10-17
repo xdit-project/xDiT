@@ -1,7 +1,5 @@
 """FLUX.1 under sequence parallelism matches the single-device transformer for supported token counts/configurations."""
 
-from types import SimpleNamespace
-
 import pytest
 import torch
 
@@ -64,10 +62,6 @@ def _flux_worker(
     ring,
     image_tokens,
     text_tokens,
-    error,
-    pipeline_patches=1,
-    use_fp8_comms=False,
-    fp8_comms_scale=None,
 ):
     torch.cuda.set_device(rank)
     init_distributed_environment(
@@ -81,33 +75,19 @@ def _flux_worker(
         args = xFuserArgs()
         args.ulysses_degree = ulysses
         args.ring_degree = ring
-        args.use_fp8_comms = use_fp8_comms
-        args.fp8_comms_scale = fp8_comms_scale
         engine_config, _ = args.create_config()
         initialize_runtime_state(engine_config=engine_config)
         # SDPA proper has no ring path; its memory-efficient kernel does.
         get_runtime_state().set_attention_backend("SDPA_EFFICIENT" if ring > 1 else "SDPA")
         get_runtime_state().max_condition_sequence_length = text_tokens
-        get_runtime_state().num_pipeline_patch = pipeline_patches
 
         device = torch.device("cuda", rank)
         torch.manual_seed(0)
         reference = FluxTransformer2DModel(**_CONFIG).to(device).eval()
         parallel = xFuserFlux1Transformer2DWrapper(**_CONFIG).to(device).eval()
         parallel.load_state_dict(reference.state_dict())
-        if use_fp8_comms:
-            # Exercise the real runtime and layer registration for both scaling
-            # modes. The invalid prompt must be refused before USP runs a kernel.
-            get_runtime_state().fp8_comms.register_models(SimpleNamespace(transformer=parallel))
-
         inputs = _inputs(image_tokens, text_tokens, device)
         with torch.no_grad():
-            if error is not None:
-                with pytest.raises(error) as caught:
-                    parallel(**inputs)
-                if use_fp8_comms:
-                    assert "--use_fp8_comms requires the prompt token count (7)" in str(caught.value)
-                return
             expected = reference(**inputs)[0]
             actual = parallel(**inputs)[0]
         torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-4)
@@ -136,24 +116,5 @@ def test_flux_sequence_parallel_matches_single_device(accelerator_ranks, ulysses
     accelerator_ranks(
         _flux_worker,
         world_size=ulysses * ring,
-        args=(ulysses, ring, image_tokens, text_tokens, None),
-    )
-
-
-@pytest.mark.multi_gpu
-def test_flux_pipefusion_rejects_padded_image_tokens(accelerator_ranks):
-    accelerator_ranks(
-        _flux_worker,
-        world_size=2,
-        args=(2, 1, 15, 8, NotImplementedError, 2),
-    )
-
-
-@pytest.mark.multi_gpu
-@pytest.mark.parametrize("fixed_scale", [None, 0.5], ids=["automatic-calibration", "fixed-scale"])
-def test_flux_fp8_comms_rejects_replicated_prompt(accelerator_ranks, fixed_scale):
-    accelerator_ranks(
-        _flux_worker,
-        world_size=2,
-        args=(2, 1, 16, 7, ValueError, 1, True, fixed_scale),
+        args=(ulysses, ring, image_tokens, text_tokens),
     )

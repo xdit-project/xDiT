@@ -95,6 +95,8 @@ Individual model classes that inherit from `xFuserModel`:
 | FLUX.1-Kontext | `FLUX.1-Kontext-dev`, `black-forest-labs/FLUX.1-Kontext-dev` |
 | FLUX.2 | `FLUX.2-dev`, `black-forest-labs/FLUX.2-dev` |
 | FLUX.2-klein | `FLUX.2-klein-9B`, `black-forest-labs/FLUX.2-klein-9B`, `FLUX.2-klein-4B`, `black-forest-labs/FLUX.2-klein-4B` |
+| FLUX.3 Image klein | `FLUX.3-image-klein`, `flux-3-image-klein`, `black-forest-labs/flux-3-image-klein` |
+| FLUX.3 Image klein base | `FLUX.3-image-klein-base`, `flux-3-image-klein-base`, `black-forest-labs/flux-3-image-klein-base` |
 | HunyuanVideo | `HunyuanVideo`, `tencent/HunyuanVideo` |
 | HunyuanVideo-1.5 | `Hunyuanvideo-1.5`, `tencent/HunyuanVideo-1.5` (both load the 720p checkpoint for `--task`), `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v`, `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v`, `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v`, `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v` (each repo id loads that checkpoint and must match `--task`) |
 | HunyuanVideo-1.5 Distilled | `Hunyuanvideo-1.5-Distilled`, `tencent/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled`, `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled` |
@@ -288,6 +290,7 @@ fill it from rank 0.
 |--------------|---------------------|-------------------------|-----------------------|----------------------|
 | FLUX.1-dev, FLUX.1-Kontext | Streaming; transformer targets declared | `text_encoder_2` | Transformer + targeted text encoder | Yes |
 | FLUX.2, FLUX.2-klein (4B/9B) | Streaming; transformer targets declared | `text_encoder` | Transformer + targeted text encoder | Yes |
+| FLUX.3 Image klein and klein base | Streaming; the text, image and reference mode blocks and the single blocks declared; the `ModularPipeline` loads the other components | None | Transformer only; text encoder loads normally | Transformer only; text encoder loads per rank |
 | Wan 2.1/2.2 I2V and T2V, Wan 2.2 TI2V | Streaming; both Wan 2.2 transformers are covered | `text_encoder` | Transformer(s) + targeted text encoder | Yes |
 | Wan 2.2 Distilled I2V | Local blockwise loading is declared for external LightX2V state dicts; standard collectives are not | Declared, post-load only | Rejected before allocation: strict remapping is not collective-safe | No |
 | Wan 2.1 VACE | Streaming; main and VACE blocks covered | `text_encoder` | Not exposed by this runner | Yes |
@@ -322,7 +325,7 @@ A listed target is only half the answer: the format still has to survive the har
 | MiniMax-H3 | `transformer.transformer_blocks`; the Ref2VA variant declares `transformer_ref.transformer_blocks` | No |
 | Cosmos3-Super and Cosmos3-Nano | `transformer.layers` | No |
 | Z-Image and Z-Image-Turbo | No | `transformer.layers`, `transformer.noise_refiner`, and `transformer.context_refiner`; `context_refiner` drops out under sequence parallelism |
-| FLUX.1, FLUX.1-Kontext, FLUX.2-klein, Wan 2.1 VACE, Qwen-Image variants, Stable Diffusion 3.5, HunyuanVideo variants, LTX variants, CausalWan, Prism | No | No |
+| FLUX.1, FLUX.1-Kontext, FLUX.2-klein, FLUX.3 Image klein and klein base, Wan 2.1 VACE, Qwen-Image variants, Stable Diffusion 3.5, HunyuanVideo variants, LTX variants, CausalWan, Prism | No | No |
 
 Several runners hold part of an FP4 target at FP8 where full FP4 costs too much
 quality: Wan 2.1 I2V and T2V keep blocks 0-9 and 30-39, Wan 2.2 TI2V keeps
@@ -481,6 +484,53 @@ torchrun --nproc_per_node=8 -m xfuser.runner \
     --ulysses_degree 8 \
     --attention_backend TRITON_BSA \
     --cross_attention_backend AITER
+```
+
+### Image Generation and Editing (FLUX.3 Image klein)
+
+FLUX.3 Image klein needs diffusers installed from source. `FLUX.3-image-klein` is
+step-distilled: 16 steps and no guidance. `FLUX.3-image-klein-base` is the
+undistilled checkpoint: 50 steps with classifier-free guidance (`--guidance_scale`,
+default 3.5, and an optional `--negative_prompt`), and `--use_cfg_parallel` runs
+the two guidance branches on separate rank groups.
+
+`--input_images` turns a run into an edit (up to 10 references); without
+`--height`/`--width` the output keeps the first reference's aspect ratio at about
+1024x1024 pixels. The VAE runs in fp32, as in BFL's reference. Seeds match the
+diffusers usage, which draws the noise from a CPU generator.
+
+The model expects full scene captions. Prompts are encoded as given: newer
+diffusers puts BFL's prompt upsampler (a separate 9B model,
+`black-forest-labs/flux-3-image-klein-pup`) in front of the pipeline, and the
+runner drops that step, so upsample short requests before the run.
+
+For speed on several GPUs, add `--use_torch_compile` and `--use_parallel_vae`:
+- **`--use_torch_compile`:** compiles the transformer blocks and replays them as CUDA/HIP graphs.
+  A sharded step is launch-bound, so this matters more than it does on one GPU.
+- **`--use_parallel_vae`:** splits the fp32 VAE decode across the ranks. The decode is 28% of
+  a 1024² klein image at Ulysses 8, and 42% at 2048².
+
+On 8x MI350X, klein at Ulysses 8 takes 0.36 s per 1024² image and 1.19 s per 2048² image this
+way.
+
+`--use_fp8_gemms` and `--attention_backend AITER_FP8` trade fidelity for speed: 9% and 10%
+faster at 2048², 20% together. FP8 GEMMs keep the image close (2/255 mean difference);
+FP8 attention moves small details.
+
+```bash
+xdit --model FLUX.3-image-klein \
+    --prompt "A lone American bison in a misty geothermal landscape at night under a full moon" \
+    --input_images ./bison.png \
+    --ulysses_degree 8 \
+    --use_torch_compile \
+    --use_parallel_vae
+
+xdit --model FLUX.3-image-klein-base \
+    --prompt "A lone American bison in a misty geothermal landscape at dawn" \
+    --use_cfg_parallel \
+    --ulysses_degree 4 \
+    --use_torch_compile \
+    --use_parallel_vae
 ```
 
 ### Benchmarking with Multiple Iterations

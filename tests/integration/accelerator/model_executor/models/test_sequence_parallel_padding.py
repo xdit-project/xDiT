@@ -447,26 +447,28 @@ class _Records(logging.Handler):
 def _ring_padding_worker(rank, world_size, init_method):
     engine_config = _init(rank, world_size, init_method, ulysses=1, ring=world_size)
     records = _Records()
-    logging.getLogger("xfuser.model_executor.layers.usp").addHandler(records)
+    logger = logging.getLogger("xfuser.model_executor.layers.usp")
+    logger.addHandler(records)
     try:
         device = torch.device("cuda", rank)
         # 7 * 3 * 3 = 63 tokens pad to 64: one padded key, and 32 queries per
         # rank, which the memory-efficient kernel needs to merge ring steps.
-        _, parallel, _, inputs = _build("wan", (7, 3, 3), device, engine_config, world_size)
+        reference, parallel, reference_inputs, inputs = _build("wan", (7, 3, 3), device, engine_config, world_size)
         with torch.no_grad():
+            expected = reference(**reference_inputs)[0]
             first = parallel(**inputs)[0]
             second = parallel(**inputs)[0]
         assert first.shape == inputs["hidden_states"].shape
         assert torch.isfinite(first).all()
+        torch.testing.assert_close(first, expected, rtol=1e-4, atol=1e-4)
         torch.testing.assert_close(first, second)
-        # Logged once, and only by rank 0.
-        warnings = [m for m in records.messages if "Ring attention cannot exclude" in m]
-        assert len(warnings) == (1 if rank == 0 else 0), records.messages
+        assert not any("Ring attention cannot exclude" in message for message in records.messages), records.messages
     finally:
+        logger.removeHandler(records)
         destroy_model_parallel()
         destroy_distributed_environment()
 
 
 @pytest.mark.multi_gpu
-def test_ring_with_padding_warns_once_and_runs(accelerator_ranks):
+def test_ring_with_padding_matches_single_device(accelerator_ranks):
     accelerator_ranks(_ring_padding_worker, world_size=2)

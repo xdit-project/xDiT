@@ -11,6 +11,8 @@ import torch
 from xfuser.core.attention import registry
 from xfuser.core.attention.spec import AttentionBackendType, AttnCall, VarlenPacking
 
+pytestmark = pytest.mark.rocm
+
 
 def _feature_reversal_matrix():
     return torch.flip(torch.eye(128), dims=[1])
@@ -88,9 +90,7 @@ def test_varlen_call_packs_keys_and_keeps_every_query(fp8_kernel, monkeypatch):
 
 def _trailing_pad_call(valid, total, batch=1, **kwargs):
     """The packing MiniMax-H3 publishes for its alignment pad, plus valid_kv_len."""
-    indices = torch.cat([
-        torch.arange(valid, device="cuda") + row * total for row in range(batch)
-    ])
+    indices = torch.cat([torch.arange(valid, device="cuda") + row * total for row in range(batch)])
     return AttnCall(
         varlen=VarlenPacking(
             indices_k=indices,
@@ -142,17 +142,29 @@ def test_a_declared_trailing_pad_is_sliced_for_fp8_comms(fp8_kernel, monkeypatch
     monkeypatch.setattr(fp8_kernel, "mha_v4_packed", mha_v4_packed)
     monkeypatch.setattr(fp8_kernel, "native_fp8_format", lambda: 4)
     monkeypatch.setattr(
-        fp8_kernel, "AttentionScaleMode",
-        type("AttentionScaleMode", (), {"F32_PER_TENSOR": 1}), raising=False,
+        fp8_kernel,
+        "AttentionScaleMode",
+        type("AttentionScaleMode", (), {"F32_PER_TENSOR": 1}),
+        raising=False,
     )
 
     query = torch.randn(1, 2, 8, 128, device="cuda")
     key = torch.randn_like(query)
     value = torch.randn_like(query)
     descale = torch.ones(1, device="cuda")
-    fp8_kernel.aiter_fp8(query, key, value, _trailing_pad_call(
-        5, 8, pre_quantized=True, q_descale=descale, k_descale=descale, v_descale=descale,
-    ))
+    fp8_kernel.aiter_fp8(
+        query,
+        key,
+        value,
+        _trailing_pad_call(
+            5,
+            8,
+            pre_quantized=True,
+            q_descale=descale,
+            k_descale=descale,
+            v_descale=descale,
+        ),
+    )
 
     assert calls["key"].shape == (1, 5, 2, 128)
     assert calls["value"].shape == (1, 5, 2, 128)

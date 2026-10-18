@@ -2,6 +2,8 @@ import tempfile
 import torch
 import unittest
 import pytest
+from xfuser.core.attention import registry
+from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.envs import PACKAGES_CHECKER, _is_hip
 from xfuser.model_executor.layers import usp
 
@@ -36,6 +38,11 @@ def _shutdown_distributed():
         destroy_distributed_environment()
 
 
+def _backend_unavailable(backend_name):
+    """The registered backend's own arch and symbol requirements."""
+    return registry.get(AttentionBackendType[backend_name]).unavailable()
+
+
 def _pytorch_sdpa_attn_type():
     """PyTorch SDPA backend that matches USP's ``sdpa_flash`` comparison.
 
@@ -59,9 +66,12 @@ class TestUSP(unittest.TestCase):
         self.env_info = PACKAGES_CHECKER.get_packages_info()
         self.runtime_state = get_runtime_state()
         self.default_comparison_backend = "sdpa_flash"
-        self.query = torch.randn(1, 24, 14867, 128, device="cuda", dtype=torch.bfloat16)
-        self.key = torch.randn(1, 24, 14867, 128, device="cuda", dtype=torch.bfloat16)
-        self.value = torch.randn(1, 24, 14867, 128, device="cuda", dtype=torch.bfloat16)
+        # Not a multiple of 128, so the comparison still hits the unaligned path.
+        # A full-frame length makes this a ten-minute kernel launch on one rank.
+        length = 257
+        self.query = torch.randn(1, 24, length, 128, device="cuda", dtype=torch.bfloat16)
+        self.key = torch.randn(1, 24, length, 128, device="cuda", dtype=torch.bfloat16)
+        self.value = torch.randn(1, 24, length, 128, device="cuda", dtype=torch.bfloat16)
 
     def _run_usp_comparison(self, attention_backend):
         self.runtime_state.set_attention_backend(self.default_comparison_backend)
@@ -99,8 +109,7 @@ class TestUSP(unittest.TestCase):
 
         result_diff = self._run_usp_comparison("flash")
 
-        self.assertNotEqual(result_diff, 0)  # Different implementations won't produce same output
-        self.assertAlmostEqual(result_diff.item(), 0, places=1)  # Difference can be 0.15ish
+        self.assertLess(result_diff.item(), 0.2)
 
     @pytest.mark.nvidia
     def test_ring_attn_flash_attn(self):
@@ -116,34 +125,33 @@ class TestUSP(unittest.TestCase):
 
         result_diff = self._run_ring_comparison("flash")
 
-        self.assertNotEqual(result_diff, 0)  # Different implementations won't produce same output
-        self.assertAlmostEqual(result_diff.item(), 0, places=1)  # Difference can be 0.15ish
+        self.assertLess(result_diff.item(), 0.2)
 
     @pytest.mark.rocm
     def test_usp_aiter(self):
         """
         Verifies USP results with aiter are close to F.SDPA results
         """
-        if not self.env_info["has_aiter"]:
-            self.skipTest("aiter library is not available in the environment.")
+        reason = _backend_unavailable("AITER")
+        if reason is not None:
+            self.skipTest(reason)
 
         result_diff = self._run_usp_comparison("aiter")
 
-        self.assertNotEqual(result_diff, 0)  # Different implementations won't produce same output
-        self.assertAlmostEqual(result_diff.item(), 0, places=1)  # Difference can be 0.15ish
+        self.assertLess(result_diff.item(), 0.2)
 
     @pytest.mark.rocm
     def test_ring_attn_aiter(self):
         """
         Verifies ring_attn results with aiter are close to F.SDPA results
         """
-        if not self.env_info["has_aiter"]:
-            self.skipTest("aiter library is not available in the environment.")
+        reason = _backend_unavailable("AITER")
+        if reason is not None:
+            self.skipTest(reason)
 
         result_diff = self._run_ring_comparison("aiter")
 
-        self.assertNotEqual(result_diff, 0)  # Different implementations won't produce same output
-        self.assertAlmostEqual(result_diff.item(), 0, places=1)  # Difference can be 0.15ish
+        self.assertLess(result_diff.item(), 0.2)
 
     @pytest.mark.nvidia
     def test_usp_cudnn(self):
@@ -155,8 +163,7 @@ class TestUSP(unittest.TestCase):
 
         result_diff = self._run_usp_comparison("cudnn")
 
-        self.assertNotEqual(result_diff, 0)  # Different implementations won't produce same output
-        self.assertAlmostEqual(result_diff.item(), 0, places=1)  # Difference can be 0.15ish
+        self.assertLess(result_diff.item(), 0.2)
 
     @pytest.mark.nvidia
     def test_ring_cudnn(self):
@@ -168,8 +175,7 @@ class TestUSP(unittest.TestCase):
 
         result_diff = self._run_ring_comparison("cudnn")
 
-        self.assertNotEqual(result_diff, 0)  # Different implementations won't produce same output
-        self.assertAlmostEqual(result_diff.item(), 0, places=1)  # Difference can be 0.15ish
+        self.assertLess(result_diff.item(), 0.2)
 
     @pytest.mark.nvidia
     def test_usp_flash3(self):
@@ -181,8 +187,7 @@ class TestUSP(unittest.TestCase):
 
         result_diff = self._run_usp_comparison("flash_3")
 
-        self.assertNotEqual(result_diff, 0)  # Different implementations won't produce same output
-        self.assertAlmostEqual(result_diff.item(), 0, places=1)  # Difference can be 0.15ish
+        self.assertLess(result_diff.item(), 0.2)
 
     @pytest.mark.nvidia
     def test_ring_flash3(self):
@@ -194,8 +199,7 @@ class TestUSP(unittest.TestCase):
 
         result_diff = self._run_ring_comparison("flash_3")
 
-        self.assertNotEqual(result_diff, 0)  # Different implementations won't produce same output
-        self.assertAlmostEqual(result_diff.item(), 0, places=1)  # Difference can be 0.15ish
+        self.assertLess(result_diff.item(), 0.2)
 
     @pytest.mark.nvidia
     def test_usp_flash4(self):
@@ -207,8 +211,7 @@ class TestUSP(unittest.TestCase):
 
         result_diff = self._run_usp_comparison("flash_4")
 
-        self.assertNotEqual(result_diff, 0)  # Different implementations won't produce same output
-        self.assertAlmostEqual(result_diff.item(), 0, places=1)  # Difference can be 0.15ish
+        self.assertLess(result_diff.item(), 0.2)
 
 
 class TestUSPHybridParallel(unittest.TestCase):

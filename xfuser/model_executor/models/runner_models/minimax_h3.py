@@ -19,8 +19,8 @@ from xfuser.core.distributed import (
     get_world_group,
 )
 from xfuser.core.utils.runner_utils import log
-from xfuser.envs import get_device_name
 from xfuser.core.utils.video_utils import encode_video_with_audio
+from xfuser.envs import get_device_name
 from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,

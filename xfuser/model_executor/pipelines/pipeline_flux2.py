@@ -34,8 +34,8 @@ from xfuser.core.distributed import (
     is_pipeline_last_stage,
     is_dp_last_group,
 )
-from xfuser.logger import init_logger
 from xfuser.envs import get_device_name
+from xfuser.logger import init_logger
 
 # Imported for its registration side effect: from_pretrained looks up a wrapper for the
 # FLUX.2 backbone to parallelise it, so a pipeline exported without this registered

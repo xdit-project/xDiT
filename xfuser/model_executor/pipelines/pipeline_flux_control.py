@@ -34,8 +34,8 @@ from xfuser.core.distributed import (
     is_pipeline_last_stage,
     is_dp_last_group,
 )
-from xfuser.model_executor.pipelines.base_pipeline import xFuserPipelineBaseWrapper
 from xfuser.envs import get_device_name
+from xfuser.model_executor.pipelines.base_pipeline import xFuserPipelineBaseWrapper
 from xfuser.model_executor.pipelines.register import xFuserPipelineWrapperRegister
 
 from PIL import Image

@@ -8,7 +8,7 @@ from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
 from xfuser.core.utils.runner_utils import log
 from xfuser.core.utils.video_utils import encode_video_with_audio
-from xfuser.envs import PACKAGES_CHECKER
+from xfuser.envs import PACKAGES_CHECKER, get_device_name
 from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
@@ -611,7 +611,7 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
         )
 
         is_i2v = self.config.task == "i2v"
-        generator = torch.Generator(device="cuda").manual_seed(input_args["seed"])
+        generator = torch.Generator(device=get_device_name()).manual_seed(input_args["seed"])
 
         shared = {
             "prompt": input_args["prompt"],

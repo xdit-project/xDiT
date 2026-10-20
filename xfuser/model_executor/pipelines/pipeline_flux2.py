@@ -35,6 +35,7 @@ from xfuser.core.distributed import (
     is_dp_last_group,
 )
 from xfuser.logger import init_logger
+from xfuser.envs import get_device_name
 
 # Imported for its registration side effect: from_pretrained looks up a wrapper for the
 # FLUX.2 backbone to parallelise it, so a pipeline exported without this registered
@@ -90,7 +91,7 @@ class xFuserFlux2PipelineBase(xFuserPipelineBaseWrapper):
             num_inference_steps=steps,
             guidance_scale=input_config.guidance_scale,
             max_sequence_length=input_config.max_sequence_length,
-            generator=torch.Generator(device="cuda").manual_seed(42),
+            generator=torch.Generator(device=get_device_name()).manual_seed(42),
             output_type=input_config.output_type,
         )
         get_runtime_state().runtime_config.warmup_steps = warmup_steps

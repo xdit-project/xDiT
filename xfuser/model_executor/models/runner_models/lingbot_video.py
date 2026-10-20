@@ -6,6 +6,7 @@ from diffusers import AutoencoderKLWan
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from transformers import Qwen3VLForConditionalGeneration, Qwen3VLProcessor
 
+from xfuser.envs import get_device_name
 from xfuser.model_executor.pipelines.pipeline_lingbot_video import (
     xFuserLingBotVideoPipeline,
     get_lingbot_video_pipeline_class,
@@ -333,7 +334,7 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
         if isinstance(raw_prompt, list):
             raw_prompt = raw_prompt[0] if len(raw_prompt) == 1 else " ".join(raw_prompt)
         prompt = _load_json_prompt(raw_prompt)
-        generator = torch.Generator(device="cuda").manual_seed(input_args["seed"])
+        generator = torch.Generator(device=get_device_name()).manual_seed(input_args["seed"])
 
         # In refiner mode, --height/--width is the final output resolution;
         # base pass runs at fixed 480x832, refiner upscales to target.
@@ -403,7 +404,7 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
         video_tensor = frames_cpu.unsqueeze(0).permute(0, 2, 1, 3, 4)
         del frames_cpu
 
-        refiner_generator = torch.Generator(device="cuda").manual_seed(input_args["seed"])
+        refiner_generator = torch.Generator(device=get_device_name()).manual_seed(input_args["seed"])
         with torch.no_grad():
             x_up = self.refiner_pipe._vae_latent_to_dit(
                 vae.encode(video_tensor.to(device=device, dtype=vae.dtype)).latent_dist.mode()

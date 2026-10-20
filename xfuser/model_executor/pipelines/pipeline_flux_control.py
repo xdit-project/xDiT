@@ -35,6 +35,7 @@ from xfuser.core.distributed import (
     is_dp_last_group,
 )
 from xfuser.model_executor.pipelines.base_pipeline import xFuserPipelineBaseWrapper
+from xfuser.envs import get_device_name
 from xfuser.model_executor.pipelines.register import xFuserPipelineWrapperRegister
 
 from PIL import Image
@@ -84,7 +85,7 @@ class xFuserPipelineFluxControlPipeline(xFuserPipelineBaseWrapper):
             prompt=prompt,  # TODO: will be removed and replaced with 'prompt_embeds' and 'pooled_prompt_embeds'
             num_inference_steps=steps,
             max_sequence_length=input_config.max_sequence_length,
-            generator=torch.Generator(device="cuda").manual_seed(42),
+            generator=torch.Generator(device=get_device_name()).manual_seed(42),
             output_type=input_config.output_type,
         )
         get_runtime_state().runtime_config.warmup_steps = warmup_steps

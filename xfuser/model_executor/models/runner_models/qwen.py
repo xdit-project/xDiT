@@ -384,6 +384,8 @@ class xFuserQwenImage21Model(xFuserModel):
             log(f"Qwen-Image-2.1: block-causal prefill uses flex_attention on {len(blocks)} blocks.")
         else:
             log("Qwen-Image-2.1: flex_attention unavailable; block-causal prefill uses per-segment SDPA.")
+        self.pipe.vae.decoder.compile(mode=self._get_compile_mode(), dynamic=self._get_compile_dynamic())
+        log("Qwen-Image-2.1: torch.compile enabled for the VAE decoder.")
         super()._compile_model(input_args)
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:

@@ -123,6 +123,11 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
 
 
 class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
+    # When True, blocks receive the RoPE table for the full padded sequence instead
+    # of this rank's slice; the attention processor must apply RoPE after its
+    # sequence-gathering all-to-all.
+    _rope_full_sequence = False
+
     def __init__(
         self,
         num_attention_heads: int = 56,
@@ -428,10 +433,11 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
         local_stop = local_start + local_sequence_length
 
         rotary_emb = self.rope(padded_position_ids)
-        rotary_emb = (
-            rotary_emb[0][local_start:local_stop],
-            rotary_emb[1][local_start:local_stop],
-        )
+        if not self._rope_full_sequence:
+            rotary_emb = (
+                rotary_emb[0][local_start:local_stop],
+                rotary_emb[1][local_start:local_stop],
+            )
 
         packed_hidden_states = packed_hidden_states[:, local_start:local_stop]
         local_timestep_indices = padded_timestep_indices[local_start:local_stop]

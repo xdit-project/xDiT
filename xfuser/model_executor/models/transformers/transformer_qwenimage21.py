@@ -109,7 +109,41 @@ def _update_kv_cache(key, value, layer_cache, kv_cache_mode, cache_write_slice, 
     return key, value
 
 
-def _flex_prefill(query, key, value, block_mask):
+class _PrefixBlockMask(NamedTuple):
+    """Step 1's block-causal mask, over the prefix only: the target rows after it attend to every key.
+
+    ``target_len`` depends only on the output size, so the target rows are sliced off the end with it rather than
+    after ``prefix_len``, which changes with the prompt. When a new prompt length makes the compiled block dynamic,
+    a target length of total minus prefix stops Inductor from compiling the decode backend's attention.
+    """
+
+    block_mask: "BlockMask"
+    prefix_len: int
+    target_len: int
+
+
+def _full_attention(query, key, value, attn_mask):
+    """Attention without structure: on xDiT's backend, or with a key-padding mask on diffusers' SDPA."""
+    if attn_mask is not None:
+        return dispatch_attention_fn(query, key, value, attn_mask=attn_mask, dropout_p=0.0)
+    # xDiT attention() is [B, H, S, D]; this processor holds [B, S, H, D].
+    return attention(
+        query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), dropout_p=0.0, is_causal=False
+    ).transpose(1, 2)
+
+
+def _flex_prefill(query, key, value, prefix_mask, key_valid):
+    """Block-causal prefill: flex_attention for the prefix rows, and for the target rows, which see every key,
+    the same attention as a cached step."""
+    prefix_len = prefix_mask.prefix_len
+    prefix = _flex_attention(query[:, :prefix_len], key[:, :prefix_len], value[:, :prefix_len], prefix_mask.block_mask)
+    target = _full_attention(
+        query[:, -prefix_mask.target_len :], key, value, None if key_valid is None else key_valid[:, None, None, :]
+    )
+    return torch.cat([prefix, target], dim=1)
+
+
+def _flex_attention(query, key, value, block_mask):
     seq_len_q = query.shape[1]
     pad_q = math.ceil(seq_len_q / _FLEX_BLOCK_SIZE) * _FLEX_BLOCK_SIZE - seq_len_q
     pad_kv = math.ceil(key.shape[1] / _FLEX_BLOCK_SIZE) * _FLEX_BLOCK_SIZE - key.shape[1]
@@ -126,7 +160,8 @@ def _segmented_prefill(query, key, value, segments, key_valid):
     """Exact block-causal prefill: each prefix segment attends to keys ``[0, end)``, text segments with a
     causal triangle over their own keys, then the target attends to everything.
 
-    Mirrors the segment loop in diffusers' ``QwenImage21AttnProcessor`` (diffusers ``bdc2bea``).
+    Mirrors the segment loop in diffusers' ``QwenImage21AttnProcessor`` (diffusers ``bdc2bea``), except that
+    the target rows run the same attention as a cached step.
     """
     prefix_len = segments[-1][1] if segments else 0
     outputs = []
@@ -148,13 +183,7 @@ def _segmented_prefill(query, key, value, segments, key_valid):
             dispatch_attention_fn(query[:, start:end], key[:, :end], value[:, :end], attn_mask=seg_mask, dropout_p=0.0)
         )
     outputs.append(
-        dispatch_attention_fn(
-            query[:, prefix_len:],
-            key,
-            value,
-            attn_mask=None if key_valid is None else key_valid[:, None, None, :],
-            dropout_p=0.0,
-        )
+        _full_attention(query[:, prefix_len:], key, value, None if key_valid is None else key_valid[:, None, None, :])
     )
     return torch.cat(outputs, dim=1)
 
@@ -181,11 +210,14 @@ class _xFuserQwenImage21AttnMixin:
     Prefill and decode then diverge in this ``__call__``:
 
     * Eager processor (not a ``QwenImage21FlexAttnProcessor``): step 0 arrives with ``segments`` and no
-      ``BlockMask``. ``_segmented_prefill`` calls diffusers' ``dispatch_attention_fn``, which is SDPA.
+      ``BlockMask``. ``_segmented_prefill`` runs each prefix segment on diffusers' ``dispatch_attention_fn``,
+      which is SDPA.
     * Flex processor, installed only when ``flex_attention_available()`` and the model is compiled: step 0
-      arrives as one ``BlockMask``. ``_flex_prefill`` calls ``dispatch_attention_fn(..., backend="flex")``.
-    * Decode is the same for both. No mask and no segments, so the call goes through xDiT's ``attention()``
-      and ``--attention_backend`` applies. A prompt padding mask stays on ``dispatch_attention_fn``.
+      arrives with a ``_PrefixBlockMask``. ``_flex_prefill`` runs the prefix rows on
+      ``dispatch_attention_fn(..., backend="flex")``.
+    * The target rows attend to every key, so both prefills run them like a decode step: no mask, so the call
+      goes through xDiT's ``attention()`` and ``--attention_backend`` applies. A prompt padding mask stays on
+      ``dispatch_attention_fn``.
     """
 
     # Padding appended to make the sequence divisible by the Ulysses degree. The block's forward has no
@@ -216,21 +248,12 @@ class _xFuserQwenImage21AttnMixin:
             key, value, layer_cache, kv_cache_mode, cache_write_slice, key_in_cache=key_slot is not None
         )
 
-        if isinstance(attention_mask, BlockMask):
-            hidden_states = _flex_prefill(query, key, value, attention_mask)
+        if isinstance(attention_mask, _PrefixBlockMask):
+            hidden_states = _flex_prefill(query, key, value, attention_mask, key_valid)
         elif segments is not None:
             hidden_states = _segmented_prefill(query, key, value, segments, key_valid)
-        elif attention_mask is None:
-            # xDiT attention() is [B, H, S, D]; this processor holds [B, S, H, D].
-            hidden_states = attention(
-                query.transpose(1, 2),
-                key.transpose(1, 2),
-                value.transpose(1, 2),
-                dropout_p=0.0,
-                is_causal=False,
-            ).transpose(1, 2)
         else:
-            hidden_states = dispatch_attention_fn(query, key, value, attn_mask=attention_mask, dropout_p=0.0)
+            hidden_states = _full_attention(query, key, value, attention_mask)
 
         hidden_states = _scatter_sequence_gather_heads(hidden_states, self.sp_pad)
         hidden_states = hidden_states.flatten(2, 3).type_as(query)
@@ -270,8 +293,8 @@ class xFuserQwenImage21TransformerWrapper(QwenImage21Transformer2DModel):
     they are the same group only because the runner keeps Ring off.
 
     ``forward`` is a copy of ``QwenImage21Transformer2DModel.forward`` as of diffusers ``bdc2bea``; only the
-    (cos, sin) rotary table, the sharding block before the block loop, ``target_token_mask=block_modulation_mask``
-    and the gather after it differ. Also, steps after the one that fills the KV cache reuse its rotary table and
+    (cos, sin) rotary table, the block mask over the prefix alone, the sharding block before the block loop,
+    ``target_token_mask=block_modulation_mask`` and the gather after it differ. Also, steps after the one that fills the KV cache reuse its rotary table and
     masks and skip building the joint sequence, whose data-dependent shapes would block on the GPU every step.
     """
 
@@ -357,7 +380,16 @@ class xFuserQwenImage21TransformerWrapper(QwenImage21Transformer2DModel):
                 processors = [block.attn.processor for block in self.transformer_blocks]
                 needs_block_mask = any(isinstance(processor, QwenImage21FlexAttnProcessor) for processor in processors)
                 attention_mask = (
-                    build_qwenimage21_block_causal_mask(image_ids, joint_key_valid, batch_size, hidden_states.device)
+                    _PrefixBlockMask(
+                        build_qwenimage21_block_causal_mask(
+                            image_ids[:prefix_len],
+                            None if joint_key_valid is None else joint_key_valid[:, :prefix_len],
+                            batch_size,
+                            hidden_states.device,
+                        ),
+                        prefix_len,
+                        target_tokens,
+                    )
                     if needs_block_mask
                     else None
                 )

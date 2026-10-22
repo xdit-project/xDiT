@@ -220,6 +220,8 @@ class ModelCapabilities:
     use_a6w4_gemms: bool = False
     supports_step_caching: bool = False
     supports_lora: bool = False
+    # The runner fuses the LoRA into bf16 weights before quantized GEMMs are materialized.
+    supports_lora_with_quantized_gemms: bool = False
     use_fp8_comms: bool = False
     use_hybrid_attn_schedule: bool = False
     use_hybrid_gemm_schedule: bool = False
@@ -663,9 +665,15 @@ class xFuserModel(abc.ABC):
                 or config.fully_shard_degree > 1
                 or config.memory_efficient_sharding
                 or config.memory_efficient_replicated_load
-                or not config.gemm_quantization_spec.is_pure("none")
             ):
                 raise ValueError("Startup LoRA fusion requires eager, unquantized loading without FSDP or PipeFusion.")
+            if (
+                not config.gemm_quantization_spec.is_pure("none")
+                and not self.capabilities.supports_lora_with_quantized_gemms
+            ):
+                raise ValueError(
+                    f"Model {self.settings.model_name} requires eager, unquantized loading for startup LoRA fusion."
+                )
         _validate_attention_head_dims(self, config)
         for key in ModelCapabilities.__annotations__.keys():
             config_value = getattr(

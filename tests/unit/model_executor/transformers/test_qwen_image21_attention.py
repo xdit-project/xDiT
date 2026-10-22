@@ -88,16 +88,40 @@ def _xfuser_model(stock, processor_cls):
     return wrapper
 
 
+@pytest.mark.parametrize("key_in_cache", [False, True])
+def test_cached_step_writes_kv_into_the_cache(key_in_cache):
+    """A cached step's K/V equal prefix + new tokens, held in the cache filled by the extract step."""
+    prefix_k, prefix_v, key, value = (torch.randn(1, n, 2, 4) for n in (3, 3, 5, 5))
+    layer_cache = qwenimage21.QwenImage21KVLayerCache()
+    xfuser_qwenimage21._update_kv_cache(
+        torch.cat([prefix_k, torch.zeros_like(key)], dim=1),
+        torch.cat([prefix_v, torch.zeros_like(value)], dim=1),
+        layer_cache,
+        "extract",
+        slice(0, 3),
+    )
+    if key_in_cache:
+        key = layer_cache.k[:, 3:].copy_(key)
+
+    out_k, out_v = xfuser_qwenimage21._update_kv_cache(
+        key, value, layer_cache, "cached", None, key_in_cache=key_in_cache
+    )
+
+    assert out_k is layer_cache.k and out_v is layer_cache.v
+    torch.testing.assert_close(out_k, torch.cat([prefix_k, key], dim=1), rtol=0, atol=0)
+    torch.testing.assert_close(out_v, torch.cat([prefix_v, value], dim=1), rtol=0, atol=0)
+
+
 def test_flydsl_qk_norm_rope_gets_tables_matching_diffusers(xfuser_sdpa_calls, monkeypatch):
     """With FlyDSL available, QK-norm + RoPE goes to its fused kernel, given (cos, sin) tables that reproduce diffusers.
 
-    The kernel needs ROCm, so it is stubbed with the wrapper's own diffusers reference, which takes the same tables.
+    The kernel needs ROCm; on CPU the wrapper runs its diffusers reference, which takes the same tables.
     """
     fused_calls = []
 
-    def fused_reference(query, key, norm_q, norm_k, rotary_emb):
-        fused_calls.append(query.shape)
-        return fused_qk_rope_flydsl._reference(query, key, norm_q, norm_k, rotary_emb)
+    def fused_reference(query, key, norm_q, norm_k, rotary_emb, key_out=None):
+        fused_calls.append(key_out is not None)
+        return fused_qk_rope_flydsl.flydsl_fused_qk_norm_rope(query, key, norm_q, norm_k, rotary_emb, key_out=key_out)
 
     monkeypatch.setattr(xfuser_qwenimage21, "_HAS_FLYDSL", True)
     monkeypatch.setattr(xfuser_qwenimage21, "flydsl_fused_qk_norm_rope", fused_reference)
@@ -105,7 +129,8 @@ def test_flydsl_qk_norm_rope_gets_tables_matching_diffusers(xfuser_sdpa_calls, m
     reference = _prefill_then_decode(stock)
     actual = _prefill_then_decode(_xfuser_model(stock, xfuser_qwenimage21.xFuserQwenImage21AttnProcessor))
 
-    assert len(fused_calls) == (1 + DECODE_STEPS) * NUM_LAYERS
+    # Cached steps write their keys straight into the KV cache.
+    assert fused_calls == [False] * NUM_LAYERS + [True] * (DECODE_STEPS * NUM_LAYERS)
     for ref, out in zip(reference, actual):
         torch.testing.assert_close(out, ref, rtol=1e-4, atol=1e-5)
 

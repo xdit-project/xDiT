@@ -64,27 +64,48 @@ def _rotary_table(freqs):
     return freqs.real.repeat_interleave(2, dim=-1), freqs.imag.repeat_interleave(2, dim=-1)
 
 
-def _qk_norm_rope(attn, query, key, rotary_emb):
-    """QK-norm then RoPE, as one FlyDSL kernel when available and as diffusers' ops otherwise."""
+def _qk_norm_rope(attn, query, key, rotary_emb, key_out=None):
+    """QK-norm then RoPE, as one FlyDSL kernel when available and as diffusers' ops otherwise.
+
+    With ``key_out`` the key is written there and returned in its place.
+    """
     if _HAS_FLYDSL:
-        return flydsl_fused_qk_norm_rope(query, key, attn.norm_q, attn.norm_k, rotary_emb)
+        return flydsl_fused_qk_norm_rope(query, key, attn.norm_q, attn.norm_k, rotary_emb, key_out=key_out)
     cos, sin = rotary_emb
     freqs = torch.complex(cos[:, 0::2], sin[:, 0::2])
     query = apply_rotary_emb_qwen(attn.norm_q(query).to(query.dtype), freqs, use_real=False)
     key = apply_rotary_emb_qwen(attn.norm_k(key).to(key.dtype), freqs, use_real=False)
+    if key_out is not None:
+        key = key_out.copy_(key)
     return query, key
 
 
-def _update_kv_cache(key, value, layer_cache, kv_cache_mode, cache_write_slice):
+def _cached_key_slot(key, layer_cache, kv_cache_mode):
+    """Where a cached step's key belongs in the KV cache, or ``None`` if RoPE cannot write it there directly.
+
+    Not under sequence parallelism, where the all-to-all sits between RoPE and the cache.
+    """
+    if layer_cache is None or kv_cache_mode != "cached" or get_sequence_parallel_world_size() > 1:
+        return None
+    cached_k = layer_cache.get()[0]
+    return cached_k[:, cached_k.shape[1] - key.shape[1] :]
+
+
+def _update_kv_cache(key, value, layer_cache, kv_cache_mode, cache_write_slice, key_in_cache=False):
     if layer_cache is None:
         return key, value
     if kv_cache_mode == "extract" and cache_write_slice is not None:
-        # `clone()`, not `contiguous()`: a contiguous prefix slice would pin the whole prefill K/V.
-        layer_cache.store(key[:, cache_write_slice].clone(), value[:, cache_write_slice].clone())
+        # The whole prefill K/V, not just the prefix: cached steps overwrite the target tokens in place.
+        layer_cache.store(
+            key.clone(memory_format=torch.contiguous_format), value.clone(memory_format=torch.contiguous_format)
+        )
     elif kv_cache_mode == "cached":
         cached_k, cached_v = layer_cache.get()
-        key = torch.cat([cached_k, key], dim=1)
-        value = torch.cat([cached_v, value], dim=1)
+        target = slice(cached_k.shape[1] - key.shape[1], None)
+        if not key_in_cache:
+            cached_k[:, target].copy_(key)
+        cached_v[:, target].copy_(value)
+        key, value = cached_k, cached_v
     return key, value
 
 
@@ -187,10 +208,13 @@ class _xFuserQwenImage21AttnMixin:
         key = attn.to_k(hidden_states).unflatten(-1, (attn.heads, -1))
         value = attn.to_v(hidden_states).unflatten(-1, (attn.heads, -1))
 
-        query, key = _qk_norm_rope(attn, query, key, rotary_emb)
+        key_slot = _cached_key_slot(key, layer_cache, kv_cache_mode)
+        query, key = _qk_norm_rope(attn, query, key, rotary_emb, key_out=key_slot)
 
         query, key, value = _gather_sequence_scatter_heads(query, key, value, self.sp_pad)
-        key, value = _update_kv_cache(key, value, layer_cache, kv_cache_mode, cache_write_slice)
+        key, value = _update_kv_cache(
+            key, value, layer_cache, kv_cache_mode, cache_write_slice, key_in_cache=key_slot is not None
+        )
 
         if isinstance(attention_mask, BlockMask):
             hidden_states = _flex_prefill(query, key, value, attention_mask)

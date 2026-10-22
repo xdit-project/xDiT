@@ -130,32 +130,10 @@ def _require_mha_v4_recipe(backend_name):
         pytest.skip(f"Installed AITER has no kernel row for {backend_name}: {exc}")
 
 
-# Dense MXFP4 V returns garbage at any sequence length that is not a multiple of 128 on AITER
-# main: cosine against SDPA measures 0.040 at S=257 and -0.012 at S=129, while FP8 V and MXFP6 V
-# stay correct. AITER_MXFP4 stores V in MXFP4 and fails the same way. AITER's own
-# unaligned-sequence test asserts only eager==compiled and isfinite, so it does not catch this.
-_MXFP4_V_BACKENDS = ("AITER_F4F4", "AITER_F6F4", "AITER_MXFP4")
-
-
-def _mixed_attention_case(backend_name, sequence_length):
-    if backend_name in _MXFP4_V_BACKENDS and sequence_length % 128:
-        return pytest.param(
-            backend_name,
-            sequence_length,
-            marks=pytest.mark.xfail(
-                reason=(
-                    f"AITER dense MXFP4 V is numerically wrong at S={sequence_length} (S % 128 != 0); tracked upstream"
-                ),
-                strict=True,
-            ),
-        )
-    return pytest.param(backend_name, sequence_length)
-
-
 @pytest.mark.parametrize(
     ("backend_name", "sequence_length"),
     [
-        _mixed_attention_case(backend_name, sequence_length)
+        (backend_name, sequence_length)
         for sequence_length in (128, 257)
         for backend_name in (
             "AITER_BF16",
@@ -286,9 +264,8 @@ def test_aiter_mixed_attention_unequal_sequence_lengths(backend_name):
     _require_mha_v4_aiter(backend_name)
     _require_mha_v4_recipe(backend_name)
 
-    # The MXFP4-V rows require a full V tile. Keep Q and K unequal while
-    # respecting that kernel constraint; the other rows exercise a ragged K.
-    key_length = 256 if backend_name in _MXFP4_V_BACKENDS else 257
+    # Q and K unequal, with a ragged K: every row handles a partial final KV tile.
+    key_length = 257
     query = torch.randn((2, 5, 128, 128), device="cuda", dtype=torch.bfloat16)
     key = torch.randn((2, 5, key_length, 128), device="cuda", dtype=torch.bfloat16)
     value = torch.randn_like(key)
@@ -759,3 +736,99 @@ def test_mha_v4_gathers_a_multi_sequence_batch_that_declares_valid_kv_len():
         reference = F.scaled_dot_product_attention(query[b : b + 1], key[b : b + 1, :, :n], value[b : b + 1, :, :n])
         cosine = F.cosine_similarity(output[b : b + 1].float().flatten(), reference.float().flatten(), dim=0).item()
         assert cosine > 0.99, f"sequence {b} of {valid}: {cosine}"
+
+
+# ---------------------------------------------------------------------------
+# head dim 256
+#
+# Ideogram 4 runs 18 heads of 256. MXFP4 is the only row AITER ships an hd256
+# object for, so these also pin the negative case: a wider row appearing here
+# by accident would route a model to a kernel that does not exist.
+# ---------------------------------------------------------------------------
+
+_HD256_BACKENDS = ("AITER_MXFP4", "AITER_F4F4")
+
+
+def test_only_mxfp4_rows_declare_head_dim_256():
+    for spec in registry.REGISTRY.values():
+        if spec.type not in _MHA_V4_BACKENDS:
+            continue
+        dims = spec.accepts.head_dims()
+        serves_256 = dims is not None and 256 in dims
+        assert serves_256 == (spec.type.name in _HD256_BACKENDS), (
+            f"{spec.type.name} declares head dims {dims}; only {_HD256_BACKENDS} have an hd256 object"
+        )
+
+
+@pytest.mark.parametrize("backend_name", _HD256_BACKENDS)
+@pytest.mark.parametrize("sequence_length", (256, 257, 1024))
+def test_aiter_mxfp4_head_dim_256_matches_sdpa(backend_name, sequence_length):
+    """Ideogram 4's attention geometry, against SDPA on the same inputs."""
+    _require_mha_v4_aiter(backend_name)
+    _require_mha_v4_recipe(backend_name)
+
+    torch.manual_seed(1234)
+    shape = (1, 18, sequence_length, 256)
+    query = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    key = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    value = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+
+    with torch.no_grad():
+        reference = F.scaled_dot_product_attention(query, key, value)
+        output, lse = _run(backend_name, query, key, value, dropout_p=0.0, is_causal=False)
+
+    cosine_similarity = F.cosine_similarity(output.float().flatten(), reference.float().flatten(), dim=0).item()
+
+    assert output.shape == reference.shape
+    assert torch.isfinite(output).all()
+    assert lse is None
+    # The same bound the hd128 rows carry: this is MXFP4's quantization floor, not a width effect.
+    assert cosine_similarity > 0.95
+
+
+def test_aiter_mxfp4_head_dim_256_gqa():
+    """Ideogram 4 is MHA, but the hd256 kernel reads the GQA ratio as a shift."""
+    _require_mha_v4_aiter("AITER_MXFP4")
+    _require_mha_v4_recipe("AITER_MXFP4")
+
+    torch.manual_seed(99)
+    query = torch.randn((1, 16, 512, 256), device="cuda", dtype=torch.bfloat16)
+    key = torch.randn((1, 4, 512, 256), device="cuda", dtype=torch.bfloat16)
+    value = torch.randn_like(key)
+
+    with torch.no_grad():
+        reference = F.scaled_dot_product_attention(query, key, value, enable_gqa=True)
+        output, _ = _run("AITER_MXFP4", query, key, value, dropout_p=0.0, is_causal=False)
+
+    cosine = F.cosine_similarity(output.float().flatten(), reference.float().flatten(), dim=0).item()
+    assert torch.isfinite(output).all()
+    assert cosine > 0.95, f"cosine {cosine}"
+
+
+def test_aiter_mxfp4_head_dim_256_compiles_fullgraph():
+    """--use_torch_compile path.
+
+    The hd256 producers over-allocate: the Q/K scale images carry gather padding and the V data
+    buffer carries a half-row view overhang. They are custom ops so a compiled graph cannot see
+    through them and shrink those buffers to what the traced code reads, which the kernels would
+    then gather past.
+    """
+    _require_mha_v4_aiter("AITER_MXFP4")
+    _require_mha_v4_recipe("AITER_MXFP4")
+
+    torch.manual_seed(5)
+    shape = (1, 18, 1024, 256)
+    query = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    key = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    value = torch.randn_like(key)
+
+    def run(q, k, v):
+        return _run("AITER_MXFP4", q, k, v, dropout_p=0.0, is_causal=False)[0]
+
+    with torch.no_grad():
+        eager = run(query, key, value)
+        compiled = torch.compile(run, fullgraph=True)(query, key, value)
+    torch.cuda.synchronize()
+
+    assert torch.isfinite(compiled).all()
+    assert torch.equal(eager, compiled)

@@ -144,7 +144,7 @@ class _HeadDimModel:
 
 
 def test_a_model_is_refused_a_backend_that_serves_none_of_its_head_dims():
-    """Ideogram 4 runs head dimension 256, which MHA v4 does not serve.
+    """Ideogram 4 runs head dimension 256, which only the MXFP4 MHA v4 rows serve.
     A backend that declares no HEAD_DIM makes no claim and stays selectable."""
     from xfuser.core.attention import registry
     from xfuser.core.attention.spec import AttentionBackendType
@@ -154,8 +154,18 @@ def test_a_model_is_refused_a_backend_that_serves_none_of_its_head_dims():
 
     ideogram4 = _HeadDimModel(xFuserIdeogram4Model.attention_head_dims)
     for backend in DENSE_BACKENDS:
+        serves_ideogram4 = 256 in (registry.get(backend).accepts.head_dims() or ())
+        if serves_ideogram4:
+            base_model._validate_attention_head_dims(ideogram4, _HeadDimConfig(backend.name))
+            continue
         with pytest.raises(ValueError, match="head dimension"):
             base_model._validate_attention_head_dims(ideogram4, _HeadDimConfig(backend.name))
+
+    # AITER ships one hd256 MHA v4 object and both MXFP4 rows launch it.
+    assert {b.name for b in DENSE_BACKENDS if 256 in (registry.get(b).accepts.head_dims() or ())} == {
+        "AITER_MXFP4",
+        "AITER_F4F4",
+    }
 
     assert registry.get(AttentionBackendType.AITER).accepts.head_dims() is None
     base_model._validate_attention_head_dims(ideogram4, _HeadDimConfig("AITER"))

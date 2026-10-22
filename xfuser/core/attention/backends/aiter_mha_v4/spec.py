@@ -11,7 +11,7 @@ sparge variant is pure table and is generated below.
 
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Optional
+from typing import Optional, Tuple
 
 from xfuser.core.attention.requirements import ALWAYS, ARCH, NEVER, PARAM, Requirement, SYMBOL
 from xfuser.core.attention.constraints import (
@@ -93,6 +93,9 @@ class MhaV4Format:
     qk_scale: Optional[Scale] = None
     v_scale: Optional[Scale] = None
     dense: bool = True  # False = sparge variant only
+    # Dense head widths this row has a code object for. AITER ships hd256 for MXFP4 alone, so
+    # this is per-row rather than a family-wide constant.
+    head_dims: Tuple[int, ...] = (128,)
 
     @property
     def is_mxfp8(self) -> bool:
@@ -114,12 +117,14 @@ FORMATS = [
     MhaV4Format("MXFP6",     Fmt.MXFP6,       Fmt.NATIVE_FP8,  GFX950),
     MhaV4Format("F6F4",      Fmt.MXFP6,       Fmt.MXFP4,       GFX950),
     # MXFP4 Q/K with FP8 V is not a row AITER has; it rejects the combination.
-    MhaV4Format("MXFP4",     Fmt.MXFP4,       Fmt.MXFP4,       GFX950),
+    # The only row with an hd256 object, which is what serves Ideogram 4's 256-wide heads.
+    # Sparge stays 128-only below: there is no hd256 sparse object and the kernel asserts it off.
+    MhaV4Format("MXFP4",     Fmt.MXFP4,       Fmt.MXFP4,       GFX950,          head_dims=(128, 256)),
     # The same launch as MXFP4 above, deliberately. AITER commented its
     # separate f4f4 row out -- mxfp4 covers it and claims the same v_pack=1
     # FP6-P V order -- so this resolves there until the row is reinstated.
     # Kept rather than removed because existing configurations name it.
-    MhaV4Format("F4F4",      Fmt.MXFP4,       Fmt.MXFP4,       GFX950),
+    MhaV4Format("F4F4",      Fmt.MXFP4,       Fmt.MXFP4,       GFX950,          head_dims=(128, 256)),
     MhaV4Format("MXFP8",     Fmt.NATIVE_FP8,  Fmt.NATIVE_FP8,  GFX950,
                 qk_scale=Scale.E8M0_PER_1X32, v_scale=Scale.F32_PER_TENSOR),
     MhaV4Format("FP8",       Fmt.NATIVE_FP8,  Fmt.NATIVE_FP8,  GFX950_OR_GFX942,
@@ -131,7 +136,7 @@ FORMATS = [
 # Dense serves packed keys by shortening K/V -- slicing a declared trailing pad
 # or gathering the valid rows. Sparge cannot do either: its sorted-sparse launch
 # needs the key length padded to its KV tile, which is the alignment both remove.
-DENSE_CALLS = NO_DROPOUT & NON_CAUSAL & PACKED_KEYS & HEAD_DIM(128)
+DENSE_CALLS = NO_DROPOUT & NON_CAUSAL & PACKED_KEYS
 SPARGE_CALLS = NO_DROPOUT & NON_CAUSAL & NO_VARLEN & HEAD_DIM(128) & MHA_ONLY & SELF_ATTENTION
 
 
@@ -152,13 +157,13 @@ def _dense_spec(fmt: MhaV4Format) -> Spec:
         impl=Impl("kernel:mha_v4_dense", {"fmt": fmt}),
         ring=DENSE_RING,
         low_precision=fmt.qk is not Fmt.BF16,
-        accepts=DENSE_CALLS,
-        # Every row here is head dim 128, which makes the family unselectable
-        # for a model that mixes widths: LTX-2 runs 128-wide video blocks
-        # beside 64-wide audio ones under one backend choice. The odd widths
-        # go to AITER v3, which covers all of them. Not SDPA, which returns no
-        # LSE -- on a ring run that would hand the merge a partial from the
-        # 128-wide blocks and nothing from the rest.
+        accepts=DENSE_CALLS & HEAD_DIM(*fmt.head_dims),
+        # A row serves the widths its table entry lists, which makes the family
+        # unselectable for a model that mixes served and unserved ones: LTX-2
+        # runs 128-wide video blocks beside 64-wide audio ones under one backend
+        # choice. The odd widths go to AITER v3, which covers all of them. Not
+        # SDPA, which returns no LSE -- on a ring run that would hand the merge a
+        # partial from the served blocks and nothing from the rest.
         fallback=AttentionBackendType.AITER,
         requires=SYMBOL(_MHA_V4) & GFX950_OR_GFX942 & _scale_modes(fmt),
     )

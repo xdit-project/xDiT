@@ -53,15 +53,13 @@ from xfuser.core.utils.checkpoint_io import (
     component_shard_paths,
 )
 from xfuser.core.utils.dtype_policy import cast_preserving_fp32_modules
-from xfuser.core.utils.runner_utils import log, rgetattr, _use_aiter_fp8_rdna4
-from xfuser.envs import _is_cuda
+from xfuser.core.utils.runner_utils import log, rgetattr
 from .checkpoint import CheckpointManifest, CheckpointRequest
 from .contracts import (
     LoadDeclaration,
     LoadRoute,
     MaterializationMode,
     UnsupportedLoadContract,
-    assert_offload_is_compatible_with_format,
     assert_offload_is_compatible_with_sharding,
     assert_requested_materialization_is_honoured,
     select_effective_materialization_mode,
@@ -386,14 +384,11 @@ class ModelLoader:
         assert_offload_is_compatible_with_sharding(config)
         mode = select_effective_materialization_mode(config, world_size=world_size)
         requested_format, backend = select_runtime_quantization(
-            config,
-            aiter_fp8_active=bool(config.use_fp8_gemms and _use_aiter_fp8_rdna4()),
-            cuda_active=_is_cuda(),
-        )
-        assert_offload_is_compatible_with_format(
-            config,
-            requested_format=requested_format,
-            selected_backend=backend,
+            config.gemm_quantization_spec,
+            # The same registry the converters resolve through, so the contract
+            # and the adapters cannot reach different answers about a format.
+            impl_for=self.backends.impl_for,
+            why_not=self.backends.why_not,
         )
         self.load_contract = select_load_contract(
             requested_format=requested_format,
@@ -404,6 +399,7 @@ class ModelLoader:
             runner_name=type(self.model).__name__,
         )
         self.backends.preflight()
+        self.backends.assert_offload_is_compatible()
 
     def transformer_quantization_adapter(self, component_name: str):
         return self.backends.transformer_adapter(component_name)
@@ -494,7 +490,7 @@ class ModelLoader:
     def plan_eager_blockwise_fallback(self, prepared, targets, wrap_attrs):
         """Return the component-level local fallback decision."""
 
-        from .format_backends import plan_eager_blockwise_fallback
+        from .backends import plan_eager_blockwise_fallback
 
         config = self.model.config
         offload_requested = any(
@@ -691,8 +687,9 @@ class ModelLoader:
         return component
 
     def _meta_te_fp8_targets(self, component_name: str) -> tuple:
-        """This component's fp8-streamed target paths, component-relative."""
-        streamed_targets = self.quantization_ledger.fp8_streaming_targets
+        """This component's streamed target paths, at the format it was given."""
+        encoder_format = self.quantization_plan.component_format(component_name)
+        streamed_targets = self.quantization_ledger.streamed_at(encoder_format) if encoder_format else set()
         prefix = f"{component_name}."
         return tuple(
             "" if target == component_name else target[len(prefix) :]

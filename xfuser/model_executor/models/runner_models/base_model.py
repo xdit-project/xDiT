@@ -14,11 +14,7 @@ from diffusers.utils import load_image, export_to_video
 import numpy as np
 from xfuser.compat import is_diffusers_import_error
 from xfuser.config import xFuserArgs
-from xfuser.envs import (
-    PACKAGES_CHECKER,
-    _is_hip,
-    _is_cuda,
-)
+from xfuser.envs import PACKAGES_CHECKER
 from xfuser.core.utils.outputs_equal import outputs_equal
 from xfuser.core.utils.runner_utils import (
     log,
@@ -33,6 +29,7 @@ from xfuser.model_executor.models.runner_models.vae_manager import (
 )
 
 from xfuser.model_executor.cache.presets import DBCacheSettings, ModelCacheConfig
+from xfuser.model_executor.quant.targets import GemmTargets
 from xfuser.core.distributed import (
     get_world_group,
     get_model_replica_group,
@@ -58,9 +55,6 @@ from xfuser.core.distributed.attention_schedule import (
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     LoadRoute,
-)
-from xfuser.model_executor.models.runner_models.loading.quantization_plan import (
-    apply_fp8_override_cli_to_settings,
 )
 
 packages_info = PACKAGES_CHECKER.get_packages_info()
@@ -212,12 +206,11 @@ class ModelCapabilities:
     enable_tiling: bool = False
     use_vae_channels_last_format: bool = True
     # Other features
-    use_int8_gemms: bool = False
-    use_fp8_gemms: bool = False
-    use_fp8_text_encoder: bool = False
-    use_fp4_gemms: bool = False
-    use_fp6_gemms: bool = False
-    use_a6w4_gemms: bool = False
+    #: The GEMM formats this model can run, by the names --gemm_quantization
+    #: uses. One field rather than a flag per format: a new format needs no new
+    #: capability, and a run is checked against it by name.
+    gemm_formats: frozenset = frozenset()
+    quantize_text_encoder: bool = False
     supports_step_caching: bool = False
     supports_lora: bool = False
     use_fp8_comms: bool = False
@@ -229,6 +222,16 @@ class ModelCapabilities:
     supports_bsa_attention_backends: bool = False
     supports_distilled_weights: bool = False
     profile_capture_phase: bool = False
+
+    def supported_gemm_formats(self) -> frozenset:
+        """The formats a run may name for this model.
+
+        What "supported" means lives here, and a model that declares nothing
+        supports nothing rather than everything. `LoadDeclaration.for_runner`
+        reads the field directly because it accepts any capabilities-shaped
+        object, not only this one.
+        """
+        return frozenset(self.gemm_formats)
 
 
 @dataclass(frozen=True)
@@ -258,13 +261,9 @@ class ModelSettings:
     model_output_type: Optional[str] = None
     mod_value: Optional[int] = None
     fps: Optional[int] = None
-    int8_gemm_module_list: List[str] = None
-    fp8_gemm_module_list: List[str] = None
-    fp8_text_encoder_module_list: List[str] = None
-    fp8_gemm_include_suffixes: Optional[Tuple[str, ...]] = None
-    fp4_gemm_module_list: List[str] = None
-    fp8_precision_overrides: Tuple[str] = None
-    fp8_precision_override_suffixes: Tuple[str] = None
+    #: Which modules this model quantizes, and which of them stay at the better
+    #: precision. Never a format: the run supplies those.
+    gemm_targets: Optional[GemmTargets] = None
     fbcache_thresh: float = 0.12
     step_cache_config: Optional[ModelCacheConfig] = None
     # FSDP strategy is just for the components to be sharded - other components will be moved to correct device automatically
@@ -420,15 +419,17 @@ class xFuserModel(abc.ABC):
         pass
 
     def _update_model_settings(self, config: xFuserArgs) -> None:
-        if config.use_fp4_gemms:
-            apply_fp8_override_cli_to_settings(config, self.settings)
-        te_targets = self.settings.fp8_text_encoder_module_list
-        if te_targets and config.use_fp8_gemms and not config.use_fp8_text_encoder:
-            # Said out loud because text-encoder FP8 is opt-in: an encoder left bf16 is otherwise
-            # indistinguishable from --use_fp8_gemms failing to take effect.
+        targets = self.settings.gemm_targets
+
+        te_targets = targets.text_encoder.roots() if targets is not None else ()
+        spec = getattr(config, "gemm_quantization_spec", None)
+        quantizing = spec is not None and not spec.is_pure("none")
+        if te_targets and quantizing and not config.quantize_text_encoder:
+            # Said out loud because quantizing the encoder is opt-in: one left bf16 is otherwise
+            # indistinguishable from --gemm_quantization failing to take effect.
             log(
-                f"--use_fp8_gemms covers the transformer; {type(self).__name__}'s "
-                f"{len(te_targets)} text-encoder target(s) stay bf16. Add --use_fp8_text_encoder "
+                f"--gemm_quantization covers the transformer; {type(self).__name__}'s "
+                f"{len(te_targets)} text-encoder target(s) stay bf16. Add --quantize_text_encoder "
                 f"to quantize them too, for less memory at some risk to text conditioning."
             )
 
@@ -678,6 +679,19 @@ class xFuserModel(abc.ABC):
                 if config_value and not getattr(self.capabilities, key):
                     raise ValueError(f"Model {self.settings.model_name} does not support {key}.")
 
+        # The loop above matches capability names to config attributes, and a
+        # format is not a config attribute -- it is a name inside the profile.
+        # Without this a run could ask any model for any format.
+        requested = config.gemm_quantization_spec.formats - {"none"}
+        supported = self.capabilities.supported_gemm_formats()
+        unsupported = sorted(requested - supported)
+        if unsupported:
+            raise ValueError(
+                f"Model {self.settings.model_name} does not support GEMM "
+                f"format(s) {', '.join(unsupported)}; it supports "
+                + (", ".join(sorted(supported)) if supported else "none")
+            )
+
         if config.cache_method:
             if not self.capabilities.supports_step_caching:
                 raise ValueError(f"Model {self.settings.model_name} does not support step caching.")
@@ -770,30 +784,10 @@ class xFuserModel(abc.ABC):
         if self.settings.model_output_type == "video" and not self.settings.fps:
             raise ValueError(f"Model {self.settings.model_name} produces video output but fps is not set.")
 
-        if config.use_int8_gemms and _is_hip():
-            raise ValueError("Int8 GEMMs on ROCm are not supported.")
-
-        if config.use_fp6_gemms and _is_cuda():
-            raise ValueError(
-                "--use_fp6_gemms requires the AITER MXFP6 ASM backend on ROCm gfx950; CUDA is not supported."
-            )
-        if config.use_fp6_gemms and _is_hip() and not packages_info.get("has_aiter", False):
-            raise ValueError("MXFP6 GEMMs on ROCm gfx950 require AITER with the A6W6 ASM backend.")
-        if config.use_a6w4_gemms and _is_cuda():
-            raise ValueError("A6W4 requires the AITER mixed-MXFP ASM backend on ROCm gfx950; CUDA is not supported.")
-        if config.use_a6w4_gemms and _is_hip() and not packages_info.get("has_aiter", False):
-            raise ValueError("A6W4 on ROCm gfx950 requires AITER mixed-MXFP ASM.")
-
-        if config.use_fp4_gemms:
-            if _is_hip() and not packages_info.get("has_aiter", False):
-                raise ValueError("FP4 GEMMs on ROCm require AITER.")
-            if _is_cuda():
-                major, _ = torch.cuda.get_device_capability()
-                if major < 10:
-                    raise ValueError(
-                        f"NVFP4 GEMMs require CUDA capability >= 10.0 (Blackwell). "
-                        f"Detected: {torch.cuda.get_device_capability()}"
-                    )
+        # Whether this machine can store a format is not asked here. The same
+        # probes that build the adapters answer it before allocation, naming the
+        # capability or the symbol they actually found missing, rather than from
+        # a second copy of the hardware rules kept next to the arguments.
         validate_vae_config(config, self.capabilities, self.settings)
 
         if config.distilled_transformer_path or config.distilled_transformer_2_path:

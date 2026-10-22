@@ -1,5 +1,6 @@
 """Dependency-light contracts for generalized transformer FP8 load backends."""
 
+import importlib.machinery
 import importlib.util
 from pathlib import Path
 import sys
@@ -8,64 +9,95 @@ from types import SimpleNamespace
 import pytest
 
 ROOT = Path(__file__).resolve().parents[4]
-BACKENDS_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/fp8_backends.py"
+BACKENDS_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/backends.py"
 CONTRACTS_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/contracts.py"
+ADAPTER_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/quant_adapter.py"
+
+
+#: A synthetic package over the loading directory. These modules are meant to
+#: be importable without the rest of the app, and they share a dependency-light
+#: base, so the loader gives relative imports somewhere to resolve rather than
+#: forcing the shared code to be duplicated or imported absolutely.
+_PKG = "fp8_adapter_pkg"
+
+
+def _package():
+    if _PKG not in sys.modules:
+        package = importlib.util.module_from_spec(importlib.machinery.ModuleSpec(_PKG, None, is_package=True))
+        package.__path__ = [str(BACKENDS_PATH.parent)]
+        sys.modules[_PKG] = package
+    return sys.modules[_PKG]
 
 
 def _load_module(path, name):
-    spec = importlib.util.spec_from_file_location(name, path)
+    _package()
+    spec = importlib.util.spec_from_file_location(f"{_PKG}.{name}", path)
     module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
+    sys.modules[f"{_PKG}.{name}"] = module
     spec.loader.exec_module(module)
     return module
 
 
 @pytest.fixture(scope="module")
 def modules():
-    contracts = _load_module(CONTRACTS_PATH, "fp8_adapter_contracts")
+    contracts = _load_module(CONTRACTS_PATH, "contracts")
+    adapter = _load_module(ADAPTER_PATH, "quant_adapter")
     backends = _load_module(BACKENDS_PATH, "fp8_adapter_backends")
-    return SimpleNamespace(contracts=contracts, backends=backends)
+    return SimpleNamespace(contracts=contracts, backends=backends, adapter=adapter)
 
 
-def _contract(modules, backend):
-    return SimpleNamespace(
-        requested_format=modules.contracts.QuantizationFormat.FP8,
-        selected_backend=backend,
-    )
+def _adapter(modules, impl, **measured):
+    """The adapter one implementation gives, from a measured record."""
+    a = modules.adapter
+    return a.build_adapter("fp8", impl, capability=a.FormatCapability(available=True, **measured))
 
 
-def test_backend_selection_uses_injected_capabilities(modules):
-    c, b = modules.contracts, modules.backends
-    capabilities = b.Fp8BackendCapabilities(
-        aiter_block_scale=True,
-        torchao_fp8=False,
-    )
+def test_an_adapter_is_built_from_its_measured_record(modules):
+    c = modules.contracts
 
-    selected = b.select_fp8_backend(
-        _contract(modules, c.QuantizationBackend.AITER),
-        capabilities=capabilities,
-    )
+    selected = _adapter(modules, "aiter")
 
     assert selected.backend is c.QuantizationBackend.AITER
     assert selected.format is c.QuantizationFormat.FP8
+    assert selected.impl == "aiter"
+    assert selected.format_name == "fp8"
     assert selected.storage_semantics == "block_128_scaled"
+
+
+def test_an_unavailable_record_refuses_with_what_the_probe_measured(modules):
+    a = modules.adapter
+
+    with pytest.raises(modules.contracts.UnsupportedLoadContract, match="no GPU"):
+        a.build_adapter(
+            "fp8",
+            "torchao",
+            capability=a.FormatCapability(available=False, reason="no GPU"),
+        )
+
+
+def test_a_pair_with_no_registered_class_is_refused(modules):
+    a = modules.adapter
+
+    with pytest.raises(modules.contracts.UnsupportedLoadContract, match="no aiter"):
+        a.build_adapter("int8", "aiter", capability=a.FormatCapability(available=True))
 
 
 def test_hardware_and_package_probes_are_injectable(modules):
     b = modules.backends
     calls = []
 
-    capabilities = b.probe_fp8_backend_capabilities(
-        aiter_probe=lambda: calls.append("aiter") or False,
-        torchao_accelerator_probe=lambda: calls.append("accelerator") or True,
-        torchao_probe=lambda: calls.append("torchao") or True,
-        torchao_diffusers_probe=lambda: calls.append("diffusers") or False,
+    capabilities = b.probe_backend_capabilities(
+        wanted={"fp8"},
+        aiter_fp8_probe=lambda: calls.append("aiter") or False,
+        torchao_fp8_accelerator_probe=lambda: calls.append("accelerator") or True,
+        torchao_fp8_probe=lambda: calls.append("torchao") or True,
+        diffusers_probe=lambda kind: calls.append("diffusers") or False,
         torchao_text_encoder_probe=lambda: calls.append("text_encoder")
         or (
             False,
             "Transformers TorchAO unavailable",
         ),
-        torchao_fsdp_probe=lambda: calls.append("fsdp") or True,
+        fsdp_probe=lambda kind: calls.append("fsdp") or True,
     )
 
     assert calls == [
@@ -76,23 +108,21 @@ def test_hardware_and_package_probes_are_injectable(modules):
         "text_encoder",
         "fsdp",
     ]
-    assert capabilities == b.Fp8BackendCapabilities(
-        aiter_block_scale=False,
-        torchao_fp8=True,
-        torchao_diffusers_streaming=False,
-        torchao_text_encoder_streaming=False,
-        torchao_fsdp_patches=True,
-        aiter_transformers_reason="AITER FP8 backend is unavailable",
-        torchao_text_encoder_reason="Transformers TorchAO unavailable",
-    )
+    assert capabilities.of("fp8", "aiter").available is False
+    torchao = capabilities.of("fp8", "torchao")
+    assert torchao.available is True
+    assert torchao.streams is False
+    assert torchao.te_streams is False
+    assert torchao.te_streams_reason == "Transformers TorchAO unavailable"
+    assert torchao.fsdp_safe is True
 
 
 def test_text_encoder_probe_does_not_require_diffusers_transformer_quantizer(modules, monkeypatch):
     b = modules.backends
     monkeypatch.setattr(
         b,
-        "_probe_torchao_diffusers_streaming",
-        lambda: pytest.fail("text-encoder routing must probe PipelineQuantizationConfig directly"),
+        "_probe_diffusers_config",
+        lambda kind: pytest.fail("text-encoder routing must probe PipelineQuantizationConfig directly"),
     )
     monkeypatch.setattr(b, "_probe_torchao_fp8_conversion_api", lambda: (True, None))
 
@@ -134,16 +164,17 @@ def test_supported_rocm_runs_torchao_api_preflight(modules):
     b = modules.backends
     calls = []
 
-    capabilities = b.probe_fp8_backend_capabilities(
-        aiter_probe=lambda: False,
-        torchao_accelerator_probe=lambda: True,
-        torchao_probe=lambda: calls.append("torchao") or True,
-        torchao_diffusers_probe=lambda: False,
-        torchao_fsdp_probe=lambda: True,
+    capabilities = b.probe_backend_capabilities(
+        wanted={"fp8"},
+        aiter_fp8_probe=lambda: False,
+        torchao_fp8_accelerator_probe=lambda: True,
+        torchao_fp8_probe=lambda: calls.append("torchao") or True,
+        diffusers_probe=lambda kind: False,
+        fsdp_probe=lambda kind: True,
     )
 
     assert calls == ["torchao"]
-    assert capabilities.torchao_fp8 is True
+    assert capabilities.of("fp8", "torchao").available is True
 
 
 def test_cuda_fp8_requires_capability_89(modules):
@@ -176,37 +207,41 @@ def test_rocm_fp8_eligibility_does_not_query_cuda_capability(modules):
 def test_unsupported_accelerator_skips_torchao_import_probe(modules):
     b = modules.backends
 
-    capabilities = b.probe_fp8_backend_capabilities(
-        aiter_probe=lambda: False,
-        torchao_accelerator_probe=lambda: False,
-        torchao_probe=lambda: pytest.fail("must not import TorchAO"),
-        torchao_diffusers_probe=lambda: pytest.fail("must not probe Diffusers"),
-        torchao_fsdp_probe=lambda: pytest.fail("must not inspect patches"),
+    capabilities = b.probe_backend_capabilities(
+        wanted={"fp8"},
+        aiter_fp8_probe=lambda: False,
+        torchao_fp8_accelerator_probe=lambda: False,
+        torchao_fp8_probe=lambda: pytest.fail("must not import TorchAO"),
+        diffusers_probe=lambda kind: pytest.fail("must not probe Diffusers"),
+        fsdp_probe=lambda kind: pytest.fail("must not inspect patches"),
     )
 
-    assert capabilities.torchao_fp8 is False
-    assert "CUDA or HIP/ROCm" in capabilities.torchao_fp8_reason
+    torchao = capabilities.of("fp8", "torchao")
+    assert torchao.available is False
+    assert "CUDA or HIP/ROCm" in torchao.reason
 
 
 def test_torchao_preflight_preserves_exact_unavailability_reason(modules):
     b = modules.backends
 
-    capabilities = b.probe_fp8_backend_capabilities(
-        aiter_probe=lambda: False,
-        torchao_accelerator_probe=lambda: True,
-        torchao_probe=lambda: (
+    capabilities = b.probe_backend_capabilities(
+        wanted={"fp8"},
+        aiter_fp8_probe=lambda: False,
+        torchao_fp8_accelerator_probe=lambda: True,
+        torchao_fp8_probe=lambda: (
             False,
             "torchao 0.14.0 is older than required 0.15.0",
         ),
-        torchao_diffusers_probe=lambda: (
+        diffusers_probe=lambda kind: (
             False,
             "Diffusers TorchAoConfig unavailable",
         ),
-        torchao_fsdp_probe=lambda: pytest.fail("FSDP probe must not run when TorchAO is unavailable"),
+        fsdp_probe=lambda kind: pytest.fail("FSDP probe must not run when TorchAO is unavailable"),
     )
 
-    assert capabilities.torchao_fp8 is False
-    assert capabilities.torchao_fp8_reason == "torchao 0.14.0 is older than required 0.15.0"
+    torchao = capabilities.of("fp8", "torchao")
+    assert torchao.available is False
+    assert torchao.reason == "torchao 0.14.0 is older than required 0.15.0"
 
 
 def test_installed_torchao_conversion_api_preflight(modules):
@@ -225,182 +260,57 @@ def test_installed_torchao_fsdp_patch_preflight(modules):
     assert reason is None
 
 
-def test_unavailable_selected_backend_fails_without_format_change(modules):
-    c, b = modules.contracts, modules.backends
-
-    with pytest.raises(
-        c.UnsupportedLoadContract,
-        match=r"TORCHAO.*FP8.*unavailable",
-    ):
-        b.select_fp8_backend(
-            _contract(modules, c.QuantizationBackend.TORCHAO),
-            capabilities=b.Fp8BackendCapabilities(
-                aiter_block_scale=True,
-                torchao_fp8=False,
-            ),
-        )
-
-
-def test_hybrid_contract_projects_to_torchao_for_blockwise_fp8(modules):
-    c, b = modules.contracts, modules.backends
-    contract = SimpleNamespace(
-        requested_format=c.QuantizationFormat.FP8_FP4,
-        selected_backend=c.QuantizationBackend.TORCHAO,
-    )
-
-    adapter = b.select_blockwise_fp8_backend(
-        contract,
-        capabilities=b.Fp8BackendCapabilities(
-            torchao_fp8=True,
-            torchao_fsdp_patches=True,
-        ),
-    )
-
-    assert adapter.backend is c.QuantizationBackend.TORCHAO
-    assert adapter.format is c.QuantizationFormat.FP8
-    assert adapter.storage_semantics == "tensorwise_dynamic"
-
-
-def test_pure_fp4_contract_projects_for_fp8_only_blockwise_component(modules):
-    c, b = modules.contracts, modules.backends
-    contract = SimpleNamespace(
-        requested_format=c.QuantizationFormat.FP4,
-        selected_backend=c.QuantizationBackend.TORCHAO,
-    )
-
-    adapter = b.select_blockwise_fp8_backend(
-        contract,
-        capabilities=b.Fp8BackendCapabilities(
-            torchao_fp8=True,
-            torchao_fsdp_patches=True,
-        ),
-    )
-
-    assert adapter.backend is c.QuantizationBackend.TORCHAO
-    assert adapter.format is c.QuantizationFormat.FP8
-
-
-@pytest.mark.parametrize(
-    (
-        "platform",
-        "fp4_backend",
-        "aiter_fp8",
-        "torchao_fp8",
-        "expected_fp8_backend",
-    ),
-    [
-        ("cuda", "TORCHAO", False, True, "TORCHAO"),
-        ("rdna4_rocm", "AITER", True, True, "AITER"),
-        ("other_rocm", "AITER", False, True, "TORCHAO"),
-    ],
-)
-def test_fp4_contract_selects_fp8_backend_from_hardware_matrix(
-    modules,
-    platform,
-    fp4_backend,
-    aiter_fp8,
-    torchao_fp8,
-    expected_fp8_backend,
-):
-    c, b = modules.contracts, modules.backends
-    contract = SimpleNamespace(
-        requested_format=c.QuantizationFormat.FP4,
-        selected_backend=getattr(c.QuantizationBackend, fp4_backend),
-    )
-
-    adapter = b.select_blockwise_fp8_backend(
-        contract,
-        capabilities=b.Fp8BackendCapabilities(
-            aiter_block_scale=aiter_fp8,
-            torchao_fp8=torchao_fp8,
-            torchao_fsdp_patches=torchao_fp8,
-        ),
-    )
-
-    assert adapter.backend is getattr(c.QuantizationBackend, expected_fp8_backend), platform
-
-
 @pytest.mark.parametrize(
     "materialization_mode",
     ["EAGER", "REPLICATED_META"],
 )
-def test_non_fsdp_torchao_allows_missing_fsdp_tensor_patches(
+def test_unshardable_storage_is_fine_where_nothing_shards_it(
     modules,
     materialization_mode,
 ):
-    c, b = modules.contracts, modules.backends
-    contract = SimpleNamespace(
-        requested_format=c.QuantizationFormat.FP4,
-        selected_backend=c.QuantizationBackend.TORCHAO,
-        materialization_mode=getattr(c.MaterializationMode, materialization_mode),
+    a = modules.adapter
+    capability = a.FormatCapability(
+        available=True,
+        fsdp_safe=False,
+        fsdp_reason="FSDP patches unavailable",
     )
+    adapter = a.build_adapter("fp8", "torchao", capability=capability)
 
-    adapter = b.select_blockwise_fp8_backend(
-        contract,
-        capabilities=b.Fp8BackendCapabilities(
-            torchao_fp8=True,
-            torchao_fsdp_patches=False,
-            torchao_fsdp_reason="FSDP patches unavailable",
-        ),
-    )
-    b.validate_torchao_fsdp2_patches(
-        contract,
-        capabilities=b.Fp8BackendCapabilities(
-            torchao_fp8=True,
-            torchao_fsdp_patches=False,
-            torchao_fsdp_reason="FSDP patches unavailable",
-        ),
-        required=False,
-    )
+    a.validate_fsdp_placement(adapter, capability=capability, required=False)
 
-    assert adapter.backend is c.QuantizationBackend.TORCHAO
+    assert adapter.backend is modules.contracts.QuantizationBackend.TORCHAO
 
 
-def test_fsdp_torchao_rejects_missing_fsdp_tensor_patches(modules):
-    c, b = modules.contracts, modules.backends
-    contract = SimpleNamespace(
-        requested_format=c.QuantizationFormat.FP4,
-        selected_backend=c.QuantizationBackend.TORCHAO,
-        materialization_mode=c.MaterializationMode.FSDP_META,
+def test_unshardable_storage_under_fsdp_is_refused_with_the_measured_reason(
+    modules,
+):
+    a = modules.adapter
+    capability = a.FormatCapability(
+        available=True,
+        fsdp_safe=False,
+        fsdp_reason="missing TorchAO FSDP patches: fsdp_post_all_gather",
     )
+    adapter = a.build_adapter("fp8", "torchao", capability=capability)
 
     with pytest.raises(
-        c.UnsupportedLoadContract,
-        match=r"FSDP.*patch.*fsdp_post_all_gather",
+        modules.contracts.UnsupportedLoadContract,
+        match=r"FSDP2.*fsdp_post_all_gather",
     ):
-        b.validate_torchao_fsdp2_patches(
-            contract,
-            capabilities=b.Fp8BackendCapabilities(
-                torchao_fp8=True,
-                torchao_fsdp_patches=False,
-                torchao_fsdp_reason=("missing TorchAO FSDP patches: fsdp_post_all_gather"),
-            ),
-            required=True,
-        )
+        a.validate_fsdp_placement(adapter, capability=capability, required=True)
 
 
-def test_blockwise_aiter_ignores_torchao_fsdp_patch_state(modules):
-    c, b = modules.contracts, modules.backends
-    contract = SimpleNamespace(
-        requested_format=c.QuantizationFormat.FP4,
-        selected_backend=c.QuantizationBackend.AITER,
-    )
+def test_a_shardable_parameter_kind_passes_the_same_check(modules):
+    """One rule, and AITER's plain packed parameter satisfies it."""
+    a = modules.adapter
+    capability = a.FormatCapability(available=True, fsdp_safe=True)
+    adapter = a.build_adapter("fp8", "aiter", capability=capability)
 
-    adapter = b.select_blockwise_fp8_backend(
-        contract,
-        capabilities=b.Fp8BackendCapabilities(
-            aiter_block_scale=True,
-            torchao_fsdp_patches=False,
-            torchao_fsdp_reason="TorchAO patches unavailable",
-        ),
-    )
+    a.validate_fsdp_placement(adapter, capability=capability, required=True)
 
-    assert adapter.backend is c.QuantizationBackend.AITER
+    assert adapter.parameter_semantics == "packed_weight_parameter"
 
 
 def test_derive_exclusions_preserves_only_declared_target_prefixes(modules):
-    b = modules.backends
-
     class FakeModel:
         def named_modules(self):
             return [
@@ -417,13 +327,14 @@ def test_derive_exclusions_preserves_only_declared_target_prefixes(modules):
                 return object()
             raise AttributeError(name)
 
-    exclusions = b.derive_untargeted_linear_exclusions(
+    ownership = modules.adapter.derive_linear_ownership(
         FakeModel(),
         ("blocks",),
         is_linear=lambda module: module == "linear",
     )
 
-    assert exclusions == ["blocks_extra.proj", "input_proj"]
+    assert ownership.exclusions == ("blocks_extra.proj", "input_proj")
+    assert ownership.streamed == ("blocks.0.proj",)
 
 
 def test_missing_target_makes_native_mapping_unavailable(modules):
@@ -437,7 +348,7 @@ def test_missing_target_makes_native_mapping_unavailable(modules):
             raise AttributeError(name)
 
     with pytest.raises(b.TargetMappingUnavailable, match="missing"):
-        b.derive_untargeted_linear_exclusions(
+        modules.adapter.derive_linear_ownership(
             FakeModel(),
             ("missing",),
             is_linear=lambda module: module == "linear",
@@ -445,14 +356,7 @@ def test_missing_target_makes_native_mapping_unavailable(modules):
 
 
 def test_torchao_native_config_uses_structure_derived_exclusions(modules, monkeypatch):
-    c, b = modules.contracts, modules.backends
-    adapter = b.select_fp8_backend(
-        _contract(modules, c.QuantizationBackend.TORCHAO),
-        capabilities=b.Fp8BackendCapabilities(
-            torchao_fp8=True,
-            torchao_diffusers_streaming=True,
-        ),
-    )
+    adapter = _adapter(modules, "torchao", streams=True)
     sentinel = object()
     captured = []
 
@@ -476,12 +380,14 @@ def test_torchao_native_config_uses_structure_derived_exclusions(modules, monkey
         lambda exclusions: captured.append(exclusions) or sentinel,
     )
     monkeypatch.setattr(
-        b,
-        "derive_untargeted_linear_exclusions",
-        lambda model, targets: ["input_proj"],
+        modules.adapter,
+        "derive_linear_ownership",
+        lambda model, targets, **kwargs: modules.adapter.LinearOwnership(
+            exclusions=("input_proj",), streamed=("blocks.0.proj",)
+        ),
     )
 
-    prepared = b.prepare_native_transformer_fp8_load(
+    prepared = modules.adapter.prepare_native_load(
         adapter,
         component_name="transformer",
         targets=("blocks",),
@@ -490,20 +396,16 @@ def test_torchao_native_config_uses_structure_derived_exclusions(modules, monkey
     )
 
     assert prepared.quantization_config is sentinel
-    assert captured == [["input_proj"]]
+    assert captured == [("input_proj",)]
     assert prepared.descriptor.materialization_mode == "streaming"
     assert prepared.descriptor.storage_semantics == "tensorwise_dynamic"
     assert prepared.descriptor.fallback_reason is None
 
 
 def test_torchao_without_native_diffusers_api_is_explicit_fallback(modules):
-    c, b = modules.contracts, modules.backends
-    adapter = b.select_fp8_backend(
-        _contract(modules, c.QuantizationBackend.TORCHAO),
-        capabilities=b.Fp8BackendCapabilities(torchao_fp8=True),
-    )
+    adapter = _adapter(modules, "torchao")
 
-    prepared = b.prepare_native_transformer_fp8_load(
+    prepared = modules.adapter.prepare_native_load(
         adapter,
         component_name="transformer",
         targets=("blocks",),
@@ -519,13 +421,9 @@ def test_torchao_without_native_diffusers_api_is_explicit_fallback(modules):
 
 
 def test_untargeted_transformer_does_not_claim_streaming(modules):
-    c, b = modules.contracts, modules.backends
-    adapter = b.select_fp8_backend(
-        _contract(modules, c.QuantizationBackend.TORCHAO),
-        capabilities=b.Fp8BackendCapabilities(torchao_fp8=True),
-    )
+    adapter = _adapter(modules, "torchao")
 
-    prepared = b.prepare_native_transformer_fp8_load(
+    prepared = modules.adapter.prepare_native_load(
         adapter,
         component_name="transformer_2",
         targets=(),
@@ -537,30 +435,24 @@ def test_untargeted_transformer_does_not_claim_streaming(modules):
     assert "no FP8 targets" in prepared.descriptor.fallback_reason
 
 
-def test_blockwise_paths_keep_streaming_through_backend_adapter(modules):
-    c, b = modules.contracts, modules.backends
-    adapter = b.select_fp8_backend(
-        _contract(modules, c.QuantizationBackend.TORCHAO),
-        capabilities=b.Fp8BackendCapabilities(torchao_fp8=True),
-    )
+def test_blockwise_paths_quantize_on_the_way_in(modules):
+    adapter = _adapter(modules, "torchao")
 
-    descriptor = b.plan_blockwise_transformer_fp8_load(
+    descriptor = modules.adapter.describe_blockwise_load(
         adapter,
         component_name="transformer",
         targets=("blocks",),
         wrap_attrs=("blocks",),
     )
 
-    assert descriptor.materialization_mode == "streaming"
+    # Per block on the way in from disk, which the descriptor names as its own
+    # mode rather than borrowing the per-weight one.
+    assert descriptor.materialization_mode == "blockwise"
     assert descriptor.fallback_reason is None
 
 
 def test_aiter_keeps_native_quantize_on_load_config(modules, monkeypatch):
-    c, b = modules.contracts, modules.backends
-    adapter = b.select_fp8_backend(
-        _contract(modules, c.QuantizationBackend.AITER),
-        capabilities=b.Fp8BackendCapabilities(aiter_block_scale=True),
-    )
+    adapter = _adapter(modules, "aiter", streams=True)
     sentinel = object()
     monkeypatch.setattr(
         adapter,
@@ -581,14 +473,7 @@ def test_installed_native_config_matches_existing_torchao_fp8_semantics(
     pytest.importorskip("torchao")
     from torchao.quantization.granularity import PerTensor
 
-    c, b = modules.contracts, modules.backends
-    adapter = b.select_fp8_backend(
-        _contract(modules, c.QuantizationBackend.TORCHAO),
-        capabilities=b.Fp8BackendCapabilities(
-            torchao_fp8=True,
-            torchao_diffusers_streaming=True,
-        ),
-    )
+    adapter = _adapter(modules, "torchao", streams=True)
 
     config = adapter._stream_config_factory(["input_proj"])
     quant_type = config.quant_type
@@ -622,14 +507,7 @@ def test_native_diffusers_load_quantizes_only_targeted_linears(modules, tmp_path
             self.blocks = torch.nn.ModuleList([torch.nn.Linear(32, 32)])
             self.input_proj = torch.nn.Linear(32, 32)
 
-    c, b = modules.contracts, modules.backends
-    adapter = b.select_fp8_backend(
-        _contract(modules, c.QuantizationBackend.TORCHAO),
-        capabilities=b.Fp8BackendCapabilities(
-            torchao_fp8=True,
-            torchao_diffusers_streaming=True,
-        ),
-    )
+    adapter = _adapter(modules, "torchao", streams=True)
     original = TinyTransformer().to(torch.bfloat16)
     original.save_pretrained(tmp_path)
     config = adapter.transformer_stream_config(("blocks",), model_factory=TinyTransformer)

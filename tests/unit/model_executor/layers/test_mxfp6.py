@@ -1,46 +1,37 @@
 import copy
+from functools import partial
 from types import SimpleNamespace
+
+from xfuser.model_executor.models.runner_models.loading.backend_selection import (
+    QuantizationBackends,
+)
 
 import pytest
 import torch
 
 
-@pytest.mark.parametrize(
-    ("fp4", "fp6", "a6w4", "hybrid", "expected"),
-    [
-        (False, True, False, False, "fp6"),
-        (True, True, False, False, "fp4_fp6"),
-        (True, True, False, True, "fp4_fp6"),
-        (False, False, True, False, "a6w4"),
-        (True, False, True, True, "fp4_a6w4"),
-    ],
-)
-def test_runtime_selects_aiter_mxfp_formats(fp4, fp6, a6w4, hybrid, expected):
+@pytest.mark.parametrize("raw", ["fp6", "low=fp4,high=fp6"])
+def test_a_tiered_fp6_run_takes_its_low_format_contract(raw):
+    """No compound contract: the FP6 tier is resolved by name where it lands."""
     from xfuser.model_executor.models.runner_models.loading.contracts import (
         QuantizationBackend,
+        QuantizationFormat,
         select_runtime_quantization,
     )
 
-    config = SimpleNamespace(
-        use_fp8_gemms=False,
-        use_fp4_gemms=fp4,
-        use_fp6_gemms=fp6,
-        use_a6w4_gemms=a6w4,
-        use_int8_gemms=False,
-        use_hybrid_gemm_schedule=hybrid,
-    )
+    from xfuser.config.gemm import GemmQuantizationSpec
 
     format_, backend = select_runtime_quantization(
-        config,
-        aiter_fp8_active=False,
-        cuda_active=False,
+        GemmQuantizationSpec.parse(raw),
+        impl_for=lambda _format: "aiter",
     )
 
-    assert format_.value == expected
     assert backend is QuantizationBackend.AITER
+    assert format_ is (QuantizationFormat.FP6 if raw == "fp6" else QuantizationFormat.FP4)
 
 
 def test_wan22_reuses_existing_fp4_and_quality_targets_for_mxfp6():
+    from xfuser.config.gemm import GemmQuantizationSpec
     from xfuser.model_executor.models.runner_models.loading.quantization_plan import (
         QuantizationPlan,
     )
@@ -49,20 +40,32 @@ def test_wan22_reuses_existing_fp4_and_quality_targets_for_mxfp6():
     model = object.__new__(xFuserWan22T2VModel)
     model.settings = copy.deepcopy(xFuserWan22T2VModel.settings)
     model._customize_settings(SimpleNamespace())
-    model.config = SimpleNamespace(use_fp8_text_encoder=False, use_fp6_gemms=True)
+    model.settings.gemm_targets = model.settings.gemm_targets
+    # An MXFP6 run always carries a spec: args refuses --use_fp6_gemms on its
+    # own, so the mixed mode is only reachable as low=fp4,high=fp6.
+    model.config = SimpleNamespace(
+        quantize_text_encoder=False,
+        gemm_formats=frozenset({"fp6"}),
+        gemm_quantization_spec=GemmQuantizationSpec("fp4", "fp6"),
+        ulysses_degree=1,
+        ring_degree=1,
+    )
     plan = QuantizationPlan(model)
 
-    assert plan.module_list("fp4") == ["transformer.blocks"]
-    assert plan.module_list("fp6") == [
+    gemm_plan = plan.gemm_plan
+    # The primary format owns the high-noise pass; the refiner is held back.
+    assert list(gemm_plan.roots(gemm_plan.low)) == ["transformer.blocks"]
+    assert list(gemm_plan.roots(gemm_plan.high)) == ["transformer_2.blocks"]
+    assert gemm_plan.declared_roots() == (
         "transformer.blocks",
         "transformer_2.blocks",
-    ]
-    assert set(plan.module_list("fp8")) - set(plan.module_list("fp4")) == {"transformer_2.blocks"}
+    )
 
 
-def test_wan22_logs_explicit_fp4_fp6_mapping(monkeypatch):
+def test_wan22_logs_an_explicit_fp4_and_fp6_mapping(monkeypatch):
     from xfuser.config.gemm import GemmQuantizationSpec
     from xfuser.model_executor.models.runner_models.loading import quantization_plan
+    from xfuser.model_executor.quant.targets import GemmTargets, Select
 
     messages = []
     model = SimpleNamespace(
@@ -72,15 +75,15 @@ def test_wan22_logs_explicit_fp4_fp6_mapping(monkeypatch):
             use_hybrid_gemm_schedule=False,
         ),
         settings=SimpleNamespace(
-            fp4_gemm_module_list=["transformer.blocks"],
-            fp8_gemm_module_list=[
-                "transformer.blocks",
-                "transformer_2.blocks",
-            ],
-            fp8_precision_overrides=None,
-            fp8_precision_override_suffixes=None,
+            gemm_targets=GemmTargets(
+                transformer=Select(modules=("transformer.blocks", "transformer_2.blocks")),
+                keep_high=Select(modules=("transformer_2.blocks",)),
+            ),
         ),
     )
+    model.config.quantize_text_encoder = False
+    model.config.ulysses_degree = 1
+    model.config.ring_degree = 1
     monkeypatch.setattr(quantization_plan, "log", messages.append)
 
     quantization_plan.QuantizationPlan(model).log_gemm_plan()
@@ -94,50 +97,66 @@ def test_wan22_logs_explicit_fp4_fp6_mapping(monkeypatch):
 def test_wan22_mixed_mode_routes_primary_to_fp4_and_second_transformer_to_fp6(
     monkeypatch,
 ):
+    """The low-noise refiner is held at MXFP6 while the rest takes MXFP4."""
+    from xfuser.config.gemm import GemmQuantizationSpec
     from xfuser.model_executor.models.runner_models.loading import placement
+    from xfuser.model_executor.models.runner_models.loading.quantization_ledger import (
+        QuantizationLedger,
+    )
+    from xfuser.model_executor.models.runner_models.loading.quantization_plan import (
+        QuantizationPlan,
+    )
+    from xfuser.model_executor.quant.targets import GemmTargets, Select
 
     calls = []
     monkeypatch.setattr(placement, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        placement,
+        "descriptor_for",
+        lambda *a, **k: SimpleNamespace(log_message=lambda: ""),
+    )
     fp4_blocks, fp6_blocks = object(), object()
     model = SimpleNamespace(
         config=SimpleNamespace(
-            use_fp4_gemms=True,
-            use_fp6_gemms=True,
+            gemm_quantization_spec=GemmQuantizationSpec("fp4", "fp6"),
+            quantize_text_encoder=False,
             use_hybrid_gemm_schedule=False,
-            enable_model_cpu_offload=False,
-            enable_sequential_cpu_offload=False,
-            enable_group_cpu_offload=False,
+            ulysses_degree=1,
+            ring_degree=1,
         ),
         settings=SimpleNamespace(
-            fp8_precision_overrides=None,
-            fp8_precision_override_suffixes=None,
-            fp8_gemm_include_suffixes=None,
+            gemm_targets=GemmTargets(
+                transformer=Select(modules=("transformer.blocks", "transformer_2.blocks")),
+                keep_high=Select(modules=("transformer_2.blocks",)),
+            ),
         ),
         pipe=SimpleNamespace(
             transformer=SimpleNamespace(blocks=fp4_blocks),
             transformer_2=SimpleNamespace(blocks=fp6_blocks),
         ),
     )
+    backends = SimpleNamespace(
+        format=SimpleNamespace(convert_module=lambda module, **kwargs: calls.append(("fp4", module))),
+        fp6=SimpleNamespace(convert_module=lambda module, **kwargs: calls.append(("fp6", module))),
+        fp8=None,
+        blockwise_fp8=None,
+    )
+    backends.adapter_for = lambda format_name: (backends.fp6 if format_name == "fp6" else backends.format)
     loader = SimpleNamespace(
         model=model,
-        backends=SimpleNamespace(
-            format_entries=lambda: ("transformer.blocks",),
-            format=SimpleNamespace(convert_module=lambda module, **kwargs: calls.append(("fp4", module))),
-            fp6=SimpleNamespace(convert_module=lambda module, **kwargs: calls.append(("fp6", module))),
-        ),
-        quantization_plan=SimpleNamespace(
-            module_list=lambda format_name="fp8": (
-                ["transformer.blocks"] if format_name == "fp4" else ["transformer.blocks", "transformer_2.blocks"]
-            )
-        ),
-        quantization_ledger=SimpleNamespace(
-            streaming_targets=set(),
-            claim_description=lambda component: None,
-            already_quantized=lambda **kwargs: set(),
-        ),
+        backends=backends,
+        quantization_plan=QuantizationPlan(model),
+        quantization_ledger=QuantizationLedger(),
     )
+    # Borrowed from the real QuantizationBackends rather than written out
+    # again: the walks ask it to compose the per-step pair, and a stub here
+    # could pair differently from the one under test.
+    backends.model = model
+    backends.loader = loader
+    backends.hybrid_companion = partial(QuantizationBackends.hybrid_companion, backends)
 
-    placement.setup_mxfp4_gemms(loader, local_rank=0)
+    for before in (True, False):
+        placement.setup_gemm_quantization(loader, local_rank=0, offload_requested=False, before_device_move=before)
 
     assert calls == [("fp4", fp4_blocks), ("fp6", fp6_blocks)]
 
@@ -151,11 +170,11 @@ def test_only_supported_wan_runners_enable_mxfp6():
         xFuserWan22TI2VModel,
     )
 
-    assert xFuserWan21I2VModel.capabilities.use_fp6_gemms
-    assert xFuserWan21T2VModel.capabilities.use_fp6_gemms
-    assert xFuserWan22DistilledI2VModel.capabilities.use_fp6_gemms
-    assert xFuserWan22TI2VModel.capabilities.use_fp6_gemms
-    assert not xFuserWan21VACEModel.capabilities.use_fp6_gemms
+    assert "fp6" in xFuserWan21I2VModel.capabilities.supported_gemm_formats()
+    assert "fp6" in xFuserWan21T2VModel.capabilities.supported_gemm_formats()
+    assert "fp6" in xFuserWan22DistilledI2VModel.capabilities.supported_gemm_formats()
+    assert "fp6" in xFuserWan22TI2VModel.capabilities.supported_gemm_formats()
+    assert "fp6" not in xFuserWan21VACEModel.capabilities.supported_gemm_formats()
 
 
 def test_wan_mxfp6_declaration_keeps_existing_load_modes():
@@ -178,7 +197,7 @@ def test_wan_mxfp6_declaration_keeps_existing_load_modes():
         QuantizationBackend.AITER,
     ) in declaration.quantization_contracts
     assert (
-        QuantizationFormat.FP4_FP6,
+        QuantizationFormat.FP4,
         QuantizationBackend.AITER,
     ) in declaration.quantization_contracts
     assert MaterializationMode.FSDP_META in declaration.materialization_modes
@@ -186,37 +205,38 @@ def test_wan_mxfp6_declaration_keeps_existing_load_modes():
 
 
 def test_aiter_mxfp6_probe_requires_gfx950(monkeypatch):
-    from xfuser.model_executor.models.runner_models.loading import format_backends
+    from xfuser.model_executor.models.runner_models.loading import backends
 
     api = SimpleNamespace(
         quant_mxfp6_gemm=lambda value: value,
         gemm_a6w6=lambda *args: None,
         mxfp6_gemm_pack_size=lambda rows, features: (rows, features),
     )
-    real_import = format_backends.import_module
+    real_import = backends.import_module
     monkeypatch.setattr(
-        format_backends,
+        backends,
         "import_module",
         lambda name: api if name == "aiter" else real_import(name),
     )
 
-    assert format_backends._probe_aiter_mxfp6_apis(lambda: "gfx950") == (
+    assert backends._probe_aiter_mxfp6_apis(lambda: "gfx950") == (
         True,
         None,
     )
-    available, reason = format_backends._probe_aiter_mxfp6_apis(lambda: "gfx942")
+    available, reason = backends._probe_aiter_mxfp6_apis(lambda: "gfx942")
     assert not available
     assert "gfx950" in reason
 
 
-@pytest.mark.parametrize("high_format", ["fp6", "a6w4"])
-def test_fp4_hybrid_builds_selected_high_branch(monkeypatch, high_format):
+def test_fp4_hybrid_builds_whatever_companion_it_is_given(monkeypatch):
+    """The FP4 converter no longer picks the high branch; the caller does.
+
+    It used to choose between MXFP6 and torchao FP8 from a flag of its own,
+    which is the last cross-format knowledge that lived inside a converter.
+    """
     from xfuser.core.utils import runner_utils
-    from xfuser.model_executor.layers import (
-        mixed_mxfp_linear,
-        mxfp4_linear,
-        mxfp6_linear,
-    )
+    from xfuser.model_executor.layers import mxfp4_linear, mxfp6_linear
+    from xfuser.model_executor.layers.hybrid_linear import xFuserHybridLinear
 
     class StubLinear(torch.nn.Module):
         def __init__(self, in_features, out_features, **kwargs):
@@ -231,26 +251,18 @@ def test_fp4_hybrid_builds_selected_high_branch(monkeypatch, high_format):
     class StubFP6(StubLinear):
         pass
 
-    class StubA6W4(StubLinear):
-        pass
-
     monkeypatch.setattr(mxfp4_linear, "xFuserMXFP4Linear", StubFP4)
     monkeypatch.setattr(mxfp6_linear, "xFuserMXFP6Linear", StubFP6)
-    monkeypatch.setattr(mixed_mxfp_linear, "xFuserA6W4Linear", StubA6W4)
     model = torch.nn.Sequential(torch.nn.Linear(4, 3, bias=False, dtype=torch.bfloat16))
 
-    runner_utils.quantize_linear_layers_to_fp4(
+    runner_utils.replace_linears(
         model,
-        use_hybrid_schedule=True,
-        use_fp6_for_overrides=high_format == "fp6",
-        use_a6w4_for_overrides=high_format == "a6w4",
-        device="cpu",
+        runner_utils.mxfp4_layer_factory("cpu", companion=runner_utils.packed_layer_factory(StubFP6, "cpu")),
     )
 
-    assert isinstance(model[0], mxfp4_linear.xFuserHybridMXFP4Linear)
+    assert isinstance(model[0], xFuserHybridLinear)
     assert isinstance(model[0].low_precision_linear, StubFP4)
-    expected = StubFP6 if high_format == "fp6" else StubA6W4
-    assert isinstance(model[0].high_precision_linear, expected)
+    assert isinstance(model[0].high_precision_linear, StubFP6)
 
 
 def test_mxfp6_linear_uses_aiter_pack_and_gemm(monkeypatch):

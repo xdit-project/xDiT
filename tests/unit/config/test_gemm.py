@@ -1,6 +1,6 @@
 """Regression tests for mutually-owned generic FP8/FP4 GEMM modes."""
 
-from types import MethodType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 
@@ -45,81 +45,80 @@ def runtime():
 def _args(runtime, **overrides):
     values = {
         "model": "test/model",
-        "use_fp8_gemms": False,
-        "use_fp4_gemms": False,
         "use_hybrid_gemm_schedule": False,
     }
     values.update(overrides)
     return runtime.args_cls(**values)
 
 
-def test_args_reject_generic_fp8_and_fp4_without_hybrid_owner(runtime):
-    config = _args(runtime, use_fp8_gemms=True, use_fp4_gemms=True)
-
-    with pytest.raises(ValueError, match="cannot both be enabled"):
-        config._validate_gemm_quantization_flags()
-
-
 @pytest.mark.parametrize(
-    "flags",
+    ("option", "replacement"),
     [
-        {"use_int8_gemms": True, "use_fp8_gemms": True},
-        {"use_int8_gemms": True, "use_fp4_gemms": True},
-        {
-            "use_int8_gemms": True,
-            "use_fp8_gemms": True,
-            "use_fp4_gemms": True,
-            "use_hybrid_gemm_schedule": True,
-        },
+        ("removed_use_fp8_gemms", "--gemm_quantization fp8"),
+        ("removed_use_fp4_gemms", "--gemm_quantization fp4"),
+        ("removed_use_int8_gemms", "--gemm_quantization int8"),
+        (
+            "removed_fp8_precision_override_prefix_patterns",
+            "--gemm_config with gemm_high_precision_prefix_patterns",
+        ),
     ],
 )
-def test_args_reject_int8_combined_with_fp8_or_fp4(runtime, flags):
-    config = _args(runtime, **flags)
+def test_a_removed_option_says_what_replaces_it(runtime, option, replacement):
+    """Still registered, so argparse accepts it and we can name the successor
+    instead of leaving the reader an "unrecognized arguments" message."""
+    value = "x" if "patterns" in option else True
 
-    with pytest.raises(ValueError, match="--use_int8_gemms cannot be combined"):
-        config._validate_gemm_quantization_flags()
+    with pytest.raises(ValueError, match="no longer supported") as refusal:
+        _args(runtime, **{option: value})
+    assert replacement in str(refusal.value)
 
 
 @pytest.mark.parametrize(
-    "use_fp8_gemms",
-    [False, True],
+    "raw",
+    [
+        "low=int8,high=fp8",
+        "low=fp4,high=int8",
+        "low=int8,high=fp4",
+        "low=fp6,high=fp8",
+        "low=int8,high=fp6",
+        "low=fp4,high=fp6",
+    ],
 )
-def test_args_allow_explicit_hybrid_schedule_to_own_fp8_inside_fp4(runtime, use_fp8_gemms):
-    config = _args(
-        runtime,
-        use_fp8_gemms=use_fp8_gemms,
-        use_fp4_gemms=True,
-        use_hybrid_gemm_schedule=True,
-    )
+def test_any_distinct_pair_is_accepted(runtime, raw):
+    """No list of acceptable combinations.
+
+    Each named format is one registry lookup at load time, against what the
+    probes measured. A pair nobody has run is therefore allowed and unverified
+    rather than refused here -- the structure does not forbid it, and a
+    hardcoded list is not evidence that it fails.
+    """
+    config = _args(runtime, gemm_quantization=raw)
 
     config._validate_gemm_quantization_flags()
 
 
-def test_base_model_validation_rejects_generic_fp8_and_fp4_early(runtime):
+@pytest.mark.parametrize("raw", ["low=int8,high=fp8", "low=int8,high=fp4", "low=fp4,high=fp8"])
+def test_a_runner_declaring_both_formats_accepts_the_tiered_pair(runtime, raw):
+    """The runner gate asks the capability set, not a list of banned pairs.
+
+    `_validate_config` used to carry its own copy of the rules -- refusing int8
+    beside fp8 or fp4, and refusing tiers on hardware grounds it restated from
+    the probes. Both were removed in favour of one question: does this runner
+    declare the formats the profile names. A runner that declares them is
+    therefore accepted for any tiering of them.
+    """
+    spec = GemmQuantizationSpec.parse(raw)
     model = object.__new__(runtime.model_cls)
-    model.settings = SimpleNamespace(model_name="test/model", valid_tasks=[])
-    model.capabilities = runtime.capabilities_cls(
-        use_fp8_gemms=True,
-        use_fp4_gemms=True,
-        use_hybrid_gemm_schedule=True,
+    model.settings = SimpleNamespace(
+        model_name="test/model",
+        valid_tasks=[],
+        step_cache_config={},
+        model_output_type="image",
+        fps=None,
     )
-    config = _args(runtime, use_fp8_gemms=True, use_fp4_gemms=True)
+    model.capabilities = runtime.capabilities_cls(gemm_formats=frozenset(spec.formats - {"none"}))
 
-    with pytest.raises(ValueError, match="cannot both be enabled"):
-        model._validate_config(config)
-
-
-def test_base_model_uses_central_int8_conflict_validation(runtime):
-    model = object.__new__(runtime.model_cls)
-    model.settings = SimpleNamespace(model_name="test/model", valid_tasks=[])
-    model.capabilities = runtime.capabilities_cls(
-        use_int8_gemms=True,
-        use_fp8_gemms=True,
-    )
-    config = _args(runtime, use_int8_gemms=True, use_fp8_gemms=True)
-
-    with pytest.raises(ValueError, match="--use_int8_gemms cannot be combined"):
-        model._validate_config(config)
+    model._validate_config(_args(runtime, gemm_quantization=raw))
 
 
 def test_unsupported_runner_rejects_fp8_text_encoder_via_capability_validation(
@@ -127,16 +126,16 @@ def test_unsupported_runner_rejects_fp8_text_encoder_via_capability_validation(
 ):
     model = object.__new__(runtime.model_cls)
     model.settings = SimpleNamespace(model_name="test/model", valid_tasks=[])
-    model.capabilities = runtime.capabilities_cls(use_fp8_gemms=True)
+    model.capabilities = runtime.capabilities_cls(gemm_formats=frozenset({"fp8"}))
     config = _args(
         runtime,
-        use_fp8_gemms=True,
-        use_fp8_text_encoder=True,
+        gemm_quantization="fp8",
+        quantize_text_encoder=True,
     )
 
     with pytest.raises(
         ValueError,
-        match="does not support use_fp8_text_encoder",
+        match="does not support quantize_text_encoder",
     ):
         model._validate_config(config)
 
@@ -144,10 +143,15 @@ def test_unsupported_runner_rejects_fp8_text_encoder_via_capability_validation(
 def test_supported_runner_logs_when_text_encoder_targets_remain_bf16(runtime, monkeypatch):
     messages = []
     model = object.__new__(runtime.model_cls)
+    from xfuser.model_executor.quant.targets import GemmTargets, Select
+
     model.settings = SimpleNamespace(
-        fp8_text_encoder_module_list=["text_encoder.layers"],
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=("transformer.blocks",)),
+            text_encoder=Select(modules=("text_encoder.layers",)),
+        ),
     )
-    config = _args(runtime, use_fp8_gemms=True)
+    config = _args(runtime, gemm_quantization="fp8")
     monkeypatch.setattr(runtime.base, "log", messages.append)
 
     model._update_model_settings(config)
@@ -156,99 +160,27 @@ def test_supported_runner_logs_when_text_encoder_targets_remain_bf16(runtime, mo
     assert "text-encoder target(s) stay bf16" in messages[0]
 
 
-def test_explicit_hybrid_fp4_owns_conversion_without_generic_fp8_walk(runtime, monkeypatch):
-    calls = []
-    model = object.__new__(runtime.model_cls)
-    model.config = SimpleNamespace(
-        fully_shard_degree=1,
-        enable_model_cpu_offload=False,
-        enable_sequential_cpu_offload=False,
-        enable_group_cpu_offload=False,
-        use_fp4_gemms=True,
-        use_fp8_gemms=True,
-        use_int8_gemms=False,
-        use_hybrid_attn_schedule=False,
-        use_hybrid_gemm_schedule=True,
-        use_vae_channels_last_format=False,
-        use_torch_compile=False,
-    )
-    model.settings = SimpleNamespace(
-        fp8_precision_overrides=None,
-        fp8_precision_override_suffixes=None,
-        int8_gemm_module_list=None,
-    )
-    model.pipe = SimpleNamespace(to=lambda device: model.pipe)
-    model._setup_hybrid_gemm_schedule = lambda input_args: calls.append(("schedule", input_args))
-
-    fp8_backend = SimpleNamespace(
-        converts_before_device_move=False,
-        backend=SimpleNamespace(value="torchao"),
-        storage_semantics="torchao_fp8",
-        convert_module=lambda module, **kwargs: calls.append(("generic-fp8", kwargs)),
-    )
-
-    model.loader = SimpleNamespace(
-        model=model,
-        fill_eager_transformers=lambda: None,
-        replicated_broadcast_load=lambda: False,
-        backends=SimpleNamespace(fp8=fp8_backend),
-        quantization_plan=runtime.plan_cls(model),
-    )
-    model.loader.materialize_pipeline = MethodType(runtime.loader_cls.materialize_pipeline, model.loader)
-
-    monkeypatch.setattr(
-        runtime.placement,
-        "setup_mxfp4_gemms",
-        lambda _model, local_rank: calls.append(("fp4", local_rank)),
-    )
-
-    for module in (runtime.base, runtime.placement):
-        monkeypatch.setattr(module, "get_world_group", lambda: SimpleNamespace(local_rank=0))
-        monkeypatch.setattr(module, "_is_cuda", lambda: False)
-    model._post_load_and_state_initialization({"num_inference_steps": 4})
-
-    assert calls == [
-        ("fp4", 0),
-        ("schedule", {"num_inference_steps": 4}),
-    ]
+# There is one walk now, so no generic FP8 pass can follow the FP4 one
+# and re-quantize inside its wrappers; the premise this guarded is gone.
 
 
 @pytest.mark.parametrize(
-    ("value", "expected_flags"),
+    ("value", "formats"),
     [
-        ("fp8", (True, False, False, False, False)),
-        ("fp6", (False, False, True, False, False)),
-        ("a6w4", (False, False, False, True, False)),
-        ("int8", (False, False, False, False, True)),
-        ("low=fp4,high=fp8", (False, True, False, False, False)),
-        ("low=fp4,high=fp6", (False, True, True, False, False)),
-        ("low=fp4,high=a6w4", (False, True, False, True, False)),
+        ("fp8", {"fp8"}),
+        ("fp4", {"fp4"}),
+        ("fp6", {"fp6"}),
+        ("int8", {"int8"}),
+        ("low=fp4,high=fp8", {"fp4", "fp8"}),
+        ("low=fp4,high=fp6", {"fp4", "fp6"}),
     ],
 )
-def test_explicit_gemm_profiles_map_to_existing_flags(runtime, value, expected_flags):
+def test_the_profile_is_the_representation(runtime, value, formats):
+    """There is no second, derived form of "which quant": the spec is it."""
     config = _args(runtime, gemm_quantization=value)
 
     assert str(config.gemm_quantization_spec) == value
-    assert (
-        config.use_fp8_gemms,
-        config.use_fp4_gemms,
-        config.use_fp6_gemms,
-        config.use_a6w4_gemms,
-        config.use_int8_gemms,
-    ) == expected_flags
-
-
-def test_explicit_profile_wins_over_deprecated_format_flag(runtime):
-    with pytest.warns(FutureWarning, match="ignored"):
-        config = _args(
-            runtime,
-            gemm_quantization="fp6",
-            use_fp4_gemms=True,
-        )
-
-    assert config.gemm_quantization_spec == GemmQuantizationSpec("fp6")
-    assert config.use_fp6_gemms is True
-    assert config.use_fp4_gemms is False
+    assert config.gemm_quantization_spec.formats == formats
 
 
 def test_runner_parser_accepts_explicit_gemm_profile(runtime):
@@ -259,111 +191,36 @@ def test_runner_parser_accepts_explicit_gemm_profile(runtime):
     parsed = parser.parse_args(["--model", "test/model", "--gemm-quantization", "low=fp4,high=fp6"])
     config = runtime.args_cls.from_runner_args(vars(parsed))
 
-    assert config.use_fp4_gemms is True
-    assert config.use_fp6_gemms is True
+    assert config.gemm_quantization_spec.formats == {"fp4", "fp6"}
 
 
-@pytest.mark.parametrize(
-    "profile",
-    ["a6w4", "low=fp4,high=a6w4"],
-)
-def test_a6w4_profiles_reject_cpu_offload(runtime, profile):
-    config = _args(runtime, gemm_quantization=profile, enable_model_cpu_offload=True)
-    with pytest.raises(ValueError, match="CPU offload"):
-        config._validate_gemm_quantization_flags()
-
-
-def test_a6w4_schedule_requires_tiered_profile(runtime):
-    pure = _args(
-        runtime,
-        gemm_quantization="a6w4",
-        use_hybrid_gemm_schedule=True,
-    )
-    with pytest.raises(ValueError, match="requires a low/high"):
-        pure._validate_gemm_quantization_flags()
-
-
-def test_a6w4_yaml_schedule_is_accepted(runtime, tmp_path):
-    path = tmp_path / "gemm.yaml"
-    path.write_text("hybrid_gemm_schedule: [a6w4, fp4]\n")
-    config = _args(
-        runtime,
-        gemm_quantization="low=fp4,high=a6w4",
-        gemm_config=str(path),
-    )
-
-    config._validate_gemm_quantization_flags()
-    assert config.hybrid_gemm_schedule == "a6w4,fp4"
-    assert config.use_hybrid_gemm_schedule
-
-
-def test_tiered_fp8_profile_supports_text_encoder_fp8(runtime):
-    config = _args(
-        runtime,
-        gemm_quantization="low=fp4,high=fp8",
-        use_fp8_text_encoder=True,
-    )
-    config._validate_gemm_quantization_flags()
-
-    with pytest.raises(ValueError, match="profile containing FP8"):
+def test_any_profile_can_include_the_text_encoder(runtime):
+    """The flag says to include the encoder, not which format to give it."""
+    for profile in ("fp8", "fp4", "low=fp4,high=fp8", "low=fp4,high=fp6"):
         _args(
             runtime,
-            gemm_quantization="low=fp4,high=fp6",
-            use_fp8_text_encoder=True,
+            gemm_quantization=profile,
+            quantize_text_encoder=True,
         )._validate_gemm_quantization_flags()
 
 
-def test_advanced_yaml_maps_to_existing_wan_target_settings(runtime, tmp_path):
-    from xfuser.model_executor.models.runner_models.loading.quantization_plan import (
-        apply_fp8_override_cli_to_settings,
-    )
-
-    path = tmp_path / "gemm.yaml"
-    path.write_text(
-        "gemm_high_precision_targets: none\n"
-        "gemm_high_precision_module_patterns: [transformer_2.blocks]\n"
-        "gemm_high_precision_prefix_patterns: ['0.', '1.']\n"
-    )
-    config = _args(
-        runtime,
-        gemm_quantization="low=fp4,high=fp6",
-        gemm_config=str(path),
-    )
-    settings = SimpleNamespace(
-        fp4_gemm_module_list=["transformer.blocks"],
-        fp8_gemm_module_list=["transformer.blocks", "transformer_2.blocks"],
-        fp8_precision_overrides=("old.",),
-        fp8_precision_override_suffixes=("old",),
-    )
-
-    apply_fp8_override_cli_to_settings(config, settings)
-
-    assert settings.fp8_gemm_module_list == ["transformer_2.blocks"]
-    assert settings.fp8_precision_overrides == ("0.", "1.")
-    assert settings.fp8_precision_override_suffixes is None
+def test_including_the_text_encoder_needs_a_profile(runtime):
+    with pytest.raises(ValueError, match="needs a gemm_quantization profile"):
+        _args(
+            runtime,
+            gemm_quantization="none",
+            quantize_text_encoder=True,
+        )._validate_gemm_quantization_flags()
 
 
-def test_pure_fp4_uses_the_full_declared_transformer_union(runtime):
-    from xfuser.model_executor.models.runner_models.loading.quantization_plan import (
-        apply_fp8_override_cli_to_settings,
-    )
+# The advanced YAML no longer rewrites per-format lists; it overrides
+# `keep_high` directly, which test_flux2_gemm_equivalence covers under
+# "a config file can hold extra modules high".
 
-    config = _args(runtime, gemm_quantization="fp4")
-    settings = SimpleNamespace(
-        fp4_gemm_module_list=["transformer.blocks"],
-        fp8_gemm_module_list=["transformer.blocks", "transformer_2.blocks"],
-        fp8_precision_overrides=("0.",),
-        fp8_precision_override_suffixes=None,
-    )
 
-    apply_fp8_override_cli_to_settings(config, settings)
-
-    assert settings.fp4_gemm_module_list == [
-        "transformer.blocks",
-        "transformer_2.blocks",
-    ]
-    assert settings.fp8_gemm_module_list == []
-    assert settings.fp8_precision_overrides is None
+# A pure low-format run quantizing every declared target is now the
+# resolver's own rule, checked for every model by
+# tests/quant/test_migrated_models.py against the recorded lists.
 
 
 def test_yaml_schedule_conflicts_with_simple_schedule_flags(runtime, tmp_path):
@@ -422,40 +279,33 @@ def test_profile_supports_simple_hybrid_schedule(runtime, high_format):
     config._validate_gemm_quantization_flags()
 
 
-@pytest.mark.parametrize(
-    "pattern_flag",
-    ["fp8_precision_override_prefix_patterns", "fp8_precision_override_suffix_patterns"],
-)
-@pytest.mark.parametrize("profile", [None, "none", "fp4", "fp8", "fp6", "a6w4", "int8"])
-def test_fp8_override_patterns_require_a_tiered_profile(runtime, pattern_flag, profile):
-    config = _args(runtime, gemm_quantization=profile, **{pattern_flag: "transformer.proj_out"})
+def test_the_parser_knows_exactly_the_formats_the_registry_does():
+    """The one list the parser keeps cannot drift from the registry.
 
-    with pytest.raises(ValueError, match="Precision override patterns require a tiered GEMM quantization profile"):
-        config._validate_gemm_quantization_flags()
-
-
-# low=fp4,high=fp6 routes the override patterns to MXFP6, so the check must not require FP8.
-@pytest.mark.parametrize("high_format", ["fp8", "fp6", "a6w4"])
-@pytest.mark.parametrize(
-    "pattern_flag",
-    ["fp8_precision_override_prefix_patterns", "fp8_precision_override_suffix_patterns"],
-)
-def test_fp8_override_patterns_are_accepted_with_a_high_tier(runtime, high_format, pattern_flag):
-    config = _args(
-        runtime,
-        gemm_quantization=f"low=fp4,high={high_format}",
-        **{pattern_flag: "transformer.proj_out"},
+    Argument parsing must not import the registry -- that pulls in torch -- so
+    `_KNOWN_FORMATS` is a second copy of the format names, kept only to catch a
+    typo at the command line. This is what stops the two from diverging: add a
+    format to one and this fails until the other has it too.
+    """
+    from xfuser.config.gemm import _KNOWN_FORMATS
+    from xfuser.model_executor.models.runner_models.loading.backend_selection import (
+        _IMPL_PREFERENCE,
     )
 
-    config._validate_gemm_quantization_flags()
+    assert _KNOWN_FORMATS - {"none"} == set(_IMPL_PREFERENCE)
 
 
-def test_legacy_fp4_profile_still_accepts_override_patterns(runtime):
-    config = _args(
-        runtime,
-        use_fp4_gemms=True,
-        fp8_precision_override_prefix_patterns="transformer.blocks",
-        fp8_precision_override_suffix_patterns="proj_out",
+def test_every_known_format_has_a_registered_adapter():
+    """And every name the registry offers is a pair something implements."""
+    from xfuser.model_executor.models.runner_models.loading import (  # noqa: F401
+        backends,
+    )
+    from xfuser.model_executor.models.runner_models.loading.backend_selection import (
+        _IMPL_PREFERENCE,
+    )
+    from xfuser.model_executor.models.runner_models.loading.quant_adapter import (
+        REGISTRY,
     )
 
-    config._validate_gemm_quantization_flags()
+    declared = {(format_name, impl) for format_name, impls in _IMPL_PREFERENCE.items() for impl in impls}
+    assert declared == set(REGISTRY)

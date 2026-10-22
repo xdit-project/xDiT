@@ -17,6 +17,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
     ModelSettings,
 )
+from xfuser.model_executor.quant.targets import GemmTargets, Select
 from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.core.utils.runner_utils import (
     resize_and_crop_image,
@@ -57,9 +58,9 @@ class xFuserHunyuanvideoModel(xFuserModel):
         enable_slicing=True,
         enable_tiling=True,
         use_hybrid_attn_schedule=True,
-        use_fp8_gemms=True,
+        gemm_formats=frozenset({"fp8"}),
         supports_step_caching=True,
-        use_fp8_text_encoder=True,
+        quantize_text_encoder=True,
         fully_shard_degree=True,
         use_parallel_vae=True,
     )
@@ -76,7 +77,15 @@ class xFuserHunyuanvideoModel(xFuserModel):
         output_name="hunyuan_video",
         model_output_type="video",
         fps=24,
-        fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
+        gemm_targets=GemmTargets(
+            transformer=Select(
+                modules=(
+                    "transformer.transformer_blocks",
+                    "transformer.single_transformer_blocks",
+                )
+            ),
+            text_encoder=Select(modules=("text_encoder.layers",)),
+        ),
         # guidance embedded into timestep conditioning (1 forward pass per step, no separate cfg).
         step_cache_config={
             "dbcache": DBCacheSettings(
@@ -87,7 +96,6 @@ class xFuserHunyuanvideoModel(xFuserModel):
                 preset=DBCachePreset(Fn_compute_blocks=4, residual_diff_threshold=0.12, scm_policy="ultra"),
             ),
         },
-        fp8_text_encoder_module_list=["text_encoder.layers"],
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
@@ -198,7 +206,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         ring_degree=True,
         enable_slicing=True,
         enable_tiling=True,
-        use_fp8_gemms=True,
+        gemm_formats=frozenset({"fp8"}),
         supports_step_caching=True,
         use_parallel_vae=True,
         use_parallel_vae_encoder=True,
@@ -213,7 +221,9 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         output_name="hunyuan_video_1_5",
         model_output_type="video",
         fps=24,
-        fp8_gemm_module_list=["transformer.transformer_blocks"],
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=("transformer.transformer_blocks",)),
+        ),
         mod_value=16,
         # Blocks that _compile_model compiles one by one under a step cache.
         fsdp_strategy={"transformer": {"wrap_attrs": ["transformer_blocks"]}},

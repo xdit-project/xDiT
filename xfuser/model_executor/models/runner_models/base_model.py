@@ -26,6 +26,7 @@ from xfuser.core.utils.runner_utils import (
     load_dataset_prompts,
     rgetattr,
 )
+from xfuser.model_executor.models.runner_models.image_postprocess import enable_fast_pil_postprocess
 from xfuser.model_executor.models.runner_models.vae_manager import (
     VAEManager,
     validate_vae_config,
@@ -469,6 +470,7 @@ class xFuserModel(abc.ABC):
         self.engine_config, _ = self.config.create_config()
         log("Loading model pipeline...")
         self.pipe = self._load_model_checked()
+        enable_fast_pil_postprocess([self.pipe, getattr(self, "second_pipe", None)])
 
         log("Initializing runtime state...")
         initialize_runtime_state(self._get_runtime_state_pipeline(), self.engine_config)

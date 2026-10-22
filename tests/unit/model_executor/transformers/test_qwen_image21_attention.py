@@ -41,15 +41,19 @@ def _tiny_inputs():
     }
 
 
+DECODE_STEPS = 2
+
+
 def _prefill_then_decode(model, encoder_hidden_states_mask=None):
     inputs = _tiny_inputs()
     kv_cache = qwenimage21.QwenImage21KVCache(NUM_LAYERS)
+    generator = torch.Generator().manual_seed(2)
     outputs = []
-    for timestep, mode in ((0.9, "extract"), (0.4, "cached")):
+    for timestep, mode in ((0.9, "extract"), (0.6, "cached"), (0.3, "cached")):
         with torch.no_grad():
             outputs.append(
                 model(
-                    **inputs,
+                    **(inputs | {"hidden_states": torch.randn(inputs["hidden_states"].shape, generator=generator)}),
                     timestep=torch.tensor([timestep]),
                     encoder_hidden_states_mask=encoder_hidden_states_mask,
                     kv_cache=kv_cache,
@@ -101,7 +105,7 @@ def test_flydsl_qk_norm_rope_gets_tables_matching_diffusers(xfuser_sdpa_calls, m
     reference = _prefill_then_decode(stock)
     actual = _prefill_then_decode(_xfuser_model(stock, xfuser_qwenimage21.xFuserQwenImage21AttnProcessor))
 
-    assert len(fused_calls) == 2 * NUM_LAYERS
+    assert len(fused_calls) == (1 + DECODE_STEPS) * NUM_LAYERS
     for ref, out in zip(reference, actual):
         torch.testing.assert_close(out, ref, rtol=1e-4, atol=1e-5)
 
@@ -119,8 +123,8 @@ def test_decode_runs_on_xfuser_backend_and_matches_diffusers(xfuser_sdpa_calls, 
     reference = _prefill_then_decode(stock)
     actual = _prefill_then_decode(_xfuser_model(stock, getattr(xfuser_qwenimage21, processor_name)))
 
-    # Only the decode step reaches xDiT: one call per block, target-image queries only.
-    assert len(xfuser_sdpa_calls) == NUM_LAYERS
+    # Only the decode steps reach xDiT: one call per block, target-image queries only.
+    assert len(xfuser_sdpa_calls) == DECODE_STEPS * NUM_LAYERS
     assert all(shape[2] == 16 for shape in xfuser_sdpa_calls)
     for ref, out in zip(reference, actual):
         torch.testing.assert_close(out, ref, rtol=1e-4, atol=1e-5)

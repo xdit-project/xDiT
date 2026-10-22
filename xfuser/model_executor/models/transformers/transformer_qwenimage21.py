@@ -1,5 +1,6 @@
 import math
-from typing import Any
+import weakref
+from typing import Any, NamedTuple
 
 import torch
 import torch.nn.functional as F
@@ -221,6 +222,18 @@ class xFuserQwenImage21FlexAttnProcessor(_xFuserQwenImage21AttnMixin, QwenImage2
     """Compiled path: single flex_attention prefill, xDiT-backend decode."""
 
 
+class _DecodeLayout(NamedTuple):
+    """The target-only inputs of a cached-prefix step, which depend only on the prompt and image layout."""
+
+    rotary_emb: tuple[torch.Tensor, torch.Tensor]
+    modulation_mask: torch.Tensor
+    attention_mask: torch.Tensor | None
+
+
+# Keyed by the KV cache, which the pipeline creates per call and per prompt.
+_decode_layouts: "weakref.WeakKeyDictionary[QwenImage21KVCache, _DecodeLayout]" = weakref.WeakKeyDictionary()
+
+
 class xFuserQwenImage21TransformerWrapper(QwenImage21Transformer2DModel):
     """``QwenImage21Transformer2DModel`` whose block loop runs on a Ulysses slice of the sequence.
 
@@ -234,7 +247,8 @@ class xFuserQwenImage21TransformerWrapper(QwenImage21Transformer2DModel):
 
     ``forward`` is a copy of ``QwenImage21Transformer2DModel.forward`` as of diffusers ``bdc2bea``; only the
     (cos, sin) rotary table, the sharding block before the block loop, ``target_token_mask=block_modulation_mask``
-    and the gather after it differ.
+    and the gather after it differ. Also, steps after the one that fills the KV cache reuse its rotary table and
+    masks and skip building the joint sequence, whose data-dependent shapes would block on the GPU every step.
     """
 
     @apply_lora_scale("attention_kwargs")
@@ -262,67 +276,74 @@ class xFuserQwenImage21TransformerWrapper(QwenImage21Transformer2DModel):
             raise ValueError(f"kv_cache_mode is {kv_cache_mode!r} but no kv_cache was passed to hold the prefix.")
 
         hidden_states = self.img_in(hidden_states)
-        encoder_hidden_states = self.txt_in(encoder_hidden_states)
-
-        repeats = torch.where(img_mask, _IMG_TOKENS_PER_SLOT, 1)[0]
-        image_pad_mask = torch.repeat_interleave(img_mask[0], repeats)
-
-        target_tokens = math.prod(img_shapes[0][-1])
-        joint_hidden_states = torch.cat(
-            [
-                encoder_hidden_states,
-                encoder_hidden_states.new_zeros(batch_size, target_tokens // 4, encoder_hidden_states.shape[2]),
-            ],
-            dim=1,
-        )
-        joint_hidden_states = joint_hidden_states.repeat_interleave(repeats, dim=1)
-        joint_hidden_states[:, image_pad_mask] = hidden_states
-
-        rotary_emb = _rotary_table(self.pos_embed(img_shapes[0], image_pad_mask, device=hidden_states.device))
-        image_ids, target_token_mask = self.build_token_metadata(image_pad_mask, img_shapes[0])
 
         timestep = timestep.to(hidden_states.dtype)
         if self.config.causal_condition:
             timestep = torch.cat([timestep, timestep.new_zeros(1)], dim=0)
-            modulation_mask = target_token_mask
-        else:
-            modulation_mask = None
         temb = self.time_text_embed(timestep, hidden_states)
         modulation = self.modulation(temb)
 
-        joint_key_valid = None
-        if encoder_hidden_states_mask is not None:
-            joint_key_valid = torch.ones(
-                batch_size, image_pad_mask.shape[0], dtype=torch.bool, device=hidden_states.device
-            )
-            text_positions = (~image_pad_mask).nonzero(as_tuple=True)[0]
-            vlm_text_positions = ~img_mask[0][: encoder_hidden_states_mask.shape[1]]
-            joint_key_valid[:, text_positions] = encoder_hidden_states_mask.bool()[:, vlm_text_positions]
-
-        prefix_len = int((~target_token_mask).sum())
-
-        if kv_cache_mode == "cached":
-            joint_hidden_states = joint_hidden_states[:, prefix_len:]
-            rotary_emb = tuple(table[prefix_len:] for table in rotary_emb)
-            modulation_mask = modulation_mask[prefix_len:]
-            attention_mask = None if joint_key_valid is None else joint_key_valid[:, None, None, :]
-            cache_write_slice = None
-            block_segments, block_key_valid = None, None
+        cache_write_slice, block_segments, block_key_valid = None, None, None
+        if kv_cache_mode == "cached" and kv_cache in _decode_layouts:
+            # The target image ends both the joint sequence and the image tokens.
+            joint_hidden_states = hidden_states[:, -math.prod(img_shapes[0][-1]) :]
+            rotary_emb, modulation_mask, attention_mask = _decode_layouts[kv_cache]
         else:
-            processors = [block.attn.processor for block in self.transformer_blocks]
-            needs_block_mask = any(isinstance(processor, QwenImage21FlexAttnProcessor) for processor in processors)
-            attention_mask = (
-                build_qwenimage21_block_causal_mask(image_ids, joint_key_valid, batch_size, hidden_states.device)
-                if needs_block_mask
-                else None
+            encoder_hidden_states = self.txt_in(encoder_hidden_states)
+
+            repeats = torch.where(img_mask, _IMG_TOKENS_PER_SLOT, 1)[0]
+            image_pad_mask = torch.repeat_interleave(img_mask[0], repeats)
+
+            target_tokens = math.prod(img_shapes[0][-1])
+            joint_hidden_states = torch.cat(
+                [
+                    encoder_hidden_states,
+                    encoder_hidden_states.new_zeros(batch_size, target_tokens // 4, encoder_hidden_states.shape[2]),
+                ],
+                dim=1,
             )
-            block_segments = (
-                None
-                if all(isinstance(processor, QwenImage21FlexAttnProcessor) for processor in processors)
-                else _qwenimage21_prefix_segments(image_ids, prefix_len)
-            )
-            cache_write_slice = slice(0, prefix_len) if kv_cache_mode == "extract" else None
-            block_key_valid = joint_key_valid
+            joint_hidden_states = joint_hidden_states.repeat_interleave(repeats, dim=1)
+            joint_hidden_states[:, image_pad_mask] = hidden_states
+
+            rotary_emb = _rotary_table(self.pos_embed(img_shapes[0], image_pad_mask, device=hidden_states.device))
+            image_ids, target_token_mask = self.build_token_metadata(image_pad_mask, img_shapes[0])
+            modulation_mask = target_token_mask if self.config.causal_condition else None
+
+            joint_key_valid = None
+            if encoder_hidden_states_mask is not None:
+                joint_key_valid = torch.ones(
+                    batch_size, image_pad_mask.shape[0], dtype=torch.bool, device=hidden_states.device
+                )
+                text_positions = (~image_pad_mask).nonzero(as_tuple=True)[0]
+                vlm_text_positions = ~img_mask[0][: encoder_hidden_states_mask.shape[1]]
+                joint_key_valid[:, text_positions] = encoder_hidden_states_mask.bool()[:, vlm_text_positions]
+
+            prefix_len = int((~target_token_mask).sum())
+            if kv_cache is not None:
+                _decode_layouts[kv_cache] = _DecodeLayout(
+                    tuple(table[prefix_len:] for table in rotary_emb),
+                    modulation_mask[prefix_len:],
+                    None if joint_key_valid is None else joint_key_valid[:, None, None, :],
+                )
+
+            if kv_cache_mode == "cached":
+                joint_hidden_states = joint_hidden_states[:, prefix_len:]
+                rotary_emb, modulation_mask, attention_mask = _decode_layouts[kv_cache]
+            else:
+                processors = [block.attn.processor for block in self.transformer_blocks]
+                needs_block_mask = any(isinstance(processor, QwenImage21FlexAttnProcessor) for processor in processors)
+                attention_mask = (
+                    build_qwenimage21_block_causal_mask(image_ids, joint_key_valid, batch_size, hidden_states.device)
+                    if needs_block_mask
+                    else None
+                )
+                block_segments = (
+                    None
+                    if all(isinstance(processor, QwenImage21FlexAttnProcessor) for processor in processors)
+                    else _qwenimage21_prefix_segments(image_ids, prefix_len)
+                )
+                cache_write_slice = slice(0, prefix_len) if kv_cache_mode == "extract" else None
+                block_key_valid = joint_key_valid
 
         sp_rank = get_sequence_parallel_rank()
         sp_world_size = get_sequence_parallel_world_size()

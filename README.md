@@ -255,14 +255,14 @@ examples/pixartalpha_example.py \
 --pipefusion_parallel_degree 2 \
 --ulysses_degree 2 \
 --num_inference_steps 20 \
---warmup_steps 0 \
+--warmup_steps 1 \
 --prompt "A cute dog" \
 --use_cfg_parallel
 ```
 
 ⚠️ Applying PipeFusion requires setting `warmup_steps`, also required in DistriFusion, typically set to a small number compared with `num_inference_steps`.
 The warmup step impacts the efficiency of PipeFusion as it cannot be executed in parallel, thus degrading to a serial execution.
-We observed that a warmup of 0 had no effect on the PixArt model.
+PipeFusion needs at least one warmup step (`--warmup_steps 0` is rejected when `--pipefusion_parallel_degree` is greater than 1).
 Users can tune this value according to their specific tasks.
 
 ### 5. Launch an HTTP Service

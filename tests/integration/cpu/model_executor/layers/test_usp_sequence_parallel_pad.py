@@ -11,6 +11,10 @@ Joint tokens (a replicated prompt joined after the exchange) are not part of
 the declared length. The kernel here crops K to `valid_kv_len` when the kwargs
 still carry it, as the dense fallback of AITER_VSA does, so a length that
 outlived the trim would cut the joint keys' share of K off again.
+
+Replicated joint text must remain visible exactly once while the declared real
+length excludes only image padding. Check image and text queries independently
+of the compiler assertions against unpadded CPU attention.
 """
 
 import os
@@ -150,6 +154,47 @@ def _run_cases(torch, usp, rank, world_size, attention, cases):
     return errors
 
 
+def _run_joint_cases(torch, usp, rank, world_size, attention):
+    """A FLUX-style replicated prompt attends to the same unpadded image as local image queries.
+
+    The prompt goes in front of the image keys, or behind them as in HunyuanVideo.
+    """
+    text_tokens = 7
+    generator = torch.Generator().manual_seed(17)
+    text = [torch.randn(1, HEADS, text_tokens, HEAD_DIM, generator=generator) for _ in range(3)]
+    chunk = PADDED_LEN // world_size
+    errors = {}
+    for strategy in ("front", "rear"):
+        for name, real_len in (("no-pad", PADDED_LEN), ("declared-pad", 45)):
+            image = _inputs(torch, real_len)
+            local = [tensor[:, :, rank * chunk : (rank + 1) * chunk].contiguous() for tensor in image]
+            real_local_len = min(chunk, real_len - rank * chunk)
+            real = [local[0][:, :, :real_local_len], image[1][:, :, :real_len], image[2][:, :, :real_len]]
+            joined = [
+                torch.cat([text[i], real[i]] if strategy == "front" else [real[i], text[i]], dim=2) for i in range(3)
+            ]
+            expected = torch.nn.functional.scaled_dot_product_attention(*joined)
+            output = attention(
+                *local,
+                joint_query=text[0],
+                joint_key=text[1],
+                joint_value=text[2],
+                joint_strategy=strategy,
+                combine_qkv_a2a=True,
+                attention_kwargs={"valid_kv_len": real_len},
+            )
+            assert output.shape == (1, HEADS, text_tokens + chunk, HEAD_DIM)
+            if strategy == "front":
+                rows = {"text": (slice(0, text_tokens), slice(0, text_tokens))}
+                rows["image"] = (slice(text_tokens, text_tokens + real_local_len), slice(text_tokens, None))
+            else:
+                rows = {"text": (slice(chunk, None), slice(real_local_len, None))}
+                rows["image"] = (slice(0, real_local_len), slice(0, real_local_len))
+            for stream, (got, want) in rows.items():
+                errors[f"{strategy}-{name}-{stream}"] = (output[:, :, got] - expected[:, :, want]).abs().max().item()
+    return errors
+
+
 def _packed_keys_error(torch, usp, rank, world_size):
     """What USP raises for packed keys with ring attention, which it cannot slice per step."""
     local = _local_inputs(torch, rank, world_size, 45)
@@ -166,7 +211,7 @@ def _packed_keys_error(torch, usp, rank, world_size):
     return None
 
 
-def _worker(rank, world_size, init_method, result_queue, ulysses, ring, compile_backends, cases):
+def _worker(rank, world_size, init_method, result_queue, ulysses, ring, compile_backends, cases, scenario="plain"):
     # The CPU path is the one under test, whatever accelerators the machine has.
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
     os.environ["HIP_VISIBLE_DEVICES"] = ""
@@ -177,14 +222,24 @@ def _worker(rank, world_size, init_method, result_queue, ulysses, ring, compile_
 
         dist.init_process_group("gloo", init_method=init_method, rank=rank, world_size=world_size)
         usp = _wire_usp_to_gloo(torch, ulysses, ring)
-        report = {"errors": {"eager": _run_cases(torch, usp, rank, world_size, usp.USP, cases)}, "graph_breaks": {}}
+        if scenario == "plain":
+
+            def run_cases(attention):
+                return _run_cases(torch, usp, rank, world_size, attention, cases)
+
+        else:
+
+            def run_cases(attention):
+                return _run_joint_cases(torch, usp, rank, world_size, attention)
+
+        report = {"errors": {"eager": run_cases(usp.USP)}, "graph_breaks": {}}
         for backend in compile_backends:
             torch._dynamo.reset()
             torch._dynamo.utils.counters.clear()
             compiled = torch.compile(usp.USP, backend=backend)
-            report["errors"][backend] = _run_cases(torch, usp, rank, world_size, compiled, cases)
+            report["errors"][backend] = run_cases(compiled)
             report["graph_breaks"][backend] = sum(torch._dynamo.utils.counters["graph_break"].values())
-        if ring > 1 and not any(case.get("joint") for case in cases.values()):
+        if ring > 1 and scenario == "plain" and cases is CASES:
             report["packed_keys_error"] = _packed_keys_error(torch, usp, rank, world_size)
         result_queue.put(("returned", rank, report))
     except Exception:  # noqa: BLE001 - report arbitrary child failures to the parent
@@ -272,3 +327,31 @@ def test_usp_with_joint_tokens_attends_them_once_and_drops_only_the_main_pad(tmp
     for _, rank, report in results:
         for case, error in report["errors"]["eager"].items():
             assert error <= TOLERANCE, f"rank {rank}, {case}: max error {error:.3e}"
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_usp_joint_text_and_padded_image_match_unpadded_attention(tmp_path, mode):
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("yunchang", reason="yunchang builds the Ulysses and ring process groups")
+    if not torch.distributed.is_gloo_available():
+        pytest.skip("torch.distributed gloo backend is unavailable")
+    ulysses, ring = MODES[mode]
+    world_size = ulysses * ring
+
+    exit_codes, results = _run_spawned(
+        torch,
+        f"file://{tmp_path / 'usp-joint-init'}",
+        world_size,
+        (ulysses, ring, ["aot_eager"], {}, "joint"),
+        timeout=900,
+    )
+
+    errors = [result for result in results if result[0] == "error"]
+    assert not errors, "\n".join(result[2] for result in errors)
+    assert exit_codes == [0] * world_size
+    assert sorted(result[1] for result in results) == list(range(world_size))
+    for _, rank, report in results:
+        for variant, case_errors in report["errors"].items():
+            for case, error in case_errors.items():
+                assert error <= TOLERANCE, f"rank {rank}, {variant}, {case}: max error {error:.3e}"
+        assert report["graph_breaks"] == {"aot_eager": 0}, f"rank {rank}"

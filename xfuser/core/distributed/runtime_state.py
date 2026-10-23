@@ -320,6 +320,9 @@ class RuntimeState(metaclass=ABCMeta):
         # a fallback mid-graph finds it already imported.
         spec.resolved()
 
+    def reset_step_counter(self) -> None:
+        """Only DiTRuntimeState has a per-step schedule to restart."""
+
 
 class UnetRuntimeState(RuntimeState):
     def __init__(self, pipeline: DiffusionPipeline, config: EngineConfig):
@@ -451,6 +454,11 @@ class DiTRuntimeState(RuntimeState):
                 f"Attention and GEMM schedules must use the same total steps; got {attn_steps} and {gemm_steps}."
             )
         return attn_steps or gemm_steps
+
+    def reset_step_counter(self) -> None:
+        """Restart an active per-step schedule at its first step."""
+        if self.step_counter is not None:
+            self.step_counter = torch.tensor(0, dtype=torch.int)
 
     def increment_step_counter(self):
         """

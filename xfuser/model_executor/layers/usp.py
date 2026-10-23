@@ -25,11 +25,11 @@ from xfuser.core.distributed import (
 
 from xfuser.compat import version_at_least
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
-from xfuser.logger import init_logger
+from xfuser.logger import init_logger, warn_once
 from xfuser.core.attention import registry as attention_registry
 from xfuser.core.attention.spec import VarlenPacking
 from xfuser.core.attention.spec import AttnCall
-from xfuser.core.attention.spec import Sparsity
+from xfuser.core.attention.spec import AttentionBackendType, Sparsity
 from xfuser.core.distributed.fp8_comms import (
     fp8_attention_kwargs,
     fp8_comms_input_all_to_all,
@@ -425,6 +425,67 @@ def _ring_trim_trailing_kv_padding(attention_function, valid_kv_len, shard_len):
         return attention_function(query, key, value, *args, **kwargs)
 
     return wrapper
+
+
+def key_padding_mask_attention_kwargs(key_padding_mask, attention_kwargs=None):
+    """Attention kwargs and backend that keep masked keys out of USP attention.
+
+    ``key_padding_mask`` is a ``[batch, keys]`` bool mask, True for keys to
+    attend to, over the keys the backend sees and in that order: every rank's
+    local keys in rank order after the Ulysses all-to-all, less the padding that
+    ``valid_kv_len`` trims, with joint keys where USP concatenates them. USP
+    trims before the backend runs, so the mask is as long as the trimmed keys.
+
+    Returns ``(attention_kwargs, None)`` unchanged without a mask. With one, the
+    call runs on SDPA, which applies an arbitrary mask; if another backend was
+    selected, that is logged once, from eager calls only (a log call is a graph
+    break under torch.compile). FP8 communication, ring attention and sparse
+    backends cannot honour the mask and raise instead of running without it.
+    """
+    if key_padding_mask is None:
+        return attention_kwargs, None
+    runtime_state = get_runtime_state()
+    if runtime_state.fp8_comms is not None:
+        # SDPA does not take pre-quantized inputs. Delete this guard once an attention backend
+        # that takes both an arbitrary mask and FP8 inputs exists.
+        raise ValueError(
+            "--use_fp8_comms cannot be combined with batched prompts of different lengths: the attention mask "
+            "needs an attention backend that does not pre-quantize. Use equal-length prompts, one prompt per "
+            "call, or drop --use_fp8_comms. Guidance that batches a prompt with its negative prompt counts as "
+            "such a batch; --use_cfg_parallel runs them apart."
+        )
+    if get_ring_parallel_world_size() > 1:
+        # Each ring step attends to one shard of the keys, and SDPA's default kernel returns no
+        # log-sum-exp to merge the steps with. Delete this guard once the step slices the mask to its shard
+        # (as _ring_trim_trailing_kv_padding slices the pad) and runs a kernel with a log-sum-exp.
+        # Z-Image batches a prompt with its negative prompt by default and so reaches this whenever the two
+        # differ in length; --use_cfg_parallel avoids it.
+        raise NotImplementedError(
+            "Batched prompts of different lengths cannot run with ring attention: the attention mask covers all "
+            f"keys, but each ring step sees one shard of them (ring degree {get_ring_parallel_world_size()}). "
+            "Use equal-length prompts, one prompt per call (--use_cfg_parallel runs a prompt and its negative "
+            "prompt apart), or a ring degree of 1."
+        )
+    selected = getattr(runtime_state, "attention_backend", None)
+    spec = attention_registry.find(selected)
+    if spec is not None and spec.sparsity is not None:
+        # A sparse backend approximates the attention over a spatial layout that a per-prompt key mask
+        # does not describe, and running SDPA instead would drop the sparsity the user asked for.
+        # Delete this guard once a sparse backend takes a key mask.
+        raise NotImplementedError(
+            f"{selected.value} cannot be combined with batched prompts of different lengths: the attention mask "
+            "is only applied by dense SDPA. Use equal-length prompts, one prompt per call, or a dense backend."
+        )
+    # Logging is a graph break under torch.compile, so it is left to eager calls (the warmup).
+    if selected is not None and selected is not AttentionBackendType.SDPA and not torch.compiler.is_compiling():
+        warn_once(
+            logger,
+            "Batched prompts of different lengths: attention runs on SDPA instead of %s so that the padded "
+            "prompt tokens are masked out.",
+            selected.value,
+        )
+    attn_mask = key_padding_mask.to(torch.bool)[:, None, None, :]
+    return {**(attention_kwargs or {}), "attn_mask": attn_mask}, AttentionBackendType.SDPA
 
 
 def _get_attention_function(backend=None):

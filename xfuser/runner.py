@@ -111,7 +111,7 @@ class xFuserModelRunner:
             self.model.save_timings(timings)
 
 
-if __name__ == "__main__":
+def main():
     setup_logging()
     parser = FlexibleArgumentParser(description="xFuser Arguments")
     xfuser_args = xFuserArgs.add_runner_args(parser).parse_args()
@@ -130,3 +130,8 @@ if __name__ == "__main__":
         runner.save(output=output, timings=timings)
 
     runner.cleanup()
+
+
+if __name__ == "__main__":
+    with torch.inference_mode():  # mostly redundant, but harmless
+        main()

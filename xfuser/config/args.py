@@ -164,6 +164,8 @@ class xFuserArgs:
     # Model arguments
     model: str = ""
     download_dir: Optional[str] = None
+    vdn_transformer_dir: Optional[str] = None
+    vdn_window_backend: Optional[str] = None
     trust_remote_code: bool = False
     lora_path: Optional[str] = None
     lora_weight_name: Optional[str] = None
@@ -470,6 +472,23 @@ class xFuserArgs:
             type=nullable_str,
             default=xFuserArgs.download_dir,
             help="Directory to download and load the weights, default to the default cache dir of huggingface.",
+        )
+        model_group.add_argument(
+            "--vdn_transformer_dir",
+            type=nullable_str,
+            default=xFuserArgs.vdn_transformer_dir,
+            help="Path to the materialized VDN-H3 transformer directory (must contain a "
+            "transformer/ subfolder). Overrides the VDN_H3_TRANSFORMER_DIR environment "
+            "variable. Required when --model is OpenVDN/vdn-minimax-h3 (or VDN-H3).",
+        )
+        model_group.add_argument(
+            "--vdn_window_backend",
+            type=nullable_str,
+            default=xFuserArgs.vdn_window_backend,
+            choices=["sdpa", "aiter", "aiter_ck", "aiter_fp8"],
+            help="VDN-H3 only: override the window-softmax varlen kernel. By default it is "
+            "derived from --attention_backend (SDPA->sdpa, AITER->aiter_ck, AITER_FP8->aiter_fp8); "
+            "'aiter' selects AITER's Triton varlen bf16 kernel.",
         )
         model_group.add_argument(
             "--trust-remote-code",
@@ -815,6 +834,23 @@ class xFuserArgs:
         )
         parser.add_argument("--lora_weight_name", type=nullable_str, default=None)
         parser.add_argument("--lora_scale", type=float, default=1.0)
+        parser.add_argument(
+            "--vdn_transformer_dir",
+            type=nullable_str,
+            default=xFuserArgs.vdn_transformer_dir,
+            help="Path to the materialized VDN-H3 transformer directory (must contain a "
+            "transformer/ subfolder). Overrides the VDN_H3_TRANSFORMER_DIR environment "
+            "variable. Required when --model is OpenVDN/vdn-minimax-h3 (or VDN-H3).",
+        )
+        parser.add_argument(
+            "--vdn_window_backend",
+            type=nullable_str,
+            default=xFuserArgs.vdn_window_backend,
+            choices=["sdpa", "aiter", "aiter_ck", "aiter_fp8"],
+            help="VDN-H3 only: override the window-softmax varlen kernel. By default it is "
+            "derived from --attention_backend (SDPA->sdpa, AITER->aiter_ck, AITER_FP8->aiter_fp8); "
+            "'aiter' selects AITER's Triton varlen bf16 kernel.",
+        )
         parser.add_argument("--use_parallel_vae", help="Enable parallel VAE.", action="store_true")
         parser.add_argument(
             "--use_torch_compile",

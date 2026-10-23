@@ -241,6 +241,13 @@ def _padded_qkv():
             id="vsa-strips-it",
         ),
         pytest.param(
+            {"valid_kv_len": _REAL_LEN, "thw": (3, 3, 5), "encoder_sp_padding": 1},
+            AttentionBackendType.FLEX_BLOCK_ATTN,
+            False,
+            _PADDED_LEN,
+            id="ssta-strips-it",
+        ),
+        pytest.param(
             {"valid_kv_len": _REAL_LEN, "thw": None},
             AttentionBackendType.AITER_SPARGE,
             False,
@@ -289,3 +296,71 @@ def test_usp_refuses_packed_keys_together_with_ring_attention(ring_of_two):
     }
     with pytest.raises(ValueError, match="valid_kv_len must be in"):
         usp.USP(*local, attention_kwargs=attention_kwargs)
+
+
+def _joint(length=3):
+    return {name: torch.randn(1, 2, length, 8) for name in ("joint_query", "joint_key", "joint_value")}
+
+
+def _vsa_like_function(seen):
+    """An attention function whose kernel crops K to `valid_kv_len` as AITER_VSA's dense fallback does."""
+
+    def kernel(query, key, value, call):
+        valid = call.attention_kwargs.get("valid_kv_len")
+        if valid is not None and valid < key.shape[2]:
+            key, value = key[:, :, :valid], value[:, :, :valid]
+        seen.append(key.shape[2])
+        return _attention_with_lse(query, key, value)
+
+    spec = Spec(AttentionBackendType.SDPA, impl=kernel, ring=ALWAYS, accepts=ANY_CALL, requires=ALWAYS)
+    return usp.concat_joint_tensors_decorator(usp._spec_adapter(spec))
+
+
+@pytest.mark.parametrize("strategy", ["front", "rear"])
+def test_usp_publishes_no_pad_length_for_the_keys_joined_after_the_trim(monkeypatch, usp_kv_lens, strategy):
+    # The declared length counts the main keys only. Left in the kwargs, a backend that crops K to it
+    # (the dense fallback of AITER_VSA) would cut the joint tokens' keys off again.
+    seen = []
+    monkeypatch.setattr(usp, "get_ulysses_parallel_rank", lambda: 0)
+    monkeypatch.setattr(usp, "_get_attention_function", lambda backend=None: _vsa_like_function(seen))
+    attention_kwargs = {"valid_kv_len": _REAL_LEN}
+
+    usp.USP(*_padded_qkv(), joint_strategy=strategy, **_joint(), attention_kwargs=attention_kwargs)
+
+    assert seen == [_REAL_LEN + 3]
+    # The wrapper-owned dict keeps its declaration for the next layer.
+    assert attention_kwargs == {"valid_kv_len": _REAL_LEN}
+
+
+@pytest.mark.parametrize(
+    "attention_kwargs, backend, is_causal",
+    [
+        pytest.param({"valid_kv_len": _REAL_LEN}, AttentionBackendType.SDPA, True, id="causal"),
+        pytest.param(
+            {"valid_kv_len": _REAL_LEN, "indices_k": torch.arange(_REAL_LEN)},
+            AttentionBackendType.SDPA,
+            False,
+            id="packed-keys",
+        ),
+        pytest.param(
+            {"valid_kv_len": _REAL_LEN, "thw": (3, 3, 5)}, AttentionBackendType.AITER_SPARGE, False, id="sparge"
+        ),
+        pytest.param({"valid_kv_len": _REAL_LEN, "thw": (3, 3, 5)}, AttentionBackendType.AITER_VSA, False, id="vsa"),
+        pytest.param(
+            {"valid_kv_len": _REAL_LEN, "thw": (3, 3, 5)}, AttentionBackendType.FLEX_BLOCK_ATTN, False, id="ssta"
+        ),
+    ],
+)
+def test_usp_refuses_a_declared_pad_with_joint_tensors_where_the_backend_would_keep_it(
+    monkeypatch, usp_kv_lens, attention_kwargs, backend, is_causal
+):
+    monkeypatch.setattr(usp, "get_ulysses_parallel_rank", lambda: 0)
+    with pytest.raises(NotImplementedError, match="valid_kv_len cannot be combined with joint tensors"):
+        usp.USP(
+            *_padded_qkv(),
+            is_causal=is_causal,
+            joint_strategy="front",
+            **_joint(),
+            backend=backend,
+            attention_kwargs=attention_kwargs,
+        )

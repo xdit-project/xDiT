@@ -6,6 +6,11 @@ attention sink. USP drops them given the real length (`valid_kv_len`); in ring
 attention it does so inside the step that attends to the last rank's shard.
 That needs the real Ulysses and ring exchanges, hence processes over gloo, and
 torch.compile has to trace it without a graph break.
+
+Joint tokens (a replicated prompt joined after the exchange) are not part of
+the declared length. The kernel here crops K to `valid_kv_len` when the kwargs
+still carry it, as the dense fallback of AITER_VSA does, so a length that
+outlived the trim would cut the joint keys' share of K off again.
 """
 
 import os
@@ -24,6 +29,14 @@ CASES = {
     "no-pad": dict(real_len=PADDED_LEN),
     "declared-pad": dict(real_len=45, declared=True),
     "declared-pad-causal": dict(real_len=45, declared=True, causal=True),
+}
+JOINT_LEN = 5
+JOINT_CASES = {
+    "joint-front-no-pad": dict(real_len=PADDED_LEN, joint="front", joint_query=True),
+    "joint-front-declared-pad": dict(real_len=45, declared=True, joint="front", joint_query=True),
+    "joint-rear-declared-pad": dict(real_len=45, declared=True, joint="rear", joint_query=True),
+    # Only the keys are joint, as for the understanding tokens of Cosmos3.
+    "joint-front-keys-only": dict(real_len=45, declared=True, joint="front"),
 }
 # (Ulysses, ring) degrees. At ring degree 4 only one of a rank's four steps attends to the pad.
 MODES = {"ulysses": (2, 1), "ring": (1, 2), "hybrid": (2, 2), "ring4": (1, 4), "hybrid-ring4": (2, 4)}
@@ -61,6 +74,9 @@ def _wire_usp_to_gloo(torch, ulysses, ring):
     set_seq_parallel_pg(ulysses, ring, dist.get_rank(), dist.get_world_size())
 
     def cpu_flash(query, key, value, call):
+        valid_kv_len = call.attention_kwargs.get("valid_kv_len")
+        if valid_kv_len is not None and valid_kv_len < key.shape[2]:
+            key, value = key[:, :, :valid_kv_len], value[:, :, :valid_kv_len]
         return torch.ops.aten._scaled_dot_product_flash_attention_for_cpu(
             query, key, value, dropout_p=0.0, is_causal=call.is_causal
         )[:2]
@@ -85,8 +101,23 @@ def _wire_usp_to_gloo(torch, ulysses, ring):
     return usp
 
 
+def _joint_inputs(torch):
+    generator = torch.Generator().manual_seed(1)
+    return [torch.randn(1, HEADS, JOINT_LEN, HEAD_DIM, generator=generator) for _ in range(3)]
+
+
 def _real_rows_error(torch, rank, world_size, case, output):
     query, key, value = (tensor[:, :, : case["real_len"]] for tensor in _inputs(torch, case["real_len"]))
+    if case.get("joint"):
+        front = case["joint"] == "front"
+        _, joint_key, joint_value = _joint_inputs(torch)
+        key, value = (
+            torch.cat((joint, main) if front else (main, joint), dim=2)
+            for joint, main in ((joint_key, key), (joint_value, value))
+        )
+        if case.get("joint_query"):
+            # With joint queries the output also holds their rows, ahead of or behind the main ones.
+            output = output[:, :, JOINT_LEN:] if front else output[:, :, :-JOINT_LEN]
     expected = torch.ops.aten._scaled_dot_product_flash_attention_for_cpu(
         query, key, value, is_causal=case.get("causal", False)
     )[0]
@@ -103,12 +134,18 @@ def _local_inputs(torch, rank, world_size, real_len):
     return [tensor[:, :, rank * chunk : (rank + 1) * chunk].contiguous() for tensor in _inputs(torch, real_len)]
 
 
-def _run_cases(torch, usp, rank, world_size, attention):
+def _run_cases(torch, usp, rank, world_size, attention, cases):
     errors = {}
-    for name, case in CASES.items():
+    for name, case in cases.items():
         local = _local_inputs(torch, rank, world_size, case["real_len"])
         attention_kwargs = {"valid_kv_len": case["real_len"]} if case.get("declared") else None
-        output = attention(*local, is_causal=case.get("causal", False), attention_kwargs=attention_kwargs)
+        joint = {}
+        if case.get("joint"):
+            joint_query, joint_key, joint_value = _joint_inputs(torch)
+            joint = dict(joint_key=joint_key, joint_value=joint_value, joint_strategy=case["joint"])
+            if case.get("joint_query"):
+                joint["joint_query"] = joint_query
+        output = attention(*local, is_causal=case.get("causal", False), attention_kwargs=attention_kwargs, **joint)
         errors[name] = _real_rows_error(torch, rank, world_size, case, output)
     return errors
 
@@ -129,7 +166,7 @@ def _packed_keys_error(torch, usp, rank, world_size):
     return None
 
 
-def _worker(rank, world_size, init_method, result_queue, ulysses, ring, compile_backends):
+def _worker(rank, world_size, init_method, result_queue, ulysses, ring, compile_backends, cases):
     # The CPU path is the one under test, whatever accelerators the machine has.
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
     os.environ["HIP_VISIBLE_DEVICES"] = ""
@@ -140,14 +177,14 @@ def _worker(rank, world_size, init_method, result_queue, ulysses, ring, compile_
 
         dist.init_process_group("gloo", init_method=init_method, rank=rank, world_size=world_size)
         usp = _wire_usp_to_gloo(torch, ulysses, ring)
-        report = {"errors": {"eager": _run_cases(torch, usp, rank, world_size, usp.USP)}, "graph_breaks": {}}
+        report = {"errors": {"eager": _run_cases(torch, usp, rank, world_size, usp.USP, cases)}, "graph_breaks": {}}
         for backend in compile_backends:
             torch._dynamo.reset()
             torch._dynamo.utils.counters.clear()
             compiled = torch.compile(usp.USP, backend=backend)
-            report["errors"][backend] = _run_cases(torch, usp, rank, world_size, compiled)
+            report["errors"][backend] = _run_cases(torch, usp, rank, world_size, compiled, cases)
             report["graph_breaks"][backend] = sum(torch._dynamo.utils.counters["graph_break"].values())
-        if ring > 1:
+        if ring > 1 and not any(case.get("joint") for case in cases.values()):
             report["packed_keys_error"] = _packed_keys_error(torch, usp, rank, world_size)
         result_queue.put(("returned", rank, report))
     except Exception:  # noqa: BLE001 - report arbitrary child failures to the parent
@@ -200,7 +237,7 @@ def test_usp_matches_attention_over_the_real_tokens(tmp_path, mode):
     compile_backends = _compile_backends()
 
     exit_codes, results = _run_spawned(
-        torch, f"file://{tmp_path / 'usp-init'}", world_size, (ulysses, ring, compile_backends), timeout=900
+        torch, f"file://{tmp_path / 'usp-init'}", world_size, (ulysses, ring, compile_backends, CASES), timeout=900
     )
 
     errors = [result for result in results if result[0] == "error"]
@@ -214,3 +251,24 @@ def test_usp_matches_attention_over_the_real_tokens(tmp_path, mode):
         assert report["graph_breaks"] == {backend: 0 for backend in compile_backends}, f"rank {rank}"
         if ring > 1:
             assert report["packed_keys_error"] is not None and "valid_kv_len must be in" in report["packed_keys_error"]
+
+
+@pytest.mark.parametrize("mode", ["ulysses", "ring", "hybrid"])
+def test_usp_with_joint_tokens_attends_them_once_and_drops_only_the_main_pad(tmp_path, mode):
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("yunchang", reason="yunchang builds the Ulysses and ring process groups")
+    if not torch.distributed.is_gloo_available():
+        pytest.skip("torch.distributed gloo backend is unavailable")
+    ulysses, ring = MODES[mode]
+    world_size = ulysses * ring
+
+    exit_codes, results = _run_spawned(
+        torch, f"file://{tmp_path / 'usp-init'}", world_size, (ulysses, ring, [], JOINT_CASES), timeout=300
+    )
+
+    errors = [result for result in results if result[0] == "error"]
+    assert not errors, "\n".join(result[2] for result in errors)
+    assert exit_codes == [0] * world_size
+    for _, rank, report in results:
+        for case, error in report["errors"]["eager"].items():
+            assert error <= TOLERANCE, f"rank {rank}, {case}: max error {error:.3e}"

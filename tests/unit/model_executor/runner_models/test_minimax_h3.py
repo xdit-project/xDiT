@@ -259,6 +259,7 @@ def test_minimax_h3_runner_registration():
     assert "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree" in MODEL_REGISTRY
     assert "FastH3-Dense" in MODEL_REGISTRY
     assert "FastVideo/FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree" in MODEL_REGISTRY
+    assert "MiniMax-H3-Turbo" in MODEL_REGISTRY
 
 
 def test_fasth3_defaults_match_inference_contract():
@@ -597,6 +598,223 @@ def test_minimax_h3_fp8_quantization_policy():
     expected = ("attn.to_qkv", "ff.net.0.proj")
     assert xFuserMiniMaxH3Model.settings.fp8_gemm_include_suffixes == expected
     assert xFuserMiniMaxH3Ref2VAModel.settings.fp8_gemm_include_suffixes == expected
+
+
+def _tiny_lora_target():
+    block = torch.nn.Module()
+    block.attn = torch.nn.Module()
+    block.attn.to_q = torch.nn.Linear(4, 6, bias=False)
+    transformer = torch.nn.Module()
+    transformer.transformer_blocks = torch.nn.ModuleList([block])
+    return transformer
+
+
+def _save_lora(tmp_path, tensors, metadata=None, name="turbo.safetensors"):
+    from safetensors.torch import save_file
+
+    path = tmp_path / name
+    save_file(tensors, str(path), metadata=metadata)
+    return str(path)
+
+
+@pytest.mark.parametrize("metadata, alpha", [({"alpha": "16"}, 16.0), (None, 8.0)])
+def test_turbo_lora_merges_with_peft_scaling_and_recorded_alpha(tmp_path, monkeypatch, metadata, alpha):
+    from xfuser.model_executor.models.runner_models.minimax_h3 import _merge_lora_into_transformer
+
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "1")
+    transformer = _tiny_lora_target()
+    base = transformer.transformer_blocks[0].attn.to_q.weight.detach().clone()
+    lora_a, lora_b = torch.randn(2, 4), torch.randn(6, 2)
+    path = _save_lora(
+        tmp_path,
+        {
+            "transformer_blocks.0.attn.to_q.lora_A.default.weight": lora_a,
+            "transformer_blocks.0.attn.to_q.lora_B.default.weight": lora_b,
+        },
+        metadata=metadata,
+    )
+
+    _merge_lora_into_transformer(transformer, path, scale=0.5)
+
+    expected = base + (lora_b @ lora_a) * (alpha / 2 * 0.5)
+    torch.testing.assert_close(transformer.transformer_blocks[0].attn.to_q.weight.detach(), expected)
+
+
+@pytest.mark.parametrize(
+    "tensors, match",
+    [
+        ({"transformer_blocks.0.attn.to_q.lora_A.default.weight": torch.randn(2, 4)}, "incomplete"),
+        (
+            {
+                "transformer_blocks.0.attn.to_k.lora_A.default.weight": torch.randn(2, 4),
+                "transformer_blocks.0.attn.to_k.lora_B.default.weight": torch.randn(6, 2),
+            },
+            "unresolved",
+        ),
+        (
+            {
+                "transformer_blocks.0.attn.to_q.lora_A.default.weight": torch.randn(2, 5),
+                "transformer_blocks.0.attn.to_q.lora_B.default.weight": torch.randn(6, 2),
+            },
+            "does not match",
+        ),
+        ({"transformer_blocks.0.attn.to_q.alpha": torch.tensor(8.0)}, "Unexpected"),
+    ],
+)
+def test_turbo_lora_rejects_adapters_that_do_not_fit(tmp_path, tensors, match):
+    from xfuser.model_executor.models.runner_models.minimax_h3 import _merge_lora_into_transformer
+
+    with pytest.raises(ValueError, match=match):
+        _merge_lora_into_transformer(_tiny_lora_target(), _save_lora(tmp_path, tensors), scale=1.0)
+
+
+def test_lora_file_resolves_from_a_file_a_directory_or_a_repository(tmp_path, monkeypatch):
+    import huggingface_hub
+
+    from xfuser.model_executor.models.runner_models.minimax_h3 import _resolve_lora_file
+
+    path = _save_lora(tmp_path, {"x.lora_A.default.weight": torch.zeros(1, 1)}, name="adapter.safetensors")
+    downloads = []
+    monkeypatch.setattr(
+        huggingface_hub,
+        "hf_hub_download",
+        lambda repo_id, filename: downloads.append((repo_id, filename)) or f"/cache/{filename}",
+    )
+
+    assert _resolve_lora_file(path, None) == path
+    assert _resolve_lora_file(str(tmp_path), "adapter.safetensors") == path
+    assert _resolve_lora_file("org/repo", "adapter.safetensors") == "/cache/adapter.safetensors"
+    assert downloads == [("org/repo", "adapter.safetensors")]
+    with pytest.raises(ValueError, match="lora_weight_name is required"):
+        _resolve_lora_file("org/repo", None)
+
+
+@pytest.mark.parametrize(
+    "steps, shift, expected",
+    [
+        # The worked example in the Minimax-H3-Turbo model specs.
+        (4, 12.0, [1.0, 0.9730, 0.9231, 0.8000, 0.0]),
+        (4, None, [1.0, 0.9730, 0.9231, 0.8000, 0.0]),
+        (4, 6.0, [1.0, 0.9474, 0.8571, 0.6667, 0.0]),
+    ],
+)
+def test_turbo_video_schedule_matches_the_published_grid(steps, shift, expected):
+    from diffusers import MiniMaxH3Scheduler
+
+    from xfuser.model_executor.models.runner_models.minimax_h3 import _count_steps_as_forwards, _set_video_shift
+
+    scheduler = MiniMaxH3Scheduler(shift=12.0)
+    _count_steps_as_forwards(scheduler)
+    scheduler.set_shift(1.0)
+    _set_video_shift(scheduler, shift)
+    scheduler.set_timesteps(steps)
+
+    torch.testing.assert_close(scheduler.sigmas.float(), torch.tensor(expected), atol=1e-4, rtol=0)
+
+
+TURBO_TEST_WEIGHT = "minimax_h3_fl2v_turbo_8step_v1.0_768p_bf16.safetensors"
+
+
+def _turbo_model(tmp_path, **options):
+    from xfuser.config import xFuserArgs
+    from xfuser.model_executor.models.runner_models.minimax_h3 import xFuserMiniMaxH3TurboModel
+
+    return xFuserMiniMaxH3TurboModel(
+        xFuserArgs(model="MiniMax-H3-Turbo", input_images=[], output_directory=str(tmp_path), **options)
+    )
+
+
+def _turbo_args(steps, flow_shift):
+    return {
+        "prompt": "a cat",
+        "dataset_path": None,
+        "negative_prompt": None,
+        "height": 768,
+        "width": 1344,
+        "num_inference_steps": steps,
+        "flow_shift": flow_shift,
+    }
+
+
+def test_turbo_defaults_to_the_studio_adapter(tmp_path):
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        TURBO_DEFAULT_WEIGHT_NAME,
+        TURBO_LORA_REPO,
+        xFuserMiniMaxH3Model,
+    )
+
+    model = _turbo_model(tmp_path)
+
+    assert (model.config.lora_path, model.config.lora_weight_name) == (TURBO_LORA_REPO, TURBO_DEFAULT_WEIGHT_NAME)
+    assert model.settings.model_name == xFuserMiniMaxH3Model.settings.model_name
+    assert model.settings.output_name == "minimax_h3_turbo"
+    assert (model.default_input_values.num_inference_steps, model.default_input_values.flow_shift) == (8, 6.0)
+
+
+@pytest.mark.parametrize(
+    "weight_name, steps, shift, refused",
+    [
+        ("minimax_h3_fl2v_turbo_4step_v0.1.safetensors", 4, 12.0, 8),
+        ("minimax_h3_fl2v_turbo_8step_v1.0_bf16.safetensors", 8, 12.0, 6),
+        ("minimax_h3_fl2v_turbo_4step_v1.0_768p_bf16.safetensors", 4, 6.0, 8),
+        ("minimax_h3_fl2v_turbo_8step_v1.0_768p_bf16.safetensors", 8, 6.0, 4),
+    ],
+)
+def test_turbo_defaults_and_step_counts_follow_the_adapter(tmp_path, weight_name, steps, shift, refused):
+    model = _turbo_model(tmp_path, lora_path="lightx2v/Minimax-h3-Turbo", lora_weight_name=weight_name)
+
+    assert (model.default_input_values.num_inference_steps, model.default_input_values.flow_shift) == (steps, shift)
+    model._validate_args(_turbo_args(steps, shift))
+    with pytest.raises(ValueError, match="distilled for"):
+        model._validate_args(_turbo_args(refused, shift))
+
+
+def test_turbo_8step_544p_adapter_also_samples_in_4_steps(tmp_path):
+    model = _turbo_model(
+        tmp_path,
+        lora_path="lightx2v/Minimax-h3-Turbo",
+        lora_weight_name="minimax_h3_fl2v_turbo_8step_v1.0_bf16.safetensors",
+    )
+
+    model._validate_args(_turbo_args(4, 12.0))
+
+
+def test_turbo_unknown_adapter_needs_explicit_steps_and_shift(tmp_path):
+    path = _save_lora(tmp_path, {"x.lora_A.default.weight": torch.zeros(1, 1)}, name="my_adapter.safetensors")
+    model = _turbo_model(tmp_path, lora_path=path)
+
+    assert model.default_input_values.num_inference_steps is None
+    with pytest.raises(ValueError, match="no published Turbo settings"):
+        model._validate_args(_turbo_args(None, None))
+    model._validate_args(_turbo_args(6, 9.0))
+
+
+@pytest.mark.parametrize(
+    "options, match",
+    [
+        ({"lora_weight_name": "minimax_h3_ref2v_turbo_4step_v0.1_bf16.safetensors"}, "Ref2VA adapter"),
+        ({"lora_weight_name": None}, "lora_weight_name is required"),
+        ({"lora_weight_name": TURBO_TEST_WEIGHT, "fully_shard_degree": 2}, "without FSDP"),
+    ],
+)
+def test_turbo_refuses_adapters_and_layouts_it_cannot_run(tmp_path, options, match):
+    with pytest.raises(ValueError, match=match):
+        _turbo_model(tmp_path, lora_path="lightx2v/Minimax-h3-Turbo", **options)
+
+
+def test_turbo_accepts_fp8_gemms_but_the_base_runners_refuse_lora(tmp_path, monkeypatch):
+    from xfuser.config import xFuserArgs
+    from xfuser.model_executor.models.runner_models.minimax_h3 import xFuserFastH3V2Model, xFuserMiniMaxH3Model
+
+    # The base runners log their default attention backend, which reads RANK/WORLD_SIZE.
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "1")
+    model = _turbo_model(tmp_path, gemm_quantization="fp8")
+    assert not model.config.gemm_quantization_spec.is_pure("none")
+    for runner in (xFuserMiniMaxH3Model, xFuserFastH3V2Model):
+        with pytest.raises(ValueError, match="does not support startup LoRA"):
+            runner(xFuserArgs(lora_path="adapter", input_images=[], output_directory=str(tmp_path)))
 
 
 def test_minimax_h3_fp4_quantization_policy():
@@ -1025,7 +1243,7 @@ def test_minimax_h3_loads_task_workflow(
     monkeypatch.setattr(minimax_h3, "log", lambda message: None)
 
     model = object.__new__(xFuserMiniMaxH3Model)
-    model.config = SimpleNamespace(task=task, text_encoder_tp_degree=1)
+    model.config = SimpleNamespace(task=task, text_encoder_tp_degree=1, lora_path=None)
     model._parallelize_text_encoder = lambda text_encoder: None
 
     _attach_online_loader(model, monkeypatch)
@@ -1038,6 +1256,46 @@ def test_minimax_h3_loads_task_workflow(
     assert transformer.qkv_fused
     assert pipe.loaded_dtype == torch.bfloat16
     assert pipe.text_encoder.lm_head is None
+
+
+def test_minimax_h3_turbo_merges_the_lora_before_fusing_qkv(monkeypatch):
+    from diffusers import ModularPipeline
+
+    from xfuser.model_executor.models.runner_models import minimax_h3
+    from xfuser.model_executor.models.runner_models.minimax_h3 import xFuserMiniMaxH3TurboModel
+    from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
+        xFuserMiniMaxH3Transformer3DWrapper,
+    )
+
+    pipe = _FakeMiniMaxPipe()
+    transformer = _FakeTransformer()
+    merges = []
+    monkeypatch.setattr(ModularPipeline, "from_pretrained", lambda model_name, workflow: pipe)
+    monkeypatch.setattr(xFuserMiniMaxH3Transformer3DWrapper, "from_pretrained", lambda *args, **kwargs: transformer)
+    monkeypatch.setattr(minimax_h3, "_patch_minimax_h3_text_encoder_broadcast", lambda: None)
+    monkeypatch.setattr(minimax_h3, "_resolve_lora_file", lambda path, name: f"/cache/{name}")
+    monkeypatch.setattr(
+        minimax_h3,
+        "_merge_lora_into_transformer",
+        lambda target, path, scale: merges.append((target, path, scale, target.qkv_fused)),
+    )
+    monkeypatch.setattr(minimax_h3, "log", lambda message: None)
+
+    model = object.__new__(xFuserMiniMaxH3TurboModel)
+    model.config = SimpleNamespace(
+        task="i2va",
+        text_encoder_tp_degree=1,
+        lora_path="lightx2v/Minimax-h3-Turbo",
+        lora_weight_name="adapter.safetensors",
+        lora_scale=0.5,
+    )
+    model._parallelize_text_encoder = lambda text_encoder: None
+    _attach_online_loader(model, monkeypatch)
+
+    model._load_model()
+
+    assert merges == [(transformer, "/cache/adapter.safetensors", 0.5, False)]
+    assert transformer.qkv_fused
 
 
 def test_fasth3_loads_published_checkpoint(monkeypatch):
@@ -1083,7 +1341,7 @@ def test_fasth3_loads_published_checkpoint(monkeypatch):
     monkeypatch.setattr(minimax_h3, "log", lambda message: None)
 
     model = object.__new__(xFuserFastH3Model)
-    model.config = SimpleNamespace(task="t2va", text_encoder_tp_degree=1)
+    model.config = SimpleNamespace(task="t2va", text_encoder_tp_degree=1, lora_path=None)
     model._parallelize_text_encoder = lambda text_encoder: None
 
     _attach_online_loader(model, monkeypatch)
@@ -1155,6 +1413,7 @@ def test_fasth3_dense_loads_published_checkpoint(monkeypatch):
         task="t2va",
         text_encoder_tp_degree=1,
         attention_backend="AITER",
+        lora_path=None,
     )
     model._parallelize_text_encoder = lambda text_encoder: None
 

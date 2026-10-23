@@ -1062,6 +1062,11 @@ class xFuserModel(abc.ABC):
             batch_args = copy.deepcopy(input_args)
             prompts = batch_args["prompt"][batch_index * batch_size : (batch_index + 1) * batch_size]
             batch_args["prompt"] = prompts
+            negative_prompts = batch_args.get("negative_prompt")
+            if isinstance(negative_prompts, list) and len(negative_prompts) == len(all_prompts):
+                batch_args["negative_prompt"] = negative_prompts[
+                    batch_index * batch_size : (batch_index + 1) * batch_size
+                ]
 
             log(
                 f"Processing batch {batch_index} with prompts {batch_index * batch_size} to {(batch_index + 1) * batch_size}"

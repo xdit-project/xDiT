@@ -687,12 +687,10 @@ class DiTRuntimeState(RuntimeState):
         latents_height = self.input_config.height // vae_scale_factor
         latents_width = self.input_config.width // vae_scale_factor
 
-        if latents_height % num_sp_patches != 0:
-            if split_latents_by_rows:
-                raise ValueError("The height of the input is not divisible by the number of sequence parallel devices")
+        if not split_latents_by_rows:
             # The transformer shards the token sequence itself, so the row
-            # patches below are never read; leave them unset rather than
-            # describe a split that cannot exist.
+            # patches below are never read. Leave them unset rather than
+            # validate or describe a row split the caller never makes.
             self.num_pipeline_patch = self.parallel_config.pp_config.num_pipeline_patch
             self.pp_patches_height = None
             self.pp_patches_start_idx_local = None
@@ -701,6 +699,9 @@ class DiTRuntimeState(RuntimeState):
             self.pp_patches_token_start_end_idx_global = None
             self.pp_patches_token_num = None
             return
+
+        if latents_height % num_sp_patches != 0:
+            raise ValueError("The height of the input is not divisible by the number of sequence parallel devices")
 
         self.num_pipeline_patch = self.parallel_config.pp_config.num_pipeline_patch
         # Pipeline patches

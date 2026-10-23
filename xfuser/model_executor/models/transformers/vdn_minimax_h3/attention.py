@@ -1,4 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+#
+# Ported from OpenVDN / Video DeltaNet (VDN-H3): Apache-2.0, Copyright 2026 the
+# VDN authors. https://github.com/OpenVDN/vdn-minimax-h3 (commit e262cb5)
+#   source: src/models/{hybrid_attention,attention_gates}.py,
+#           src/models/softmax_attention/dense_processor.py
+# Cross-referenced with SGLang's hybrid_window_attn_h3 diffusion integration
+# (https://github.com/sgl-project/sglang, Apache-2.0).
 """VDN-H3 hybrid attention for xDiT: window softmax + Video-Delta linear branch.
 
 The diffusers ``MiniMaxH3Attention`` keeps its dense q/k/v/out projections; VDN

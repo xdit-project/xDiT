@@ -486,53 +486,6 @@ torchrun --nproc_per_node=8 -m xfuser.runner \
     --cross_attention_backend AITER
 ```
 
-### Image Generation and Editing (FLUX.3 Image klein)
-
-FLUX.3 Image klein needs diffusers installed from source. `FLUX.3-image-klein` is
-step-distilled: 16 steps and no guidance. `FLUX.3-image-klein-base` is the
-undistilled checkpoint: 50 steps with classifier-free guidance (`--guidance_scale`,
-default 3.5, and an optional `--negative_prompt`), and `--use_cfg_parallel` runs
-the two guidance branches on separate rank groups.
-
-`--input_images` turns a run into an edit (up to 10 references); without
-`--height`/`--width` the output keeps the first reference's aspect ratio at about
-1024x1024 pixels. The VAE runs in fp32, as in BFL's reference. Seeds match the
-diffusers usage, which draws the noise from a CPU generator.
-
-The model expects full scene captions. Prompts are encoded as given: newer
-diffusers puts BFL's prompt upsampler (a separate 9B model,
-`black-forest-labs/flux-3-image-klein-pup`) in front of the pipeline, and the
-runner drops that step, so upsample short requests before the run.
-
-For speed on several GPUs, add `--use_torch_compile` and `--use_parallel_vae`:
-- **`--use_torch_compile`:** compiles the transformer blocks and replays them as CUDA/HIP graphs.
-  A sharded step is launch-bound, so this matters more than it does on one GPU.
-- **`--use_parallel_vae`:** splits the fp32 VAE decode across the ranks. The decode is 28% of
-  a 1024² klein image at Ulysses 8, and 42% at 2048².
-
-On 8x MI350X, klein at Ulysses 8 takes 0.36 s per 1024² image and 1.19 s per 2048² image this
-way.
-
-`--use_fp8_gemms` and `--attention_backend AITER_FP8` trade fidelity for speed: 9% and 10%
-faster at 2048², 20% together. FP8 GEMMs keep the image close (2/255 mean difference);
-FP8 attention moves small details.
-
-```bash
-xdit --model FLUX.3-image-klein \
-    --prompt "A lone American bison in a misty geothermal landscape at night under a full moon" \
-    --input_images ./bison.png \
-    --ulysses_degree 8 \
-    --use_torch_compile \
-    --use_parallel_vae
-
-xdit --model FLUX.3-image-klein-base \
-    --prompt "A lone American bison in a misty geothermal landscape at dawn" \
-    --use_cfg_parallel \
-    --ulysses_degree 4 \
-    --use_torch_compile \
-    --use_parallel_vae
-```
-
 ### Benchmarking with Multiple Iterations
 
 ```bash

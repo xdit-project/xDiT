@@ -22,15 +22,6 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
     STANDARD_LOAD_ROUTES,
 )
 
-# Generation size of text-to-image runs; with reference images the pipeline keeps this
-# area at the first reference's aspect ratio.
-_DEFAULT_SIZE = 1024
-_TRANSFORMER_BLOCKS = [
-    "transformer.txt_mode_blocks",
-    "transformer.mode_blocks",
-    "transformer.single_transformer_blocks",
-]
-
 
 def _deepest_text_encoder_layer(blocks) -> int:
     """The deepest Qwen3-VL hidden state the pipeline's text-encoder step reads."""
@@ -54,31 +45,6 @@ def trim_text_encoder(text_encoder, last_layer: int) -> None:
     language_model.layers = language_model.layers[:last_layer]
     language_model.norm = torch.nn.Identity()
     text_encoder.lm_head = torch.nn.Identity()
-
-
-def _settings(model_name: str, output_name: str) -> ModelSettings:
-    return ModelSettings(
-        model_name=model_name,
-        output_name=output_name,
-        model_output_type="image",
-        mod_value=16,
-        fp8_gemm_module_list=_TRANSFORMER_BLOCKS,
-        fsdp_strategy={
-            "transformer": {
-                "wrap_attrs": [
-                    "txt_mode_blocks",
-                    "mode_blocks.image",
-                    "mode_blocks.image_cond",
-                    "single_transformer_blocks",
-                ],
-                # Setting the dtype keeps the fp32 QK norms out of the FSDP units.
-                "dtype": torch.bfloat16,
-            },
-            "text_encoder": {
-                "wrap_attrs": ["model.language_model.layers"],
-            },
-        },
-    )
 
 
 class _Flux3Model(xFuserModel):
@@ -116,6 +82,34 @@ class _Flux3Model(xFuserModel):
         enable_slicing=True,
         use_parallel_vae=True,
     )
+    # Shared by both checkpoints, which add their model and output names with replace().
+    settings = ModelSettings(
+        model_output_type="image",
+        mod_value=16,
+        fp8_gemm_module_list=[
+            "transformer.txt_mode_blocks",
+            "transformer.mode_blocks",
+            "transformer.single_transformer_blocks",
+        ],
+        fsdp_strategy={
+            "transformer": {
+                "wrap_attrs": [
+                    "txt_mode_blocks",
+                    "mode_blocks.image",
+                    "mode_blocks.image_cond",
+                    "single_transformer_blocks",
+                ],
+                # Setting the dtype keeps the fp32 QK norms out of the FSDP units.
+                "dtype": torch.bfloat16,
+            },
+            "text_encoder": {
+                "wrap_attrs": ["model.language_model.layers"],
+            },
+        },
+    )
+    # Generation size of text-to-image runs; with reference images the pipeline keeps this
+    # area at the first reference's aspect ratio.
+    default_size = 1024
 
     def _validate_config(self, config: xFuserArgs) -> None:
         super()._validate_config(config)
@@ -211,8 +205,8 @@ class _Flux3Model(xFuserModel):
         input_args = super()._preprocess_args_images(input_args)
         images = input_args["input_images"]
         if not images:
-            input_args["height"] = input_args.get("height") or _DEFAULT_SIZE
-            input_args["width"] = input_args.get("width") or _DEFAULT_SIZE
+            input_args["height"] = input_args.get("height") or self.default_size
+            input_args["width"] = input_args.get("width") or self.default_size
         elif input_args.get("resize_input_images", False):
             if input_args.get("height") is None or input_args.get("width") is None:
                 raise ValueError("--resize_input_images needs --height and --width.")
@@ -268,7 +262,9 @@ class xFuserFlux3KleinModel(_Flux3Model):
     """FLUX.3 image klein: the step-distilled (flow-map) checkpoint, 16 steps without guidance."""
 
     default_input_values = DefaultInputValues(num_inference_steps=16)
-    settings = _settings("black-forest-labs/flux-3-image-klein", "flux_3_image_klein")
+    settings = replace(
+        _Flux3Model.settings, model_name="black-forest-labs/flux-3-image-klein", output_name="flux_3_image_klein"
+    )
 
     # Both inputs are unused by the distilled model. A negative prompt is content the user
     # expects to change the image, so it is refused; --guidance_scale is a sampling knob
@@ -297,7 +293,11 @@ class xFuserFlux3KleinBaseModel(_Flux3Model):
 
     capabilities = replace(_Flux3Model.capabilities, use_cfg_parallel=True)
     default_input_values = DefaultInputValues(num_inference_steps=50, guidance_scale=3.5)
-    settings = _settings("black-forest-labs/flux-3-image-klein-base", "flux_3_image_klein_base")
+    settings = replace(
+        _Flux3Model.settings,
+        model_name="black-forest-labs/flux-3-image-klein-base",
+        output_name="flux_3_image_klein_base",
+    )
 
     def _validate_args(self, input_args: dict) -> None:
         super()._validate_args(input_args)

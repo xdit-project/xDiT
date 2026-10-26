@@ -1,10 +1,13 @@
 import json
+import logging
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from xfuser.config import xFuserArgs
 from xfuser.model_executor.models.runner_models import base_model
+from xfuser import logger as xfuser_logger
 
 
 @pytest.fixture(autouse=True)
@@ -54,6 +57,24 @@ def test_too_few_prompts_for_the_data_parallel_groups_are_rejected(monkeypatch):
 
     with pytest.raises(ValueError, match="less than data_parallel_world_size"):
         model._split_prompts_for_dp({"prompt": ["a cat", "a dog"], "negative_prompt": None})
+
+
+@pytest.mark.parametrize(("parallelizes_vae", "prompt_count"), [(True, 3), (False, 3), (True, 4)])
+def test_a_wrapper_parallel_vae_needs_the_same_prompt_count_in_every_data_parallel_group(
+    monkeypatch, parallelizes_vae, prompt_count
+):
+    monkeypatch.setattr(base_model, "get_data_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(base_model, "get_data_parallel_rank", lambda: 0)
+    model = object.__new__(_StubModel)
+    model.config = SimpleNamespace(data_parallel_degree=2)
+    model._legacy_pipe = SimpleNamespace(parallelizes_vae=lambda: parallelizes_vae)
+    input_args = {"prompt": [str(i) for i in range(prompt_count)], "negative_prompt": None}
+
+    if parallelizes_vae and prompt_count % 2:
+        with pytest.raises(ValueError, match="3 prompts must divide evenly across --data_parallel_degree 2"):
+            model._split_prompts_for_dp(input_args)
+    else:
+        assert model._split_prompts_for_dp(input_args)["prompt"] == input_args["prompt"][0::2]
 
 
 def _model_class(**attributes):
@@ -176,3 +197,105 @@ def test_the_head_dim_refusal_names_fallback_or_a_hard_stop():
 
     with pytest.raises(ValueError, match="would be refused"):
         base_model._validate_attention_head_dims(model, _HeadDimConfig("AITER_FP8_SPARGE"))
+
+
+def _gather_dp_outputs(monkeypatch, *, dp_degree, legacy_pipe, rank=0, sp_rank=0):
+    """Run ``_gather_dp_outputs`` on a non-saving rank and return what it sent, or "not gathered"."""
+    sent = []
+    monkeypatch.setattr(base_model, "get_world_group", lambda: SimpleNamespace(world_size=2, rank=rank))
+    monkeypatch.setattr(base_model, "get_sequence_parallel_rank", lambda: sp_rank)
+    monkeypatch.setattr(base_model, "get_classifier_free_guidance_rank", lambda: 0)
+    monkeypatch.setattr(base_model.torch.distributed, "gather_object", lambda obj, *args, **kwargs: sent.append(obj))
+    model = object.__new__(_StubModel)
+    model.config = SimpleNamespace(data_parallel_degree=dp_degree)
+    model._legacy_pipe = legacy_pipe
+
+    model._gather_dp_outputs("output")
+    return sent or "not gathered"
+
+
+def _legacy_pipe(*, parallelizes_vae, is_dp_last_group):
+    return SimpleNamespace(parallelizes_vae=lambda: parallelizes_vae, is_dp_last_group=lambda: is_dp_last_group)
+
+
+def test_legacy_wrapper_without_dp_or_parallel_vae_keeps_its_output(monkeypatch):
+    legacy_pipe = _legacy_pipe(parallelizes_vae=False, is_dp_last_group=True)
+
+    assert _gather_dp_outputs(monkeypatch, dp_degree=1, legacy_pipe=legacy_pipe) == "not gathered"
+
+
+@pytest.mark.parametrize(
+    ("dp_degree", "parallelizes_vae"),
+    [
+        (2, False),
+        (1, True),  # the wrapper's images are on rank 0, the saving rank is the last
+    ],
+)
+def test_legacy_wrapper_sends_from_the_ranks_its_own_decode_selects(monkeypatch, dp_degree, parallelizes_vae):
+    for is_dp_last_group, expected in ((True, ["output"]), (False, [None])):
+        legacy_pipe = _legacy_pipe(parallelizes_vae=parallelizes_vae, is_dp_last_group=is_dp_last_group)
+
+        # The SP rank would pick the opposite sender: it must not matter for a legacy wrapper.
+        sent = _gather_dp_outputs(
+            monkeypatch, dp_degree=dp_degree, legacy_pipe=legacy_pipe, sp_rank=int(is_dp_last_group)
+        )
+
+        assert sent == expected
+
+
+@pytest.mark.parametrize(("sp_rank", "expected"), [(0, ["output"]), (1, [None])])
+def test_other_runners_send_from_the_first_sequence_parallel_rank(monkeypatch, sp_rank, expected):
+    assert _gather_dp_outputs(monkeypatch, dp_degree=2, legacy_pipe=None, sp_rank=sp_rank) == expected
+
+
+def _pipeline(**modules):
+    """Stands in for any pipeline: the eval pass walks attributes, not `components`."""
+    return SimpleNamespace(scheduler=object(), **modules)
+
+
+@pytest.fixture
+def runner_warnings(monkeypatch):
+    """Warnings the runner logged during this test, each exactly once.
+
+    caplog.handler is not used: pytest keeps that handler on the root logger as well, so any
+    unrelated warning reaching root during the test (or a propagated copy) would be counted.
+    """
+    records = []
+    handler = logging.Handler(level=logging.WARNING)
+    handler.emit = records.append
+    # warn_once drops repeats across the whole session.
+    monkeypatch.setattr(xfuser_logger, "_logged_once", set())
+    base_model.logger.addHandler(handler)
+    yield lambda: [record.getMessage() for record in records]
+    base_model.logger.removeHandler(handler)
+
+
+def test_eval_pass_reaches_modules_beside_and_inside_pipelines(runner_warnings):
+    shared_vae = torch.nn.Linear(2, 2).eval()
+    swapped_block = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Dropout(0.5)).eval()
+    swapped_block[1].train()  # eval-mode parent, training-mode child
+    model = object.__new__(_StubModel)
+    model.pipe = _pipeline(vae=shared_vae, transformer=swapped_block)
+    model.decode_pipe = _pipeline(vae=shared_vae, decoder=torch.nn.Dropout(0.5))
+    model.upsampler = torch.nn.BatchNorm1d(2)
+
+    model._set_eval_mode()
+
+    for module in (shared_vae, swapped_block, model.decode_pipe.decoder, model.upsampler):
+        assert not any(submodule.training for submodule in module.modules())
+        warnings = runner_warnings()
+        assert len(warnings) == 1, warnings
+        (warning,) = warnings
+
+    for name in ("pipe.transformer", "decode_pipe.decoder", "upsampler"):
+        assert name in warning
+    assert "vae" not in warning
+
+
+def test_eval_pass_is_silent_when_everything_is_already_in_eval_mode(runner_warnings):
+    model = object.__new__(_StubModel)
+    model.pipe = _pipeline(transformer=torch.nn.Dropout(0.5).eval())
+
+    model._set_eval_mode()
+
+    assert runner_warnings() == []

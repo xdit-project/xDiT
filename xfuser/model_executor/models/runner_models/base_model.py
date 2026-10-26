@@ -20,13 +20,16 @@ from xfuser.envs import (
     _is_cuda,
 )
 from xfuser.core.utils.outputs_equal import outputs_equal
+from xfuser.logger import warn_once
 from xfuser.core.utils.runner_utils import (
     log,
     log_error,
+    logger,
     load_dataset_prompts,
     rgetattr,
 )
 from xfuser.model_executor.models.runner_models.image_postprocess import enable_fast_pil_postprocess
+from xfuser.model_executor.pipelines.base_pipeline import xFuserPipelineBaseWrapper
 from xfuser.model_executor.models.runner_models.vae_manager import (
     VAEManager,
     validate_vae_config,
@@ -393,6 +396,9 @@ class xFuserModel(abc.ABC):
     # model's support has not been released yet, and leave None when no floor is known.
     min_diffusers_version: Optional[str] = None
 
+    # The pipeline when it is a legacy xFuserPipelineBaseWrapper, set by initialize().
+    _legacy_pipe: Optional[xFuserPipelineBaseWrapper] = None
+
     def __init__(self, config: xFuserArgs) -> None:
         self.settings = copy.deepcopy(self.__class__.settings)
         self._customize_settings(config)
@@ -459,6 +465,7 @@ class xFuserModel(abc.ABC):
                 f"{self.settings.model_name} is unavailable with diffusers {diffusers.__version__}: {e}. {remedy}"
             ) from e
 
+    @torch.inference_mode()
     def initialize(self, input_args: dict) -> None:
         """Load the model pipeline"""
 
@@ -471,14 +478,20 @@ class xFuserModel(abc.ABC):
         log("Loading model pipeline...")
         self.pipe = self._load_model_checked()
         enable_fast_pil_postprocess([self.pipe, getattr(self, "second_pipe", None)])
+        self._legacy_pipe = self.pipe if isinstance(self.pipe, xFuserPipelineBaseWrapper) else None
+        if self._legacy_pipe is not None:
+            self._legacy_pipe.prompts_split_by_caller = True
 
         log("Initializing runtime state...")
         initialize_runtime_state(self._get_runtime_state_pipeline(), self.engine_config)
 
         self._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
+        if self.config.use_parallel_vae and not self._wrapper_parallelizes_vae():
             self._vae_manager.setup_parallel_vae(self._decoding_vaes())
         self._enable_options()
+        # Before anything below runs the pipe: FP8 comms calibrates on it, and compile
+        # guards on `training`, so a later switch would recompile.
+        self._set_eval_mode()
         fp8_comms = get_runtime_state().fp8_comms if runtime_state_is_initialized() else None
         if fp8_comms is not None:
             setup_fp8_comms(
@@ -504,6 +517,45 @@ class xFuserModel(abc.ABC):
 
         if self.config.cache_method:
             self._apply_step_cache()
+
+    def _set_eval_mode(self) -> None:
+        """Switch every module the runner holds to eval mode, warning about those that were not.
+
+        inference_mode only disables autograd; Dropout and BatchNorm follow `training`, which
+        from_pretrained clears but manual construction (from_config + load_state_dict) does not.
+        Runners keep pipelines beside self.pipe (e.g. LTX upsample/decode, LingBot refiner), and a
+        pipeline may hold modules it never registered, so attributes are walked two levels deep
+        rather than through `components`. Submodules are inspected too, as a block swapped in
+        after loading leaves an eval-mode parent with a training-mode child.
+        """
+        candidates = []
+        for name, value in vars(self).items():
+            if isinstance(value, torch.nn.Module):
+                candidates.append((name, value))
+            elif isinstance(getattr(value, "__dict__", None), dict):
+                candidates.extend(
+                    (f"{name}.{sub_name}", sub_value)
+                    for sub_name, sub_value in vars(value).items()
+                    if isinstance(sub_value, torch.nn.Module)
+                )
+
+        seen = set()
+        in_training = []
+        for name, module in candidates:
+            # Pipelines share components (e.g. LTX upsample_pipe reuses pipe.vae).
+            if id(module) in seen:
+                continue
+            seen.add(id(module))
+            if any(submodule.training for submodule in module.modules()):
+                in_training.append(name)
+            module.eval()
+
+        if in_training:
+            warn_once(
+                logger,
+                f"Switched {', '.join(in_training)} from training to eval mode. "
+                f"{type(self).__name__} should load them with .eval().",
+            )
 
     def _local_onload_device(self) -> torch.device:
         """The device this rank offloads to and from, which is never implicitly cuda:0."""
@@ -981,6 +1033,7 @@ class xFuserModel(abc.ABC):
 
         return determinism_failures, expected_output
 
+    @torch.inference_mode()
     def run(self, input_args: dict) -> Tuple[DiffusionOutput, list]:
         """Run the model and optionally check repeated outputs for determinism.
 
@@ -1107,6 +1160,7 @@ class xFuserModel(abc.ABC):
                 self._run_timed_pipe(input_args)
             log("Warmup complete.")
 
+    @torch.inference_mode()
     def profile(self, input_args: dict) -> Tuple[DiffusionOutput, list, torch.profiler.profiler.profile]:
         """Profile the model execution"""
         self._validate_args(input_args)
@@ -1405,6 +1459,12 @@ class xFuserModel(abc.ABC):
                 f"Number of prompts ({len(prompts)}) is less than data_parallel_world_size ({dp_world_size}). "
             )
 
+        if self._wrapper_parallelizes_vae() and len(prompts) % dp_world_size:
+            raise ValueError(
+                f"--use_parallel_vae gathers the latents of every DP group, so the {len(prompts)} prompts "
+                f"must divide evenly across --data_parallel_degree {dp_world_size}."
+            )
+
         local_prompts = prompts[dp_rank::dp_world_size]
         if isinstance(negative_prompts, list) and len(negative_prompts) != 1:
             local_negative_prompts = negative_prompts[dp_rank::dp_world_size]
@@ -1417,6 +1477,13 @@ class xFuserModel(abc.ABC):
         split_args["negative_prompt"] = local_negative_prompts
         return split_args
 
+    def _wrapper_parallelizes_vae(self) -> bool:
+        """Return whether a legacy wrapper decodes with its own parallel VAE.
+
+        Such a wrapper shards its decoder at construction, so the runner must not shard it again.
+        """
+        return self._legacy_pipe is not None and self._legacy_pipe.parallelizes_vae()
+
     def _gather_dp_outputs(self, output: DiffusionOutput) -> Optional[DiffusionOutput]:
         """
         Gathers DiffusionOutput objects from all DP groups onto the last rank.
@@ -1425,14 +1492,21 @@ class xFuserModel(abc.ABC):
         Only the first rank in the SP group sends the real payload,
         the other ranks send None to keep the collective valid.
 
+        A legacy pipeline wrapper returns images only on the ranks its own
+        ``is_dp_last_group()`` selects, so those ranks send instead.
         """
-        if self.config.data_parallel_degree == 1:
+        # Without DP the output is already on the saving rank, unless a legacy
+        # wrapper decodes with a parallel VAE and so returns it on rank 0.
+        if self.config.data_parallel_degree == 1 and not self._wrapper_parallelizes_vae():
             return output
 
         world_group = get_world_group()
         last_rank = world_group.world_size - 1
 
-        is_representative = get_sequence_parallel_rank() == 0 and get_classifier_free_guidance_rank() == 0
+        if self._legacy_pipe is not None:
+            is_representative = self._legacy_pipe.is_dp_last_group()
+        else:
+            is_representative = get_sequence_parallel_rank() == 0 and get_classifier_free_guidance_rank() == 0
         send_obj = output if is_representative else None
 
         gather_list = [None] * world_group.world_size if world_group.rank == last_rank else None

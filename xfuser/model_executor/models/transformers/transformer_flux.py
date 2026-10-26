@@ -56,6 +56,10 @@ from xfuser.model_executor.layers.attention_processor import (
 )
 from xfuser.model_executor.layers.usp import USP
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
+from xfuser.model_executor.models.transformers.transformers_utils import (
+    local_sp_pad_rows,
+    zero_sp_pad_rows_hook,
+)
 from xfuser.model_executor.layers.fused_qk_rope_flydsl import (
     flydsl_fused_qk_norm_rope,
     _HAS_FLYDSL,
@@ -383,8 +387,11 @@ class xFuserFlux1Transformer2DWrapper(FluxTransformer2DModel):
             axes_dims_rope=axes_dims_rope,
         )
 
+        self._sp_pad = {"local_rows": 0}
+        # Both block kinds return (text, image); the pad trails the image stream.
         for block in self.transformer_blocks + self.single_transformer_blocks:
             block.attn.processor = xFuserFluxAttnProcessor()
+            block.register_forward_hook(zero_sp_pad_rows_hook(self._sp_pad, index=1))
         register_fp8_comms_eligible_modules(self, flux_attn_modules(self))
 
     def _pad_to_sp_divisible(self, tensor: torch.Tensor, padding_length: int, dim: int) -> torch.Tensor:
@@ -434,9 +441,9 @@ class xFuserFlux1Transformer2DWrapper(FluxTransformer2DModel):
                 )
             attention_spec = attention_registry.find(runtime_state.attention_backend)
             if padding_length > 0 and attention_spec is not None and attention_spec.sparsity == Sparsity.VSA:
-                # USP() now clears valid_kv_len after trimming joint calls (#851), so AITER_VSA's dense
-                # path no longer crops K/V again once the replicated prompt is joined. Remove this guard
-                # once that path is validated on AITER hardware.
+                # USP() trims the pad keys of a joint call itself and clears valid_kv_len (#851), so
+                # AITER_VSA's dense path should not crop K/V again once the replicated prompt is joined.
+                # Remove this guard once that path is validated on AITER hardware.
                 raise NotImplementedError(
                     f"FLUX.1 on {runtime_state.attention_backend.value} cannot pad "
                     f"{sequence_length} image tokens for {sp_world_size} sequence parallel ranks "
@@ -457,6 +464,9 @@ class xFuserFlux1Transformer2DWrapper(FluxTransformer2DModel):
         hidden_states = torch.chunk(hidden_states, get_sequence_parallel_world_size(), dim=-2)[
             get_sequence_parallel_rank()
         ]
+        self._sp_pad["local_rows"] = local_sp_pad_rows(
+            sequence_length, hidden_states.shape[1], get_sequence_parallel_rank()
+        )
         encoder_hidden_states = torch.chunk(encoder_hidden_states, get_classifier_free_guidance_world_size(), dim=0)[
             get_classifier_free_guidance_rank()
         ]

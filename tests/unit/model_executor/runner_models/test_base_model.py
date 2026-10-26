@@ -245,6 +245,8 @@ def test_legacy_wrapper_sends_from_the_ranks_its_own_decode_selects(monkeypatch,
 @pytest.mark.parametrize(("sp_rank", "expected"), [(0, ["output"]), (1, [None])])
 def test_other_runners_send_from_the_first_sequence_parallel_rank(monkeypatch, sp_rank, expected):
     assert _gather_dp_outputs(monkeypatch, dp_degree=2, legacy_pipe=None, sp_rank=sp_rank) == expected
+
+
 def _pipeline(**modules):
     """Stands in for any pipeline: the eval pass walks attributes, not `components`."""
     return SimpleNamespace(scheduler=object(), **modules)

@@ -11,6 +11,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
 )
+from xfuser.model_executor.quant.targets import GemmTargets, Select
 from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.core.utils.runner_utils import log, resize_and_crop_image
 from xfuser.model_executor.models.runner_models.loading.contracts import (
@@ -72,8 +73,7 @@ class xFuserCosmos3SuperModel(xFuserModel):
         use_cfg_parallel=True,
         use_parallel_vae=True,
         use_parallel_vae_encoder=True,
-        use_fp8_gemms=True,
-        use_fp4_gemms=True,
+        gemm_formats=frozenset({"fp8", "fp4"}),
         enable_slicing=True,
         enable_tiling=True,
     )
@@ -91,9 +91,14 @@ class xFuserCosmos3SuperModel(xFuserModel):
         model_output_type="video",
         fps=24,
         mod_value=16,
-        fp8_gemm_module_list=["transformer.layers"],
-        fp4_gemm_module_list=["transformer.layers"],
-        fp8_precision_overrides=tuple(f"{i}." for i in list(range(10)) + list(range(54, 64))),
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=("transformer.layers",)),
+            # The first and last ten layers carry more of the output quality
+            # than the middle ones, so a tiered run holds them at the better
+            # format. Absolute paths, matched on segment boundaries, so
+            # layers.5 cannot take layers.54 with it.
+            keep_high=Select(prefixes=tuple(f"transformer.layers.{index}" for index in (*range(10), *range(54, 64)))),
+        ),
         fsdp_strategy=COSMOS3_FSDP_STRATEGY,
     )
 
@@ -203,7 +208,8 @@ class xFuserCosmos3NanoModel(xFuserCosmos3SuperModel):
         model_output_type="video",
         fps=24,
         mod_value=16,
-        fp8_gemm_module_list=["transformer.layers"],
-        fp4_gemm_module_list=["transformer.layers"],
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=("transformer.layers",)),
+        ),
         fsdp_strategy=COSMOS3_FSDP_STRATEGY,
     )

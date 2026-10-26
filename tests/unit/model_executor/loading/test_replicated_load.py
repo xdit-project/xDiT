@@ -11,13 +11,31 @@ Run with:
     python -m pytest tests/unit/model_executor/loading/test_replicated_load.py -v
 """
 
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
 
 torch = pytest.importorskip("torch")
 
+from xfuser.config.gemm import GemmQuantizationSpec
+from xfuser.model_executor.quant.targets import GemmTargets, Select, resolve
+
+#: Two transformer targets, both held at the better format, so an FP4 block
+#: fill is handed them as its remainder.
+_REMAINDER = GemmTargets(
+    transformer=Select(modules=("transformer.blocks", "transformer.encoder")),
+    keep_high=Select(modules=("transformer.blocks", "transformer.encoder")),
+)
+
+#: One block-local leaf held at the better format, the rest streamed.
+_CARVED = GemmTargets(
+    transformer=Select(modules=("transformer.blocks",)),
+    keep_high=Select(prefixes=("transformer.blocks.0.override",)),
+)
 from xfuser.model_executor.models.runner_models.loading import (
+    quant_adapter,
+    backends,
     meta_load,
     text_encoder_plan,
     transformer_load,
@@ -72,14 +90,39 @@ def loader_for(runner):
 
     ledger = getattr(runner, "quantization_ledger", QuantizationLedger())
     runner.quantization_ledger = ledger
-    plan = getattr(runner, "fp8", SimpleNamespace(targets_for=lambda name: ()))
+    if not hasattr(runner, "config"):
+        runner.config = SimpleNamespace()
+    if not hasattr(runner.config, "use_hybrid_gemm_schedule"):
+        runner.config.use_hybrid_gemm_schedule = False
+    if not hasattr(runner.settings, "gemm_targets"):
+        runner.settings.gemm_targets = None
+    plan = getattr(runner, "fp8", SimpleNamespace(component_targets=lambda name: ()))
+    if not hasattr(plan, "gemm_plan"):
+        # The routes ask the plan before they ask anything else. A fixture that
+        # declares targets gets a resolved one, with every declared component
+        # enabled -- these fixtures exist to drive those routes.
+        declared = getattr(runner.settings, "gemm_targets", None)
+        plan.gemm_plan = (
+            resolve(
+                declared,
+                GemmQuantizationSpec.parse("fp8"),
+                enable=tuple(declared.components),
+            )
+            if declared is not None
+            else None
+        )
+    if not hasattr(plan, "component_format"):
+        # Borrowed from the real QuantizationPlan rather than written out
+        # again: the encoder route asks it which format a component takes, and
+        # a copy here could answer differently from the one under test.
+        plan.component_format = partial(QuantizationPlan.component_format, plan)
     backends = getattr(runner, "backends", SimpleNamespace())
     transformer_adapter = getattr(
         runner,
         "_transformer_quantization_adapter",
         lambda component_name: (
             getattr(runner, "fp8_backend", None),
-            plan.targets_for(component_name),
+            plan.component_targets(component_name),
         ),
     )
     loader = SimpleNamespace(
@@ -110,18 +153,12 @@ def loader_for(runner):
 
 def preflight_loader(runner):
     """Build only the loader-owned runtime state needed by preflight tests."""
-    for name in (
-        "fp8_gemm_module_list",
-        "fp8_text_encoder_module_list",
-        "fp4_gemm_module_list",
-        "int8_gemm_module_list",
-        "fp8_precision_overrides",
-        "fp8_precision_override_suffixes",
-    ):
-        if not hasattr(runner.settings, name):
-            setattr(runner.settings, name, None)
-    if not hasattr(runner.config, "use_fp8_text_encoder"):
-        runner.config.use_fp8_text_encoder = False
+    if not hasattr(runner.settings, "gemm_targets"):
+        # These stubs describe a model that declares nothing; the routes ask
+        # for the declaration before they ask it anything.
+        runner.settings.gemm_targets = None
+    if not hasattr(runner.config, "quantize_text_encoder"):
+        runner.config.quantize_text_encoder = False
     if not hasattr(runner.config, "use_hybrid_gemm_schedule"):
         runner.config.use_hybrid_gemm_schedule = False
     loader = object.__new__(ModelLoader)
@@ -129,11 +166,15 @@ def preflight_loader(runner):
     loader.load_declaration = runner.load_declaration
     loader.load_contract = None
     loader.quantization_plan = QuantizationPlan(runner)
+    # A stub registry: these tests are about the contract preflight builds,
+    # not about which implementation this machine happens to offer, so the
+    # answer is whatever the test set on the runner.
     loader.backends = SimpleNamespace(
-        fp8=None,
-        format=None,
-        uses_blockwise_fp8=lambda: False,
+        impl_for=lambda _fmt: getattr(runner, "fp8_impl", "torchao"),
+        why_not=lambda _fmt: "stub registry",
+        adapter_for=lambda _fmt: None,
         preflight=lambda: None,
+        assert_offload_is_compatible=lambda: None,
     )
     return loader
 
@@ -465,22 +506,19 @@ def test_runner_fsdp_meta_support_matches_capabilities_and_strategy():
 def test_base_runner_selects_the_production_contract_before_loading(monkeypatch):
     from xfuser.model_executor.models.runner_models import base_model
 
-    monkeypatch.setattr(meta_load, "_use_aiter_fp8_rdna4", lambda: True)
-    monkeypatch.setattr(meta_load, "_is_cuda", lambda: False)
     model_capabilities = base_model.ModelCapabilities(
         fully_shard_degree=True,
-        use_fp8_gemms=True,
+        gemm_formats=frozenset({"fp8"}),
     )
     runner = SimpleNamespace(
+        fp8_impl="aiter",
         config=SimpleNamespace(
             fully_shard_degree=2,
             pipefusion_parallel_degree=1,
             tensor_parallel_degree=1,
             memory_efficient_sharding=True,
             memory_efficient_replicated_load=False,
-            use_fp8_gemms=True,
-            use_fp4_gemms=False,
-            use_int8_gemms=False,
+            gemm_quantization_spec=GemmQuantizationSpec.parse("fp8"),
         ),
         settings=SimpleNamespace(fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}}),
         load_declaration=LoadDeclaration.for_runner(
@@ -506,8 +544,6 @@ def test_base_runner_selects_the_production_contract_before_loading(monkeypatch)
 def test_base_runner_rejects_unsupported_meta_mode_before_loading(monkeypatch):
     from xfuser.model_executor.models.runner_models import base_model
 
-    monkeypatch.setattr(meta_load, "_use_aiter_fp8_rdna4", lambda: False)
-    monkeypatch.setattr(meta_load, "_is_cuda", lambda: True)
     runner = SimpleNamespace(
         config=SimpleNamespace(
             fully_shard_degree=1,
@@ -515,9 +551,7 @@ def test_base_runner_rejects_unsupported_meta_mode_before_loading(monkeypatch):
             tensor_parallel_degree=1,
             memory_efficient_sharding=False,
             memory_efficient_replicated_load=True,
-            use_fp8_gemms=False,
-            use_fp4_gemms=False,
-            use_int8_gemms=False,
+            gemm_quantization_spec=GemmQuantizationSpec.parse("none"),
         ),
         settings=SimpleNamespace(fsdp_strategy={}),
         load_declaration=LoadDeclaration.for_runner(
@@ -536,8 +570,6 @@ def test_base_runner_rejects_unsupported_meta_mode_before_loading(monkeypatch):
 def test_base_runner_uses_effective_single_rank_mode(monkeypatch):
     from xfuser.model_executor.models.runner_models import base_model
 
-    monkeypatch.setattr(meta_load, "_use_aiter_fp8_rdna4", lambda: False)
-    monkeypatch.setattr(meta_load, "_is_cuda", lambda: True)
     runner = SimpleNamespace(
         config=SimpleNamespace(
             fully_shard_degree=1,
@@ -545,9 +577,7 @@ def test_base_runner_uses_effective_single_rank_mode(monkeypatch):
             tensor_parallel_degree=1,
             memory_efficient_sharding=False,
             memory_efficient_replicated_load=True,
-            use_fp8_gemms=False,
-            use_fp4_gemms=False,
-            use_int8_gemms=False,
+            gemm_quantization_spec=GemmQuantizationSpec.parse("none"),
         ),
         settings=SimpleNamespace(fsdp_strategy={}),
         load_declaration=LoadDeclaration.for_runner(
@@ -578,20 +608,18 @@ def test_wan22_spec_resolves_after_dynamic_instance_settings(monkeypatch):
         tensor_parallel_degree=1,
         memory_efficient_sharding=True,
         memory_efficient_replicated_load=False,
-        use_fp8_gemms=True,
-        use_fp4_gemms=False,
-        use_int8_gemms=False,
+        gemm_quantization_spec=GemmQuantizationSpec.parse("fp8"),
     )
     runner._customize_settings(SimpleNamespace())
-    monkeypatch.setattr(meta_load, "_use_aiter_fp8_rdna4", lambda: True)
-    monkeypatch.setattr(meta_load, "_is_cuda", lambda: False)
+    runner.fp8_impl = "aiter"
 
     loader = ModelLoader(runner)
     loader.backends = SimpleNamespace(
-        fp8=None,
-        format=None,
-        uses_blockwise_fp8=lambda: False,
+        impl_for=lambda _fmt: getattr(runner, "fp8_impl", "torchao"),
+        why_not=lambda _fmt: "stub registry",
+        adapter_for=lambda _fmt: None,
         preflight=lambda: None,
+        assert_offload_is_compatible=lambda: None,
     )
     loader.preflight(world_size=2)
     fsdp_selected = loader.load_contract
@@ -612,10 +640,11 @@ def test_wan22_spec_resolves_after_dynamic_instance_settings(monkeypatch):
     # One loader owns one immutable preflight result; a changed run gets a new loader.
     loader = ModelLoader(runner)
     loader.backends = SimpleNamespace(
-        fp8=None,
-        format=None,
-        uses_blockwise_fp8=lambda: False,
+        impl_for=lambda _fmt: getattr(runner, "fp8_impl", "torchao"),
+        why_not=lambda _fmt: "stub registry",
+        adapter_for=lambda _fmt: None,
         preflight=lambda: None,
+        assert_offload_is_compatible=lambda: None,
     )
     loader.preflight(world_size=2)
     replicated_selected = loader.load_contract
@@ -640,7 +669,7 @@ def test_build_transformer_preserves_request_subfolder_without_override():
     runner = SimpleNamespace(
         _memory_efficient_fsdp_load=lambda: False,
         _replicated_broadcast_load=lambda: False,
-        fp8=SimpleNamespace(targets_for=lambda name: []),
+        fp8=SimpleNamespace(component_targets=lambda name: []),
         fp8_backend=None,
         settings=SimpleNamespace(fsdp_strategy={}),
     )
@@ -756,26 +785,7 @@ def test_structure_inspection_catches_include_buffers_error_on_context_enter(
 def test_build_transformer_routes_torchao_fp8_to_native_diffusers_config(
     monkeypatch,
 ):
-    from xfuser.model_executor.models.runner_models.loading.contracts import (
-        QuantizationBackend,
-        QuantizationFormat,
-    )
-    from xfuser.model_executor.models.runner_models.loading.fp8_backends import (
-        Fp8BackendCapabilities,
-        select_fp8_backend,
-    )
-
-    contract = SimpleNamespace(
-        requested_format=QuantizationFormat.FP8,
-        selected_backend=QuantizationBackend.TORCHAO,
-    )
-    adapter = select_fp8_backend(
-        contract,
-        capabilities=Fp8BackendCapabilities(
-            torchao_fp8=True,
-            torchao_diffusers_streaming=True,
-        ),
-    )
+    adapter = _fp8_adapter("torchao", streams=True)
     calls = []
     sentinel = object()
 
@@ -806,7 +816,7 @@ def test_build_transformer_routes_torchao_fp8_to_native_diffusers_config(
     runner = SimpleNamespace(
         _memory_efficient_fsdp_load=lambda: False,
         _replicated_broadcast_load=lambda: False,
-        fp8=SimpleNamespace(targets_for=lambda name: ["blocks"]),
+        fp8=SimpleNamespace(component_targets=lambda name: ["blocks"]),
         fp8_backend=adapter,
         settings=SimpleNamespace(fsdp_strategy={}),
         _checkpoint_request=lambda name: CheckpointRequest("org/repo", subfolder=name),
@@ -816,31 +826,28 @@ def test_build_transformer_routes_torchao_fp8_to_native_diffusers_config(
 
     assert result == "streamed"
     assert calls[0]["quantization_config"] is sentinel
-    assert runner.quantization_ledger.fp8_streaming_targets == {"transformer.blocks"}
+    assert runner.quantization_ledger.streamed_at("fp8") == {"transformer.blocks"}
 
 
 def test_blockwise_transformer_marks_only_wrapped_target_as_streamed(
     monkeypatch,
 ):
-    from xfuser.model_executor.models.runner_models.loading import fp8_backends
-
     adapter = SimpleNamespace(format=SimpleNamespace(value="fp8"))
     descriptor = SimpleNamespace(
         materialization_mode="blockwise",
         log_message=lambda: "blockwise fp8",
     )
     monkeypatch.setattr(
-        fp8_backends,
-        "plan_blockwise_transformer_fp8_load",
+        quant_adapter,
+        "describe_blockwise_load",
         lambda *args, **kwargs: descriptor,
     )
     runner = SimpleNamespace(
         _memory_efficient_fsdp_load=lambda: True,
         _replicated_broadcast_load=lambda: False,
-        fp8=SimpleNamespace(targets_for=lambda name: ["blocks", "encoder"]),
+        fp8=SimpleNamespace(component_targets=lambda name: ["blocks", "encoder"]),
         fp8_backend=adapter,
         settings=SimpleNamespace(fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}}),
-        config=SimpleNamespace(use_fp4_gemms=False),
         _loader=SimpleNamespace(build_meta_transformer=lambda *args, **kwargs: "meta"),
         _checkpoint_request=lambda name: CheckpointRequest("org/repo", subfolder=name),
     )
@@ -848,23 +855,21 @@ def test_blockwise_transformer_marks_only_wrapped_target_as_streamed(
     result = transformer_load.load_transformer(loader_for(runner), SimpleNamespace())
 
     assert result == "meta"
-    assert runner.quantization_ledger.fp8_streaming_targets == {"transformer.blocks"}
+    assert runner.quantization_ledger.streamed_at("fp8") == {"transformer.blocks"}
     assert runner.quantization_ledger.streaming_targets == {"transformer.blocks"}
 
 
 def test_blockwise_fp4_marks_only_wrapped_fp8_remainder_as_streamed(
     monkeypatch,
 ):
-    from xfuser.model_executor.models.runner_models.loading import format_backends
-
     adapter = SimpleNamespace(format=SimpleNamespace(value="fp4"))
     descriptor = SimpleNamespace(
         materialization_mode="blockwise",
         log_message=lambda: "blockwise fp4",
     )
     monkeypatch.setattr(
-        format_backends,
-        "describe_blockwise_format_load",
+        quant_adapter,
+        "describe_blockwise_load",
         lambda *args, **kwargs: descriptor,
     )
     runner = SimpleNamespace(
@@ -874,9 +879,16 @@ def test_blockwise_fp4_marks_only_wrapped_fp8_remainder_as_streamed(
             adapter,
             ("blocks",),
         ),
-        fp8=SimpleNamespace(targets_for=lambda name: ["blocks", "encoder"]),
-        settings=SimpleNamespace(fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}}),
-        config=SimpleNamespace(use_fp4_gemms=True),
+        fp8=SimpleNamespace(
+            component_targets=lambda name: ["blocks", "encoder"],
+            # A tiered run, so the FP4 block fill has an FP8 remainder to be
+            # told about; only the wrapped target is recorded as streamed.
+            gemm_plan=resolve(_REMAINDER, GemmQuantizationSpec.parse("low=fp4,high=fp8")),
+        ),
+        settings=SimpleNamespace(
+            fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}},
+            gemm_targets=_REMAINDER,
+        ),
         _loader=SimpleNamespace(build_meta_transformer=lambda *args, **kwargs: "meta"),
         _checkpoint_request=lambda name: CheckpointRequest("org/repo", subfolder=name),
     )
@@ -884,20 +896,11 @@ def test_blockwise_fp4_marks_only_wrapped_fp8_remainder_as_streamed(
     result = transformer_load.load_transformer(loader_for(runner), SimpleNamespace())
 
     assert result == "meta"
-    assert runner.quantization_ledger.fp8_streaming_targets == {"transformer.blocks"}
+    assert runner.quantization_ledger.streamed_at("fp8") == {"transformer.blocks"}
     assert runner.quantization_ledger.streaming_targets == {"transformer.blocks"}
 
 
 def test_build_transformer_logs_explicit_torchao_post_load_fallback(monkeypatch):
-    from xfuser.model_executor.models.runner_models.loading.contracts import (
-        QuantizationBackend,
-        QuantizationFormat,
-    )
-    from xfuser.model_executor.models.runner_models.loading.fp8_backends import (
-        Fp8BackendCapabilities,
-        select_fp8_backend,
-    )
-
     calls = []
     logs = []
 
@@ -907,17 +910,11 @@ def test_build_transformer_logs_explicit_torchao_post_load_fallback(monkeypatch)
             calls.append(kwargs)
             return "loaded"
 
-    adapter = select_fp8_backend(
-        SimpleNamespace(
-            requested_format=QuantizationFormat.FP8,
-            selected_backend=QuantizationBackend.TORCHAO,
-        ),
-        capabilities=Fp8BackendCapabilities(torchao_fp8=True),
-    )
+    adapter = _fp8_adapter("torchao")
     runner = SimpleNamespace(
         _memory_efficient_fsdp_load=lambda: False,
         _replicated_broadcast_load=lambda: False,
-        fp8=SimpleNamespace(targets_for=lambda name: ["blocks"]),
+        fp8=SimpleNamespace(component_targets=lambda name: ["blocks"]),
         fp8_backend=adapter,
         settings=SimpleNamespace(fsdp_strategy={}),
         _checkpoint_request=lambda name: CheckpointRequest("org/repo", subfolder=name),
@@ -937,15 +934,6 @@ def test_build_transformer_logs_explicit_torchao_post_load_fallback(monkeypatch)
 def test_build_transformer_mapping_failure_falls_back_without_streaming_claim(
     monkeypatch,
 ):
-    from xfuser.model_executor.models.runner_models.loading.contracts import (
-        QuantizationBackend,
-        QuantizationFormat,
-    )
-    from xfuser.model_executor.models.runner_models.loading.fp8_backends import (
-        Fp8BackendCapabilities,
-        select_fp8_backend,
-    )
-
     calls = []
     logs = []
 
@@ -955,20 +943,11 @@ def test_build_transformer_mapping_failure_falls_back_without_streaming_claim(
             calls.append(kwargs)
             return "loaded"
 
-    adapter = select_fp8_backend(
-        SimpleNamespace(
-            requested_format=QuantizationFormat.FP8,
-            selected_backend=QuantizationBackend.TORCHAO,
-        ),
-        capabilities=Fp8BackendCapabilities(
-            torchao_fp8=True,
-            torchao_diffusers_streaming=True,
-        ),
-    )
+    adapter = _fp8_adapter("torchao", streams=True)
     runner = SimpleNamespace(
         _memory_efficient_fsdp_load=lambda: False,
         _replicated_broadcast_load=lambda: False,
-        fp8=SimpleNamespace(targets_for=lambda name: ["blocks"]),
+        fp8=SimpleNamespace(component_targets=lambda name: ["blocks"]),
         fp8_backend=adapter,
         settings=SimpleNamespace(fsdp_strategy={}),
         _checkpoint_request=lambda name: CheckpointRequest("org/repo", subfolder=name),
@@ -993,13 +972,12 @@ def test_build_transformer_mapping_failure_falls_back_without_streaming_claim(
 
 
 def test_eager_post_load_fallback_builds_meta_for_local_block_fill(monkeypatch):
-    from xfuser.model_executor.models.runner_models.loading import format_backends
     from xfuser.model_executor.models.runner_models.loading.contracts import (
         QuantizationBackend,
         QuantizationFormat,
     )
 
-    adapter = format_backends.AiterMxfp4BackendAdapter(
+    adapter = backends.AiterMxfp4BackendAdapter(
         backend=QuantizationBackend.AITER,
         format_=QuantizationFormat.FP4,
         native_unavailable_reason="requires full-precision block",
@@ -1025,14 +1003,12 @@ def test_eager_post_load_fallback_builds_meta_for_local_block_fill(monkeypatch):
             ("blocks",),
         ),
         _loader=loader,
-        fp8=SimpleNamespace(targets_for=lambda component: ()),
+        fp8=SimpleNamespace(component_targets=lambda component: ()),
         settings=SimpleNamespace(
             fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}},
-            fp8_precision_overrides=None,
-            fp8_precision_override_suffixes=None,
         ),
         config=SimpleNamespace(
-            use_fp4_gemms=True,
+            gemm_formats=frozenset({"fp4"}),
             use_hybrid_gemm_schedule=False,
         ),
         _checkpoint_request=lambda name: CheckpointRequest("org/repo", subfolder=name),
@@ -1047,15 +1023,6 @@ def test_eager_post_load_fallback_builds_meta_for_local_block_fill(monkeypatch):
 
 
 def test_build_transformer_preserves_aiter_native_streaming(monkeypatch):
-    from xfuser.model_executor.models.runner_models.loading.contracts import (
-        QuantizationBackend,
-        QuantizationFormat,
-    )
-    from xfuser.model_executor.models.runner_models.loading.fp8_backends import (
-        Fp8BackendCapabilities,
-        select_fp8_backend,
-    )
-
     calls = []
 
     class Wrapper:
@@ -1064,20 +1031,14 @@ def test_build_transformer_preserves_aiter_native_streaming(monkeypatch):
             calls.append(kwargs)
             return "loaded"
 
-    adapter = select_fp8_backend(
-        SimpleNamespace(
-            requested_format=QuantizationFormat.FP8,
-            selected_backend=QuantizationBackend.AITER,
-        ),
-        capabilities=Fp8BackendCapabilities(aiter_block_scale=True),
-    )
+    adapter = _fp8_adapter("aiter", streams=True)
     sentinel = object()
     monkeypatch.setattr(adapter, "_stream_config_factory", lambda targets: sentinel)
     monkeypatch.setattr(transformer_load, "native_quantization_device_map", lambda *args: {"": 0})
     runner = SimpleNamespace(
         _memory_efficient_fsdp_load=lambda: False,
         _replicated_broadcast_load=lambda: False,
-        fp8=SimpleNamespace(targets_for=lambda name: ["blocks"]),
+        fp8=SimpleNamespace(component_targets=lambda name: ["blocks"]),
         fp8_backend=adapter,
         settings=SimpleNamespace(fsdp_strategy={}),
         _checkpoint_request=lambda name: CheckpointRequest("org/repo", subfolder=name),
@@ -1106,10 +1067,10 @@ def test_build_transformer_streams_native_fp4_and_int8_configs(
         QuantizationFormat,
     )
     from xfuser.model_executor.models.runner_models.loading import (
-        format_backends,
+        backends,
     )
 
-    adapter = getattr(format_backends, adapter_name)(
+    adapter = getattr(backends, adapter_name)(
         backend=QuantizationBackend.TORCHAO,
         format_=getattr(QuantizationFormat, format_name),
         native_transformer_streaming=True,
@@ -1146,8 +1107,6 @@ def test_build_transformer_streams_native_fp4_and_int8_configs(
         ),
         settings=SimpleNamespace(
             fsdp_strategy={},
-            fp8_precision_overrides=None,
-            fp8_precision_override_suffixes=None,
         ),
         config=SimpleNamespace(use_hybrid_gemm_schedule=False),
         _checkpoint_request=lambda name: CheckpointRequest("org/repo", subfolder=name),
@@ -1162,13 +1121,12 @@ def test_build_transformer_streams_native_fp4_and_int8_configs(
 
 
 def test_build_transformer_records_only_streamed_nvfp4_leaves(monkeypatch):
-    from xfuser.model_executor.models.runner_models.loading import format_backends
     from xfuser.model_executor.models.runner_models.loading.contracts import (
         QuantizationBackend,
         QuantizationFormat,
     )
 
-    adapter = format_backends.TorchaoNvfp4BackendAdapter(
+    adapter = backends.TorchaoNvfp4BackendAdapter(
         backend=QuantizationBackend.TORCHAO,
         format_=QuantizationFormat.FP4,
         native_transformer_streaming=True,
@@ -1200,13 +1158,15 @@ def test_build_transformer_records_only_streamed_nvfp4_leaves(monkeypatch):
             adapter,
             ("blocks",),
         ),
-        settings=SimpleNamespace(
-            fsdp_strategy={},
-            fp8_precision_overrides=("0.override",),
-            fp8_precision_override_suffixes=None,
-        ),
+        settings=SimpleNamespace(fsdp_strategy={}, gemm_targets=_CARVED),
         config=SimpleNamespace(use_hybrid_gemm_schedule=False),
         _checkpoint_request=lambda name: CheckpointRequest("org/repo", subfolder=name),
+    )
+    # The stream plan asks the resolved plan which leaves the high format keeps,
+    # so the fixture has to carry one rather than a pattern on settings.
+    runner.fp8 = SimpleNamespace(
+        component_targets=lambda name: ("blocks",),
+        gemm_plan=resolve(_CARVED, GemmQuantizationSpec.parse("low=fp4,high=fp8")),
     )
 
     result = transformer_load.load_transformer(loader_for(runner), Wrapper)
@@ -1215,19 +1175,98 @@ def test_build_transformer_records_only_streamed_nvfp4_leaves(monkeypatch):
     assert runner.quantization_ledger.streaming_targets == {"transformer.blocks.0.keep"}
 
 
+def _fp8_adapter(impl, **measured):
+    """The FP8 adapter one implementation gives, from a measured record.
+
+    The loader builds every adapter this way now -- there is no per-format
+    selection function to call -- so the fixtures do too.
+    """
+    from xfuser.model_executor.models.runner_models.loading.quant_adapter import (
+        FormatCapability,
+        build_adapter,
+    )
+
+    return build_adapter("fp8", impl, capability=FormatCapability(available=True, **measured))
+
+
 def _attach_backends(runner):
     """Give a fake runner the quantization selector the loader reads adapters through."""
 
     loader = loader_for(runner)
     backends = QuantizationBackends(loader)
-    backends.__dict__.update(
-        fp8=getattr(runner, "fp8_backend", None),
-        blockwise_fp8=getattr(runner, "blockwise_fp8_backend", None),
-        format=getattr(runner, "format_backend", None),
-    )
+    # Seed the resolution cache rather than probe: these fixtures are about
+    # what the loader does with an adapter, not which one the machine offers.
+    backends._adapters["fp8"] = getattr(runner, "fp8_backend", None) or getattr(runner, "blockwise_fp8_backend", None)
     loader.backends = backends
     runner.backends = backends
     return runner
+
+
+def test_the_meta_text_encoder_swap_builds_the_declared_fp8_layout():
+    """`places_text_encoder` claims a pair can be placed in an encoder, and on
+    the meta and broadcast paths `_swap_meta_te_to_fp8` is what places it.
+
+    It builds one specific layer class rather than consulting anything, so a
+    second declared format would leave the swap behind while the plan, the
+    adapter lookup and the ledger all moved. The companion check that only fp8
+    declares an encoder lives with the registry, in
+    test_format_backend_adapters.py; this one pins what the swap actually
+    builds, so the two fail together rather than drifting apart.
+
+    The swap asks AITER for the fp8 dtype (twice: in the swap itself and in
+    ``absorb_fp8_weight_from_weight_attr``), so this cannot run on a host
+    without it -- the CPU CI image included.
+    """
+    fp8_dtype = pytest.importorskip("aiter").dtypes.fp8
+    from xfuser.model_executor.layers.fp8_linear import xFuserFP8BlockScaleLinear
+
+    class Encoder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.block = torch.nn.Sequential(torch.nn.Linear(128, 128, bias=False))
+
+    with torch.device("meta"):
+        encoder = Encoder()
+    loader = object.__new__(ModelLoader)
+
+    loader._swap_meta_te_to_fp8(encoder, ["block"])
+
+    swapped = encoder.block[0]
+    assert isinstance(swapped, xFuserFP8BlockScaleLinear)
+    # The plain TE layout the rank0 broadcast fills: fp8 param + fp32 scale.
+    assert swapped.weight_fp8.dtype is fp8_dtype
+    assert swapped.weight_scale.dtype is torch.float32
+
+
+def test_a_declared_encoder_with_no_targets_never_resolves_an_adapter():
+    """Resolving the encoder's format up front asks this machine to store a
+    format the run may never have named.
+
+    It used to be resolved before the loop, which was harmless only while
+    capability probing answered for every format on every run. Once probing was
+    narrowed to the formats a run actually names, that lookup had no truthful
+    answer and refused the load -- on a plain bf16 run of any model that merely
+    declares encoder targets. So the lookup has to sit after the no-targets
+    guard, and an encoder with nothing to place must not reach it at all.
+    """
+    declared = GemmTargets(text_encoder=Select(modules=("text_encoder.encoder.block",)))
+    runner = SimpleNamespace(
+        _replicated_broadcast_load=lambda: False,
+        _memory_efficient_fsdp_load=lambda: False,
+        settings=SimpleNamespace(gemm_targets=declared),
+        # Declared, but nothing enabled: the run names no format for it.
+        fp8=SimpleNamespace(
+            component_targets=lambda name: (),
+            gemm_plan=resolve(declared, GemmQuantizationSpec.parse("fp8"), enable=()),
+        ),
+    )
+
+    def refuse(format_name):
+        raise AssertionError(f"resolved an adapter for {format_name!r} with no encoder targets to place")
+
+    runner.backends = SimpleNamespace(adapter_for=refuse)
+
+    assert text_encoder_plan.plan_text_encoders(loader_for(runner)) == ({}, None)
 
 
 def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
@@ -1239,16 +1278,20 @@ def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
         _memory_efficient_fsdp_load=lambda: False,
         fp8_backend=SimpleNamespace(),
         fp8=SimpleNamespace(
-            targets_for=lambda name: {
+            component_targets=lambda name: {
                 "text_encoder": ["encoder.block"],
                 "text_encoder_2": ["model.layers"],
             }[name]
         ),
         settings=SimpleNamespace(
-            fp8_text_encoder_module_list=[
-                "text_encoder.encoder.block",
-                "text_encoder_2.model.layers",
-            ]
+            gemm_targets=GemmTargets(
+                text_encoder=Select(
+                    modules=(
+                        "text_encoder.encoder.block",
+                        "text_encoder_2.model.layers",
+                    )
+                )
+            )
         ),
         _loader=SimpleNamespace(build_meta_component=lambda name, fp8=False: (name, fp8)),
     )
@@ -1285,7 +1328,7 @@ def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
         return prepared[component_name]
 
     monkeypatch.setattr(
-        "xfuser.model_executor.models.runner_models.loading.fp8_backends.prepare_text_encoder_fp8_load",
+        "xfuser.model_executor.models.runner_models.loading.backends.prepare_text_encoder_load",
         prepare,
     )
     monkeypatch.setattr(
@@ -1323,22 +1366,80 @@ def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
         "text_encoder descriptor",
         "text_encoder_2 descriptor",
     ]
-    assert runner.quantization_ledger.fp8_streaming_targets == {
+    assert runner.quantization_ledger.streamed_at("fp8") == {
         "text_encoder.encoder.block",
         "text_encoder_2.model.layers",
     }
 
 
-def test_hybrid_meta_te_uses_blockwise_fp8_backend(monkeypatch):
-    sentinel = SimpleNamespace(backend=SimpleNamespace(value="torchao"))
+def test_a_non_fp8_run_still_stores_the_encoder_at_fp8(monkeypatch):
+    """The encoder's loaders carry one format, so a run that named another
+    still gets FP8 here -- and is recorded under it, so the format-agnostic
+    walks leave those leaves where this route put them.
+
+    This route no longer explains itself: the plan pins the component and says
+    so on its own line, which is pinned by
+    `tests/quant/test_gemm_targets.py::test_the_log_names_a_pinned_component_and_why`.
+    """
+    from xfuser.model_executor.quant.targets import resolve
+    from xfuser.config.gemm import GemmQuantizationSpec
+
+    logs = []
+    targets = GemmTargets(text_encoder=Select(modules=("text_encoder.encoder.block",)))
     runner = SimpleNamespace(
-        load_contract=SimpleNamespace(requested_format=SimpleNamespace(value="fp8_fp4")),
+        load_contract=SimpleNamespace(requested_format=SimpleNamespace(value="fp4")),
+        fp8_backend=_fp8_adapter("aiter"),
+        _replicated_broadcast_load=lambda: False,
+        _memory_efficient_fsdp_load=lambda: False,
+        settings=SimpleNamespace(gemm_targets=targets),
+        _loader=SimpleNamespace(build_meta_component=lambda name, fp8=False: object()),
+    )
+    monkeypatch.setattr(
+        "xfuser.model_executor.models.runner_models.loading.backends.prepare_text_encoder_load",
+        lambda adapter, **kwargs: SimpleNamespace(
+            descriptor=SimpleNamespace(
+                materialization_mode="post_load",
+                log_message=lambda: "text_encoder quantization: requested=fp8",
+            ),
+            quantization_config=None,
+        ),
+    )
+    monkeypatch.setattr(text_encoder_plan, "log", logs.append)
+
+    _attach_backends(runner)
+    loader = loader_for(runner)
+    gemm_plan = resolve(
+        targets,
+        GemmQuantizationSpec.parse("fp4"),
+        enable=("transformer", "text_encoder"),
+        component_formats={"text_encoder": ("fp8",)},
+    )
+    loader.quantization_plan = SimpleNamespace(
+        gemm_plan=gemm_plan,
+        component_format=partial(QuantizationPlan.component_format, SimpleNamespace(gemm_plan=gemm_plan)),
+    )
+    text_encoder_plan.plan_text_encoders(loader)
+
+    # The run named FP4; the encoder is pinned to FP8 and recorded there.
+    assert gemm_plan.format_for("text_encoder.encoder.block.0.attn.q") == "fp8"
+    assert loader.quantization_ledger.streamed_at("fp4") == set()
+    assert any("requested=fp8" in message for message in logs)
+
+
+def test_hybrid_meta_te_uses_the_fp8_adapter(monkeypatch):
+    sentinel = _fp8_adapter("torchao")
+    runner = SimpleNamespace(
+        # A tiered run names FP8 for its high tier, and the encoder is placed
+        # by whatever stores FP8 here -- the same adapter a pure FP8 run uses.
+        load_contract=SimpleNamespace(requested_format=SimpleNamespace(value="fp4")),
         fp8_backend=None,
         blockwise_fp8_backend=sentinel,
         _replicated_broadcast_load=lambda: False,
         _memory_efficient_fsdp_load=lambda: True,
-        fp8=SimpleNamespace(targets_for=lambda name: ["encoder.block"]),
-        settings=SimpleNamespace(fp8_text_encoder_module_list=["text_encoder.encoder.block"]),
+        fp8=SimpleNamespace(component_targets=lambda name: ["encoder.block"]),
+        settings=SimpleNamespace(
+            gemm_targets=GemmTargets(text_encoder=Select(modules=("text_encoder.encoder.block",)))
+        ),
         _loader=SimpleNamespace(
             meta_te_kwargs=lambda: ({"text_encoder": "meta"}, None),
             build_meta_component=lambda name, fp8=False: object(),
@@ -1358,7 +1459,7 @@ def test_hybrid_meta_te_uses_blockwise_fp8_backend(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "xfuser.model_executor.models.runner_models.loading.fp8_backends.prepare_text_encoder_fp8_load",
+        "xfuser.model_executor.models.runner_models.loading.backends.prepare_text_encoder_load",
         prepare,
     )
     monkeypatch.setattr(text_encoder_plan, "log", lambda message: None)
@@ -1377,9 +1478,11 @@ def test_meta_te_placement_disables_torchao_native_pipeline_streaming(
         load_contract=SimpleNamespace(requested_format=SimpleNamespace(value="fp8")),
         _replicated_broadcast_load=lambda: False,
         _memory_efficient_fsdp_load=lambda: True,
-        fp8_backend=SimpleNamespace(backend=SimpleNamespace(value="torchao")),
-        fp8=SimpleNamespace(targets_for=lambda name: ["encoder.block"]),
-        settings=SimpleNamespace(fp8_text_encoder_module_list=["text_encoder.encoder.block"]),
+        fp8_backend=_fp8_adapter("torchao"),
+        fp8=SimpleNamespace(component_targets=lambda name: ["encoder.block"]),
+        settings=SimpleNamespace(
+            gemm_targets=GemmTargets(text_encoder=Select(modules=("text_encoder.encoder.block",)))
+        ),
         _loader=SimpleNamespace(
             meta_te_kwargs=lambda: ({"text_encoder": "meta"}, None),
             build_meta_component=lambda name, fp8=False: object(),
@@ -1399,7 +1502,7 @@ def test_meta_te_placement_disables_torchao_native_pipeline_streaming(
         )
 
     monkeypatch.setattr(
-        "xfuser.model_executor.models.runner_models.loading.fp8_backends.prepare_text_encoder_fp8_load",
+        "xfuser.model_executor.models.runner_models.loading.backends.prepare_text_encoder_load",
         prepare,
     )
     monkeypatch.setattr(text_encoder_plan, "log", lambda message: None)
@@ -1409,7 +1512,7 @@ def test_meta_te_placement_disables_torchao_native_pipeline_streaming(
 
     assert (kwargs, config) == ({"text_encoder": "meta"}, None)
     assert observed == [(False, False)]
-    assert runner.quantization_ledger.fp8_streaming_targets == set()
+    assert runner.quantization_ledger.streamed_at("fp8") == set()
 
 
 def test_a_blockwise_filled_text_encoder_needs_no_post_load_fallback(monkeypatch):
@@ -1417,7 +1520,7 @@ def test_a_blockwise_filled_text_encoder_needs_no_post_load_fallback(monkeypatch
 
     A blockwise-filled encoder is quantized per block on the way in from disk, before wrapping, so
     the objection does not apply and TorchAO can quantize a text encoder on the FSDP meta path. This
-    is the case the blockwise fill exists for, so reaching prepare_text_encoder_fp8_load here would
+    is the case the blockwise fill exists for, so reaching prepare_text_encoder_load here would
     mean the encoder had been routed back to the whole-encoder rank0 load.
     """
 
@@ -1425,16 +1528,20 @@ def test_a_blockwise_filled_text_encoder_needs_no_post_load_fallback(monkeypatch
         backend=SimpleNamespace(value="torchao"),
         format=SimpleNamespace(value="fp8"),
         storage_semantics="",
+        parameter_semantics="tensor_subclass_parameter",
+        auxiliary_state_semantics="backend_managed",
+        trainability="inference_only",
+        serialization="torchao_version_dependent",
+        fills_blocks_locally=True,
     )
     runner = SimpleNamespace(
         load_contract=SimpleNamespace(requested_format=SimpleNamespace(value="fp8")),
         _replicated_broadcast_load=lambda: False,
         _memory_efficient_fsdp_load=lambda: True,
         fp8_backend=adapter,
-        config=SimpleNamespace(use_fp4_gemms=False),
-        fp8=SimpleNamespace(targets_for=lambda name: ["encoder.block"]),
+        fp8=SimpleNamespace(component_targets=lambda name: ["encoder.block"]),
         settings=SimpleNamespace(
-            fp8_text_encoder_module_list=["text_encoder.encoder.block"],
+            gemm_targets=GemmTargets(text_encoder=Select(modules=("text_encoder.encoder.block",))),
             fsdp_strategy={"text_encoder": {"wrap_attrs": ["encoder.block"]}},
         ),
         _loader=SimpleNamespace(
@@ -1445,7 +1552,7 @@ def test_a_blockwise_filled_text_encoder_needs_no_post_load_fallback(monkeypatch
     )
 
     monkeypatch.setattr(
-        "xfuser.model_executor.models.runner_models.loading.fp8_backends.prepare_text_encoder_fp8_load",
+        "xfuser.model_executor.models.runner_models.loading.backends.prepare_text_encoder_load",
         lambda *a, **k: pytest.fail("a blockwise-filled encoder was routed to the whole-encoder rank0 load"),
     )
     monkeypatch.setattr(text_encoder_plan, "log", lambda message: None)
@@ -1455,8 +1562,8 @@ def test_a_blockwise_filled_text_encoder_needs_no_post_load_fallback(monkeypatch
 
     assert (kwargs, config) == ({"text_encoder": "meta"}, None)
     # Recorded as already quantized, so the post-load walk leaves the filled blocks alone.
-    assert "text_encoder" in runner.quantization_ledger.fp8_descriptor_components
-    assert runner.quantization_ledger.fp8_streaming_targets
+    assert ("text_encoder", "fp8") in runner.quantization_ledger.described
+    assert runner.quantization_ledger.streamed_at("fp8")
 
 
 def test_meta_fsdp_rejects_text_encoder_post_load_fallback(monkeypatch):
@@ -1464,9 +1571,11 @@ def test_meta_fsdp_rejects_text_encoder_post_load_fallback(monkeypatch):
         load_contract=SimpleNamespace(requested_format=SimpleNamespace(value="fp8")),
         _replicated_broadcast_load=lambda: False,
         _memory_efficient_fsdp_load=lambda: True,
-        fp8_backend=SimpleNamespace(backend=SimpleNamespace(value="aiter")),
-        fp8=SimpleNamespace(targets_for=lambda name: ["encoder.block"]),
-        settings=SimpleNamespace(fp8_text_encoder_module_list=["text_encoder.encoder.block"]),
+        fp8_backend=_fp8_adapter("aiter"),
+        fp8=SimpleNamespace(component_targets=lambda name: ["encoder.block"]),
+        settings=SimpleNamespace(
+            gemm_targets=GemmTargets(text_encoder=Select(modules=("text_encoder.encoder.block",)))
+        ),
         _loader=SimpleNamespace(
             build_meta_component=lambda name, fp8=False: object(),
             will_fill_blockwise=lambda name: False,
@@ -1479,7 +1588,7 @@ def test_meta_fsdp_rejects_text_encoder_post_load_fallback(monkeypatch):
         pytest.fail("memory-efficient FSDP incorrectly allowed post-load")
 
     monkeypatch.setattr(
-        "xfuser.model_executor.models.runner_models.loading.fp8_backends.prepare_text_encoder_fp8_load",
+        "xfuser.model_executor.models.runner_models.loading.backends.prepare_text_encoder_load",
         prepare,
     )
 

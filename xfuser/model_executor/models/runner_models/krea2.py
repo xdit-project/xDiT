@@ -17,12 +17,13 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     xFuserModel,
 )
+from xfuser.model_executor.quant.targets import GemmTargets, Select
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     STANDARD_LOAD_ROUTES,
 )
 
-_QUANT_GEMM_MODULES = ["transformer.transformer_blocks"]
+_QUANT_GEMM_MODULES = ("transformer.transformer_blocks",)
 
 # Backends that exclude padded keys, through the varlen packing or the attn_mask.
 # SDPA_FLASH is excluded because aten._scaled_dot_product_flash_attention has no
@@ -100,8 +101,7 @@ class _Krea2BaseModel(xFuserModel):
         data_parallel_degree=True,
         use_cfg_parallel=False,
         use_parallel_vae=True,
-        use_fp8_gemms=True,
-        use_fp4_gemms=True,
+        gemm_formats=frozenset({"fp8", "fp4"}),
         use_hybrid_attn_schedule=True,
         fully_shard_degree=True,
         enable_tiling=True,
@@ -200,8 +200,9 @@ class xFuserKrea2RawModel(_Krea2BaseModel):
         output_name="krea2_raw",
         model_output_type="image",
         mod_value=16,
-        fp8_gemm_module_list=_QUANT_GEMM_MODULES,
-        fp4_gemm_module_list=_QUANT_GEMM_MODULES,
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=_QUANT_GEMM_MODULES),
+        ),
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks"],
@@ -247,8 +248,9 @@ class xFuserKrea2TurboModel(_Krea2BaseModel):
         output_name="krea2_turbo",
         model_output_type="image",
         mod_value=16,
-        fp8_gemm_module_list=_QUANT_GEMM_MODULES,
-        fp4_gemm_module_list=_QUANT_GEMM_MODULES,
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=_QUANT_GEMM_MODULES),
+        ),
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks"],

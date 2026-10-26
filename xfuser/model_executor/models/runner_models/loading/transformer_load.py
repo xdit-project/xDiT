@@ -59,7 +59,7 @@ def native_quantization_device_map(model, adapter):
             "enable_group_cpu_offload",
         )
     )
-    if adapter.format.value == "fp8" and adapter.backend.value == "aiter" and cpu_offload:
+    if cpu_offload and adapter.loads_to_host_under_offload:
         return {"": "cpu"}
     return {"": get_world_group().local_rank}
 
@@ -73,73 +73,87 @@ def _resolve_request(loader, subfolder, checkpoint_request):
     return request
 
 
-def _prepare_native_load(model, adapter, component_name, targets, stream_quant, model_factory):
+def _plan_residual_match(plan, component_name, high_format):
+    """Which streamed leaves the high format keeps, in the component's own terms.
+
+    The stream plan names modules relative to the component; the plan speaks in
+    full pipeline paths, so rejoin before asking it.
+    """
+
+    def matches(name):
+        path = f"{component_name}.{name}" if name else component_name
+        return plan.format_for(path) == high_format
+
+    return matches
+
+
+def _prepare_native_load(
+    adapter,
+    *,
+    component_name,
+    targets,
+    stream_quant,
+    model_factory,
+    plan=None,
+    hybrid=False,
+):
     """The quantization config an ordinary ``from_pretrained`` should carry, if any."""
 
-    if adapter.format.value == "fp8":
-        from .fp8_backends import prepare_native_transformer_fp8_load
+    # A declaration that names its leaves narrows the same way the legacy
+    # setting did, and a native config that cannot express the narrowing has to
+    # stay a post-load conversion either way.
+    narrowed = bool(plan.only_suffixes) if plan is not None else False
 
-        return prepare_native_transformer_fp8_load(
-            adapter,
-            component_name=component_name,
-            targets=targets,
-            # Native FP8 configs quantize every linear under each target. A suffix-restricted
-            # policy must remain a post-load/blockwise conversion so the ledger does not claim
-            # broader coverage than was requested.
-            stream_quant=(stream_quant and not getattr(model.settings, "fp8_gemm_include_suffixes", None)),
-            model_factory=model_factory,
-        )
-    from .format_backends import prepare_native_transformer_format_load
+    from .quant_adapter import prepare_native_load
 
-    is_fp4 = adapter.format.value in {
-        "fp4",
-        "fp8_fp4",
-        "fp4_fp6",
-        "fp4_a6w4",
-    }
-    return prepare_native_transformer_format_load(
+    return prepare_native_load(
         adapter,
         component_name=component_name,
         targets=targets,
-        stream_quant=stream_quant,
-        precision_prefixes=((model.settings.fp8_precision_overrides or ()) if is_fp4 else ()),
-        precision_suffixes=((model.settings.fp8_precision_override_suffixes or ()) if is_fp4 else ()),
-        hybrid=(model.config.use_hybrid_gemm_schedule if is_fp4 else False),
+        # A native config quantizes every linear under each target, so a
+        # declaration that narrows to particular leaves has to stay a post-load
+        # conversion or the ledger claims broader coverage than was asked for.
+        stream_quant=stream_quant and not narrowed,
         model_factory=model_factory,
+        # The high tier stays out of the stream the same way it stays out of
+        # the primary converter: by asking the plan. Adapters that cannot hold
+        # leaves back ignore this.
+        residual_match=(
+            _plan_residual_match(plan, component_name, plan.high)
+            if plan is not None and plan.high is not None
+            else None
+        ),
+        hybrid=hybrid,
     )
 
 
-def _fp4_remainder(loader, component_name):
-    """Tell an FP4 block fill which higher-precision remainder it also owns."""
+def _blockwise_remainder(loader, component_name):
+    """What else this component's blockwise fill converts, per format.
 
-    if not loader.model.config.use_fp4_gemms:
+    The fill walks each block once and places whatever that block holds, so
+    anything the run gives the other format is converted in the same pass and
+    has to be recorded too. Neither format is named here: the plan says which
+    is which, and a run with no second format simply yields nothing.
+    """
+
+    plan = loader.quantization_plan.gemm_plan
+    if plan is None or plan.high is None:
         return {}
-    remainder_key = (
-        "mxfp6_targets"
-        if (
-            getattr(loader.model.config, "use_fp6_gemms", False)
-            or getattr(loader.model.config, "use_a6w4_gemms", False)
-        )
-        else "fp8_targets"
-    )
-    return {
-        "fp4_gemms": True,
-        remainder_key: tuple(loader.quantization_plan.targets_for(component_name)),
-    }
+    targets = plan.relative_to(component_name, plan.roots(plan.high))
+    return {"remainder": ((plan.high, targets),)} if targets else {}
 
 
 def _record_native_quantization(ledger, adapter, component_name, prepared, targets):
     """Note what the native config will have quantized, so the post-load walk skips it."""
 
     log(prepared.descriptor.log_message())
-    is_fp8 = adapter.format.value == "fp8"
-    ledger.describe(component_name, fp8=is_fp8)
+    ledger.describe(component_name, format_name=adapter.format.value)
     if prepared.quantization_config is None:
         return
-    # Only a format load narrows the streamed set; an FP8 one has no such field and owns
-    # everything it was given.
-    streamed = getattr(prepared, "streamed_targets", ()) or targets
-    ledger.record_streamed(component_name, streamed, fp8=is_fp8)
+    # A load that held a residual back narrows the streamed set; one that did
+    # not owns everything it was given.
+    streamed = prepared.streamed_targets or targets
+    ledger.record_streamed(component_name, streamed, format_name=adapter.format.value)
 
 
 def load_transformer(
@@ -186,19 +200,20 @@ def load_transformer(
                 targets,
                 wrap_attrs,
                 blockwise_transformer_descriptor(adapter, component_name, targets, wrap_attrs),
-                **_fp4_remainder(loader, component_name),
+                **_blockwise_remainder(loader, component_name),
             )
         return loader.build_meta_transformer(wrapper_cls, request, init_kwargs, **build_kwargs)
 
     quantization_config = None
     if adapter is not None:
         prepared = _prepare_native_load(
-            model,
             adapter,
-            component_name,
-            targets,
-            stream_quant,
-            lambda: build_transformer_structure(wrapper_cls, request, init_kwargs),
+            component_name=component_name,
+            targets=targets,
+            stream_quant=stream_quant,
+            model_factory=lambda: build_transformer_structure(wrapper_cls, request, init_kwargs),
+            plan=loader.quantization_plan.gemm_plan,
+            hybrid=model.config.use_hybrid_gemm_schedule,
         )
         local_plan = loader.plan_eager_blockwise_fallback(prepared, targets, wrap_attrs)
         if local_plan is not None and local_plan.enabled:
@@ -208,8 +223,8 @@ def load_transformer(
                 component_name,
                 targets,
                 wrap_attrs,
-                blockwise_transformer_descriptor(adapter, component_name, targets, wrap_attrs, local=True),
-                **_fp4_remainder(loader, component_name),
+                blockwise_transformer_descriptor(adapter, component_name, targets, wrap_attrs),
+                **_blockwise_remainder(loader, component_name),
             )
             component = loader.build_meta_transformer(wrapper_cls, request, init_kwargs, **build_kwargs)
             loader.mark_local_blockwise(component)

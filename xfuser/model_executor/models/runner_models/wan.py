@@ -25,6 +25,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
 )
+from xfuser.model_executor.quant.targets import GemmTargets, Select
 from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.core.utils.runner_utils import (
@@ -179,12 +180,9 @@ class xFuserWan21I2VModel(xFuserWanModel):
         ulysses_degree=True,
         ring_degree=True,
         fully_shard_degree=True,
-        use_fp8_gemms=True,
-        use_fp8_text_encoder=True,
+        gemm_formats=frozenset({"fp8", "fp4", "fp6", "a6w4"}),
+        quantize_text_encoder=True,
         use_cfg_parallel=True,
-        use_fp4_gemms=True,
-        use_fp6_gemms=True,
-        use_a6w4_gemms=True,
         use_hybrid_attn_schedule=True,
         use_parallel_vae=True,
         use_parallel_vae_encoder=True,
@@ -211,30 +209,18 @@ class xFuserWan21I2VModel(xFuserWanModel):
         model_output_type="video",
         mod_value=16,  # vae_scale_factor_spatial * patch_size[1] = 8
         fps=16,
-        fp8_gemm_module_list=["transformer.blocks"],
-        fp8_text_encoder_module_list=["text_encoder.encoder.block"],
-        fp4_gemm_module_list=["transformer.blocks"],
-        fp8_precision_overrides=(
-            "0.",
-            "1.",
-            "2.",
-            "3.",
-            "4.",
-            "5.",
-            "6.",
-            "7.",
-            "8.",
-            "9.",
-            "30.",
-            "31.",
-            "32.",
-            "33.",
-            "34.",
-            "35.",
-            "36.",
-            "37.",
-            "38.",
-            "39.",
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=("transformer.blocks",)),
+            text_encoder=Select(modules=("text_encoder.encoder.block",)),
+            # The first and last ten blocks carry more of the output quality
+            # than the middle ones, and the text encoder is quantized to save
+            # host RAM rather than to chase the smallest format; a tiered run
+            # holds all of them at the better one. Absolute paths, matched on
+            # segment boundaries, so blocks.3 cannot take blocks.30 with it.
+            keep_high=Select(
+                modules=("text_encoder.encoder.block",),
+                prefixes=tuple(f"transformer.blocks.{index}" for index in (*range(10), *range(30, 40))),
+            ),
         ),
         fsdp_strategy=COMMON_FSDP_STRATEGY,
         step_cache_config={
@@ -342,9 +328,21 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
             "wrap_attrs": ["blocks"],
             "dtype": torch.bfloat16,
         }
-        self.settings.fp8_gemm_module_list = ["transformer.blocks", "transformer_2.blocks"]
-        self.settings.fp8_text_encoder_module_list = ["text_encoder.encoder.block"]
-        self.settings.fp8_precision_overrides = None
+        # Both denoisers are quantized, but only the high-noise pass takes the
+        # low format: the low-noise refiner generates the fine detail, so it is
+        # held at the better one. That replaces the inherited declaration
+        # outright, endpoint blocks and all -- this model splits by denoiser,
+        # not by block depth.
+        self.settings.gemm_targets = GemmTargets(
+            transformer=Select(modules=("transformer.blocks", "transformer_2.blocks")),
+            text_encoder=Select(modules=("text_encoder.encoder.block",)),
+            keep_high=Select(
+                modules=(
+                    "transformer_2.blocks",
+                    "text_encoder.encoder.block",
+                )
+            ),
+        )
         self.settings.transformer_attr_names = ["transformer", "transformer_2"]
         # Dual-transformer: t1=high-noise denoiser, t2=low-noise refiner (shorter warmup).
         self.settings.step_cache_config = {
@@ -453,11 +451,9 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
         ulysses_degree=True,
         ring_degree=True,
         fully_shard_degree=True,
-        use_fp8_gemms=True,
-        use_fp8_text_encoder=True,
+        gemm_formats=frozenset({"fp8", "fp4", "fp6"}),
+        quantize_text_encoder=True,
         use_cfg_parallel=False,
-        use_fp4_gemms=True,
-        use_fp6_gemms=True,
         use_hybrid_attn_schedule=True,
         use_parallel_vae=True,
         use_parallel_vae_encoder=True,
@@ -615,9 +611,8 @@ class xFuserWan21T2VModel(xFuserWanModel):
         ulysses_degree=True,
         ring_degree=True,
         fully_shard_degree=True,
-        use_fp8_gemms=True,
-        use_fp8_text_encoder=True,
-        use_fp4_gemms=True,
+        gemm_formats=frozenset({"fp8", "fp4"}),
+        quantize_text_encoder=True,
         use_hybrid_attn_schedule=True,
         use_parallel_vae=True,
         cross_attention_backend=True,
@@ -640,10 +635,7 @@ class xFuserWan21T2VModel(xFuserWanModel):
         ulysses_degree=True,
         ring_degree=True,
         fully_shard_degree=True,
-        use_fp8_gemms=True,
-        use_fp4_gemms=True,
-        use_fp6_gemms=True,
-        use_a6w4_gemms=True,
+        gemm_formats=frozenset({"fp8", "fp4", "fp6", "a6w4"}),
         use_hybrid_attn_schedule=True,
         use_parallel_vae=True,
         cross_attention_backend=True,
@@ -658,30 +650,18 @@ class xFuserWan21T2VModel(xFuserWanModel):
         model_output_type="video",
         model_name="Wan-AI/Wan2.1-T2V-14B-Diffusers",
         output_name="wan2.1_t2v",
-        fp8_gemm_module_list=["transformer.blocks"],
-        fp8_text_encoder_module_list=["text_encoder.encoder.block"],
-        fp4_gemm_module_list=["transformer.blocks"],
-        fp8_precision_overrides=(
-            "0.",
-            "1.",
-            "2.",
-            "3.",
-            "4.",
-            "5.",
-            "6.",
-            "7.",
-            "8.",
-            "9.",
-            "30.",
-            "31.",
-            "32.",
-            "33.",
-            "34.",
-            "35.",
-            "36.",
-            "37.",
-            "38.",
-            "39.",
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=("transformer.blocks",)),
+            # No text-encoder target: this runner does not declare the
+            # quantize_text_encoder capability, so the flag is refused and a
+            # declared encoder target could never be reached.
+            # The first and last ten blocks carry more of the output quality
+            # than the middle ones, so a tiered run holds them at the better
+            # format. Absolute paths, matched on segment boundaries, so
+            # blocks.3 cannot take blocks.30 with it.
+            keep_high=Select(
+                prefixes=tuple(f"transformer.blocks.{index}" for index in (*range(10), *range(30, 40))),
+            ),
         ),
         fsdp_strategy=COMMON_FSDP_STRATEGY,
         step_cache_config={
@@ -765,10 +745,14 @@ class xFuserWan21T2V1_3BModel(xFuserWan21T2VModel):
         super()._customize_settings(config)
         self.settings.model_name = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
         self.settings.output_name = "wan2.1_t2v_1.3b"
-        # The 14B list keeps its first and last ten blocks in FP8 under --use_fp4_gemms
-        # and names blocks 30-39, which do not exist here. Apply the same rule to the
-        # 30 blocks of this checkpoint.
-        self.settings.fp8_precision_overrides = tuple(f"{i}." for i in (*range(10), *range(20, 30)))
+        # The 14B declaration holds its first and last ten blocks at the high
+        # format and names blocks 30-39, which do not exist in this 30-block
+        # checkpoint. Same rule, renumbered; the transformer and text-encoder
+        # selections it inherits are unchanged.
+        self.settings.gemm_targets = replace(
+            self.settings.gemm_targets,
+            keep_high=Select(prefixes=tuple(f"transformer.blocks.{index}" for index in (*range(10), *range(20, 30)))),
+        )
 
 
 @register_model("Wan-AI/Wan2.2-T2V-A14B-Diffusers")
@@ -792,9 +776,16 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
             "wrap_attrs": ["blocks"],
             "dtype": torch.bfloat16,
         }
-        self.settings.fp8_gemm_module_list = ["transformer.blocks", "transformer_2.blocks"]
-        self.settings.fp8_text_encoder_module_list = ["text_encoder.encoder.block"]
-        self.settings.fp8_precision_overrides = None
+        # Both denoisers are quantized, but only the high-noise pass takes the
+        # low format: the low-noise refiner generates the fine detail, so it is
+        # held at the better one. That replaces the inherited declaration
+        # outright, endpoint blocks and all -- this model splits by denoiser,
+        # not by block depth.
+        self.settings.gemm_targets = GemmTargets(
+            transformer=Select(modules=("transformer.blocks", "transformer_2.blocks")),
+            # No text-encoder target: see xFuserWan21T2VModel.
+            keep_high=Select(modules=("transformer_2.blocks",)),
+        )
         self.settings.transformer_attr_names = ["transformer", "transformer_2"]
         self.settings.step_cache_config = {
             "dbcache": DBCacheSettings(
@@ -891,12 +882,9 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         ring_degree=True,
         fully_shard_degree=True,
         use_cfg_parallel=True,
-        use_fp8_gemms=True,
-        use_fp8_text_encoder=True,
-        use_fp4_gemms=True,
+        gemm_formats=frozenset({"fp8", "fp4", "fp6", "a6w4"}),
+        quantize_text_encoder=True,
         use_fp8_comms=True,
-        use_fp6_gemms=True,
-        use_a6w4_gemms=True,
         use_hybrid_attn_schedule=True,
         use_hybrid_gemm_schedule=True,
         use_parallel_vae=True,
@@ -931,11 +919,18 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         model_output_type="video",
         model_name="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
         output_name="wan2.2_ti2v",
-        fp8_gemm_module_list=["transformer.blocks"],
-        fp8_text_encoder_module_list=["text_encoder.encoder.block"],
-        fp4_gemm_module_list=["transformer.blocks"],
-        fp8_precision_overrides=("0.", "1.", "28.", "29."),
-        fp8_precision_override_suffixes=(".net.0.proj", ".net.2"),
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=("transformer.blocks",)),
+            text_encoder=Select(modules=("text_encoder.encoder.block",)),
+            # Endpoint blocks and the text encoder as elsewhere in the family,
+            # and additionally the two feed-forward projections in every block,
+            # wherever they occur -- a suffix belongs to no subtree of its own.
+            keep_high=Select(
+                modules=("text_encoder.encoder.block",),
+                prefixes=tuple(f"transformer.blocks.{index}" for index in (0, 1, 28, 29)),
+                suffixes=("net.0.proj", "net.2"),
+            ),
+        ),
         fsdp_strategy=COMMON_FSDP_STRATEGY,
         valid_tasks=["i2v", "t2v"],
         step_cache_config={
@@ -1052,8 +1047,8 @@ class xFuserWan21VACEModel(xFuserWanModel):
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
-        use_fp8_gemms=True,
-        use_fp8_text_encoder=True,
+        gemm_formats=frozenset({"fp8"}),
+        quantize_text_encoder=True,
         cross_attention_backend=True,
         enable_tiling=True,
         enable_slicing=True,
@@ -1075,8 +1070,15 @@ class xFuserWan21VACEModel(xFuserWanModel):
     settings = ModelSettings(
         fps=16,
         model_output_type="video",
-        fp8_gemm_module_list=["transformer.blocks", "transformer.vace_blocks"],
-        fp8_text_encoder_module_list=["text_encoder.encoder.block"],
+        gemm_targets=GemmTargets(
+            transformer=Select(
+                modules=(
+                    "transformer.blocks",
+                    "transformer.vace_blocks",
+                )
+            ),
+            text_encoder=Select(modules=("text_encoder.encoder.block",)),
+        ),
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["blocks", "vace_blocks"],

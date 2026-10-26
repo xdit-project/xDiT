@@ -19,6 +19,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
 )
+from xfuser.model_executor.quant.targets import GemmTargets, Select
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     LoadRoute,
@@ -115,8 +116,7 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
         ulysses_degree=True,
         ring_degree=False,
         use_cfg_parallel=True,
-        use_fp8_gemms=True,
-        use_fp4_gemms=True,
+        gemm_formats=frozenset({"fp8", "fp4"}),
         use_hybrid_attn_schedule=True,
         use_hybrid_gemm_schedule=True,
         fully_shard_degree=True,
@@ -139,16 +139,28 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
         output_name="lingbot_video_moe",
         model_output_type="video",
         fps=24,
-        fp8_gemm_module_list=["transformer.blocks"],
-        fp4_gemm_module_list=["transformer.blocks"],
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=("transformer.blocks",)),
+        ),
         fsdp_strategy=LINGBOT_FSDP_STRATEGY,
     )
+
+    def _quantizes_blocks(self) -> bool:
+        """Whether this run replaces the blocks' nn.Linear leaves at all.
+
+        Asked of the plan rather than of a format list: every format removes
+        ``.weight`` from the leaves it converts, which is the only thing the
+        callers of this care about, and the list was missing a format the model
+        now declares the moment one was added.
+        """
+        plan = self.loader.quantization_plan.gemm_plan
+        return plan is not None and plan.quantizes
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         # Cache bulk_dtype on each block before quantization replaces nn.Linear
         # modules — LingBotVideoBlock.forward reads self.attn.to_q.weight.dtype
         # which breaks after FP4/FP8 quantization removes .weight.
-        if self.config.use_fp4_gemms or self.config.use_fp8_gemms:
+        if self._quantizes_blocks():
             for block in self.pipe.transformer.blocks:
                 if hasattr(block, "attn") and hasattr(block.attn, "to_q"):
                     w = getattr(block.attn.to_q, "weight", None)
@@ -179,7 +191,7 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
         else:
             super()._post_load_and_state_initialization(input_args)
         # After quantization, patch blocks that lost .weight.dtype
-        if self.config.use_fp4_gemms or self.config.use_fp8_gemms:
+        if self._quantizes_blocks():
             from xfuser.model_executor.models.transformers.transformer_lingbot_video import _patch_block_bulk_dtype
 
             for block in self.pipe.transformer.blocks:
@@ -227,9 +239,8 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
             {},
         )
         # Quantize refiner linears (same path as base transformer)
-        if self.config.use_fp4_gemms or self.config.use_fp8_gemms:
+        if self._quantizes_blocks():
             from xfuser.model_executor.models.transformers.transformer_lingbot_video import _patch_block_bulk_dtype
-            from xfuser.core.utils.runner_utils import quantize_linear_layers_to_fp4, quantize_linear_layers_to_fp8
 
             # Cache bulk dtype before quantization replaces nn.Linear
             for block in refiner_transformer.blocks:
@@ -238,17 +249,17 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
                     if w is not None:
                         block._cached_bulk_dtype = w.dtype
             device = f"cuda:{local_rank}"
-            if self.config.use_fp4_gemms:
-                log("Quantizing refiner blocks to FP4...")
-                quantize_linear_layers_to_fp4(
-                    refiner_transformer.blocks,
-                    fp8_layers=self.settings.fp8_precision_overrides,
-                    use_hybrid_schedule=self.config.use_hybrid_gemm_schedule,
-                    device=device,
-                )
-            elif self.config.use_fp8_gemms:
-                log("Quantizing refiner blocks to FP8...")
-                quantize_linear_layers_to_fp8(refiner_transformer.blocks, device=device)
+            # Through the same registry as every other target, rather than a
+            # named converter per format: naming them here picked AITER MXFP4
+            # for a run whose transformer the registry had given to TorchAO
+            # NVFP4, so one pipeline held two different FP4s.
+            low = self.loader.quantization_plan.gemm_plan.low
+            adapter = self.loader.backends.adapter_for(low)
+            log(f"Quantizing refiner blocks to {low.upper()}...")
+            # The refiner is quantized outside the plan-driven walk, so it gets
+            # no hybrid companion: the schedule pairs formats the plan named,
+            # and this path names none.
+            adapter.convert_module(refiner_transformer.blocks, device=device)
             # Patch blocks that lost .weight.dtype
             for block in refiner_transformer.blocks:
                 if hasattr(block, "_cached_bulk_dtype"):
@@ -508,7 +519,8 @@ class xFuserLingBotVideoDenseModel(xFuserLingBotVideoMoEModel):
         output_name="lingbot_video_dense",
         model_output_type="video",
         fps=24,
-        fp8_gemm_module_list=["transformer.blocks"],
-        fp4_gemm_module_list=["transformer.blocks"],
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=("transformer.blocks",)),
+        ),
         fsdp_strategy=LINGBOT_FSDP_STRATEGY,
     )

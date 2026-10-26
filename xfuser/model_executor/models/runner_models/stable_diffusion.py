@@ -14,6 +14,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
     ModelSettings,
 )
+from xfuser.model_executor.quant.targets import GemmTargets, Select
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     LoadRoute,
@@ -42,10 +43,10 @@ class xFuserStableDiffusionModel(xFuserModel):
         enable_tiling=True,
         enable_slicing=True,
         fully_shard_degree=True,
-        use_fp8_gemms=True,
+        gemm_formats=frozenset({"fp8"}),
         use_fp8_comms=True,
         supports_step_caching=True,
-        use_fp8_text_encoder=True,
+        quantize_text_encoder=True,
         use_parallel_vae=True,
     )
     default_input_values = DefaultInputValues(
@@ -66,7 +67,10 @@ class xFuserStableDiffusionModel(xFuserModel):
                 "wrap_attrs": ["encoder.block"],
             },
         },
-        fp8_gemm_module_list=["transformer.transformer_blocks"],
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=("transformer.transformer_blocks",)),
+            text_encoder=Select(modules=("text_encoder_3.encoder.block",)),
+        ),
         step_cache_config={
             "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
@@ -80,7 +84,6 @@ class xFuserStableDiffusionModel(xFuserModel):
                 ),
             ),
         },
-        fp8_text_encoder_module_list=["text_encoder_3.encoder.block"],
     )
 
     def _load_model(self) -> DiffusionPipeline:

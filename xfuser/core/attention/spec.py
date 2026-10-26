@@ -261,6 +261,17 @@ class Spec:
     def is_sparse(self) -> bool:
         return self.sparsity is not None
 
+    @property
+    def applies_attn_mask(self) -> bool:
+        """Whether every call this backend serves applies ``attention_kwargs["attn_mask"]``.
+
+        Read from ``accepts`` (MASKED_VARLEN), and the fallback has to apply it
+        too: run() hands it the calls this kernel refuses, mask and all.
+        """
+        if not self.accepts.applies_attn_mask():
+            return False
+        return self._fallback is None or self._fallback.applies_attn_mask
+
     def unavailable(self) -> Optional[str]:
         """Why this backend cannot run here, or None. Never says 'update X':
         the same missing symbol means too-old or too-new, and we cannot tell."""

@@ -324,7 +324,7 @@ class xFuserQwenImageTransformerWrapper(QwenImageTransformer2DModel):
         block_attention_kwargs = attention_kwargs.copy() if attention_kwargs is not None else {}
         if encoder_hidden_states_mask is not None:
             # diffusers' Qwen-Image pipelines pass None when no prompt token is padding, so a mask here
-            # means prompts of different lengths. Any mask routes attention to SDPA.
+            # means prompts of different lengths. key_padding_mask_attention_kwargs applies it in attention.
             block_attention_kwargs["attention_mask"] = text_image_key_mask(
                 encoder_hidden_states_mask,
                 image_seq_len,

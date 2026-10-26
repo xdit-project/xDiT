@@ -29,6 +29,10 @@ class CallConstraint:
         """Head dims this constraint admits, when it restricts them."""
         return None
 
+    def applies_attn_mask(self) -> bool:
+        """Whether the kernel applies ``attention_kwargs["attn_mask"]``, as MASKED_VARLEN declares."""
+        return False
+
 
 @dataclass(frozen=True)
 class AllConstraints(CallConstraint):
@@ -47,6 +51,9 @@ class AllConstraints(CallConstraint):
             if dims is not None:
                 return dims
         return None
+
+    def applies_attn_mask(self) -> bool:
+        return any(part.applies_attn_mask() for part in self.parts)
 
 
 @dataclass(frozen=True)
@@ -114,6 +121,9 @@ class _MaskedVarlen(CallConstraint):
         if call.varlen is None or call.attention_kwargs.get("attn_mask") is not None:
             return None
         return "does not support varlen packed keys without an attn_mask"
+
+    def applies_attn_mask(self) -> bool:
+        return True
 
 
 class _PackedKeys(CallConstraint):

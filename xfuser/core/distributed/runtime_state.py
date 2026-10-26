@@ -319,6 +319,12 @@ class RuntimeState(metaclass=ABCMeta):
         # schedule. Resolving walks the fallback chain, so a call that lands on
         # a fallback mid-graph finds it already imported.
         spec.resolved()
+        # usp.key_padding_mask_attention_kwargs runs a call with a key-padding mask
+        # (batched prompts of different lengths) on SDPA when this backend cannot
+        # apply the mask. Resolve SDPA now as well, so that call imports nothing
+        # inside a compiled region either.
+        if not spec.applies_attn_mask:
+            attention_registry.get(AttentionBackendType.SDPA).resolved()
 
 
 class UnetRuntimeState(RuntimeState):

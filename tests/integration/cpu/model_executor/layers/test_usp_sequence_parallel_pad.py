@@ -91,7 +91,8 @@ def _wire_usp_to_gloo(torch, ulysses, ring):
             key, value = key[:, :, :valid_kv_len], value[:, :, :valid_kv_len]
         attn_mask = call.attention_kwargs.get("attn_mask")
         if attn_mask is not None:
-            # Like SDPA, which USP routes masked calls to: no log-sum-exp, so no ring attention.
+            # Like SDPA, which USP routes masked calls to when the selection (SDPA_FLASH here) cannot apply
+            # the mask: no log-sum-exp, so no ring attention.
             return torch.nn.functional.scaled_dot_product_attention(query, key, value, attn_mask=attn_mask), None
         return torch.ops.aten._scaled_dot_product_flash_attention_for_cpu(
             query, key, value, dropout_p=0.0, is_causal=call.is_causal

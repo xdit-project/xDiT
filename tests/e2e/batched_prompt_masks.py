@@ -4,8 +4,8 @@ Run directly with Python; the script spawns its own processes:
     python tests/e2e/batched_prompt_masks.py --model z-image --ulysses-degree 2
 
 The stock pipeline runs on one GPU with two prompts of different lengths. The
-same pipeline with the xDiT transformer wrapper (SDPA backend) then runs the
-same two prompts on --ulysses-degree GPUs. Every transformer call of both runs is
+same pipeline with the xDiT transformer wrapper (--attention-backend, else the
+platform's default) then runs the same two prompts on --ulysses-degree GPUs. Every transformer call of both runs is
 recorded. The summary gives the relative L2 distance of each call's output and
 the PSNR of each decoded sample, then runs the stock transformer on every input
 the wrapper saw (a "same-input" error). That separates a mask that is missing
@@ -138,10 +138,13 @@ def _worker(rank, world_size, role, options, init_method, output):
     pipe = pipeline_class.from_pretrained(checkpoint, **kwargs).to(device)
     pipe.set_progress_bar_config(disable=rank != 0)
     if role == "wrapper":
-        args = xFuserArgs(model=checkpoint, ulysses_degree=world_size, ring_degree=1, attention_backend="SDPA")
+        args = xFuserArgs(
+            model=checkpoint, ulysses_degree=world_size, ring_degree=1, attention_backend=options.attention_backend
+        )
         engine_config, _ = args.create_config()
         initialize_runtime_state(pipeline=pipe, engine_config=engine_config)
-        get_runtime_state().set_attention_backend("SDPA")
+        if rank == 0:
+            print(f"wrapper attention backend: {get_runtime_state().attention_backend.name}", flush=True)
     video = options.model == "hunyuan-video-1.5"
     if video:
         # Decoding a batch of two needs slicing.
@@ -192,6 +195,9 @@ def main():
     parser.add_argument("--frames", type=int, default=9, help="Video frames (HunyuanVideo-1.5)")
     parser.add_argument(
         "--even-text", action="store_true", help="HunyuanVideo-1.5: a 40-token prompt, sharded over two ranks"
+    )
+    parser.add_argument(
+        "--attention-backend", help="The wrapper's attention backend, e.g. SDPA or CUDNN; default per platform"
     )
     parser.add_argument("--noise-floor", action="store_true", help="Also run stock with SDPA's math kernel")
     parser.add_argument("--seed", type=int, default=42)

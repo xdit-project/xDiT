@@ -511,6 +511,27 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         step_cache_config={"fbcache": None},
     )
 
+    def _compile_model(self, input_args: dict) -> None:
+        """Compile the VAE decoder as well as the transformer.
+
+        The decoder runs eagerly by default and is launch-bound rather than
+        arithmetic-bound: ~30 ms of the ~347 ms this model spends on the GPU at
+        1024x1024.  Letting Inductor fuse it is worth ~2.8 ms.
+
+        It takes mode="default" rather than this model's "reduce-overhead"
+        because CUDA Graphs are worth nothing here -- measured both ways, the
+        two land inside this benchmark's run-to-run spread -- while the risk on
+        the other side is real: a graph's outputs live in its buffer pool and
+        are valid only until the next replay, and the transformer replays many
+        times between one decode and the next.  Compiling the decoder under
+        CUDA Graphs also moved the decoded image by ~47 dB PSNR for no reason
+        that was chased down.  Zero upside, unexplained output change, and a
+        failure mode the base class carries explicit machinery for: take the
+        boring mode.
+        """
+        self._compile_vae_decoder()
+        super()._compile_model(input_args)
+
     def _get_compile_mode(self) -> str:
         # CUDA graphs incompatible with cross-step caching, and
         # cause pathological re-captures on RDNA4.

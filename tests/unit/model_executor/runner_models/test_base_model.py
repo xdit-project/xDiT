@@ -7,6 +7,7 @@ import torch
 
 from xfuser.config import xFuserArgs
 from xfuser.model_executor.models.runner_models import base_model
+from xfuser import logger as xfuser_logger
 
 
 @pytest.fixture(autouse=True)
@@ -253,11 +254,20 @@ def _pipeline(**modules):
 
 
 @pytest.fixture
-def runner_warnings(caplog):
-    """xfuser loggers do not propagate to the root logger caplog listens on, so attach to it directly."""
-    base_model.logger.addHandler(caplog.handler)
-    yield lambda: [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
-    base_model.logger.removeHandler(caplog.handler)
+def runner_warnings(monkeypatch):
+    """Warnings the runner logged during this test, each exactly once.
+
+    caplog.handler is not used: pytest keeps that handler on the root logger as well, so any
+    unrelated warning reaching root during the test (or a propagated copy) would be counted.
+    """
+    records = []
+    handler = logging.Handler(level=logging.WARNING)
+    handler.emit = records.append
+    # warn_once drops repeats across the whole session.
+    monkeypatch.setattr(xfuser_logger, "_logged_once", set())
+    base_model.logger.addHandler(handler)
+    yield lambda: [record.getMessage() for record in records]
+    base_model.logger.removeHandler(handler)
 
 
 def test_eval_pass_reaches_modules_beside_and_inside_pipelines(runner_warnings):
@@ -273,7 +283,10 @@ def test_eval_pass_reaches_modules_beside_and_inside_pipelines(runner_warnings):
 
     for module in (shared_vae, swapped_block, model.decode_pipe.decoder, model.upsampler):
         assert not any(submodule.training for submodule in module.modules())
-    (warning,) = runner_warnings()
+        warnings = runner_warnings()
+        assert len(warnings) == 1, warnings
+        (warning,) = warnings
+
     for name in ("pipe.transformer", "decode_pipe.decoder", "upsampler"):
         assert name in warning
     assert "vae" not in warning

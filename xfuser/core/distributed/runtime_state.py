@@ -329,11 +329,20 @@ class RuntimeState(metaclass=ABCMeta):
         # schedule. Resolving walks the fallback chain, so a call that lands on
         # a fallback mid-graph finds it already imported.
         spec.resolved()
+<<<<<<< HEAD
         spec.validate(self.runtime_config)
 
     def current_step(self) -> Optional[torch.Tensor]:
         """The running forward's index as a 0-d tensor, or None when nothing tracks steps."""
         return None
+=======
+        # usp.key_padding_mask_attention_kwargs runs a call with a key-padding mask
+        # (batched prompts of different lengths) on SDPA when this backend cannot
+        # apply the mask. Resolve SDPA now as well, so that call imports nothing
+        # inside a compiled region either.
+        if not spec.applies_attn_mask:
+            attention_registry.get(AttentionBackendType.SDPA).resolved()
+>>>>>>> e85e3c4 (fix(sp): keep mask-capable attention backends and resolve the SDPA fallback eagerly)
 
 
 class UnetRuntimeState(RuntimeState):

@@ -19,7 +19,7 @@ if not os.environ.get("RANK"):
     os.environ["MASTER_PORT"] = "12355"
 
 
-# ruff: disable[E402]
+# ruff: noqa: E402
 from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY, xFuserModel, DiffusionOutput
 from xfuser.config import FlexibleArgumentParser
 from xfuser.core.distributed import (
@@ -27,7 +27,6 @@ from xfuser.core.distributed import (
 )
 from xfuser.core.utils.runner_utils import log, is_last_process
 from xfuser import xFuserArgs
-# ruff: enable[E402]
 
 
 class xFuserModelRunner:

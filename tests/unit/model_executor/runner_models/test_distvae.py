@@ -682,3 +682,120 @@ def test_aiter_replacement_blocks_recognition_until_xdit_restores_torch_norm():
         assert envs.restore_torch_group_norm_for_distvae() is True
         assert nn.GroupNorm is original
         assert parallel.decoder_adapter_name(vae) == "DecoderAdapter"
+
+
+class _AffineAiterGroupNorm(nn.Module):
+    """Stand-in for AITER's GroupNorm: torch's attributes, AITER's defining module.
+
+    ``restore_torch_group_norm_in`` identifies AITER by ``__module__`` rather
+    than by import, so this stub is all it takes to exercise the swap on a box
+    that has no AITER.
+    """
+
+    __module__ = "aiter.ops.groupnorm"
+
+    def __init__(self, num_groups, num_channels, eps=1e-5, affine=True):
+        super().__init__()
+        self.num_groups = num_groups
+        self.eps = eps
+        self.affine = affine
+        self.weight = nn.Parameter(torch.ones(num_channels)) if affine else None
+        self.bias = nn.Parameter(torch.zeros(num_channels)) if affine else None
+
+
+class _DecoderTree(nn.Module):
+    """A nested module tree, so the swap is exercised below the top level."""
+
+    def __init__(self):
+        super().__init__()
+        self.norm = _AffineAiterGroupNorm(2, 8)
+        self.block = nn.Sequential(nn.Conv2d(8, 8, 1), _AffineAiterGroupNorm(4, 8))
+
+
+def test_instance_restoration_swaps_aiter_norms_and_adopts_their_parameters():
+    tree = _DecoderTree()
+    weights = [tree.norm.weight, tree.block[1].weight]
+    biases = [tree.norm.bias, tree.block[1].bias]
+
+    assert envs.restore_torch_group_norm_in(tree) == 2
+
+    for norm, weight, bias in zip([tree.norm, tree.block[1]], weights, biases):
+        assert type(norm) is envs._TORCH_GROUPNORM
+        # Adopted, not copied: anything already holding the parameter -- an
+        # optimizer, a state dict, an offload hook -- still sees the same tensor.
+        assert norm.weight is weight
+        assert norm.bias is bias
+    assert (tree.norm.num_groups, tree.block[1].num_groups) == (2, 4)
+
+
+def test_instance_restoration_leaves_non_affine_and_torch_norms_alone():
+    # A non-affine AITER GroupNorm already defers to torch, and a torch one has
+    # nothing to restore; neither is worth rebuilding.
+    tree = nn.Sequential(_AffineAiterGroupNorm(2, 8, affine=False), envs._TORCH_GROUPNORM(2, 8))
+
+    assert envs.restore_torch_group_norm_in(tree) == 0
+    assert type(tree[0]) is _AffineAiterGroupNorm
+
+
+def test_instance_restoration_leaves_the_global_binding_alone():
+    """The scoped counterpart must not un-patch the process the way DistVAE's does."""
+    tree = _DecoderTree()
+
+    with mock.patch.object(nn, "GroupNorm", AiterGroupNorm):
+        assert envs.restore_torch_group_norm_in(tree) == 2
+        assert nn.GroupNorm is AiterGroupNorm
+
+
+def test_decoder_compilation_covers_every_decoding_vae():
+    runner = _runner()
+    first, second = _DecoderTree(), _DecoderTree()
+    runner.pipe = SimpleNamespace(vae=SimpleNamespace(decoder=first))
+    runner.second_pipe = SimpleNamespace(vae=SimpleNamespace(decoder=second))
+
+    with mock.patch.object(torch, "compile", side_effect=lambda m, mode=None: ("compiled", m, mode)) as compiled:
+        runner._compile_vae_decoder()
+
+    assert compiled.call_count == 2
+    assert runner.pipe.vae.decoder == ("compiled", first, "default")
+    assert runner.second_pipe.vae.decoder == ("compiled", second, "default")
+    # The GroupNorm restore travels with the compile, on both trees -- compiling
+    # around AITER's opaque custom op is most of the win left on the table.
+    assert type(first.norm) is envs._TORCH_GROUPNORM
+    assert type(second.norm) is envs._TORCH_GROUPNORM
+
+
+def test_decoder_compilation_defers_to_parallel_vae():
+    runner = _runner(use_parallel_vae=True)
+    tree = _DecoderTree()
+    runner.pipe = SimpleNamespace(vae=SimpleNamespace(decoder=tree))
+
+    with mock.patch.object(torch, "compile") as compiled:
+        runner._compile_vae_decoder()
+
+    compiled.assert_not_called()
+    assert runner.pipe.vae.decoder is tree
+    # DistVAE owns this decoder's execution, so neither half of the policy runs.
+    assert type(tree.norm) is _AffineAiterGroupNorm
+
+
+class _AlreadyCompiled(nn.Module):
+    """Stands in for ``torch._dynamo.OptimizedModule``, which is patched to it.
+
+    Building a real one couples the test to Dynamo's constructor, which is not
+    what is under test here -- the guard only asks whether the decoder is one.
+    """
+
+
+def test_decoder_compilation_skips_an_already_compiled_decoder():
+    runner = _runner()
+    already = _AlreadyCompiled()
+    runner.pipe = SimpleNamespace(vae=SimpleNamespace(decoder=already))
+
+    with (
+        mock.patch.object(torch._dynamo, "OptimizedModule", _AlreadyCompiled),
+        mock.patch.object(torch, "compile") as compiled,
+    ):
+        runner._compile_vae_decoder()
+
+    compiled.assert_not_called()
+    assert runner.pipe.vae.decoder is already

@@ -1,7 +1,7 @@
 from abc import ABCMeta, abstractmethod
 from functools import wraps
 from xfuser.compat import version_at_least
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import sys
 import torch
 import torch.distributed
@@ -163,6 +163,10 @@ class xFuserVAEWrapper:
 
 
 class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
+    # The xFuserModel runner gives each DP group its own prompts and sets this so
+    # enable_data_parallel does not split them a second time.
+    prompts_split_by_caller = False
+
     def __init__(
         self,
         pipeline: DiffusionPipeline,
@@ -246,6 +250,8 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
     def enable_data_parallel(func):
         @wraps(func)
         def data_parallel_fn(self, *args, **kwargs):
+            if self.prompts_split_by_caller:
+                return func(self, *args, **kwargs)
             prompt = kwargs.get("prompt", None)
             negative_prompt = kwargs.get("negative_prompt", "")
             # dp_degree <= batch_size
@@ -579,6 +585,50 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
 
         return patch_latents
 
+    def _async_pipeline_step_end(
+        self,
+        callback_on_step_end: Optional[Callable],
+        callback_on_step_end_tensor_inputs: List[str],
+        step: int,
+        t: torch.Tensor,
+        patch_latents: List[torch.Tensor],
+        *,
+        patch_dim: int,
+        step_tensors: Dict[str, torch.Tensor],
+    ) -> None:
+        """Run ``callback_on_step_end`` once per PipeFusion async step (legacy path).
+
+        Only the last pipeline stage holds denoised latents. By the end of a step it
+        has already sent every patch on to the next step, so the callback sees the
+        step's latents but cannot replace them. ``step_tensors`` holds the other
+        callback tensor inputs this pipeline's async loop can provide.
+
+        Legacy: only pipelines that still hand-roll their async PipeFusion loop call
+        this (FLUX Control, HunyuanDiT, Sana). Pipelines on the modular runtime in
+        ``xfuser.model_executor.pipefusion`` reject step callbacks instead, through
+        ``_pipefusion_async_enabled``. Migrate those pipelines to that runtime, then
+        remove this method.
+        """
+        if callback_on_step_end is None or not is_pipeline_last_stage():
+            return
+        step_tensors = {**step_tensors, "latents": torch.cat(patch_latents, dim=patch_dim)}
+        missing = [k for k in callback_on_step_end_tensor_inputs if k not in step_tensors]
+        if missing:
+            raise ValueError(
+                f"callback_on_step_end_tensor_inputs {missing} are not available in the PipeFusion "
+                f"loop; available: {sorted(step_tensors)}"
+            )
+        callback_kwargs = {k: step_tensors[k] for k in callback_on_step_end_tensor_inputs}
+        callback_outputs = callback_on_step_end(self, step, t, callback_kwargs)
+        replaced = [
+            k for k, v in (callback_outputs or {}).items() if k in callback_kwargs and v is not callback_kwargs[k]
+        ]
+        if replaced:
+            logger.warning(
+                f"callback_on_step_end returned new {replaced}, which PipeFusion "
+                "cannot apply after a step has been sent; the values are ignored."
+            )
+
     @staticmethod
     def _validate_pipefusion_async_callback(callback_on_step_end) -> None:
         if callback_on_step_end is not None:
@@ -716,11 +766,15 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             raise ValueError("Invalid classifier free guidance rank")
         return embeds, embeds_mask
 
+    def parallelizes_vae(self):
+        """Return True if this wrapper decodes with a parallel VAE across the ranks."""
+        return get_runtime_state().runtime_config.use_parallel_vae and not self.use_naive_forward()
+
     def is_dp_last_group(self):
         """Return True if in the last data parallel group, False otherwise.
         Also include parallel vae situation.
         """
-        if get_runtime_state().runtime_config.use_parallel_vae and not self.use_naive_forward():
+        if self.parallelizes_vae():
             return get_world_group().rank == 0
         else:
             return is_dp_last_group()
@@ -737,7 +791,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
     def gather_latents_for_vae(self, latents: torch.Tensor):
         """gather latents from dp last group"""
         # Only gather if we're using parallel VAE and not using naive forward
-        if not (get_runtime_state().runtime_config.use_parallel_vae and not self.use_naive_forward()):
+        if not self.parallelizes_vae():
             return latents
 
         self._release_transformer_kv_cache()
@@ -838,13 +892,15 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             input_shape = torch.zeros(latents_shape_len[0], dtype=torch.int, device=device)
         get_world_group().broadcast(input_shape, src=src)
 
+        # broadcast latents dtype: the pipeline may compute in a dtype other than the
+        # engine config's or the VAE's, and earlier PipeFusion stages hold no latents
+        dtypes = (torch.float32, torch.float16, torch.bfloat16)
+        dtype_code = torch.tensor([dtypes.index(latents.dtype) if rank == src else 0], dtype=torch.int, device=device)
+        get_world_group().broadcast(dtype_code, src=src)
+
         # broadcast latents
-        dtype = get_world_group().broadcast_object(
-            latents.dtype if rank == src else None,
-            src=src,
-        )
         if rank != src:
-            latents = torch.zeros(torch.Size(input_shape), dtype=dtype, device=device)
+            latents = torch.zeros(torch.Size(input_shape), dtype=dtypes[int(dtype_code)], device=device)
         get_world_group().broadcast(latents, src=src)
 
         return latents

@@ -20,13 +20,14 @@ if not os.environ.get("RANK"):
     os.environ["MASTER_PORT"] = "12355"
 
 
-from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY, xFuserModel, DiffusionOutput  # noqa: E402
-from xfuser.config import FlexibleArgumentParser  # noqa: E402
-from xfuser.core.distributed import (  # noqa: E402
+# ruff: noqa: E402
+from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY, xFuserModel, DiffusionOutput
+from xfuser.config import FlexibleArgumentParser
+from xfuser.core.distributed import (
     get_runtime_state,
 )
-from xfuser.core.utils.runner_utils import log, is_last_process  # noqa: E402
-from xfuser import xFuserArgs  # noqa: E402
+from xfuser.core.utils.runner_utils import log, is_last_process
+from xfuser import xFuserArgs
 
 
 def _has_output_payload(output: DiffusionOutput | None) -> bool:
@@ -141,7 +142,7 @@ class xFuserModelRunner:
             self.model.save_timings(timings)
 
 
-if __name__ == "__main__":
+def main():
     setup_logging()
     parser = FlexibleArgumentParser(description="xFuser Arguments")
     xfuser_args = xFuserArgs.add_runner_args(parser).parse_args()
@@ -160,3 +161,8 @@ if __name__ == "__main__":
         runner.save(output=output, timings=timings)
 
     runner.cleanup()
+
+
+if __name__ == "__main__":
+    with torch.inference_mode():  # mostly redundant, but harmless
+        main()

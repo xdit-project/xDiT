@@ -9,6 +9,12 @@ from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
 
 from xfuser.model_executor.layers.usp import USP
+from xfuser.model_executor.models.transformers.transformers_utils import (
+    chunk_and_pad_sequence,
+    gather_and_unpad,
+    local_sp_pad_rows,
+    zero_sp_pad_rows_hook,
+)
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
 from xfuser.model_executor.layers.fused_qk_rope_zimage_flydsl import (
     flydsl_fused_qk_norm_rope,
@@ -18,7 +24,6 @@ from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
     get_sequence_parallel_rank,
     get_ulysses_parallel_world_size,
-    get_sp_group,
     get_classifier_free_guidance_world_size,
     get_classifier_free_guidance_rank,
     get_cfg_group,
@@ -71,6 +76,9 @@ class xFuserZSingleStreamAttnProcessor:
     Processor for Z-Image single stream attention that adapts the existing Attention class to match the behavior of the
     original Z-ImageAttention module.
     """
+
+    def __init__(self, attention_kwargs: Optional[dict] = None):
+        self.attention_kwargs = attention_kwargs
 
     @staticmethod
     def _pad_heads(x: torch.Tensor, pad_heads: int) -> torch.Tensor:
@@ -133,6 +141,7 @@ class xFuserZSingleStreamAttnProcessor:
             dropout_p=0.0,
             is_causal=False,
             attn_layer=attn,
+            attention_kwargs=self.attention_kwargs,
         )
 
         if pad_heads:
@@ -167,36 +176,12 @@ def z_image_attn_modules(transformer) -> list[torch.nn.Module]:
 class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self._self_attn_kwargs = {"valid_kv_len": None}
+        self._sp_pad = {"local_rows": 0}
         for layer in self.layers + self.context_refiner + self.noise_refiner:
-            layer.attention.processor = xFuserZSingleStreamAttnProcessor()
+            layer.attention.processor = xFuserZSingleStreamAttnProcessor(attention_kwargs=self._self_attn_kwargs)
+            layer.register_forward_hook(zero_sp_pad_rows_hook(self._sp_pad))
         register_fp8_comms_eligible_modules(self, z_image_attn_modules(self))
-
-    def _chunk_and_pad_sequence(
-        self, x: torch.Tensor, sp_world_rank: int, sp_world_size: int, pad_amount: int, dim: int
-    ) -> torch.Tensor:
-        if pad_amount > 0:
-            if dim < 0:
-                dim = x.ndim + dim
-            pad_shape = list(x.shape)
-            pad_shape[dim] = pad_amount
-            x = torch.cat(
-                [
-                    x,
-                    torch.zeros(
-                        pad_shape,
-                        dtype=x.dtype,
-                        device=x.device,
-                    ),
-                ],
-                dim=dim,
-            )
-        x = torch.chunk(x, sp_world_size, dim=dim)[sp_world_rank]
-        return x
-
-    def _gather_and_unpad(self, x: torch.Tensor, pad_amount: int, dim: int) -> torch.Tensor:
-        x = get_sp_group().all_gather(x, dim=dim)
-        size = x.size(dim)
-        return x.narrow(dim=dim, start=0, length=size - pad_amount)
 
     def forward(
         self,
@@ -271,12 +256,13 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
             x_attn_mask[i, :seq_len] = 1
 
         # SP support
-        pad_amount = (sp_world_size - (x.shape[1] % sp_world_size)) % sp_world_size
-        x = self._chunk_and_pad_sequence(x, sp_world_rank, sp_world_size, pad_amount, dim=-2)
-        x_attn_mask = self._chunk_and_pad_sequence(x_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1)
-        x_freqs_cis_chunked = self._chunk_and_pad_sequence(
-            x_freqs_cis, sp_world_rank, sp_world_size, pad_amount, dim=-2
-        )
+        seq_len = x.shape[1]
+        pad_amount = (sp_world_size - (seq_len % sp_world_size)) % sp_world_size
+        self._self_attn_kwargs["valid_kv_len"] = seq_len if pad_amount else None
+        x = chunk_and_pad_sequence(x, sp_world_rank, sp_world_size, pad_amount, dim=-2)
+        self._sp_pad["local_rows"] = local_sp_pad_rows(seq_len, x.shape[1], sp_world_rank)
+        x_attn_mask = chunk_and_pad_sequence(x_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1)
+        x_freqs_cis_chunked = chunk_and_pad_sequence(x_freqs_cis, sp_world_rank, sp_world_size, pad_amount, dim=-2)
 
         if torch.is_grad_enabled() and self.gradient_checkpointing:
             for layer in self.noise_refiner:
@@ -286,7 +272,7 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
                 x = layer(x, x_attn_mask, x_freqs_cis_chunked, adaln_input)
 
         # Gather SP outputs and remove padding
-        x = self._gather_and_unpad(x, pad_amount, dim=-2)
+        x = gather_and_unpad(x, pad_amount, dim=-2)
 
         # cap embed & refine
         cap_item_seqlens = [len(_) for _ in cap_feats]
@@ -311,12 +297,13 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
             cap_attn_mask[i, :seq_len] = 1
 
         # SP support
-        pad_amount = (sp_world_size - (cap_feats.shape[1] % sp_world_size)) % sp_world_size
-        cap_feats = self._chunk_and_pad_sequence(cap_feats, sp_world_rank, sp_world_size, pad_amount, dim=-2)
-        cap_attn_mask = self._chunk_and_pad_sequence(cap_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1)
-        cap_freqs_cis_chunked = self._chunk_and_pad_sequence(
-            cap_freqs_cis, sp_world_rank, sp_world_size, pad_amount, dim=-2
-        )
+        seq_len = cap_feats.shape[1]
+        pad_amount = (sp_world_size - (seq_len % sp_world_size)) % sp_world_size
+        self._self_attn_kwargs["valid_kv_len"] = seq_len if pad_amount else None
+        cap_feats = chunk_and_pad_sequence(cap_feats, sp_world_rank, sp_world_size, pad_amount, dim=-2)
+        self._sp_pad["local_rows"] = local_sp_pad_rows(seq_len, cap_feats.shape[1], sp_world_rank)
+        cap_attn_mask = chunk_and_pad_sequence(cap_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1)
+        cap_freqs_cis_chunked = chunk_and_pad_sequence(cap_freqs_cis, sp_world_rank, sp_world_size, pad_amount, dim=-2)
 
         if torch.is_grad_enabled() and self.gradient_checkpointing:
             for layer in self.context_refiner:
@@ -326,7 +313,7 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
                 cap_feats = layer(cap_feats, cap_attn_mask, cap_freqs_cis_chunked)
 
         # Gather SP outputs and remove padding
-        cap_feats = self._gather_and_unpad(cap_feats, pad_amount, dim=-2)
+        cap_feats = gather_and_unpad(cap_feats, pad_amount, dim=-2)
 
         # unified
         unified = []
@@ -347,14 +334,13 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
             unified_attn_mask[i, :seq_len] = 1
 
         # SP support
-        pad_amount = (sp_world_size - (unified.shape[1] % sp_world_size)) % sp_world_size
-        unified = self._chunk_and_pad_sequence(unified, sp_world_rank, sp_world_size, pad_amount, dim=-2)
-        unified_attn_mask = self._chunk_and_pad_sequence(
-            unified_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1
-        )
-        unified_freqs_cis = self._chunk_and_pad_sequence(
-            unified_freqs_cis, sp_world_rank, sp_world_size, pad_amount, dim=-2
-        )
+        seq_len = unified.shape[1]
+        pad_amount = (sp_world_size - (seq_len % sp_world_size)) % sp_world_size
+        self._self_attn_kwargs["valid_kv_len"] = seq_len if pad_amount else None
+        unified = chunk_and_pad_sequence(unified, sp_world_rank, sp_world_size, pad_amount, dim=-2)
+        self._sp_pad["local_rows"] = local_sp_pad_rows(seq_len, unified.shape[1], sp_world_rank)
+        unified_attn_mask = chunk_and_pad_sequence(unified_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1)
+        unified_freqs_cis = chunk_and_pad_sequence(unified_freqs_cis, sp_world_rank, sp_world_size, pad_amount, dim=-2)
 
         if torch.is_grad_enabled() and self.gradient_checkpointing:
             for layer in self.layers:
@@ -366,7 +352,7 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
                 unified = layer(unified, unified_attn_mask, unified_freqs_cis, adaln_input)
 
         # Gather SP outputs and remove padding
-        unified = self._gather_and_unpad(unified, pad_amount, dim=-2)
+        unified = gather_and_unpad(unified, pad_amount, dim=-2)
 
         unified = self.all_final_layer[f"{patch_size}-{f_patch_size}"](unified, adaln_input)
         unified = list(unified.unbind(dim=0))

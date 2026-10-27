@@ -266,6 +266,37 @@ def test_qwen_backbone_accepts_missing_prompt_mask(monkeypatch):
     torch.testing.assert_close(actual_text, text)
 
 
+@pytest.mark.parametrize("output_owner", [True, False])
+def test_parallel_vae_decode_returns_on_the_wrapper_output_rank(monkeypatch, output_owner):
+    state = SimpleNamespace(
+        runtime_config=SimpleNamespace(use_parallel_vae=True),
+        parallel_config=SimpleNamespace(vae_parallel_size=0),
+    )
+    monkeypatch.setattr(pipeline_qwen_image, "get_runtime_state", lambda: state)
+    # Not the last pipeline stage, which parallel VAE no longer makes the output rank.
+    monkeypatch.setattr(pipeline_qwen_image, "is_dp_last_group", lambda: False)
+    decoded = torch.zeros(1, 3, 1, 4, 4)
+    pipe = SimpleNamespace(
+        vae_scale_factor=8,
+        vae=SimpleNamespace(
+            dtype=torch.float32,
+            config=SimpleNamespace(z_dim=2, latents_mean=[0.0, 0.0], latents_std=[1.0, 1.0]),
+            decode=lambda _latents, return_dict: (decoded,),
+        ),
+        _unpack_latents=lambda value, *_args: value.view(1, 2, 1, 2, 2),
+        gather_broadcast_latents=lambda value: value,
+        is_dp_last_group=lambda: output_owner,
+        image_processor=SimpleNamespace(postprocess=lambda image, output_type: ("image", image.shape)),
+        maybe_free_model_hooks=lambda: None,
+    )
+
+    result = QwenPipeFusionMixin._decode_qwen_latents(
+        pipe, torch.zeros(1, 4, 2), height=32, width=32, output_type="pil", return_dict=False
+    )
+
+    assert result == ((("image", (1, 3, 4, 4)),) if output_owner else None)
+
+
 def test_reference_only_patch_skips_scheduler():
     pipe = SimpleNamespace(
         _pipefusion_update_patch=lambda *_args: (_ for _ in ()).throw(AssertionError("scheduler called")),

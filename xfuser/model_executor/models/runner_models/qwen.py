@@ -1,3 +1,6 @@
+from dataclasses import replace
+
+import diffusers
 import torch
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from xfuser.model_executor.cache import (
@@ -386,13 +389,14 @@ class xFuserQwenImage21Model(xFuserModel):
         return pipe
 
     @staticmethod
-    def _qwen_image21_output_size(images, height, width, resolution=1024):
-        """Output (height, width): explicit when given, else the last condition image's aspect
-        ratio at ``resolution**2`` area -- what QwenImage21Pipeline picks itself -- else square.
+    def _qwen_image21_output_size(images, height, width, resolution=2048):
+        """Return the output (height, width).
 
-        The ``calculate_dimensions`` import stays inside this class. A module-level helper
-        would make the floor audit treat that unreleased symbol as a requirement of every
-        model in this file, including the released Qwen-Image pipelines.
+        An explicit height and width are used as given. Otherwise the output keeps the last
+        condition image's aspect ratio at about ``resolution x resolution`` pixels, or is
+        ``resolution x resolution`` when there are no condition images.
+
+        ``calculate_dimensions`` needs diffusers 0.41.0.
         """
         if height is not None and width is not None:
             return height, width
@@ -448,6 +452,8 @@ class xFuserQwenImage21Model(xFuserModel):
             log(f"Qwen-Image-2.1: block-causal prefill uses flex_attention on {len(blocks)} blocks.")
         else:
             log("Qwen-Image-2.1: flex_attention unavailable; block-causal prefill uses per-segment SDPA.")
+        self.pipe.vae.decoder.compile(mode=self._get_compile_mode(), dynamic=self._get_compile_dynamic())
+        log("Qwen-Image-2.1: torch.compile enabled for the VAE decoder.")
         super()._compile_model(input_args)
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
@@ -470,3 +476,40 @@ class xFuserQwenImage21Model(xFuserModel):
 
         output = self.pipe(**kwargs)
         return DiffusionOutput(images=output.images, pipe_args=input_args)
+
+
+@register_model("Qwen/Qwen-Image-2.1-Turbo")
+@register_model("Qwen-Image-2.1-Turbo")
+class xFuserQwenImage21TurboModel(xFuserQwenImage21Model):
+    """Qwen-Image 2.1 Turbo: the 2.1 architecture distilled to 8 denoising steps.
+
+    The checkpoint saves its sampling sigmas, and QwenImage21Pipeline uses them in place of
+    ``num_inference_steps``, so any other step count would be silently ignored.
+    """
+
+    _TURBO_STEPS = 8
+
+    default_input_values = replace(xFuserQwenImage21Model.default_input_values, num_inference_steps=_TURBO_STEPS)
+    settings = replace(
+        xFuserQwenImage21Model.settings,
+        model_name="Qwen/Qwen-Image-2.1-Turbo",
+        output_name="qwen_image_21_turbo",
+    )
+
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        if not getattr(self.pipe.config, "sample_sigmas", None):
+            raise RuntimeError(
+                f"diffusers {diffusers.__version__} dropped the checkpoint's sample_sigmas, so "
+                f"Qwen-Image-2.1-Turbo would sample with the wrong schedule. "
+                f"Requires diffusers>={self.min_diffusers_version}."
+            )
+        super()._post_load_and_state_initialization(input_args)
+
+    def _validate_args(self, input_args: dict) -> None:
+        super()._validate_args(input_args)
+        steps = input_args.get("num_inference_steps")
+        if steps != self._TURBO_STEPS:
+            raise ValueError(
+                f"Qwen-Image-2.1-Turbo uses the checkpoint's {self._TURBO_STEPS}-step schedule; "
+                f"num_inference_steps must be {self._TURBO_STEPS}, got {steps}."
+            )

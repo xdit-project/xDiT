@@ -36,6 +36,7 @@ from xfuser.core.distributed import (
     is_pipeline_last_stage,
     is_dp_last_group,
 )
+from xfuser.envs import get_device_name
 from xfuser.logger import init_logger
 from xfuser.model_executor.pipefusion import (
     PipeFusionImagePatchSchedule,
@@ -98,7 +99,7 @@ class xFuserFlux2PipelineBase(xFuserPipelineBaseWrapper):
             num_inference_steps=steps,
             guidance_scale=input_config.guidance_scale,
             max_sequence_length=input_config.max_sequence_length,
-            generator=torch.Generator(device="cuda").manual_seed(42),
+            generator=torch.Generator(device=get_device_name()).manual_seed(42),
             output_type=input_config.output_type,
         )
         get_runtime_state().runtime_config.warmup_steps = warmup_steps
@@ -332,6 +333,10 @@ class xFuserFlux2PipelineBase(xFuserPipelineBaseWrapper):
                     image_latents=image_latents,
                     image_latent_ids=image_latent_ids,
                 )
+                if is_pipeline_first_stage():
+                    # The last warmup step's latents were sent on the shapes negotiated
+                    # before the reference layout is installed, which resets them.
+                    latents = get_pp_group().pipeline_recv()
                 reference_layout = (
                     PipeFusionPatchLayout.with_appended_reference_tokens(
                         generated_tokens=latent_ids.shape[-2],
@@ -360,6 +365,7 @@ class xFuserFlux2PipelineBase(xFuserPipelineBaseWrapper):
                         image_latents=image_latents,
                         image_latent_ids=image_latent_ids,
                         layout=reference_layout,
+                        warmup_latents_received=True,
                     )
             else:
                 latents = self._sync_pipeline(
@@ -562,6 +568,7 @@ class xFuserFlux2PipelineBase(xFuserPipelineBaseWrapper):
         image_latents=None,
         image_latent_ids=None,
         layout=None,
+        warmup_latents_received=False,
     ):
         if len(timesteps) == 0:
             return latents
@@ -578,7 +585,7 @@ class xFuserFlux2PipelineBase(xFuserPipelineBaseWrapper):
         patch_latents = super()._init_async_pipeline(
             num_timesteps=len(timesteps),
             latents=latents,
-            num_pipeline_warmup_steps=num_pipeline_warmup_steps,
+            num_pipeline_warmup_steps=0 if warmup_latents_received else num_pipeline_warmup_steps,
             split_sizes=layout.split_sizes,
             split_dim=1,
             queue_receives=False,

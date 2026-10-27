@@ -295,7 +295,7 @@ class xFuserWanTI2VPipeFusionPipeline(xFuserPipelineBaseWrapper):
             video = self.vae.decode(prepare(latents), return_dict=False)[0]
         if video is not None and output_type != "latent":
             video = self.video_processor.postprocess_video(video, output_type=output_type)
-        if not is_dp_last_group():
+        if not self.is_dp_last_group():
             return None
         self.maybe_free_model_hooks()
         if not return_dict:

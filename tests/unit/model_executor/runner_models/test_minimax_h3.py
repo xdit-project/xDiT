@@ -610,6 +610,118 @@ def test_minimax_h3_fp4_quantization_policy():
     assert xFuserMiniMaxH3Ref2VAModel.settings.fp8_precision_override_suffixes == expected
 
 
+def test_vdn_supported_attn_backends_exclude_unservable_paths():
+    from xfuser.core.attention.spec import AttentionBackendType
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        xFuserMiniMaxH3Model,
+        xFuserVDNMiniMaxH3Model,
+    )
+
+    supported = xFuserVDNMiniMaxH3Model.supported_attn_backends
+    # VDN only serves the three window kernels, a strict subset of base H3's set.
+    assert supported == frozenset(
+        {AttentionBackendType.SDPA, AttentionBackendType.AITER, AttentionBackendType.AITER_FP8}
+    )
+    assert supported < xFuserMiniMaxH3Model.supported_attn_backends
+    assert AttentionBackendType.CUDNN not in supported
+    assert AttentionBackendType.NVTE_FP8 not in supported
+
+
+def test_vdn_window_backend_derived_from_attention_backend():
+    from types import SimpleNamespace
+
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        xFuserVDNMiniMaxH3Model,
+    )
+
+    resolve = xFuserVDNMiniMaxH3Model._resolve_window_backend
+
+    def model(attention_backend=None, vdn_window_backend=None):
+        return SimpleNamespace(
+            config=SimpleNamespace(attention_backend=attention_backend, vdn_window_backend=vdn_window_backend)
+        )
+
+    assert resolve(model(attention_backend="SDPA")) == "sdpa"
+    assert resolve(model(attention_backend="AITER")) == "aiter_ck"
+    assert resolve(model(attention_backend="AITER_FP8")) == "aiter_fp8"
+    # an explicit --vdn_window_backend wins over the derived default
+    assert resolve(model(attention_backend="SDPA", vdn_window_backend="aiter")) == "aiter"
+    # no backend set -> SDPA default
+    assert resolve(model()) == "sdpa"
+
+
+def test_vdn_step_count_runs_the_distilled_9_point_grid(monkeypatch):
+    from types import SimpleNamespace
+
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        xFuserMiniMaxH3Model,
+        xFuserVDNMiniMaxH3Model,
+        _count_steps_as_forwards,
+    )
+
+    assert xFuserVDNMiniMaxH3Model.default_input_values.num_inference_steps == 8
+
+    monkeypatch.setattr(xFuserMiniMaxH3Model, "_validate_args", lambda self, input_args: None)
+    model = SimpleNamespace()
+    xFuserVDNMiniMaxH3Model._validate_args(model, {"num_inference_steps": 8})
+    with pytest.raises(ValueError, match="8 transformer forwards"):
+        xFuserVDNMiniMaxH3Model._validate_args(model, {"num_inference_steps": 9})
+
+    grid_points = []
+    scheduler = SimpleNamespace(set_timesteps=lambda n, device=None: grid_points.append(n))
+    _count_steps_as_forwards(scheduler)
+    scheduler.set_timesteps(xFuserVDNMiniMaxH3Model.default_input_values.num_inference_steps)
+    assert grid_points == [9]
+
+
+def test_vdn_load_leaves_the_fused_transformer_in_eval_mode(monkeypatch):
+    import diffusers
+
+    from xfuser.model_executor.models.runner_models import minimax_h3
+    from xfuser.model_executor.models.runner_models.minimax_h3 import xFuserVDNMiniMaxH3Model
+    from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
+        xFuserMiniMaxH3Transformer3DWrapper,
+    )
+    from xfuser.model_executor.models.transformers.vdn_minimax_h3 import transformer as vdn_transformer
+    from xfuser.model_executor.models.transformers.vdn_minimax_h3 import window_softmax
+
+    class FakePipe:
+        def __init__(self):
+            self.text_encoder = SimpleNamespace(lm_head=object())
+            self.scheduler = SimpleNamespace(set_timesteps=lambda n, device=None: None)
+            self.audio_scheduler = SimpleNamespace(set_timesteps=lambda n, device=None: None)
+
+        def update_components(self, transformer):
+            self.transformer = transformer
+
+        def load_components(self, dtype):
+            pass
+
+    # from_pretrained returns modules in eval mode; the tiny base wrapper fuses QKV like the VDN one.
+    loaded = xFuserMiniMaxH3Transformer3DWrapper(**_tiny_config()).eval()
+    monkeypatch.setattr(diffusers.ModularPipeline, "from_pretrained", lambda *args, **kwargs: FakePipe())
+    monkeypatch.setattr(
+        vdn_transformer.xFuserMiniMaxH3VDNTransformer3DWrapper,
+        "from_pretrained",
+        lambda *args, **kwargs: loaded,
+    )
+    monkeypatch.setattr(window_softmax, "set_window_backend", lambda name: None)
+    monkeypatch.setattr(minimax_h3, "log", lambda message: None)
+    model = SimpleNamespace(
+        settings=SimpleNamespace(model_name="OpenVDN/vdn-minimax-h3"),
+        config=SimpleNamespace(task="t2va", text_encoder_tp_degree=2, attention_backend="SDPA"),
+        _vdn_transformer_dir=lambda: "/unused",
+        _resolve_window_backend=lambda: "sdpa",
+        _parallelize_text_encoder=lambda text_encoder: None,
+    )
+
+    pipe = xFuserVDNMiniMaxH3Model._load_model(model)
+
+    assert pipe.transformer is loaded
+    assert any(name.endswith("to_qkv") for name, _ in loaded.named_modules())
+    assert [name for name, module in loaded.named_modules() if module.training] == []
+
+
 def test_minimax_h3_text_encoder_tp_plan():
     from torch.distributed.tensor.parallel import ColwiseParallel, RowwiseParallel
 

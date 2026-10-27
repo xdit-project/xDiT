@@ -32,6 +32,19 @@ from xfuser.logger import init_logger
 logger = init_logger(__name__)
 
 TensorMetadata = namedtuple("TensorMetadata", ["device", "dtype", "size"])
+_PIPELINE_P2P_CHUNK_BYTES = 8 * 1024 * 1024
+
+
+class _CompositeWork:
+    def __init__(self, works):
+        self.works = works
+
+    def wait(self, *args, **kwargs):
+        result = None
+        for work in self.works:
+            result = work.wait(*args, **kwargs)
+        return result
+
 
 env_info = envs.PACKAGES_CHECKER.get_packages_info()
 HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
@@ -916,18 +929,14 @@ class PipelineGroupCoordinator(GroupCoordinator):
         return self.recv_buffer[name][idx]
 
     def _pipeline_irecv(self, tensor: torch.tensor):
-        return torch.distributed.irecv(
-            tensor,
-            src=self.prev_rank,
-            group=(self.device_groups[(self.rank_in_group + 1) % 2] if self.world_size == 2 else self.device_group),
-        )
+        group = self.device_groups[(self.rank_in_group + 1) % 2] if self.world_size == 2 else self.device_group
+        chunks = tensor.flatten().split(max(1, _PIPELINE_P2P_CHUNK_BYTES // tensor.element_size()))
+        return _CompositeWork([torch.distributed.irecv(chunk, src=self.prev_rank, group=group) for chunk in chunks])
 
     def _pipeline_isend(self, tensor: torch.tensor):
-        return torch.distributed.isend(
-            tensor,
-            dst=self.next_rank,
-            group=(self.device_groups[self.rank_in_group % 2] if self.world_size == 2 else self.device_group),
-        )
+        group = self.device_groups[self.rank_in_group % 2] if self.world_size == 2 else self.device_group
+        chunks = tensor.flatten().split(max(1, _PIPELINE_P2P_CHUNK_BYTES // tensor.element_size()))
+        return _CompositeWork([torch.distributed.isend(chunk, dst=self.next_rank, group=group) for chunk in chunks])
 
     def set_skip_tensor_recv_buffer(
         self,

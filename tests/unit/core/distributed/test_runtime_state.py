@@ -44,3 +44,44 @@ def test_short_request_does_not_shrink_warmup_of_later_requests(state, request_f
         warmup_seen.append(state.runtime_config.warmup_steps)
 
     assert warmup_seen == [4, 4, 4]
+
+
+def test_wan_pipeline_uses_spatial_patch_size_and_tracks_temporal_patch_size():
+    pipeline_type = type("xFuserWanTI2VPipeFusionPipeline", (), {})
+    pipeline = pipeline_type()
+    pipeline.vae_scale_factor_spatial = 8
+    pipeline.vae_scale_factor_temporal = 4
+    pipeline.transformer = SimpleNamespace(
+        config=SimpleNamespace(
+            patch_size=(1, 2, 2),
+            in_channels=48,
+            num_attention_heads=24,
+            attention_head_dim=128,
+        )
+    )
+    state = DiTRuntimeState.__new__(DiTRuntimeState)
+
+    state._check_pipeline_class_name(pipeline, config=None)
+
+    assert state.wan_video is True
+    assert state.backbone_patch_size == 2
+    assert state.wan_temporal_patch_size == 1
+
+
+def test_wan_patch_tokens_include_the_full_temporal_extent(monkeypatch):
+    monkeypatch.setattr(runtime_state_module, "get_sequence_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(runtime_state_module, "get_sequence_parallel_rank", lambda: 0)
+    state = DiTRuntimeState.__new__(DiTRuntimeState)
+    state.input_config = InputConfig(height=1280, width=736, num_frames=121, batch_size=1)
+    state.parallel_config = SimpleNamespace(pp_config=SimpleNamespace(num_pipeline_patch=2))
+    state.backbone_patch_size = 2
+    state.vae_scale_factor_spatial = 8
+    state.vae_scale_factor_temporal = 4
+    state.wan_temporal_patch_size = 1
+
+    state._calc_wan_patches_metadata()
+
+    assert state.pp_patches_height == [80, 80]
+    assert state.pp_patches_token_num == [57040, 57040]
+    assert state.pp_patches_token_start_idx_local == [0, 57040, 114080]
+    assert state.pp_patches_token_start_end_idx_global == [[0, 57040], [57040, 114080]]

@@ -68,8 +68,8 @@ def test_channels_last_conversion_preserves_decode_output_for_every_stage():
 @pytest.mark.parametrize(
     ("vae_parallel_size", "expected_events"),
     [
-        (0, ["post-load", "parallel", "options"]),
-        (2, ["post-load", "options"]),
+        (0, ["post-load", "parallel", "options", "eval"]),
+        (2, ["post-load", "options", "eval"]),
     ],
 )
 def test_initialize_sets_up_every_parallel_vae_before_enabling_options(
@@ -83,6 +83,7 @@ def test_initialize_sets_up_every_parallel_vae_before_enabling_options(
     class Runner:
         initialize = xFuserModel.initialize
         _decoding_vaes = xFuserModel._decoding_vaes
+        _wrapper_parallelizes_vae = xFuserModel._wrapper_parallelizes_vae
 
         def __init__(self):
             self.engine = SimpleNamespace(runtime_config=SimpleNamespace())
@@ -111,6 +112,9 @@ def test_initialize_sets_up_every_parallel_vae_before_enabling_options(
 
         def _enable_options(self):
             events.append("options")
+
+        def _set_eval_mode(self):
+            events.append("eval")
 
     runner = Runner()
     runner._vae_manager.setup_parallel_vae.side_effect = lambda vaes: events.append("parallel")

@@ -237,11 +237,6 @@ not select precision; pass it separately, for example:
 --gemm_config examples/gemm_config.yaml
 ```
 
-With pure FP8 (`--gemm_quantization fp8`), base MiniMax-H3 quantizes
-`attn.to_qkv` and `ff.net.0.proj`, while VDN-H3 quantizes all five
-transformer-block linear types (`attn.to_qkv`, `ff.net.0.proj`,
-`attn.to_out.0`, `attn.to_out_linear`, `ff.net.2`).
-
 INT8 uses per-row symmetric scaling and skips linear layers smaller than 512 in
 either dimension. To keep the declared targets and that 512 minimum while
 streaming, xDiT derives `modules_to_not_convert` from a config-built meta

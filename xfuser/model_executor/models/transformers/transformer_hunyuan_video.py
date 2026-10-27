@@ -6,6 +6,12 @@ from diffusers.models.attention_processor import Attention
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
 from xfuser.model_executor.layers.usp import USP
+from xfuser.model_executor.models.transformers.transformers_utils import (
+    chunk_and_pad_sequence,
+    gather_and_unpad,
+    local_sp_pad_rows,
+    zero_sp_pad_rows_hook,
+)
 from xfuser.core.distributed import (
     get_classifier_free_guidance_world_size,
     get_classifier_free_guidance_rank,
@@ -14,11 +20,15 @@ from xfuser.core.distributed import (
     get_sequence_parallel_rank,
     get_runtime_state,
     get_cfg_group,
-    get_sp_group,
 )
 
 
 class xFuserHunyuanVideoAttnProcessor:
+    def __init__(self, attention_kwargs: Optional[Dict[str, Any]] = None):
+        # Shared with the transformer, which sets ``valid_kv_len`` to the real
+        # video token count when it pads the sequence to split evenly.
+        self.attention_kwargs = attention_kwargs
+
     def __call__(
         self,
         attn: Attention,
@@ -104,6 +114,7 @@ class xFuserHunyuanVideoAttnProcessor:
 
         #! ---------------------------------------- ATTENTION ----------------------------------------
         if get_pipeline_parallel_world_size() == 1 and get_runtime_state().split_text_embed_in_sp:
+            # The text is only split when the video tokens are not padded (see forward).
             hidden_states = USP(query, key, value, dropout_p=0.0, is_causal=False)
             hidden_states = hidden_states.transpose(1, 2).flatten(2, 3)
         elif get_sequence_parallel_world_size() > 1:
@@ -126,6 +137,9 @@ class xFuserHunyuanVideoAttnProcessor:
                 joint_key=encoder_key,
                 joint_value=encoder_value,
                 joint_strategy="rear",
+                # Zero-padded video keys trail the gathered video K/V (the text
+                # is appended after USP's trim), so keep only the real ones.
+                attention_kwargs=self.attention_kwargs,
             )
 
             hidden_states = hidden_states.transpose(1, 2)
@@ -155,8 +169,13 @@ class xFuserHunyuanVideoAttnProcessor:
 
 class xFuserHunyuanVideoTransformer3DWrapper(HunyuanVideoTransformer3DModel):
     def install_xdit_attention_processors(self):
+        # The key is always present because torch.compile guards on the key set.
+        self._self_attn_kwargs = {"valid_kv_len": None}
+        self._sp_pad = {"local_rows": 0}
+        # Both block kinds return (video, text); the pad trails the video stream.
         for block in self.transformer_blocks + self.single_transformer_blocks:
-            block.attn.processor = xFuserHunyuanVideoAttnProcessor()
+            block.attn.processor = xFuserHunyuanVideoAttnProcessor(attention_kwargs=self._self_attn_kwargs)
+            block.register_forward_hook(zero_sp_pad_rows_hook(self._sp_pad, index=0))
         return self
 
     @classmethod
@@ -215,33 +234,35 @@ class xFuserHunyuanVideoTransformer3DWrapper(HunyuanVideoTransformer3DModel):
         hidden_states = torch.chunk(hidden_states, get_classifier_free_guidance_world_size(), dim=0)[
             get_classifier_free_guidance_rank()
         ]
-        hidden_states = torch.chunk(hidden_states, get_sequence_parallel_world_size(), dim=-2)[
-            get_sequence_parallel_rank()
-        ]
+        sp_world_size = get_sequence_parallel_world_size()
+        sp_world_rank = get_sequence_parallel_rank()
+        video_seq_len = hidden_states.shape[-2]
+        # Pad the video tokens so every rank gets an equal shard; the padded
+        # keys are excluded from attention and the rows dropped after gather.
+        pad_amount = (sp_world_size - video_seq_len % sp_world_size) % sp_world_size
+        hidden_states = chunk_and_pad_sequence(hidden_states, sp_world_rank, sp_world_size, pad_amount, dim=-2)
+        self._self_attn_kwargs["valid_kv_len"] = video_seq_len if pad_amount else None
+        self._sp_pad["local_rows"] = local_sp_pad_rows(video_seq_len, hidden_states.shape[-2], sp_world_rank)
 
         encoder_attention_mask = encoder_attention_mask.to(torch.bool).any(dim=0)
         encoder_hidden_states = encoder_hidden_states[:, encoder_attention_mask, :]
-        if encoder_hidden_states.shape[-2] % get_sequence_parallel_world_size() != 0:
-            get_runtime_state().split_text_embed_in_sp = False
-        else:
-            get_runtime_state().split_text_embed_in_sp = True
+        # Padded video keys have to form one trailing suffix for USP to trim, so a
+        # padded sequence sends the text through the joint "rear" path unsplit
+        # instead of splicing it into the sequence.
+        get_runtime_state().split_text_embed_in_sp = (
+            not pad_amount and encoder_hidden_states.shape[-2] % sp_world_size == 0
+        )
 
         encoder_hidden_states = torch.chunk(encoder_hidden_states, get_classifier_free_guidance_world_size(), dim=0)[
             get_classifier_free_guidance_rank()
         ]
         if get_runtime_state().split_text_embed_in_sp:
-            encoder_hidden_states = torch.chunk(encoder_hidden_states, get_sequence_parallel_world_size(), dim=-2)[
-                get_sequence_parallel_rank()
-            ]
+            encoder_hidden_states = torch.chunk(encoder_hidden_states, sp_world_size, dim=-2)[sp_world_rank]
 
         freqs_cos, freqs_sin = image_rotary_emb
 
-        def get_rotary_emb_chunk(freqs):
-            freqs = torch.chunk(freqs, get_sequence_parallel_world_size(), dim=0)[get_sequence_parallel_rank()]
-            return freqs
-
-        freqs_cos = get_rotary_emb_chunk(freqs_cos)
-        freqs_sin = get_rotary_emb_chunk(freqs_sin)
+        freqs_cos = chunk_and_pad_sequence(freqs_cos, sp_world_rank, sp_world_size, pad_amount, dim=0)
+        freqs_sin = chunk_and_pad_sequence(freqs_sin, sp_world_rank, sp_world_size, pad_amount, dim=0)
         image_rotary_emb = (freqs_cos, freqs_sin)
 
         # 4. Transformer blocks
@@ -295,7 +316,7 @@ class xFuserHunyuanVideoTransformer3DWrapper(HunyuanVideoTransformer3DModel):
         hidden_states = self.norm_out(hidden_states, temb)
         hidden_states = self.proj_out(hidden_states)
 
-        hidden_states = get_sp_group().all_gather(hidden_states, dim=-2)
+        hidden_states = gather_and_unpad(hidden_states, pad_amount, dim=-2)
         hidden_states = get_cfg_group().all_gather(hidden_states, dim=0)
 
         hidden_states = hidden_states.reshape(

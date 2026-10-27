@@ -1418,6 +1418,8 @@ class xFuserModel(abc.ABC):
 
     def prepare_run(self, input_args: dict) -> None:
         """Prepare model state before a pipeline invocation."""
+        # A shorter warmup or compile run must not leave the next run mid-schedule.
+        get_runtime_state().reset_step_counter()
         self._vae_manager.prepare_run(self._decoding_vaes(), input_args)
 
     def _run_timed_pipe(self, input_args: dict) -> Tuple[DiffusionOutput, float]:

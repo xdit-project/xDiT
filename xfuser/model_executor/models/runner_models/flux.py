@@ -166,6 +166,20 @@ class xFuserFluxModel(xFuserModel):
         return DiffusionOutput(images=images, pipe_args=input_args)
 
 
+def _refuse_flux2_pipefusion_parallel_vae(config) -> None:
+    """Refuse the FLUX.2 PipeFusion wrapper with --use_parallel_vae.
+
+    That wrapper decodes only on its last pipeline stage, so a decoder sharded
+    across every stage would wait for ranks that never call it.
+    """
+    if config.pipefusion_parallel_degree > 1 and config.use_parallel_vae:
+        raise ValueError(
+            "--use_parallel_vae is not supported with --pipefusion_parallel_degree > 1 for FLUX.2: "
+            "the PipeFusion pipeline decodes on its last pipeline stage only. "
+            "Drop --use_parallel_vae or use Ulysses/Ring parallelism instead."
+        )
+
+
 @register_model("black-forest-labs/FLUX.1-Kontext-dev")
 @register_model("FLUX.1-Kontext-dev")
 class xFuserFluxKontextModel(xFuserModel):
@@ -386,6 +400,10 @@ class xFuserFlux2Model(xFuserModel):
             return True
         return False
 
+    def _validate_config(self, config) -> None:
+        super()._validate_config(config)
+        _refuse_flux2_pipefusion_parallel_vae(config)
+
     def _load_model(self) -> DiffusionPipeline:
         if self.config.pipefusion_parallel_degree > 1:
             dtype = torch.bfloat16 if PACKAGES_CHECKER._on_rdna4() else torch.float16
@@ -531,6 +549,10 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         if self.config.pipefusion_parallel_degree > 1 and input_args and input_args.get("input_images"):
             return True
         return False
+
+    def _validate_config(self, config) -> None:
+        super()._validate_config(config)
+        _refuse_flux2_pipefusion_parallel_vae(config)
 
     def _load_model(self) -> DiffusionPipeline:
         if self.config.pipefusion_parallel_degree > 1:

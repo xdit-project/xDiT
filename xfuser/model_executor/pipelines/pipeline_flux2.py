@@ -36,6 +36,7 @@ from xfuser.core.distributed import (
     is_pipeline_last_stage,
     is_dp_last_group,
 )
+from xfuser.envs import get_device_name
 from xfuser.logger import init_logger
 from xfuser.model_executor.pipefusion import (
     PipeFusionImagePatchSchedule,
@@ -98,7 +99,7 @@ class xFuserFlux2PipelineBase(xFuserPipelineBaseWrapper):
             num_inference_steps=steps,
             guidance_scale=input_config.guidance_scale,
             max_sequence_length=input_config.max_sequence_length,
-            generator=torch.Generator(device="cuda").manual_seed(42),
+            generator=torch.Generator(device=get_device_name()).manual_seed(42),
             output_type=input_config.output_type,
         )
         get_runtime_state().runtime_config.warmup_steps = warmup_steps

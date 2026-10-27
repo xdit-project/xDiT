@@ -392,11 +392,10 @@ def _trim_trailing_kv_padding(key, value, attention_kwargs, backend=None):
     return key[:, :, :valid_kv_len], value[:, :, :valid_kv_len], consumed
 
 
-# setup_sparge strips the rows past the published `thw` layout itself before it
-# reorders Q and K/V against that layout. Trimming K/V ahead of it would break
-# the equal Q/K/V lengths these backends need: Sparge refuses the call, VSA
-# silently falls back to dense attention.
-_SPARSITY_STRIPPING_SP_PAD = (Sparsity.SPARGE, Sparsity.VSA)
+# Spatial sparse setup strips the rows past the published `thw` layout itself
+# before reordering Q and K/V. SSTA also drops `encoder_sp_padding` from text.
+# Trimming K/V first breaks the equal Q/K/V lengths required by these paths.
+_SPARSITY_STRIPPING_SP_PAD = (Sparsity.SSTA, Sparsity.SPARGE, Sparsity.VSA)
 
 
 def _backend_strips_sp_pad(backend, attention_kwargs) -> bool:
@@ -569,6 +568,10 @@ def USP(
     Ring attention. Also supports joint tensors and key-value caching for pipeline parallelism.
     Explicit backend can be provided to specify the attention backend to use.
 
+    ``attention_kwargs["valid_kv_len"]`` declares the global number of valid
+    main K/V tokens before uniform SP suffix padding, across both Ulysses and
+    ring ranks. Joint tokens are excluded from this count and remain intact.
+
     ``attn_layer`` (optional): the attention module. Used to resolve Ulysses FP8
     communication state and to update the PipeFusion KV cache for modules that
     registered one. Callers only pass the module; USP no-ops when FP8 comms is
@@ -645,7 +648,8 @@ def USP(
 
     joint_attn_kwargs = None
     if joint_strategy:
-        query = _concat_joint_tensor(query, joint_query, joint_strategy, dim=2)
+        if joint_query is not None:
+            query = _concat_joint_tensor(query, joint_query, joint_strategy, dim=2)
         joint_key, joint_value = _preprocess_joint_tensors(joint_key, joint_value)
         joint_attn_kwargs = {
             "joint_value": joint_value,
@@ -701,6 +705,18 @@ def USP(
     valid_kv_len = (attention_kwargs or {}).get("valid_kv_len")
     if valid_kv_len is None:
         pass
+    elif joint_strategy and (
+        is_causal
+        or attention_kwargs.get("indices_k") is not None
+        or _backend_strips_sp_pad(hb_backend, attention_kwargs)
+    ):
+        # In these three cases the pad stays in K for the backend to handle (below), which cannot tell
+        # it from the joint tokens joined afterwards. No model combines them with joint tensors.
+        # Make the backend handle the pad of the main tokens before joining the others, then delete this.
+        raise NotImplementedError(
+            "valid_kv_len cannot be combined with joint tensors for causal attention, packed keys, "
+            "or a backend that strips the pad against a spatial layout (Sparge, VSA, SSTA)."
+        )
     elif is_causal:
         # Causality already hides a trailing pad from every real query, and the
         # untrimmed equal lengths leave no room for the backends' differing
@@ -712,6 +728,12 @@ def USP(
         attention_function = _ring_trim_trailing_kv_padding(attention_function, valid_kv_len, key.shape[2])
     else:
         key, value, attention_kwargs = _trim_trailing_kv_padding(key, value, attention_kwargs, hb_backend)
+
+    if joint_strategy and valid_kv_len is not None:
+        # The published length counts main K/V only. Their pad has now been dropped (or will be inside
+        # each ring step), so a backend must not apply that length again to the K/V with the joint tokens
+        # joined: the dense fallback of AITER_VSA, for one, crops K to it.
+        attention_kwargs = {**attention_kwargs, "valid_kv_len": None}
 
     if kv_head_repeat > 1:
         key, value = _repeat_kv_heads(key, value, kv_head_repeat)

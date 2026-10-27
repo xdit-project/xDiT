@@ -59,6 +59,8 @@ def test_registered_model_accepts_supported_ulysses_before_loading(name):
         ("FLUX.2-dev", 48, 16, 32),
         ("FLUX.2-klein-9B", 32, 16, 3),
         ("FLUX.2-klein-4B", 24, 3, 16),
+        ("FLUX.3-image-klein", 24, 3, 16),
+        ("FLUX.3-image-klein-base", 24, 3, 16),
         ("SD3.5", 38, 19, 3),
         ("HunyuanVideo", 24, 3, 16),
         ("Hunyuanvideo-1.5", 16, 16, 3),

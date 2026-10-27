@@ -6,7 +6,7 @@ from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
 from xfuser.core.distributed import get_runtime_state
 from xfuser.core.utils.runner_utils import log
-from xfuser.envs import _is_hip
+from xfuser.envs import _is_hip, get_device_name
 from xfuser.core.attention.backends.aiter_mha_v4.spec import DENSE_BACKENDS
 from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.model_executor.models.runner_models.base_model import (
@@ -167,7 +167,7 @@ class _Krea2BaseModel(xFuserModel):
             guidance_scale=input_args["guidance_scale"],
             output_type=input_args.get("output_type", "pil"),
             max_sequence_length=max_seq,
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=torch.Generator(device=get_device_name()).manual_seed(input_args["seed"]),
         )
 
         images = output.images if output else []

@@ -40,6 +40,7 @@ def vace_runner(monkeypatch):
     monkeypatch.setattr(base_model, "get_model_replica_group", lambda: group)
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
     monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 1)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda *args, **kwargs: 0)
     monkeypatch.setattr(base_model, "initialize_runtime_state", lambda *args: None)
     monkeypatch.setattr(base_model, "runtime_state_is_initialized", lambda: False)
     monkeypatch.setattr(wan, "get_runtime_state", lambda: Mock())
@@ -58,7 +59,7 @@ def vace_runner(monkeypatch):
         num_layers=1,
         vace_layers=[0],
         vace_in_channels=66,
-    )
+    ).eval()
     observed_timesteps = []
 
     def predict(hidden_states, timestep, **kwargs):
@@ -73,7 +74,7 @@ def vace_runner(monkeypatch):
         num_res_blocks=1,
         latents_mean=[0.0],
         latents_std=[1.0],
-    )
+    ).eval()
 
     def encode(video):
         latent = video[:, :1, ::4, ::8, ::8]

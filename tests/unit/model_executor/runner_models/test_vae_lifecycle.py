@@ -70,6 +70,7 @@ def test_initialize_sets_up_every_parallel_vae_before_enabling_options(monkeypat
     class Runner:
         initialize = xFuserModel.initialize
         _decoding_vaes = xFuserModel._decoding_vaes
+        _wrapper_parallelizes_vae = xFuserModel._wrapper_parallelizes_vae
 
         def __init__(self):
             self.config = SimpleNamespace(
@@ -95,6 +96,9 @@ def test_initialize_sets_up_every_parallel_vae_before_enabling_options(monkeypat
         def _enable_options(self):
             events.append("options")
 
+        def _set_eval_mode(self):
+            events.append("eval")
+
     runner = Runner()
     runner._vae_manager.setup_parallel_vae.side_effect = lambda vaes: events.append("parallel")
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
@@ -104,5 +108,5 @@ def test_initialize_sets_up_every_parallel_vae_before_enabling_options(monkeypat
 
     runner.initialize({})
 
-    assert events == ["post-load", "parallel", "options"]
+    assert events == ["post-load", "parallel", "options", "eval"]
     runner._vae_manager.setup_parallel_vae.assert_called_once_with([first, second])

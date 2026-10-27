@@ -18,6 +18,7 @@ from xfuser.core.distributed import (
     get_runtime_state,
 )
 from xfuser.model_executor.layers.attention_processor import xFuserAttentionProcessorRegister
+from xfuser.model_executor.models.transformers.transformers_utils import local_sp_pad_rows, zero_sp_pad_rows_hook
 from xfuser.envs import PACKAGES_CHECKER
 from xfuser.core.vsa_attention import jenga_scheduled_drop_rate
 from xfuser.model_executor.layers.fused_qk_norm_rope_wan_flydsl import (
@@ -192,46 +193,6 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
         return query, key, value
 
 
-def _zero_sp_pad_rows_hook(sp_pad):
-    """Forward hook keeping the SP pad rows of a block's output at zero.
-
-    The pad rows never reach real tokens' attention once USP drops their keys,
-    but what a block writes there still enters statistics taken across the
-    rows of whole local tensors, which then apply to the real rows:
-    - FP8-comms calibration: pad rows set the per-tensor V scale in some layers
-      (measured up to 1.5x coarser for every real token);
-    - the step cache's residual difference;
-    - cross-attention kernels that share a quantization scale across query
-      rows: Sage (256-row Q blocks) and AITER FP8 (one Q scale per tensor).
-    The list spans features and backends, so the zeroing is not gated on them;
-    missing one would fail silently. It only runs on a rank holding pad rows,
-    and costs nothing measurable: under torch.compile it fuses into the block's
-    last pointwise op, eagerly it is ~5 us per block.
-
-    A hook rather than a line in forward's loop, so it also runs when a step
-    cache iterates the blocks itself. A VACE block returns its conditioning
-    states with its control states; both are zeroed, since the conditioning
-    states are added to the main stream as hints.
-    """
-
-    def hook(module, args, output):
-        rows = sp_pad["local_rows"]
-        if rows:
-            for tensor in output if isinstance(output, tuple) else (output,):
-                if tensor is not None:
-                    tensor[:, -rows:] = 0
-
-    return hook
-
-
-def _local_sp_pad_rows(seq_len: int, local_len: int, sp_rank: int) -> int:
-    """How many of this rank's `local_len` rows are SP pad, for a real length `seq_len`.
-
-    The pad trails the global sequence, so only the last ranks' chunks hold any.
-    """
-    return min(local_len, max(0, (sp_rank + 1) * local_len - seq_len))
-
-
 class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
     def __init__(
         self,
@@ -299,7 +260,7 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
         # Pad rows of this rank's chunk, set per forward; 0 leaves the blocks untouched.
         self._sp_pad = {"local_rows": 0}
         for block in self.blocks:
-            block.register_forward_hook(_zero_sp_pad_rows_hook(self._sp_pad))
+            block.register_forward_hook(zero_sp_pad_rows_hook(self._sp_pad))
 
     def _update_vsa_attention_kwargs(self, timestep: torch.LongTensor) -> None:
         """Publish the current AITER VSA schedule values to its backend."""
@@ -407,7 +368,7 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
         self._self_attn_kwargs["valid_kv_len"] = hidden_states.shape[1] if pad_amount else None
         seq_len = hidden_states.shape[1]
         hidden_states = self._chunk_and_pad_sequence(hidden_states, sp_world_rank, sp_world_size, pad_amount, dim=1)
-        self._sp_pad["local_rows"] = _local_sp_pad_rows(seq_len, hidden_states.shape[1], sp_world_rank)
+        self._sp_pad["local_rows"] = local_sp_pad_rows(seq_len, hidden_states.shape[1], sp_world_rank)
 
         if ts_seq_len is not None:  # (wan2.2 ti2v)
             temb = self._chunk_and_pad_sequence(temb, sp_world_rank, sp_world_size, pad_amount, dim=1)

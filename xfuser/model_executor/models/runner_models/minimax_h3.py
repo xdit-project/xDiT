@@ -21,6 +21,7 @@ from xfuser.core.distributed import (
 )
 from xfuser.core.utils.runner_utils import log
 from xfuser.core.utils.video_utils import encode_video_with_audio
+from xfuser.envs import get_device_name
 from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
@@ -583,7 +584,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
             "width": input_args["width"],
             "num_frames": input_args["num_frames"],
             "num_inference_steps": input_args["num_inference_steps"],
-            "generator": torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            "generator": torch.Generator(device=get_device_name()).manual_seed(input_args["seed"]),
             "output_type": "pt",
         }
         images = input_args.get("input_images") or []
@@ -1076,7 +1077,7 @@ class xFuserMiniMaxH3Ref2VAModel(xFuserMiniMaxH3Model):
             width=input_args["width"],
             num_frames=input_args["num_frames"],
             num_inference_steps=input_args["num_inference_steps"],
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=torch.Generator(device=get_device_name()).manual_seed(input_args["seed"]),
             output_type="pt",
         )
         return MiniMaxH3DiffusionOutput(

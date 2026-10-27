@@ -28,8 +28,54 @@ The PipeFusion pipeline workflow when $M$ = $N$ =4 is shown in the following pic
     <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/workflow.png" alt="Pipeline Image">
 </div>
 
+### Composition and validation boundaries
 
-We have evaluated the accuracy of PipeFusion, DistriFusion and the baseline as shown bolow. To conduct the FID experiment, follow the detailed instructions provided in the [documentation](../../docs/fid/FID.md).
+- Parallel VAE encoding/decoding is scheduled independently of the DiT pipeline
+  and can compose with PipeFusion when the model advertises the corresponding
+  capability. Tile-parallel decoding remains subject to the model's normal tile
+  geometry and memory validation.
+- Step caching is not yet supported. It requires per-patch histories and cache
+  decisions synchronized across pipeline stages, so configuration rejects
+  `--cache_method` with PipeFusion instead of applying an incorrect stage-local
+  cache.
+- `--memory_efficient_replicated_load` has a PipeFusion-specific meaning on
+  runners that support stage-local meta construction (currently the FLUX
+  family): each rank constructs and streams only its local transformer blocks.
+  Replicated pipeline components remain eager. SD3.5's composition wrapper
+  cannot construct a stage-local transformer on meta and explicitly rejects
+  this option.
+- A stage-local transformer cannot also be FSDP-wrapped because pipeline ranks
+  own different blocks. Configuration therefore requires
+  `--fully_shard_components` whenever FSDP and PipeFusion are combined, and the
+  loader rejects stage-local names. Replicated components such as a text
+  encoder may be selected for targeted FSDP.
+- Quantization is applied while stage-local blocks stream from the checkpoint,
+  before final device placement. Checkpoint names are preserved across stage
+  slicing so each local block still maps to its original global layer.
+- FLUX.2 reference-image conditioning uses a mixed generated/reference patch
+  layout. Static reference tokens participate in transformer attention while
+  scheduler feedback updates and returns only generated tokens.
+
+### `torch.compile` warmup
+
+Pipeline stages reach their first transformer call sequentially, so ordinary
+lazy compilation also runs sequentially and can exceed the P2P watchdog on
+large models. PipeFusion avoids that startup bottleneck by:
+
+1. running a short eager pass that captures each rank's real full-sequence and
+   patch-stage inputs;
+2. compiling only the blocks retained by each local stage;
+3. replaying the captured stage calls locally on every rank at the same time;
+4. clearing temporary KV/runtime state before a short end-to-end validation.
+
+The replay never performs pipeline communication. Models with additional
+mutable PipeFusion state must expose `reset_pipefusion_state()` on their stage
+wrapper so capture data cannot leak into inference. The generic capture,
+snapshot, and replay implementation lives in
+`xfuser/model_executor/pipefusion/compile.py`.
+
+
+We have evaluated the accuracy of PipeFusion, DistriFusion and the baseline as shown below. To conduct the FID experiment, follow the detailed instructions provided in the [documentation](../../docs/fid/FID.md).
 
 <div align="center">
     <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/image_quality.png" alt="image_quality">

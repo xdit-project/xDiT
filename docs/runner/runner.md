@@ -115,6 +115,7 @@ Individual model classes that inherit from `xFuserModel`:
 | Lumina-Image-2.0 | `Lumina2`, `Lumina-Image-2.0`, `Alpha-VLLM/Lumina-Image-2.0` |
 | MiniMax-H3 | `MiniMaxAI/MiniMax-H3`, `MiniMax-H3`, `MiniMax-H3-Ref2VA` |
 | MiniMax-H3 Turbo (lightx2v LoRA) | `MiniMax-H3-Turbo` |
+| VDN-H3 | `OpenVDN/vdn-minimax-h3`, `VDN-H3` |
 | Prism (preview-alpha) | `Prism`, `Prism-preview-alpha`, `FrancisRing/Prism` |
 | FastH3 Preview v1 | `FastH3`, `FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree`, `FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1300`, `FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1900` |
 | FastH3 Preview v1 (Dense) | `FastH3-Dense`, `FastVideo/FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree` |
@@ -308,6 +309,7 @@ fill it from rank 0.
 | CausalWan | No shared load route declared; direct load with manual single-file fallback | None | Rejected before allocation: fallback discovery is not collective-safe | No |
 | Ideogram 4 | Streaming; both the conditional and unconditional transformer declared | None | Both transformers; text encoder loads normally | Yes, for both transformers; the `trust_remote_code` text encoder is filled eagerly because the manifest cannot read its parameter names ahead of the load |
 | MiniMax-H3 and MiniMax-H3-Ref2VA | Modular `ModularPipeline` construction with fused QKV projections; direct load only | None | Rejected before allocation: fusion rewrites attention into `attn.to_qkv`, so live tensor names stop matching checkpoint keys | No |
+| VDN-H3 | The MiniMax-H3 modular pipeline with its transformer replaced by the materialized VDN transformer from `--vdn_transformer_dir`; fused QKV projections; direct load only | None | Not exposed by this runner | No |
 | Prism | Vendored MOVA module tree built on meta from the `MOVA-360p` configs; the single Prism state dict is read straight onto each rank's device; no shared load route declared | None | Not exposed by this runner | No |
 
 The FLUX PipeFusion loading branches construct their complete pipelines directly, so they do not use transformer streaming, and replicated meta-load is excluded whenever PipeFusion is active. Each runner keeps class-level `load_support` beside its capabilities and settings. The declaration positively names eligible meta transformers and text encoders and records standard-collective and local-blockwise routes independently; a requested unsupported meta mode fails before model allocation.
@@ -326,7 +328,7 @@ A listed target is only half the answer: the format still has to survive the har
 | MiniMax-H3 | `transformer.transformer_blocks`; the Ref2VA variant declares `transformer_ref.transformer_blocks` | No |
 | Cosmos3-Super and Cosmos3-Nano | `transformer.layers` | No |
 | Z-Image and Z-Image-Turbo | No | `transformer.layers`, `transformer.noise_refiner`, and `transformer.context_refiner`; `context_refiner` drops out under sequence parallelism |
-| FLUX.1, FLUX.1-Kontext, FLUX.2-klein, FLUX.3 Image klein and klein base, Wan 2.1 VACE, Qwen-Image variants, Stable Diffusion 3.5, HunyuanVideo variants, LTX variants, CausalWan, Prism | No | No |
+| FLUX.1, FLUX.1-Kontext, FLUX.2-klein, FLUX.3 Image klein and klein base, Wan 2.1 VACE, Qwen-Image variants, Stable Diffusion 3.5, HunyuanVideo variants, LTX variants, CausalWan, Prism, VDN-H3 | No | No |
 
 Several runners hold part of an FP4 target at FP8 where full FP4 costs too much
 quality: Wan 2.1 I2V and T2V keep blocks 0-9 and 30-39, Wan 2.2 TI2V keeps
@@ -415,6 +417,8 @@ These examples show how the flags are wired, not tuned recommendations: output q
 | `--audio_prompt` | Prompt for the audio stream; defaults to `--prompt` | Optional for `Prism` |
 | `--bsa_sparsity` | `TRITON_BSA`: fraction of 4x4x4 key blocks each query block skips (top-k); default 0.75 | Optional for `Prism` with `--attention_backend TRITON_BSA` |
 | `--bsa_cdf_threshold` | `TRITON_BSA`: also keep the key blocks holding this much attention weight (top-p), floored at the top-k count; 0 disables; default 0.2 | Optional for `Prism` with `--attention_backend TRITON_BSA` |
+| `--vdn_transformer_dir` | Materialized VDN transformer directory (contains `transformer/`); the `VDN_H3_TRANSFORMER_DIR` environment variable is the fallback | `VDN-H3` |
+| `--vdn_window_backend` | Window-softmax kernel: `sdpa`, `aiter` (AITER Triton varlen), `aiter_ck`, or `aiter_fp8`; default derived from `--attention_backend` (`SDPA` -> `sdpa`, `AITER` -> `aiter_ck`, `AITER_FP8` -> `aiter_fp8`) | Optional for `VDN-H3` |
 
 ### Benchmarking
 
@@ -486,6 +490,36 @@ torchrun --nproc_per_node=8 -m xfuser.runner \
     --attention_backend TRITON_BSA \
     --cross_attention_backend AITER
 ```
+
+### Video with Audio from Text (VDN-H3)
+
+VDN-H3 replaces each MiniMax-H3 attention layer with a window softmax branch plus a
+Video-Delta linear branch. Its transformer is first materialized once from the
+`OpenVDN/vdn-minimax-h3` checkpoint (the two VDN LoRA adapters folded into the
+MiniMax-H3 base, plus the linear-branch weights); the rest of the pipeline is
+loaded from `MiniMaxAI/MiniMax-H3`.
+
+```bash
+python scripts/vdn/materialize_transformer.py --output /path/to/vdn-h3
+
+torchrun --nproc_per_node=8 -m xfuser.runner \
+    --model OpenVDN/vdn-minimax-h3 \
+    --vdn_transformer_dir /path/to/vdn-h3 \
+    --task t2va \
+    --prompt "A red fox trots through a snowy pine forest." \
+    --num_frames 124 \
+    --ulysses_degree 8 \
+    --use_parallel_vae \
+    --gemm_quantization fp8 \
+    --attention_backend SDPA \
+    --vdn_window_backend aiter_ck \
+    --use_torch_compile
+```
+
+The `stage-dmd-step-250` checkpoint is an 8-step distill, so `--num_inference_steps`
+defaults to 8 and other values are rejected. `num_inference_steps` counts transformer
+forwards here: the model card's diffusers `num_inference_steps=9` (9 sigma points) is
+the same schedule.
 
 ### Benchmarking with Multiple Iterations
 

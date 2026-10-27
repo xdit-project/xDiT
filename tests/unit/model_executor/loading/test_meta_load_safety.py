@@ -98,6 +98,38 @@ def test_tensor_layout_contract_captures_specs_ties_and_persistence(runtime):
     )
 
 
+def test_stage_local_block_fill_uses_global_checkpoint_names(runtime):
+    torch = runtime.torch
+    from xfuser.model_executor.models.runner_models.loading.checkpoint import (
+        CheckpointManifest,
+    )
+
+    block = torch.nn.Linear(2, 2, bias=False)
+    block._xfuser_checkpoint_fqn = "blocks.4"
+    component = torch.nn.Module()
+    component.blocks = torch.nn.ModuleList([block])
+    filler = runtime.meta._BlockwiseDiskFiller(
+        object(),
+        component,
+        ["blocks"],
+        CheckpointManifest({}),
+        "cpu",
+        collective=False,
+    )
+    required = []
+    filler._assert_same_layout = lambda _module: None
+    filler._reader_for_block = lambda _index: 0
+    filler._require_checkpoint_keys = lambda keys, src=0: required.extend(keys)
+    filler._read_tensors = lambda *_args, **_kwargs: None
+    filler._reconcile_tensor_specs = lambda *_args, **_kwargs: None
+    filler._broadcast = lambda *_args, **_kwargs: None
+    filler._retire_keys = lambda _keys: None
+
+    filler.fill_block(block, 1)
+
+    assert required == ["blocks.4.weight"]
+
+
 @pytest.mark.parametrize(
     "field,local",
     [

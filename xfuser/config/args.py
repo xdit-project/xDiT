@@ -164,6 +164,8 @@ class xFuserArgs:
     # Model arguments
     model: str = ""
     download_dir: Optional[str] = None
+    vdn_transformer_dir: Optional[str] = None
+    vdn_window_backend: Optional[str] = None
     trust_remote_code: bool = False
     lora_path: Optional[str] = None
     lora_weight_name: Optional[str] = None
@@ -330,6 +332,20 @@ class xFuserArgs:
         self.determinism_check_report_ranks = _normalize_determinism_check_report_ranks(
             self.determinism_check_report_ranks
         )
+        if self.warmup_steps < 0:
+            raise ValueError("--warmup_steps must be greater than or equal to 0")
+        if self.pipefusion_parallel_degree > 1 and self.warmup_steps < 1:
+            raise ValueError(
+                "--warmup_steps must be at least 1 with PipeFusion so KV caches "
+                "are initialized before asynchronous patch updates"
+            )
+        if self.num_pipeline_patch is not None and self.num_pipeline_patch < 1:
+            raise ValueError("--num_pipeline_patch must be greater than 0")
+        if self.attn_layer_num_for_pp is not None:
+            if len(self.attn_layer_num_for_pp) != self.pipefusion_parallel_degree:
+                raise ValueError("--attn_layer_num_for_pp must contain one entry per PipeFusion stage")
+            if any(layer_count < 1 for layer_count in self.attn_layer_num_for_pp):
+                raise ValueError("--attn_layer_num_for_pp entries must be greater than 0")
         if self.profile_with_stack and not self.profile:
             logger.warning("--profile_with_stack has no effect without --profile; no profiles will be outputted.")
         if self.fully_shard_components is not None:
@@ -338,6 +354,12 @@ class xFuserArgs:
                 raise ValueError("--fully_shard_components requires at least one component")
             if self.fully_shard_degree <= 1:
                 raise ValueError("--fully_shard_components requires --fully_shard_degree greater than 1")
+        if self.pipefusion_parallel_degree > 1 and self.fully_shard_degree > 1 and self.fully_shard_components is None:
+            raise ValueError(
+                "Full-transformer FSDP cannot be combined with PipeFusion because pipeline stages "
+                "own different transformer blocks. Select replicated components explicitly with "
+                "--fully_shard_components."
+            )
         self._resolve_gemm_quantization()
         if self.cache_method is None:
             if self.use_fbcache:
@@ -354,6 +376,11 @@ class xFuserArgs:
                     stacklevel=2,
                 )
                 self.cache_method = "teacache"
+        if self.pipefusion_parallel_degree > 1 and self.cache_method is not None:
+            raise ValueError(
+                "Step caching is not supported with PipeFusion yet; it requires per-patch histories "
+                "and synchronized cache decisions."
+            )
 
     @property
     def gemm_quantization_spec(self) -> GemmQuantizationSpec:
@@ -470,6 +497,23 @@ class xFuserArgs:
             type=nullable_str,
             default=xFuserArgs.download_dir,
             help="Directory to download and load the weights, default to the default cache dir of huggingface.",
+        )
+        model_group.add_argument(
+            "--vdn_transformer_dir",
+            type=nullable_str,
+            default=xFuserArgs.vdn_transformer_dir,
+            help="Path to the materialized VDN-H3 transformer directory (must contain a "
+            "transformer/ subfolder). Overrides the VDN_H3_TRANSFORMER_DIR environment "
+            "variable. Required when --model is OpenVDN/vdn-minimax-h3 (or VDN-H3).",
+        )
+        model_group.add_argument(
+            "--vdn_window_backend",
+            type=nullable_str,
+            default=xFuserArgs.vdn_window_backend,
+            choices=["sdpa", "aiter", "aiter_ck", "aiter_fp8"],
+            help="VDN-H3 only: override the window-softmax varlen kernel. By default it is "
+            "derived from --attention_backend (SDPA->sdpa, AITER->aiter_ck, AITER_FP8->aiter_fp8); "
+            "'aiter' selects AITER's Triton varlen bf16 kernel.",
         )
         model_group.add_argument(
             "--trust-remote-code",
@@ -815,6 +859,23 @@ class xFuserArgs:
         )
         parser.add_argument("--lora_weight_name", type=nullable_str, default=None)
         parser.add_argument("--lora_scale", type=float, default=1.0)
+        parser.add_argument(
+            "--vdn_transformer_dir",
+            type=nullable_str,
+            default=xFuserArgs.vdn_transformer_dir,
+            help="Path to the materialized VDN-H3 transformer directory (must contain a "
+            "transformer/ subfolder). Overrides the VDN_H3_TRANSFORMER_DIR environment "
+            "variable. Required when --model is OpenVDN/vdn-minimax-h3 (or VDN-H3).",
+        )
+        parser.add_argument(
+            "--vdn_window_backend",
+            type=nullable_str,
+            default=xFuserArgs.vdn_window_backend,
+            choices=["sdpa", "aiter", "aiter_ck", "aiter_fp8"],
+            help="VDN-H3 only: override the window-softmax varlen kernel. By default it is "
+            "derived from --attention_backend (SDPA->sdpa, AITER->aiter_ck, AITER_FP8->aiter_fp8); "
+            "'aiter' selects AITER's Triton varlen bf16 kernel.",
+        )
         parser.add_argument("--use_parallel_vae", help="Enable parallel VAE.", action="store_true")
         parser.add_argument(
             "--use_torch_compile",
@@ -856,6 +917,25 @@ class xFuserArgs:
             type=int,
             default=1,
             help="Pipefusion parallel degree. Indicates the number of pipeline stages.",
+        )
+        parser.add_argument(
+            "--num_pipeline_patch",
+            type=int,
+            default=None,
+            help="Number of patches used by the PipeFusion schedule. Defaults to the pipeline degree.",
+        )
+        parser.add_argument(
+            "--attn_layer_num_for_pp",
+            default=None,
+            nargs="*",
+            type=int,
+            help="Number of transformer layers assigned to each PipeFusion stage.",
+        )
+        parser.add_argument(
+            "--warmup_steps",
+            type=int,
+            default=1,
+            help="Number of synchronous denoising steps before the asynchronous PipeFusion schedule.",
         )
         parser.add_argument(
             "--tensor_parallel_degree",

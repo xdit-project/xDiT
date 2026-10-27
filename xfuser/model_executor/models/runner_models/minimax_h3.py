@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import functools
 import inspect
 from types import MethodType, SimpleNamespace
@@ -60,6 +61,22 @@ _SUPPORTED_ATTN_BACKENDS = frozenset(
     }
 ) | (AITER_MHA_V4_ONLY_BACKEND_SET - _UNSERVED_MHA_V4_BACKENDS)
 _FASTH3_ATTN_BACKENDS = VSA_H3_BACKENDS
+# VDN-H3's window varlen executor only implements these three; it does not use
+# the CUDNN / NVTE_FP8 / MHA-v4 paths the base H3 advertises.
+_VDN_SUPPORTED_ATTN_BACKENDS = frozenset(
+    {
+        AttentionBackendType.SDPA,
+        AttentionBackendType.AITER,
+        AttentionBackendType.AITER_FP8,
+    }
+)
+# --attention_backend -> VDN window kernel. AITER maps to the CK/ASM varlen; the
+# Triton varlen ("aiter") is reachable only via --vdn_window_backend.
+_VDN_WINDOW_BACKEND_FOR_ATTENTION = {
+    AttentionBackendType.SDPA: "sdpa",
+    AttentionBackendType.AITER: "aiter_ck",
+    AttentionBackendType.AITER_FP8: "aiter_fp8",
+}
 _SUPPORTED_ULYSSES_DEGREES = frozenset({1, 2, 4, 8})
 _SUPPORTED_TASKS = frozenset({"t2va", "i2va", "l2va", "fl2va", "ref2va"})
 FASTH3_V1_DATAFREE_MODEL_ID = "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree"
@@ -806,6 +823,175 @@ class xFuserFastH3V2Model(xFuserFastH3Model):
         xFuserMiniMaxH3Model._validate_args(self, input_args)
         if input_args["num_inference_steps"] != 8:
             raise ValueError(f"FastH3 V2 requires 8 transformer forwards, got {input_args['num_inference_steps']}.")
+
+
+VDN_H3_MODEL_ID = "OpenVDN/vdn-minimax-h3"
+# The materialized VDN transformer (base H3 + folded LoRA + linear branch) in
+# diffusers layout. Produced by scripts/vdn/materialize_transformer.py.
+VDN_H3_TRANSFORMER_DIR_ENV = "VDN_H3_TRANSFORMER_DIR"
+
+
+@register_model(VDN_H3_MODEL_ID)
+@register_model("VDN-H3")
+class xFuserVDNMiniMaxH3Model(xFuserMiniMaxH3Model):
+    """VDN-H3 (Video DeltaNet MiniMax-H3) runner.
+
+    Reuses the base MiniMax-H3 modular pipeline (scheduler, VAEs, Qwen3-VL text
+    encoder), but swaps the transformer for the VDN hybrid-attention wrapper
+    loaded from a materialized VDN transformer dir. Supports Ulysses sequence
+    parallelism (head-sharded attention) and torch.compile of each repeated
+    transformer block (fullgraph=True); the packed-layout geometry is primed from
+    position_ids in an eager forward pre-hook outside the compiled blocks.
+    """
+
+    default_input_values = DefaultInputValues(
+        height=768,
+        width=1344,
+        num_frames=124,
+        # stage-dmd-step-250 is the 8-NFE distill. num_inference_steps counts
+        # transformer forwards (_count_steps_as_forwards), so 8 forwards use the
+        # 9-point sigma grid that the model card's num_inference_steps=9 means.
+        num_inference_steps=8,
+    )
+
+    settings = copy.deepcopy(xFuserMiniMaxH3Model.settings)
+    # Pipeline components (scheduler / VAEs / text encoder) come from the base
+    # H3 repo; only the transformer is VDN-specific.
+    settings.model_name = "MiniMaxAI/MiniMax-H3"
+    settings.output_name = "vdn_minimax_h3"
+    settings.valid_tasks = ["t2va"]
+    # VDN-H3 runs FP8 on all five transformer-block linear types, not the base
+    # H3 two-layer allowlist. The extra three (window/linear-branch outputs and
+    # the FFN down projection) measured -0.44 s on example_2 (345f, 8x MI355X)
+    # with same-seed PSNR/SSIM against bf16 inside the two-layer band.
+    settings.fp8_gemm_include_suffixes = (
+        "attn.to_qkv",  # fused Q/K/V projection
+        "ff.net.0.proj",  # SwiGLU up/gate projection
+        "attn.to_out.0",  # window-attention output projection
+        "attn.to_out_linear",  # linear-attention (Video-Delta) output projection
+        "ff.net.2",  # FFN down projection
+    )
+
+    # FSDP / fp4 / hybrid-attn schedule off. Ulysses is supported via the VDN
+    # processor's head-sharded all-to-all path (per-head FLOP split, correct on
+    # N GPUs). FP8 GEMMs are opt-in via --gemm_quantization fp8.
+    # ModelCapabilities is frozen, so build one via replace().
+    capabilities = dataclasses.replace(
+        xFuserMiniMaxH3Model.capabilities,
+        ulysses_degree=True,
+        fully_shard_degree=False,
+        use_fp8_gemms=True,
+        use_fp4_gemms=False,
+        use_hybrid_attn_schedule=False,
+    )
+
+    supported_attn_backends = _VDN_SUPPORTED_ATTN_BACKENDS
+
+    def _resolve_window_backend(self) -> str:
+        """Pick the window varlen kernel: --vdn_window_backend wins, else derive
+        it from --attention_backend (SDPA/AITER/AITER_FP8), defaulting to SDPA."""
+        override = getattr(self.config, "vdn_window_backend", None)
+        if override:
+            return override
+        backend = _parse_attention_backend(getattr(self.config, "attention_backend", None), "attention backend")
+        return _VDN_WINDOW_BACKEND_FOR_ATTENTION.get(backend, "sdpa")
+
+    def _vdn_transformer_dir(self) -> str:
+        import os
+
+        # Prefer the explicit CLI/config argument, then fall back to the env var
+        # for backward compatibility.
+        directory = getattr(self.config, "vdn_transformer_dir", None) or os.environ.get(VDN_H3_TRANSFORMER_DIR_ENV)
+        if not directory:
+            raise RuntimeError(
+                "VDN-H3 needs the materialized transformer dir. Run "
+                "scripts/vdn/materialize_transformer.py, then pass "
+                "--vdn_transformer_dir <dir> (or set "
+                f"${VDN_H3_TRANSFORMER_DIR_ENV})."
+            )
+        if not os.path.isdir(os.path.join(directory, "transformer")):
+            raise RuntimeError(
+                f"${VDN_H3_TRANSFORMER_DIR_ENV}={directory!r} has no transformer/ "
+                "subfolder; point it at the materializer output directory."
+            )
+        return directory
+
+    def _validate_args(self, input_args: dict) -> None:
+        xFuserMiniMaxH3Model._validate_args(self, input_args)
+        if input_args["num_inference_steps"] != 8:
+            raise ValueError(
+                "VDN-H3 stage-dmd-step-250 requires 8 transformer forwards (9 sigma grid "
+                "points; the model card's diffusers num_inference_steps=9 is "
+                f"num_inference_steps=8 here). Got num_inference_steps={input_args['num_inference_steps']}."
+            )
+
+    def _load_model(self):
+        from diffusers import ModularPipeline
+        from xfuser.model_executor.models.transformers.vdn_minimax_h3.transformer import (
+            xFuserMiniMaxH3VDNTransformer3DWrapper,
+        )
+        from xfuser.model_executor.models.transformers.vdn_minimax_h3.window_softmax import (
+            set_window_backend,
+        )
+
+        vdn_dir = self._vdn_transformer_dir()
+        set_window_backend(self._resolve_window_backend())
+        workflow = "t2va" if self.config.task == "t2va" else "fl2va"
+        log(f"Loading VDN-H3 {workflow.upper()} components (transformer: {vdn_dir})")
+        if self.config.text_encoder_tp_degree <= 1:
+            _patch_minimax_h3_text_encoder_broadcast()
+        pipe = ModularPipeline.from_pretrained(
+            self.settings.model_name,
+            workflow=workflow,
+        )
+        transformer = xFuserMiniMaxH3VDNTransformer3DWrapper.from_pretrained(
+            vdn_dir,
+            subfolder="transformer",
+            dtype=torch.bfloat16,
+            attention_backend=_parse_attention_backend(
+                getattr(self.config, "attention_backend", None),
+                "attention backend",
+            ),
+        )
+        pipe.update_components(transformer=transformer)
+        pipe.load_components(dtype=torch.bfloat16)
+        pipe.transformer.fuse_qkv_projections()
+        # The fused to_qkv projections are new modules, created in training mode.
+        pipe.transformer.eval()
+        pipe.text_encoder.lm_head = None
+        self._parallelize_text_encoder(pipe.text_encoder)
+        # MiniMaxH3Scheduler runs one step fewer than requested, so count
+        # scheduler steps as transformer forwards -- same as the base H3 and
+        # Ref2VA runners.
+        _count_steps_as_forwards(pipe.scheduler)
+        _count_steps_as_forwards(pipe.audio_scheduler)
+        return pipe
+
+    def _compile_model(self, input_args: dict) -> None:
+        # The VDN attention primes its packed-layout geometry from position_ids
+        # *values* in an eager forward pre-hook (device reads), so it stays eager.
+        # The blocks do no device-value reads, so each repeated block compiles as
+        # one full graph. Compiling transformer.forward instead puts all blocks in
+        # one graph, which compiled 2.3x slower and ran slower on 8x MI355X.
+        mode = self._get_compile_mode()
+        vae = getattr(self.pipe, "vae", None)
+        if vae is not None:
+            vae.compile_repeated_blocks(mode=mode, fullgraph=False)
+            log("VDN-H3: compiled video VAE decoder blocks.")
+
+        if self.config.fully_shard_degree > 1:
+            # Sharded compile path not validated for VDN yet; keep transformer
+            # eager rather than risk an FSDP + hybrid-attention interaction.
+            log("VDN-H3: fully_shard_degree>1, keeping transformer eager (sharded compile not validated).")
+            return
+
+        self._enable_compute_comm_overlap()
+        transformer = getattr(self.pipe, self._transformer_component_name)
+        transformer.compile_repeated_blocks(mode=mode, fullgraph=True)
+        compile_args = copy.deepcopy(input_args)
+        compile_args["num_inference_steps"] = self._warmup_num_inference_steps
+        self._run_timed_pipe(compile_args)
+        log("VDN-H3: compiled repeated transformer blocks (fullgraph=True).")
 
 
 @register_model("MiniMax-H3-Ref2VA")

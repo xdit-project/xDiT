@@ -18,9 +18,18 @@ def test_pipefusion_allows_targeted_fsdp_for_replicated_components():
     assert args.fully_shard_components == ["text_encoder"]
 
 
-def test_pipefusion_rejects_step_caching_until_patch_histories_are_supported():
-    with pytest.raises(ValueError, match="per-patch histories"):
+def test_pipefusion_rejects_non_native_step_cache_methods():
+    with pytest.raises(ValueError, match="requires --cache_method pipefusion"):
         xFuserArgs(pipefusion_parallel_degree=2, cache_method="fbcache")
+
+
+def test_pipefusion_accepts_its_patch_aware_cache_method():
+    args = xFuserArgs(
+        pipefusion_parallel_degree=2,
+        cache_method="pipefusion",
+    )
+
+    assert args.cache_method == "pipefusion"
 
 
 @pytest.mark.parametrize(

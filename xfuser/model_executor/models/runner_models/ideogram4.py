@@ -7,6 +7,7 @@ import torch
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
 from xfuser.core.utils.runner_utils import log
+from xfuser.envs import get_device_name
 from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
@@ -492,7 +493,7 @@ class xFuserIdeogram4Model(xFuserModel):
             guidance_schedule=guidance_schedule,
             prompt_upsampling=self._should_upsample_prompt(input_args["prompt"]),
             max_sequence_length=input_args["max_sequence_length"],
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=torch.Generator(device=get_device_name()).manual_seed(input_args["seed"]),
             output_type=input_args.get("output_type", "pil"),
         )
         return DiffusionOutput(images=output.images, pipe_args=input_args)

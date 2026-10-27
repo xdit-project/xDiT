@@ -58,7 +58,7 @@ def _tiny_klein():
     )
 
 
-def _worker(rank, world_size, init_method, parallel_vae=False, reference_image=False):
+def _worker(rank, world_size, init_method, parallel_vae=False, reference_image=False, warmup_steps=1):
     from xfuser.model_executor.pipelines.pipeline_flux2_klein import xFuserFlux2KleinPipeline
 
     torch.cuda.set_device(rank)
@@ -73,7 +73,7 @@ def _worker(rank, world_size, init_method, parallel_vae=False, reference_image=F
         model="tiny",
         pipefusion_parallel_degree=world_size,
         num_pipeline_patch=2,
-        warmup_steps=1,
+        warmup_steps=warmup_steps,
         attention_backend="sdpa",
         use_parallel_vae=parallel_vae,
     )
@@ -88,7 +88,7 @@ def _worker(rank, world_size, init_method, parallel_vae=False, reference_image=F
             prompt_embeds=prompt_embeds,
             height=16,
             width=16,
-            num_inference_steps=2,
+            num_inference_steps=warmup_steps + 1,
             guidance_scale=1.0,
             generator=torch.Generator().manual_seed(1),
             output_type="np" if parallel_vae else "latent",
@@ -141,4 +141,15 @@ def test_flux2_pipefusion_preserves_reference_image_conditioning(accelerator_ran
         timeout=240,
         init_filename="flux2-pipefusion-reference-image",
         args=(False, True),
+    )
+
+
+@pytest.mark.multi_gpu
+def test_flux2_pipefusion_reference_image_survives_several_warmup_steps(accelerator_ranks):
+    accelerator_ranks(
+        _worker,
+        world_size=2,
+        timeout=240,
+        init_filename="flux2-pipefusion-reference-image-warmup",
+        args=(False, True, 2),
     )

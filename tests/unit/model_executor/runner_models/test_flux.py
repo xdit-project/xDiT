@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from xfuser import xFuserArgs
 from xfuser.model_executor.models.runner_models import flux
 from xfuser.model_executor.models.runner_models.flux import (
     xFuserFluxKontextModel,
@@ -48,3 +49,27 @@ def test_ulysses_runs_record_the_requested_size(monkeypatch, flux_runtime_state,
 
     assert output.images == ["image"]
     assert (state.input_config.height, state.input_config.width) == (size, size)
+
+
+@pytest.fixture
+def single_process(monkeypatch):
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "1")
+
+
+@pytest.mark.parametrize(
+    ("model_cls", "model"),
+    [
+        (flux.xFuserFlux2Model, "FLUX.2-dev"),
+        (flux.xFuserFlux2Klein9BModel, "FLUX.2-klein-9B"),
+        (flux.xFuserFlux2Klein4BModel, "FLUX.2-klein-4B"),
+    ],
+)
+def test_flux2_pipefusion_refuses_parallel_vae_at_construction(single_process, tmp_path, model_cls, model):
+    # The FLUX.2 PipeFusion pipeline decodes on its last stage only, so a decoder
+    # sharded across every stage would wait forever for the other stages.
+    args = {"model": model, "pipefusion_parallel_degree": 2, "output_directory": str(tmp_path)}
+    model_cls(xFuserArgs(**args))
+
+    with pytest.raises(ValueError, match="--use_parallel_vae is not supported with --pipefusion_parallel_degree"):
+        model_cls(xFuserArgs(**args, use_parallel_vae=True))

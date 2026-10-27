@@ -187,8 +187,8 @@ def _block_local_targets(targets, block_path):
 
 
 def _target_filter(targets, excluded_targets=(), include_suffixes=None):
-    return (
-        lambda _module, fqn: any(not target or fqn == target or fqn.startswith(f"{target}.") for target in targets)
+    return lambda _module, fqn: (
+        any(not target or fqn == target or fqn.startswith(f"{target}.") for target in targets)
         and not any(module_path_is_covered(fqn, target) for target in excluded_targets)
         and (not include_suffixes or fqn.endswith(tuple(include_suffixes)))
     )

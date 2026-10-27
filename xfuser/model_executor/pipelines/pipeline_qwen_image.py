@@ -423,7 +423,7 @@ class QwenPipeFusionMixin:
             elif is_dp_last_group():
                 self._release_transformer_kv_cache()
                 image = self.vae.decode(prepare_latents(latents), return_dict=False)[0][:, :, 0]
-        if not is_dp_last_group():
+        if not self.is_dp_last_group():
             return None
         if output_type == "latent":
             image = latents

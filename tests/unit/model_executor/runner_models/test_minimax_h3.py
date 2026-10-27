@@ -674,6 +674,54 @@ def test_vdn_step_count_runs_the_distilled_9_point_grid(monkeypatch):
     assert grid_points == [9]
 
 
+def test_vdn_load_leaves_the_fused_transformer_in_eval_mode(monkeypatch):
+    import diffusers
+
+    from xfuser.model_executor.models.runner_models import minimax_h3
+    from xfuser.model_executor.models.runner_models.minimax_h3 import xFuserVDNMiniMaxH3Model
+    from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
+        xFuserMiniMaxH3Transformer3DWrapper,
+    )
+    from xfuser.model_executor.models.transformers.vdn_minimax_h3 import transformer as vdn_transformer
+    from xfuser.model_executor.models.transformers.vdn_minimax_h3 import window_softmax
+
+    class FakePipe:
+        def __init__(self):
+            self.text_encoder = SimpleNamespace(lm_head=object())
+            self.scheduler = SimpleNamespace(set_timesteps=lambda n, device=None: None)
+            self.audio_scheduler = SimpleNamespace(set_timesteps=lambda n, device=None: None)
+
+        def update_components(self, transformer):
+            self.transformer = transformer
+
+        def load_components(self, dtype):
+            pass
+
+    # from_pretrained returns modules in eval mode; the tiny base wrapper fuses QKV like the VDN one.
+    loaded = xFuserMiniMaxH3Transformer3DWrapper(**_tiny_config()).eval()
+    monkeypatch.setattr(diffusers.ModularPipeline, "from_pretrained", lambda *args, **kwargs: FakePipe())
+    monkeypatch.setattr(
+        vdn_transformer.xFuserMiniMaxH3VDNTransformer3DWrapper,
+        "from_pretrained",
+        lambda *args, **kwargs: loaded,
+    )
+    monkeypatch.setattr(window_softmax, "set_window_backend", lambda name: None)
+    monkeypatch.setattr(minimax_h3, "log", lambda message: None)
+    model = SimpleNamespace(
+        settings=SimpleNamespace(model_name="OpenVDN/vdn-minimax-h3"),
+        config=SimpleNamespace(task="t2va", text_encoder_tp_degree=2, attention_backend="SDPA"),
+        _vdn_transformer_dir=lambda: "/unused",
+        _resolve_window_backend=lambda: "sdpa",
+        _parallelize_text_encoder=lambda text_encoder: None,
+    )
+
+    pipe = xFuserVDNMiniMaxH3Model._load_model(model)
+
+    assert pipe.transformer is loaded
+    assert any(name.endswith("to_qkv") for name, _ in loaded.named_modules())
+    assert [name for name, module in loaded.named_modules() if module.training] == []
+
+
 def test_minimax_h3_text_encoder_tp_plan():
     from torch.distributed.tensor.parallel import ColwiseParallel, RowwiseParallel
 

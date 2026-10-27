@@ -956,6 +956,8 @@ class xFuserVDNMiniMaxH3Model(xFuserMiniMaxH3Model):
         pipe.update_components(transformer=transformer)
         pipe.load_components(dtype=torch.bfloat16)
         pipe.transformer.fuse_qkv_projections()
+        # The fused to_qkv projections are new modules, created in training mode.
+        pipe.transformer.eval()
         pipe.text_encoder.lm_head = None
         self._parallelize_text_encoder(pipe.text_encoder)
         # MiniMaxH3Scheduler runs one step fewer than requested, so count

@@ -1021,6 +1021,16 @@ def test_a_masked_pack_reaches_the_varlen_and_mask_applying_backends_only():
     assert accepting == expected, f"unexpected: {sorted(accepting - expected)}, missing: {sorted(expected - accepting)}"
 
 
+def test_a_backend_serves_key_padding_exactly_when_the_masked_pack_reaches_its_kernel():
+    """usp refuses a batch of prompts of different lengths on any other backend, so the property it reads
+    must agree with what the specs accept for a masked pack."""
+    from xfuser.core.attention import registry
+
+    serving = {backend.name for backend, spec in registry.REGISTRY.items() if spec.serves_key_padding}
+    expected = VARLEN_CAPABLE | MASK_APPLYING
+    assert serving == expected, f"unexpected: {sorted(serving - expected)}, missing: {sorted(expected - serving)}"
+
+
 # --------------------------------------------------------------------------
 # every spec points at code that exists
 # --------------------------------------------------------------------------

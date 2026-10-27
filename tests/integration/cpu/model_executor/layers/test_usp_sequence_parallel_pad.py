@@ -95,8 +95,7 @@ def _wire_usp_to_gloo(torch, ulysses, ring):
             key, value = key[:, :, :valid_kv_len], value[:, :, :valid_kv_len]
         attn_mask = call.attention_kwargs.get("attn_mask")
         if attn_mask is not None:
-            # Like SDPA, which USP routes masked calls to when the selection (SDPA_FLASH here) cannot apply
-            # the mask: no log-sum-exp, so no ring attention.
+            # Like SDPA, which applies the mask: no log-sum-exp, so no ring attention.
             return torch.nn.functional.scaled_dot_product_attention(query, key, value, attn_mask=attn_mask), None
         return torch.ops.aten._scaled_dot_product_flash_attention_for_cpu(
             query, key, value, dropout_p=0.0, is_causal=call.is_causal
@@ -108,7 +107,8 @@ def _wire_usp_to_gloo(torch, ulysses, ring):
     ring_rank = dist.get_rank(PROCESS_GROUP.RING_PG)
     runtime_state = SimpleNamespace(
         fp8_comms=None,
-        attention_backend=AttentionBackendType.SDPA_FLASH,
+        # Selected for the mask: the registry's SDPA applies attn_mask, as the kernel above does.
+        attention_backend=AttentionBackendType.SDPA,
         runtime_config=SimpleNamespace(use_spargeattn_head_balance=False),
     )
     usp.PROCESS_GROUP = PROCESS_GROUP
@@ -136,6 +136,18 @@ def _key_mask(torch, case):
     mask[:, 7:11] = False
     mask[:, -3] = False
     return mask
+
+
+def _padded_key_mask(torch, case):
+    """The mask over the keys the backend sees: the real keys' mask with the False pad rows of the main keys in it."""
+    mask = _key_mask(torch, case)
+    if mask is None:
+        return None
+    pad = torch.zeros(1, PADDED_LEN - case["real_len"], dtype=torch.bool)
+    joint = JOINT_LEN if case.get("joint") else 0
+    if case.get("joint") == "front":
+        return torch.cat([mask[:, :joint], mask[:, joint:], pad], dim=1)
+    return torch.cat([mask[:, : mask.shape[1] - joint], pad, mask[:, mask.shape[1] - joint :]], dim=1)
 
 
 def _real_rows_error(torch, rank, world_size, case, output):
@@ -185,7 +197,7 @@ def _run_cases(torch, usp, rank, world_size, attention, cases):
             *local,
             is_causal=case.get("causal", False),
             attention_kwargs=attention_kwargs,
-            key_mask=_key_mask(torch, case),
+            key_mask=_padded_key_mask(torch, case),
             **joint,
         )
         errors[name] = _real_rows_error(torch, rank, world_size, case, output)
@@ -193,11 +205,15 @@ def _run_cases(torch, usp, rank, world_size, attention, cases):
 
 
 def _usp_with_key_mask(usp):
-    """USP as a wrapper calls it: the mask helper first, then USP with the backend and kwargs it returns."""
+    """USP as a wrapper calls it: the key padding first (the mask over every key, the pad included), then USP."""
+    from xfuser.model_executor.layers.attention_mask import MaskMetaCache
+
+    cache = MaskMetaCache()
 
     def call(query, key, value, key_mask=None, attention_kwargs=None, **kwargs):
-        attention_kwargs, backend = usp.key_padding_mask_attention_kwargs(key_mask, attention_kwargs)
-        return usp.USP(query, key, value, backend=backend, attention_kwargs=attention_kwargs, **kwargs)
+        padding = None if key_mask is None else usp.key_padding_mask(cache, None, lambda _key: key_mask)
+        attention_kwargs = usp.key_padding_attention_kwargs(attention_kwargs, padding)
+        return usp.USP(query, key, value, attention_kwargs=attention_kwargs, **kwargs)
 
     return call
 

@@ -339,9 +339,21 @@ def _init(rank, world_size, init_method, ulysses, ring):
     return engine_config
 
 
-def _build(model, tokens, device, engine_config, ring):
+def _cast(value, dtype):
+    """Floating tensors of a (nested) input in ``dtype``; masks and indices keep theirs."""
+    if isinstance(value, torch.Tensor):
+        return value.to(dtype) if value.is_floating_point() else value
+    if isinstance(value, (list, tuple)):
+        return type(value)(_cast(item, dtype) for item in value)
+    return {key: _cast(item, dtype) for key, item in value.items()} if isinstance(value, dict) else value
+
+
+def _build(model, tokens, device, engine_config, ring, backend=None, dtype=None):
     torch.manual_seed(0)
     reference, parallel, reference_inputs, parallel_inputs = _MODELS[model](device, tokens)
+    if dtype is not None:
+        reference, parallel = reference.to(dtype), parallel.to(dtype)
+        reference_inputs, parallel_inputs = _cast(reference_inputs, dtype), _cast(parallel_inputs, dtype)
     reference = reference.to(device).eval()
     # AITER's RMSNorm registers a `_ones_weight` buffer that the Diffusers
     # reference does not have; nothing else may differ.
@@ -352,15 +364,17 @@ def _build(model, tokens, device, engine_config, ring):
     # The runtime state a pipeline would set up, which the wrappers step.
     initialize_runtime_state(pipeline=_Pipeline(parallel), engine_config=engine_config)
     # SDPA proper has no ring path (ring=NEVER); its memory-efficient kernel does.
-    get_runtime_state().set_attention_backend("SDPA_EFFICIENT" if ring > 1 else "SDPA")
+    get_runtime_state().set_attention_backend(backend or ("SDPA_EFFICIENT" if ring > 1 else "SDPA"))
     return reference, parallel, reference_inputs, parallel_inputs
 
 
-def _parity_worker(rank, world_size, init_method, model, ulysses, ring, tokens):
+def _parity_worker(rank, world_size, init_method, model, ulysses, ring, tokens, backend=None, dtype=None):
     engine_config = _init(rank, world_size, init_method, ulysses, ring)
     try:
         device = torch.device("cuda", rank)
-        reference, parallel, reference_inputs, parallel_inputs = _build(model, tokens, device, engine_config, ring)
+        reference, parallel, reference_inputs, parallel_inputs = _build(
+            model, tokens, device, engine_config, ring, backend, dtype
+        )
         checked = []
 
         def check_padding(module, args, output):
@@ -395,8 +409,10 @@ def _parity_worker(rank, world_size, init_method, model, ulysses, ring, tokens):
             actual = _flatten(parallel(**parallel_inputs))
         assert len(actual) == len(expected)
         assert checked, "the model must execute the blocks guarded against padding drift"
+        # bfloat16 runs on a flash backend, whose kernel rounds differently from the reference's.
+        tolerance = dict(rtol=1e-4, atol=1e-4) if dtype is None else dict(rtol=5e-2, atol=5e-2)
         for a, e in zip(actual, expected):
-            torch.testing.assert_close(a, e, rtol=1e-4, atol=1e-4)
+            torch.testing.assert_close(a, e, **tolerance)
     finally:
         destroy_model_parallel()
         destroy_distributed_environment()
@@ -496,4 +512,37 @@ def test_ring_matches_single_device(accelerator_ranks, model, ulysses, ring, tok
         _parity_worker,
         world_size=ulysses * ring,
         args=(model, ulysses, ring, tokens),
+    )
+
+
+# Batches of prompts of different lengths, on the flash backends (bfloat16, as they require): the mask reaches
+# them as packed keys. Ulysses 3 pads the sequence, and the replicated prompts join as joint keys.
+_FLASH_CASES = [
+    pytest.param("hunyuan_video15", 2, ((2, 3, 4), (10, 7)), id="hunyuan_video15-batched"),
+    pytest.param("hunyuan_video15", 2, ((2, 3, 4), (11, 7)), id="hunyuan_video15-batched-joint-rear"),
+    pytest.param("hunyuan_video15", 3, ((2, 3, 4), (12, 8)), id="hunyuan_video15-batched-u3"),
+    pytest.param("qwen_image", 2, ((4, 6), (8, 5)), id="qwen_image-batched"),
+    pytest.param("qwen_image", 2, ((4, 6), (7, 3)), id="qwen_image-batched-joint-front"),
+    pytest.param("qwen_image", 3, ((5, 5), (9, 4)), id="qwen_image-batched-padded-image-u3"),
+    pytest.param("qwen_image", 3, ((5, 5), (7, 4)), id="qwen_image-batched-joint-front-padded-image-u3"),
+    pytest.param("z_image", 2, ((4, 4), (10, 40)), id="z_image-batched"),
+    pytest.param("z_image", 3, ((4, 4), (10, 40)), id="z_image-batched-padded-caption-u3"),
+    pytest.param("z_image", 3, ((4, 4), (10, 70)), id="z_image-batched-padded-unified-u3"),
+]
+
+
+@pytest.mark.multi_gpu
+@pytest.mark.parametrize("backend", ["FLASH", "FLASH_3", "FLASH_4"])
+@pytest.mark.parametrize("model, ulysses, tokens", _FLASH_CASES)
+def test_batched_prompts_on_a_flash_backend_match_single_device(accelerator_ranks, backend, model, ulysses, tokens):
+    from xfuser.core.attention import registry
+    from xfuser.core.attention.spec import AttentionBackendType
+
+    unavailable = registry.get(AttentionBackendType[backend]).unavailable()
+    if unavailable is not None:
+        pytest.skip(f"{backend}: {unavailable}")
+    accelerator_ranks(
+        _parity_worker,
+        world_size=ulysses,
+        args=(model, ulysses, 1, tokens, backend, torch.bfloat16),
     )

@@ -12,6 +12,8 @@ from xfuser.model_executor.layers.attention_processor import (
 from xfuser.model_executor.models.transformers.transformers_utils import (
     chunk_and_pad_sequence,
     gather_and_unpad,
+    local_sp_pad_rows,
+    zero_sp_pad_rows_hook,
 )
 
 
@@ -27,9 +29,12 @@ def _make_xfuser_ideogram4_attention_processor():
 
     @xFuserAttentionProcessorRegister.register(Ideogram4AttnProcessor)
     class xFuserIdeogram4AttnProcessor(Ideogram4AttnProcessor):
-        def __init__(self) -> None:
+        def __init__(self, attention_kwargs: dict | None = None) -> None:
             super().__init__()
             self.attention_function = USP
+            # Shared with the transformer, which sets ``valid_kv_len`` when the
+            # sequence is zero-padded to split evenly across ranks.
+            self.attention_kwargs = attention_kwargs
 
         def __call__(
             self,
@@ -64,6 +69,7 @@ def _make_xfuser_ideogram4_attention_processor():
                 query.transpose(1, 2),
                 key.transpose(1, 2),
                 value.transpose(1, 2),
+                attention_kwargs=self.attention_kwargs,
             ).transpose(1, 2)
             hidden_states = hidden_states.flatten(2, 3).type_as(query)
             return attn.to_out[0](hidden_states)
@@ -84,8 +90,16 @@ def _make_xfuser_ideogram4_transformer_wrapper():
 
     class xFuserIdeogram4Transformer2DWrapper(Ideogram4Transformer2DModel):
         def _install_xfuser_processors(self) -> None:
+            # from_pretrained and the FP8 loader call this again after from_config.
+            if hasattr(self, "_sp_pad"):
+                return
+            # The key is always present because torch.compile guards on the key set.
+            self._self_attn_kwargs = {"valid_kv_len": None}
+            self._sp_pad = {"local_rows": 0}
             for layer in self.layers:
-                layer.attention.set_processor(processor_class())
+                layer.attention.set_processor(processor_class(attention_kwargs=self._self_attn_kwargs))
+                # A block returns the one [text, image] stream; the pad trails it.
+                layer.register_forward_hook(zero_sp_pad_rows_hook(self._sp_pad))
 
         @classmethod
         def from_pretrained(cls, *args, **kwargs):
@@ -218,6 +232,9 @@ def _make_xfuser_ideogram4_transformer_wrapper():
 
             sequence_length = num_text_tokens + num_image_tokens
             pad_amount = (sp_size - sequence_length % sp_size) % sp_size
+            # Diffusers attends only within the real tokens; publishing the real
+            # length lets USP drop the padded keys (also of each ring step).
+            self._self_attn_kwargs["valid_kv_len"] = sequence_length if pad_amount else None
             hidden_states = chunk_and_pad_sequence(
                 hidden_states,
                 sp_rank,
@@ -225,6 +242,7 @@ def _make_xfuser_ideogram4_transformer_wrapper():
                 pad_amount,
                 dim=1,
             )
+            self._sp_pad["local_rows"] = local_sp_pad_rows(sequence_length, hidden_states.shape[1], sp_rank)
             position_ids = chunk_and_pad_sequence(
                 position_ids,
                 sp_rank,

@@ -302,7 +302,7 @@ class xFuserZImagePipeFusionPipeline(xFuserPipelineBaseWrapper):
             image = self.vae.decode(prepare(latents), return_dict=False)[0]
         if image is not None and output_type != "latent":
             image = self.image_processor.postprocess(image, output_type=output_type)
-        if not is_dp_last_group():
+        if not self.is_dp_last_group():
             return None
         self.maybe_free_model_hooks()
         if not return_dict:

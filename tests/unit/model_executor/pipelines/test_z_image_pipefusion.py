@@ -277,3 +277,32 @@ def test_z_image_async_last_stage_returns_each_scheduled_patch_immediately(monke
     assert scheduler_inputs == [(10.0, 1.0), (20.0, 2.0), (30.0, 11.0), (40.0, 22.0)]
     assert [sent[2].item() for sent in group.sent] == [11.0, 22.0]
     assert result.flatten().tolist() == [41.0, 62.0]
+
+
+@pytest.mark.parametrize("output_owner", [True, False])
+def test_z_image_parallel_vae_decode_returns_on_the_wrapper_output_rank(monkeypatch, output_owner):
+    state = SimpleNamespace(
+        runtime_config=SimpleNamespace(use_parallel_vae=True),
+        parallel_config=SimpleNamespace(vae_parallel_size=0),
+    )
+    monkeypatch.setattr(pipeline_z_image_pipefusion, "get_runtime_state", lambda: state)
+    # Not the last pipeline stage, which parallel VAE no longer makes the output rank.
+    monkeypatch.setattr(pipeline_z_image_pipefusion, "is_dp_last_group", lambda: False)
+    decoded = torch.zeros(1, 3, 4, 4)
+    pipe = SimpleNamespace(
+        vae=SimpleNamespace(
+            dtype=torch.float32,
+            config=SimpleNamespace(scaling_factor=1.0, shift_factor=0.0),
+            decode=lambda _latents, return_dict: (decoded,),
+        ),
+        gather_broadcast_latents=lambda value: value,
+        is_dp_last_group=lambda: output_owner,
+        image_processor=SimpleNamespace(postprocess=lambda image, output_type: ("image", image.shape)),
+        maybe_free_model_hooks=lambda: None,
+    )
+
+    result = xFuserZImagePipeFusionPipeline._decode_latents(
+        pipe, torch.zeros(1, 4, 2, 2), output_type="pil", return_dict=False
+    )
+
+    assert result == ((("image", (1, 3, 4, 4)),) if output_owner else None)

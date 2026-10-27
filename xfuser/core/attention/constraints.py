@@ -33,6 +33,14 @@ class CallConstraint:
         """Whether the kernel applies ``attention_kwargs["attn_mask"]``, as MASKED_VARLEN declares."""
         return False
 
+    def attends_packed_keys(self) -> bool:
+        """Whether the kernel attends over varlen packed keys itself.
+
+        True unless refused, like every call a constraint does not restrict:
+        NO_VARLEN refuses them, and MASKED_VARLEN serves them through the mask.
+        """
+        return True
+
 
 @dataclass(frozen=True)
 class AllConstraints(CallConstraint):
@@ -54,6 +62,9 @@ class AllConstraints(CallConstraint):
 
     def applies_attn_mask(self) -> bool:
         return any(part.applies_attn_mask() for part in self.parts)
+
+    def attends_packed_keys(self) -> bool:
+        return all(part.attends_packed_keys() for part in self.parts)
 
 
 @dataclass(frozen=True)
@@ -110,6 +121,9 @@ class _NoVarlen(CallConstraint):
     def unmet(self, query, key, value, call) -> Optional[str]:
         return "does not support varlen packed keys" if call.varlen else None
 
+    def attends_packed_keys(self) -> bool:
+        return False
+
 
 @dataclass(frozen=True)
 class _MaskedVarlen(CallConstraint):
@@ -124,6 +138,9 @@ class _MaskedVarlen(CallConstraint):
 
     def applies_attn_mask(self) -> bool:
         return True
+
+    def attends_packed_keys(self) -> bool:
+        return False
 
 
 class _PackedKeys(CallConstraint):

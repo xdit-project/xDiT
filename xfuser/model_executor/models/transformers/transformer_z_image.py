@@ -7,11 +7,13 @@ from diffusers.models.attention_processor import Attention
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
 
-from xfuser.model_executor.layers.usp import USP, key_padding_mask_attention_kwargs
+from xfuser.model_executor.layers.attention_mask import MaskMetaCache
+from xfuser.model_executor.layers.usp import USP, key_padding_attention_kwargs, key_padding_mask
 from xfuser.model_executor.models.transformers.transformers_utils import (
     chunk_and_pad_sequence,
     gather_and_unpad,
     local_sp_pad_rows,
+    prefix_key_mask,
     zero_sp_pad_rows_hook,
 )
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
@@ -123,9 +125,7 @@ class xFuserZSingleStreamAttnProcessor:
                 key = self._pad_heads(key, pad_heads)
                 value = self._pad_heads(value, pad_heads)
 
-        # The wrapper passes a [batch, keys] mask only when the batch items
-        # differ in length.
-        attention_kwargs, backend = key_padding_mask_attention_kwargs(attention_mask, self.attention_kwargs)
+        # The wrapper passes a key-padding mask only when the batch items differ in length.
         hidden_states = USP(
             query,
             key,
@@ -133,8 +133,7 @@ class xFuserZSingleStreamAttnProcessor:
             dropout_p=0.0,
             is_causal=False,
             attn_layer=attn,
-            backend=backend,
-            attention_kwargs=attention_kwargs,
+            attention_kwargs=key_padding_attention_kwargs(self.attention_kwargs, attention_mask),
         )
 
         if pad_heads:
@@ -175,21 +174,20 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
             layer.attention.processor = xFuserZSingleStreamAttnProcessor(attention_kwargs=self._self_attn_kwargs)
             layer.register_forward_hook(zero_sp_pad_rows_hook(self._sp_pad))
         register_fp8_comms_eligible_modules(self, z_image_attn_modules(self))
+        self._key_padding_cache = MaskMetaCache()
 
-    @staticmethod
-    def _key_padding_mask(item_seqlens: List[int], device: torch.device) -> Optional[torch.Tensor]:
-        """The stock model's [batch, keys] mask for one stage, or None.
+    def _key_padding(self, item_seqlens: List[int], keys: int, device: torch.device):
+        """The stock model's key-padding mask for one stage, over its ``keys`` padded keys, or None.
 
         A mask is needed only when the batch items differ in length. Ulysses
-        gathers every rank's chunk of the sequence in order and USP drops the
-        sequence-parallel padding at its end, so the keys are the single-device
-        keys and so is the mask.
+        gathers every rank's chunk of the sequence in order, so the keys are the
+        single-device keys followed by the sequence-parallel padding. The lengths
+        are host integers, so they key the cache rather than a mask tensor, which
+        is rebuilt every step.
         """
-        max_seqlen = max(item_seqlens)
-        if all(seq_len == max_seqlen for seq_len in item_seqlens):
+        if all(seq_len == item_seqlens[0] for seq_len in item_seqlens):
             return None
-        seqlens = torch.tensor(item_seqlens, device=device)
-        return torch.arange(max_seqlen, device=device) < seqlens[:, None]
+        return key_padding_mask(self._key_padding_cache, None, prefix_key_mask, tuple(item_seqlens), keys, device)
 
     def forward(
         self,
@@ -258,11 +256,10 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
         # Clarify the length matches to satisfy Dynamo due to "Symbolic Shape Inference" to avoid compilation errors
         x_freqs_cis = x_freqs_cis[:, : x.shape[1]]
 
-        x_attn_mask = self._key_padding_mask(x_item_seqlens, device)
-
         # SP support
         seq_len = x.shape[1]
         pad_amount = (sp_world_size - (seq_len % sp_world_size)) % sp_world_size
+        x_attn_mask = self._key_padding(x_item_seqlens, seq_len + pad_amount, device)
         self._self_attn_kwargs["valid_kv_len"] = seq_len if pad_amount else None
         x = chunk_and_pad_sequence(x, sp_world_rank, sp_world_size, pad_amount, dim=-2)
         self._sp_pad["local_rows"] = local_sp_pad_rows(seq_len, x.shape[1], sp_world_rank)
@@ -295,11 +292,10 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
         # Clarify the length matches to satisfy Dynamo due to "Symbolic Shape Inference" to avoid compilation errors
         cap_freqs_cis = cap_freqs_cis[:, : cap_feats.shape[1]]
 
-        cap_attn_mask = self._key_padding_mask(cap_item_seqlens, device)
-
         # SP support
         seq_len = cap_feats.shape[1]
         pad_amount = (sp_world_size - (seq_len % sp_world_size)) % sp_world_size
+        cap_attn_mask = self._key_padding(cap_item_seqlens, seq_len + pad_amount, device)
         self._self_attn_kwargs["valid_kv_len"] = seq_len if pad_amount else None
         cap_feats = chunk_and_pad_sequence(cap_feats, sp_world_rank, sp_world_size, pad_amount, dim=-2)
         self._sp_pad["local_rows"] = local_sp_pad_rows(seq_len, cap_feats.shape[1], sp_world_rank)
@@ -328,11 +324,10 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
 
         unified = pad_sequence(unified, batch_first=True, padding_value=0.0)
         unified_freqs_cis = pad_sequence(unified_freqs_cis, batch_first=True, padding_value=0.0)
-        unified_attn_mask = self._key_padding_mask(unified_item_seqlens, device)
-
         # SP support
         seq_len = unified.shape[1]
         pad_amount = (sp_world_size - (seq_len % sp_world_size)) % sp_world_size
+        unified_attn_mask = self._key_padding(unified_item_seqlens, seq_len + pad_amount, device)
         self._self_attn_kwargs["valid_kv_len"] = seq_len if pad_amount else None
         unified = chunk_and_pad_sequence(unified, sp_world_rank, sp_world_size, pad_amount, dim=-2)
         self._sp_pad["local_rows"] = local_sp_pad_rows(seq_len, unified.shape[1], sp_world_rank)

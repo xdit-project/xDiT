@@ -26,11 +26,16 @@ from xfuser.core.distributed import (
 
 from xfuser.compat import version_at_least
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
-from xfuser.logger import init_logger, warn_once
+from xfuser.model_executor.layers.attention_mask import (
+    AttentionMaskWithMeta,
+    MaskMetaCache,
+    make_attn_mask_with_meta,
+)
+from xfuser.logger import init_logger
 from xfuser.core.attention import registry as attention_registry
 from xfuser.core.attention.spec import VarlenPacking
 from xfuser.core.attention.spec import AttnCall
-from xfuser.core.attention.spec import AttentionBackendType, Sparsity
+from xfuser.core.attention.spec import Sparsity
 from xfuser.core.distributed.fp8_comms import (
     fp8_attention_kwargs,
     fp8_comms_input_all_to_all,
@@ -436,71 +441,116 @@ def _ring_trim_trailing_kv_padding(attention_function, valid_kv_len, shard_len):
     return wrapper
 
 
-def key_padding_mask_attention_kwargs(key_padding_mask, attention_kwargs=None):
-    """Attention kwargs and backend that keep masked keys out of USP attention.
+def key_padding_mask(cache: MaskMetaCache, key, build_mask, *extra):
+    """The key-padding mask for USP calls whose keys ``build_mask(key, *extra)`` partly masks.
 
-    ``key_padding_mask`` is a ``[batch, keys]`` bool mask, True for keys to
-    attend to, over the keys the backend sees and in that order: every rank's
-    local keys in rank order after the Ulysses all-to-all, less the padding that
-    ``valid_kv_len`` trims, with joint keys where USP concatenates them. USP
-    trims before the backend runs, so the mask is as long as the trimmed keys.
+    ``build_mask`` returns a ``[batch, keys]`` bool mask, True for the keys to
+    attend to, over every key the backend sees and in that order: each rank's
+    keys in rank order after the Ulysses all-to-all, the sequence-parallel pad
+    included (False), with joint keys where USP joins them. The call carries it
+    through ``key_padding_attention_kwargs``, which drops ``valid_kv_len`` so
+    that USP trims nothing.
 
-    Returns ``(attention_kwargs, None)`` unchanged without a mask. With one, the
-    kwargs carry it as ``attn_mask`` and the backend is None, keeping the
-    selected one, when that backend applies an ``attn_mask`` (its spec declares
-    MASKED_VARLEN, as SDPA, SDPA_MATH, SDPA_EFFICIENT and cuDNN do). Any other
-    dense backend would drop the mask, so the call runs on SDPA instead, which
-    is logged once, from eager calls only (a log call is a graph break under
-    torch.compile); runtime_state resolves SDPA for such a selection ahead of
-    any compiled region. FP8 communication, ring attention and sparse backends
-    cannot honour the mask and raise instead of running without it.
+    The selected backend serves the mask itself:
+
+    - one whose every kernel applies ``attn_mask`` (SDPA, SDPA_MATH,
+      SDPA_EFFICIENT, cuDNN) gets the mask alone, as ``[batch, 1, 1, keys]``;
+    - one that attends over packed keys (FlashAttention 2 to 4, AITER) gets an
+      AttentionMaskWithMeta. Packing costs a host sync, so ``cache`` builds it
+      once per ``key`` and ``extra``, outside compiled graphs.
+
+    Anything else raises, before the first attention call: FP8 communication,
+    ring attention, sparse backends and dense ones that neither apply a mask
+    nor attend over packed keys. Such a run would attend to the masked keys,
+    or need another backend than the one selected.
     """
-    if key_padding_mask is None:
-        return attention_kwargs, None
+    spec = _key_padding_backend()
+    if spec.applies_attn_mask:
+        return build_mask(key, *extra)[:, None, None, :]
+    return cache.get(key, _packed_key_padding, build_mask, *extra)
+
+
+def _packed_key_padding(key, build_mask, *extra) -> AttentionMaskWithMeta:
+    return make_attn_mask_with_meta(build_mask(key, *extra))
+
+
+def key_padding_attention_kwargs(attention_kwargs, key_padding):
+    """A USP call's ``attention_kwargs`` with ``key_padding`` from ``key_padding_mask``, or unchanged without one.
+
+    The mask covers the sequence-parallel pad, so the call declares no
+    ``valid_kv_len``: USP would trim the keys the mask and its packed indices
+    describe. Returns a new dict; a wrapper's shared one outlives the call.
+    """
+    if key_padding is None:
+        return attention_kwargs
+    if isinstance(key_padding, AttentionMaskWithMeta):
+        mask = {
+            "attn_mask": key_padding.attn_mask,
+            "indices_k": key_padding.indices_k,
+            "cu_seqlens_k": key_padding.cu_seqlens_k,
+            "max_seqlen_k": key_padding.max_seqlen_k,
+        }
+    else:
+        mask = {"attn_mask": key_padding}
+    return {**(attention_kwargs or {}), **mask, "valid_kv_len": None}
+
+
+def _key_padding_backend():
+    """The selected backend's spec when it keeps a key-padding mask's keys out of USP attention, else raise."""
     runtime_state = get_runtime_state()
     if runtime_state.fp8_comms is not None:
-        # No backend that applies an attn_mask takes pre-quantized inputs. Delete this guard once an
-        # attention backend that takes both an arbitrary mask and FP8 inputs exists.
+        # FP8 communication hands pre-quantized Q/K/V to AITER_FP8 or AITER_FLYDSL_FP8, and neither
+        # pre-quantized kernel takes an attn_mask or packed keys. Delete this guard once one does.
         raise ValueError(
-            "--use_fp8_comms cannot be combined with batched prompts of different lengths: the attention mask "
-            "needs an attention backend that does not pre-quantize. Use equal-length prompts, one prompt per "
-            "call, or drop --use_fp8_comms. Guidance that batches a prompt with its negative prompt counts as "
-            "such a batch; --use_cfg_parallel runs them apart."
+            "--use_fp8_comms cannot be combined with batched prompts of different lengths: the attention "
+            "kernels that take pre-quantized inputs cannot keep the padded prompt tokens out. Use equal-length "
+            "prompts, one prompt per call, or drop --use_fp8_comms. Guidance that batches a prompt with its "
+            "negative prompt counts as such a batch; --use_cfg_parallel runs them apart."
         )
-    if get_ring_parallel_world_size() > 1:
-        # Each ring step attends to one shard of the keys, but the mask covers all of them. Delete this guard
-        # once the step slices the mask to its shard (as _ring_trim_trailing_kv_padding slices the pad) and
-        # the masked call runs on a backend with a log-sum-exp to merge the steps with (SDPA has none).
-        # Z-Image batches a prompt with its negative prompt by default and so reaches this whenever the two
-        # differ in length; --use_cfg_parallel avoids it.
+    ring_degree = get_ring_parallel_world_size()
+    if ring_degree > 1:
+        # Each ring step attends to one shard of the keys, but the mask and its packed indices cover all of
+        # them. Delete this guard once the step slices both to its shard, as _ring_trim_trailing_kv_padding
+        # slices the pad. Z-Image batches a prompt with its negative prompt by default and so reaches this
+        # whenever the two differ in length; --use_cfg_parallel avoids it.
         raise NotImplementedError(
             "Batched prompts of different lengths cannot run with ring attention: the attention mask covers all "
-            f"keys, but each ring step sees one shard of them (ring degree {get_ring_parallel_world_size()}). "
-            "Use equal-length prompts, one prompt per call (--use_cfg_parallel runs a prompt and its negative "
-            "prompt apart), or a ring degree of 1."
+            f"keys, but each ring step sees one shard of them (ring degree {ring_degree}). Use equal-length "
+            "prompts, one prompt per call (--use_cfg_parallel runs a prompt and its negative prompt apart), or "
+            "a ring degree of 1."
         )
-    selected = getattr(runtime_state, "attention_backend", None)
+    selected = runtime_state.attention_backend
     spec = attention_registry.find(selected)
-    if spec is not None and spec.sparsity is not None:
+    if spec is None:
+        raise NotImplementedError(f"Attention backend {selected} not registered.")
+    if spec.sparsity is not None:
         # A sparse backend approximates the attention over a spatial layout that a per-prompt key mask
-        # does not describe, and running a dense backend instead would drop the sparsity the user asked for.
-        # Delete this guard once a sparse backend takes a key mask.
+        # does not describe. Delete this guard once a sparse backend takes a key mask.
         raise NotImplementedError(
-            f"{selected.value} cannot be combined with batched prompts of different lengths: the attention mask "
-            "is only applied by dense backends. Use equal-length prompts, one prompt per call, or a dense backend."
+            f"{selected.name} cannot be combined with batched prompts of different lengths: the attention mask "
+            "is only applied by dense backends. Use equal-length prompts, one prompt per call, or "
+            f"--attention_backend with one of {', '.join(_key_padding_backends())}."
         )
-    attention_kwargs = {**(attention_kwargs or {}), "attn_mask": key_padding_mask.to(torch.bool)[:, None, None, :]}
-    if spec is not None and spec.applies_attn_mask:
-        return attention_kwargs, None
-    # Logging is a graph break under torch.compile, so it is left to eager calls (the warmup).
-    if spec is not None and not torch.compiler.is_compiling():
-        warn_once(
-            logger,
-            "Batched prompts of different lengths: attention runs on SDPA instead of %s, which cannot apply "
-            "the key mask that keeps the padded prompt tokens out.",
-            selected.value,
+    if not spec.serves_key_padding:
+        raise NotImplementedError(
+            f"{selected.name} cannot be combined with batched prompts of different lengths: it neither applies "
+            "an attention mask nor attends over packed keys, so it would attend to the padding of the shorter "
+            f"prompts. Use --attention_backend with one of {', '.join(_key_padding_backends())}, equal-length "
+            "prompts, or one prompt per call. Guidance that batches a prompt with its negative prompt counts as "
+            "such a batch; --use_cfg_parallel runs them apart."
         )
-    return attention_kwargs, AttentionBackendType.SDPA
+    return spec
+
+
+# Reads every spec's requirements, which imports vendor modules: only ever an error message's business.
+@torch.compiler.disable
+def _key_padding_backends():
+    """The dense backends available here that keep a key-padding mask's keys out."""
+    return [
+        spec.type.name
+        for spec in attention_registry.REGISTRY.values()
+        if spec.sparsity is None and spec.serves_key_padding and spec.unavailable() is None
+    ]
 
 
 def _get_attention_function(backend=None):

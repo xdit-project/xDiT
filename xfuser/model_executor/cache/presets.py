@@ -17,6 +17,7 @@ ModelCacheConfig: dict[str, optional method_config] keyed by cache method name,
     e.g. {"dbcache": DBCacheSettings(...)}. .get(cache_method) returns None for
     in-tree methods that need no model-specific configuration.
 """
+
 import dataclasses
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -32,7 +33,9 @@ class DBCachePreset:
     # steps before cache kicks in
     max_warmup_steps: int = 8
     max_cached_steps: int = -1
-    # SCM steps_computation_mask policy: None | "slow" | "medium" | "fast" | "ultra"
+    # SCM steps_computation_mask policy:
+    # None | "slow" | "medium" | "fast" | "ultra" | "alternating".
+    # "alternating" is xDiT's PipeFusion-oriented isolated-reuse schedule.
     scm_policy: Optional[str] = "fast"
     # enable_taylorseer: None/True attaches the TaylorSeer calibrator (default DBCache
     # behavior). Set False to run the plain Fn-block residual cache with no calibrator
@@ -45,6 +48,9 @@ class DBCachePreset:
     # enable_encoder_calibrator: set False for MMDiT models (SD3.5) with Bn=0
     # Bn-residual buffer is never populated, causing the calibrator to assert.
     enable_encoder_calibrator: Optional[bool] = None
+    # PipeFusion-only optimization: patch 0 makes the adaptive decision and
+    # later patches reuse it while retaining their own cache buffers.
+    share_pipefusion_decisions: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -62,6 +68,7 @@ class CacheDitAdapterConfig:
     enable_separate_cfg: True for models where CFG runs as two separate forward passes
         (Wan, Qwen-Image-Edit). False for fused or no-CFG models (FLUX, SD3, ZImage).
     """
+
     blocks: Tuple[Tuple[str, str], ...]
     enable_separate_cfg: bool = False
     transformer_attr: str = "transformer"
@@ -79,6 +86,7 @@ class DBCacheSettings:
     Multi-transformer:  adapter=[cfg_t1, cfg_t2], preset=[preset_t1, preset_t2]
         Lists must be the same length; index i covers transformer i.
     """
+
     adapter: AdapterValue
     preset: Optional[PresetValue] = None
 

@@ -34,16 +34,32 @@ The PipeFusion pipeline workflow when $M$ = $N$ =4 is shown in the following pic
   and can compose with PipeFusion when the model advertises the corresponding
   capability. Tile-parallel decoding remains subject to the model's normal tile
   geometry and memory validation.
-- Step caching is not yet supported. It requires per-patch histories and cache
-  decisions synchronized across pipeline stages, so configuration rejects
-  `--cache_method` with PipeFusion instead of applying an incorrect stage-local
-  cache.
+- `--cache_method pipefusion` enables patch-aware step caching for models with
+  a DBCache block layout. Every pipeline patch retains its own residual
+  buffers. Patch 0 chooses the adaptive compute/reuse path for the stage and
+  later patches follow that path without waiting for a timestep-wide
+  collective. Different pipeline stages still decide independently because
+  they own different blocks. With composed sequence parallelism, only replicas
+  of the same stage synchronize through their sequence-parallel group.
+- Other cache method names remain rejected with PipeFusion. The PipeFusion
+  method reuses the model's DBCache block layout and tuning parameters, so
+  model-specific `--cache_config` overrides such as the residual threshold
+  continue to apply without exposing Cache-DiT's WORLD-group synchronization.
+  Models whose cache layout spans multiple transformers are not yet supported.
+- A Cache-DiT SCM mask can provide a stage-coordinated static policy by setting
+  `scm_policy` to `slow`, `medium`, `fast`, `ultra`, or xDiT's `alternating`
+  policy and `steps_computation_policy` to `static` in `--cache_config`.
+  Because every stage knows those decisions in advance, PipeFusion caches the
+  complete local stage residual and bypasses the configured Fn prefix on
+  scheduled reuse steps. `alternating` computes the configured warmup prefix,
+  reuses isolated alternating steps, and computes the final two correction
+  steps. Dynamic policies continue to compute Fn and use residual similarity.
 - `--memory_efficient_replicated_load` has a PipeFusion-specific meaning on
-  runners that support stage-local meta construction (currently the FLUX
-  family): each rank constructs and streams only its local transformer blocks.
-  Replicated pipeline components remain eager. SD3.5's composition wrapper
-  cannot construct a stage-local transformer on meta and explicitly rejects
-  this option.
+  runners that support stage-local meta construction (currently the FLUX and
+  Qwen Image families): each rank constructs and streams only its local
+  transformer blocks. Replicated pipeline components remain eager. SD3.5's
+  composition wrapper cannot construct a stage-local transformer on meta and
+  explicitly rejects this option.
 - A stage-local transformer cannot also be FSDP-wrapped because pipeline ranks
   own different blocks. Configuration therefore requires
   `--fully_shard_components` whenever FSDP and PipeFusion are combined, and the
@@ -55,6 +71,14 @@ The PipeFusion pipeline workflow when $M$ = $N$ =4 is shown in the following pic
 - FLUX.2 reference-image conditioning uses a mixed generated/reference patch
   layout. Static reference tokens participate in transformer attention while
   scheduler feedback updates and returns only generated tokens.
+- Qwen Image uses token-row patches. The original Qwen Image Edit checkpoint
+  appends fixed reference-image tokens to that layout while scheduler feedback
+  updates only generated tokens. Qwen Image Edit Plus 2509/2511 is not yet
+  supported because its multi-reference layout differs from the original
+  checkpoint. Qwen PipeFusion currently supports pure PP and CFG-parallel x PP;
+  composing it with sequence parallelism is rejected. Step-end callbacks are
+  also rejected because callback replacement and interruption state cannot be
+  applied consistently across pipeline stages.
 
 ### `torch.compile` warmup
 

@@ -174,3 +174,34 @@ def test_wan_async_schedule_returns_each_patch_after_patch_local_scheduler(monke
 
     assert [sent[2].item() for sent in group.sent] == [11, 22]
     assert result.flatten().tolist() == [41, 62]
+
+
+@pytest.mark.parametrize("output_owner", [True, False])
+def test_wan_parallel_vae_decode_returns_on_the_wrapper_output_rank(monkeypatch, output_owner):
+    state = SimpleNamespace(
+        runtime_config=SimpleNamespace(use_parallel_vae=True),
+        parallel_config=SimpleNamespace(vae_parallel_size=0),
+    )
+    monkeypatch.setattr(pipeline_wan_pipefusion, "get_runtime_state", lambda: state)
+    # Not the last pipeline stage, which parallel VAE no longer makes the output rank.
+    monkeypatch.setattr(pipeline_wan_pipefusion, "is_pipeline_last_stage", lambda: False)
+    monkeypatch.setattr(pipeline_wan_pipefusion, "is_dp_last_group", lambda: False)
+    decoded = torch.zeros(1, 3, 2, 4, 4)
+    pipe = SimpleNamespace(
+        vae=SimpleNamespace(
+            dtype=torch.float32,
+            config=SimpleNamespace(z_dim=2, latents_mean=[0.0, 0.0], latents_std=[1.0, 1.0]),
+            decode=lambda _latents, return_dict: (decoded,),
+        ),
+        gather_broadcast_latents=lambda value: value,
+        is_dp_last_group=lambda: output_owner,
+        video_processor=SimpleNamespace(postprocess_video=lambda video, output_type: ("video", video.shape)),
+        maybe_free_model_hooks=lambda: None,
+    )
+    latents = torch.zeros(1, 2, 1, 2, 2)
+
+    result = xFuserWanTI2VPipeFusionPipeline._decode_latents(
+        pipe, latents, torch.ones_like(latents), torch.zeros_like(latents), output_type="np", return_dict=False
+    )
+
+    assert result == ((("video", (1, 3, 2, 4, 4)),) if output_owner else None)

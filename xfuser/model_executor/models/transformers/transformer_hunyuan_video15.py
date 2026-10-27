@@ -6,11 +6,13 @@ from diffusers.models.embeddings import apply_rotary_emb
 from diffusers.models.attention_processor import Attention
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
-from xfuser.model_executor.layers.usp import USP, key_padding_mask_attention_kwargs
+from xfuser.model_executor.layers.attention_mask import MaskMetaCache
+from xfuser.model_executor.layers.usp import USP, key_padding_attention_kwargs, key_padding_mask
 from xfuser.model_executor.models.transformers.transformers_utils import (
     chunk_and_pad_sequence,
     gather_and_unpad,
     local_sp_pad_rows,
+    prefix_key_mask,
     sp_pad_spans_ranks,
     text_image_key_mask,
     zero_sp_pad_rows_hook,
@@ -35,6 +37,14 @@ def _uses_sparse_layout(attention_kwargs) -> bool:
         attention_kwargs.get("attn_sparse_type") in ("ssta", "sta", "moba")
         and get_runtime_state().attention_backend in _SSTA_BACKENDS
     )
+
+
+def _prompt_image_key_mask(
+    _key, prompt_lengths, prompt_tokens, image_tokens, sp_pad, sp_world_size, joint_strategy, device
+) -> torch.Tensor:
+    """``text_image_key_mask`` for prompts whose valid tokens come first, ``prompt_lengths`` of them per row."""
+    prompt_mask = prefix_key_mask(None, prompt_lengths, prompt_tokens, device)
+    return text_image_key_mask(prompt_mask, image_tokens, sp_pad, sp_world_size, joint_strategy)
 
 
 class xFuserHunyuanVideo15AttnProcessor:
@@ -109,8 +119,8 @@ class xFuserHunyuanVideo15AttnProcessor:
 
         #! ---------------------------------------- ATTENTION ----------------------------------------
         self.attention_kwargs["encoder_sequence_length"] = num_encoder_hidden_states_tokens
-        # attention_mask is the wrapper's dense [batch, keys] mask, None when no key is masked.
-        attention_kwargs, backend = key_padding_mask_attention_kwargs(attention_mask, self.attention_kwargs)
+        # attention_mask is the wrapper's key-padding mask, None when no key is masked.
+        attention_kwargs = key_padding_attention_kwargs(self.attention_kwargs, attention_mask)
         if encoder_hidden_states is not None and not split_text:
             hidden_states = USP(
                 query,
@@ -122,7 +132,6 @@ class xFuserHunyuanVideo15AttnProcessor:
                 joint_key=encoder_key.transpose(1, 2),
                 joint_value=encoder_value.transpose(1, 2),
                 joint_strategy="rear",
-                backend=backend,
                 attention_kwargs=attention_kwargs,
             )
         else:
@@ -132,7 +141,6 @@ class xFuserHunyuanVideo15AttnProcessor:
                 value,
                 dropout_p=0.0,
                 is_causal=False,
-                backend=backend,
                 attention_kwargs=attention_kwargs,
             )
 
@@ -220,6 +228,7 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
             # Diffusers' HunyuanVideo15TransformerBlock returns (image, text).
             block.register_forward_hook(zero_sp_pad_rows_hook(self._sp_pad_image, index=0))
             block.register_forward_hook(zero_sp_pad_rows_hook(self._sp_pad_text, index=1))
+        self._key_padding_cache = MaskMetaCache()
 
     def forward(
         self,
@@ -404,19 +413,28 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
             valid_kv_len += encoder_sequence_length
         self._self_attn_kwargs["valid_kv_len"] = valid_kv_len if hidden_states_pad_amount or enc_pad else None
 
-        # SSTA applies the per-sample text mask itself. A dense layout gets a [batch, keys] mask over the
+        # SSTA applies the per-sample text mask itself. A dense layout gets a key-padding mask over the
         # keys in the order the attention sees them, and only when prompts of different lengths leave
-        # padded text keys in the batch (a single prompt's padding was dropped above).
+        # padded text keys in the batch (a single prompt's padding was dropped above). The reordering
+        # above put each prompt's valid tokens first, so its length describes its mask: read on the host,
+        # it keys the mask cache, as the mask itself is rebuilt every step.
         self._self_attn_kwargs["text_mask"] = encoder_attention_mask if sparse_layout else None
         attention_mask = None
-        if not sparse_layout and batch_size > 1 and not encoder_attention_mask.all():
-            attention_mask = text_image_key_mask(
-                encoder_attention_mask,
-                image_sequence_length,
-                hidden_states_pad_amount,
-                sp_world_size,
-                joint_strategy=None if get_runtime_state().split_text_embed_in_sp else "rear",
-            )
+        if not sparse_layout and batch_size > 1:
+            prompt_lengths = tuple(encoder_attention_mask.sum(dim=1).tolist())
+            if min(prompt_lengths) < encoder_sequence_length:
+                attention_mask = key_padding_mask(
+                    self._key_padding_cache,
+                    None,
+                    _prompt_image_key_mask,
+                    prompt_lengths,
+                    encoder_sequence_length,
+                    image_sequence_length,
+                    hidden_states_pad_amount,
+                    sp_world_size,
+                    None if get_runtime_state().split_text_embed_in_sp else "rear",
+                    encoder_attention_mask.device,
+                )
 
         # 4. Transformer blocks
         if torch.is_grad_enabled() and self.gradient_checkpointing:

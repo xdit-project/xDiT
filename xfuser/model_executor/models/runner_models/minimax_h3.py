@@ -861,12 +861,23 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
         if input_args.get("negative_prompt") is not None:
             raise ValueError("MiniMax-H3 is guidance-distilled and does not accept a negative prompt.")
 
+    def _get_vae_compile_mode(self) -> str:
+        if PACKAGES_CHECKER._on_rdna4():
+            return "default"
+        return "reduce-overhead"
+
+    def _compile_vae_decoder_blocks(self, vae) -> None:
+        mode = self._get_vae_compile_mode()
+        vae.compile_repeated_blocks(mode=mode, fullgraph=False)
+        if mode in self.CUDAGRAPH_COMPILE_MODES:
+            self._mark_cudagraph_steps(vae.decoder)
+        log("MiniMax-H3 torch.compile enabled for repeated video VAE decoder blocks.")
+
     def _compile_model(self, input_args: dict) -> None:
         mode = self._get_compile_mode()
         vae = getattr(self.pipe, "vae", None)
         if vae is not None:
-            vae.compile_repeated_blocks(mode=mode, fullgraph=False)
-            log("MiniMax-H3 torch.compile enabled for repeated video VAE decoder blocks.")
+            self._compile_vae_decoder_blocks(vae)
 
         if self.config.fully_shard_degree > 1:
             super()._compile_model(input_args)
@@ -890,7 +901,7 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
         self._run_timed_pipe(compile_args)
 
     def _transformer_compile_mode(self, mode: str, use_hybrid: bool) -> str:
-        """CUDA graphs for the transformer alone: the video VAE decoder reads graph outputs across calls."""
+        """CUDA graphs for the transformer; the video VAE decoder's mode comes from _get_vae_compile_mode."""
         if not self.transformer_cudagraphs or use_hybrid or PACKAGES_CHECKER._on_rdna4():
             return mode
         return usp_sdma.compile_mode("reduce-overhead")

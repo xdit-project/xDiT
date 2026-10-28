@@ -236,20 +236,73 @@ def _minimax_h3_parallel_decode_clip(self, z: torch.Tensor) -> torch.Tensor:
     return self._stitch_tiles(rows, y_overlaps, x_overlaps)
 
 
+def _minimax_h3_parallel_encode_clip(self, x: torch.Tensor) -> torch.Tensor:
+    vae_group = get_vae_parallel_group()
+    if vae_group.world_size == 1 or not self.use_tiling:
+        return self._xfuser_original_encode_clip(x)
+
+    y_indices, y_lengths, y_overlaps = self._split_tiles(
+        x.shape[-2],
+        self.tile_sample_min_height,
+        self.tile_sample_min_overlap_height,
+    )
+    x_indices, x_lengths, x_overlaps = self._split_tiles(
+        x.shape[-1],
+        self.tile_sample_min_width,
+        self.tile_sample_min_overlap_width,
+    )
+    tile_specs = [
+        (y, tile_height, x_start, tile_width)
+        for y, tile_height in zip(y_indices, y_lengths)
+        for x_start, tile_width in zip(x_indices, x_lengths)
+    ]
+    # A rank without a tile of its own would not know the encoded tile shape.
+    if len(tile_specs) < vae_group.world_size:
+        return self._xfuser_original_encode_clip(x)
+
+    world_size, rank = vae_group.world_size, vae_group.rank_in_group
+    local_tiles = {
+        index: self.quant_conv(self.encoder(x[..., y : y + height, x_start : x_start + width])).contiguous()
+        for index, (y, height, x_start, width) in enumerate(tile_specs)
+        if index % world_size == rank
+    }
+    # _split_tiles gives every tile along an axis the same length, so every
+    # encoded tile has the shape of this rank's own.
+    template = next(iter(local_tiles.values()))
+    encoded = [
+        vae_group.broadcast(
+            local_tiles[index] if index % world_size == rank else torch.empty_like(template), src=index % world_size
+        )
+        for index in range(len(tile_specs))
+    ]
+    columns = len(x_lengths)
+    rows = [encoded[start : start + columns] for start in range(0, len(encoded), columns)]
+
+    ratio = self.spatial_compression_ratio
+    return self._stitch_tiles(
+        rows,
+        [overlap // ratio for overlap in y_overlaps],
+        [overlap // ratio for overlap in x_overlaps],
+    )
+
+
 def install_minimax_h3_vae_tile_parallel(vae) -> None:
     """Distribute MiniMax-H3 spatial VAE tiles across the existing VAE ranks.
 
-    DistVAE does not reimplement MiniMax-H3's clip/tile/stitch decode loop, so
-    this keeps that native loop and only shards complete spatial tiles.
+    DistVAE does not reimplement MiniMax-H3's clip/tile/stitch loops, so this
+    keeps those native loops and only shards complete spatial tiles, for both
+    encoding and decoding.
     """
     if getattr(vae, "_xfuser_tile_parallel", False):
         return
 
     vae._xfuser_original_decode_clip = vae._decode_clip
     vae._decode_clip = MethodType(_minimax_h3_parallel_decode_clip, vae)
+    vae._xfuser_original_encode_clip = vae._encode_clip
+    vae._encode_clip = MethodType(_minimax_h3_parallel_encode_clip, vae)
     vae._xfuser_tile_parallel = True
     log(
-        "MiniMax-H3 parallel VAE enabled: distributing spatial decode tiles "
+        "MiniMax-H3 parallel VAE enabled: distributing spatial encode and decode tiles "
         f"across {get_vae_parallel_group().world_size} ranks."
     )
 

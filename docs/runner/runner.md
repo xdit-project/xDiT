@@ -311,7 +311,14 @@ fill it from rank 0.
 | VDN-H3 | The MiniMax-H3 modular pipeline with its transformer replaced by the materialized VDN transformer from `--vdn_transformer_dir`; fused QKV projections; direct load only | None | Not exposed by this runner | No |
 | Prism | Vendored MOVA module tree built on meta from the `MOVA-360p` configs; the single Prism state dict is read straight onto each rank's device; no shared load route declared | None | Not exposed by this runner | No |
 
-The FLUX PipeFusion loading branches construct their complete pipelines directly, so they do not use transformer streaming, and replicated meta-load is excluded whenever PipeFusion is active. Each runner keeps class-level `load_support` beside its capabilities and settings. The declaration positively names eligible meta transformers and text encoders and records standard-collective and local-blockwise routes independently; a requested unsupported meta mode fails before model allocation.
+The FLUX and Qwen Image PipeFusion loading branches can construct a stage-local
+transformer through the local-blockwise route when
+`--memory_efficient_replicated_load` is enabled. Other replicated pipeline
+components remain eager. Each runner keeps class-level `load_support` beside its
+capabilities and settings. The declaration positively names eligible meta
+transformers and text encoders and records standard-collective and
+local-blockwise routes independently; a requested unsupported meta mode fails
+before model allocation.
 
 #### Per-model FP4 and INT8 Targets
 
@@ -348,7 +355,7 @@ list rather than adding to it.
 - Setting `--use_fp8_gemms` and `--use_fp4_gemms` together requires `--use_hybrid_gemm_schedule`; the generic combination is rejected. The hybrid FP4 path owns its FP8 high-precision conversion, so the generic FP8 traversal does not run afterward. Model-selected quality overrides and FP8-only components remain FP8. Use the FP8 precision-override flags only with FP4.
 - `--memory_efficient_sharding` requires `--fully_shard_degree > 1`. It is a sharded load: rank 0 reads one block at a time and broadcasts it within the FSDP group before each rank receives its shard.
 - `--fully_shard_degree` is orthogonal to the parallel degree and does not contribute to it. A multi-rank run must still declare a parallel degree whose product (`data × cfg × sequence × tensor × pipefusion`) equals the DiT parallel size, so pair `--fully_shard_degree N` with, for example, `--ulysses_degree N`. Setting only `--fully_shard_degree` fails config validation before the model is built.
-- `--memory_efficient_replicated_load` is opt-in, requires multiple ranks, and applies only when weights are replicated. It is ignored with FSDP, PipeFusion, or tensor parallelism, and for runners marked “No” above. Pure Ulysses, ring, CFG, and data parallelism remain eligible.
+- `--memory_efficient_replicated_load` is opt-in, requires multiple ranks, and applies only when weights are replicated. It is ignored with FSDP or tensor parallelism, and for runners marked “No” above. Pure Ulysses, ring, CFG, and data parallelism remain eligible. PipeFusion uses it only on runners with a declared local-blockwise route, where each rank streams its stage's blocks.
 - The two memory-efficient load flags represent different layouts and are not used together: FSDP splits weights, while replicated meta-load gives every rank the same weights.
 - CPU/model offload can be combined with AITER FP8; converted leaves are evicted as they are processed. Other quantization backends first require their block or component on the GPU.
 - `--enable_group_cpu_offload` is rejected with FP4 on the AITER backend, including the hybrid FP8/FP4 mode, because packed FP4 weights survive neither leg of the offload: with `--group_offload_low_cpu_mem` the hook pins each tensor and torch has no `pin_memory` for `Float4_e2m1fn_x2`, and without it AITER binds a device from the parameter it is handed, so a host parameter resolves to an invalid ordinal and aborts the process. Offload at FP8 or bf16, or run FP4 without offload.

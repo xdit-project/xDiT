@@ -84,6 +84,36 @@ def test_async_callback_is_rejected_before_warmup_selection(monkeypatch):
         )
 
 
+@pytest.mark.parametrize("first_stage", [True, False])
+def test_sync_latent_handoff_broadcasts_from_last_stage(monkeypatch, first_stage):
+    events = []
+    latents = torch.ones(1, 2) if not first_stage else torch.ones(1, 3)
+    metadata = ((1, 2), torch.float32)
+
+    def broadcast_object(value, src):
+        events.append(("metadata", value, src))
+        return metadata
+
+    def broadcast(value, src):
+        events.append(("tensor", tuple(value.shape), src))
+        return value
+
+    group = SimpleNamespace(
+        broadcast_object=broadcast_object,
+        broadcast=broadcast,
+    )
+    monkeypatch.setattr(base_pipeline, "get_pipeline_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(base_pipeline, "get_pp_group", lambda: group)
+    monkeypatch.setattr(base_pipeline, "is_pipeline_first_stage", lambda: first_stage)
+    monkeypatch.setattr(base_pipeline, "is_pipeline_last_stage", lambda: not first_stage)
+
+    result = xFuserPipelineBaseWrapper._pipefusion_handoff_sync_latents(None, latents, name="handoff")
+
+    expected_metadata = None if first_stage else metadata
+    assert events == [("metadata", expected_metadata, 1), ("tensor", (1, 2), 1)]
+    assert result.shape == (1, 2)
+
+
 def _step_end(pipe, callback, tensor_inputs, patch_latents, *, last_stage=True, **step_tensors):
     with patch.object(base_pipeline, "is_pipeline_last_stage", return_value=last_stage):
         xFuserPipelineBaseWrapper._async_pipeline_step_end(

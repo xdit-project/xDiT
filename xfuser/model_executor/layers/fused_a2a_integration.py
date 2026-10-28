@@ -191,8 +191,8 @@ def _register_input_collective():
     lib = torch.library.Library("xfuser", "FRAGMENT")
     lib.define(
         "fused_a2a_input_collective(Tensor input, Tensor lifetime, "
-        "Tensor[] previous, int role, str profile, str group_name, "
-        "int rank, int world_size, int? valid_kv_len) -> Tensor[]",
+        "Tensor[] previous, int role, str profile, int rank, "
+        "int world_size, int? valid_kv_len, str group_name) -> Tensor[]",
         tags=(torch.Tag.cudagraph_unsafe,),
     )
     lib.define(
@@ -200,7 +200,7 @@ def _register_input_collective():
         tags=(torch.Tag.cudagraph_unsafe,),
     )
 
-    def submit(input, lifetime, previous, role, profile, group_name, rank, world_size, valid_kv_len):
+    def submit(input, lifetime, previous, role, profile, rank, world_size, valid_kv_len, group_name):
         del lifetime, previous, world_size
         _require_active_profile(profile)
         group = dist.distributed_c10d._resolve_process_group(group_name)
@@ -226,7 +226,7 @@ def _register_input_collective():
             _INPUT_COLLECTIVE_WAITS[tensor.data_ptr()] = (done, handle, role)
         return [payload, scale]
 
-    def submit_fake(input, lifetime, previous, role, profile, group_name, rank, world_size, valid_kv_len):
+    def submit_fake(input, lifetime, previous, role, profile, rank, world_size, valid_kv_len, group_name):
         del lifetime, previous, group_name, rank
         head_major = input.transpose(1, 2)
         payloads, scales = _fake_packed_raw_outputs(
@@ -255,7 +255,7 @@ def _register_input_collective():
         has_side_effect(op)
 
     @register_lowering(submit_op, type_promotion_kind=None)
-    def lower_submit(input, lifetime, previous, role, profile, group_name, rank, world_size, valid_kv_len):
+    def lower_submit(input, lifetime, previous, role, profile, rank, world_size, valid_kv_len, group_name):
         outputs = ir._CollectiveKernel.create_out_of_place(
             submit_op,
             input,
@@ -263,10 +263,10 @@ def _register_input_collective():
             previous,
             role,
             profile,
-            group_name,
             rank,
             world_size,
             valid_kv_len,
+            group_name,
         )
         return [ir.TensorBox.create(output) for output in outputs]
 
@@ -654,10 +654,10 @@ def fused_a2a_input_role(
             previous,
             role,
             _ATTENTION_A2A_CONFIG.profile,
-            group.group_name,
             rank,
             world_size,
             valid_kv_len,
+            group.group_name,
         )
         return (*previous, *outputs)
     handle = (group.group_name, rank, input.device.index)

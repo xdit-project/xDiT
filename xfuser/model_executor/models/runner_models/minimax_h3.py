@@ -286,6 +286,25 @@ def _minimax_h3_parallel_encode_clip(self, x: torch.Tensor) -> torch.Tensor:
     )
 
 
+def _record_cudagraph_on_first_call(compiled_forward):
+    """Replay a once-per-request compiled forward as a CUDA graph from its first call on."""
+    recorded = False
+
+    def forward(hidden_states: torch.Tensor) -> torch.Tensor:
+        nonlocal recorded
+        if not recorded:
+            # A graph records on its second call. Make both happen in the first
+            # call, which is the compile warmup, rather than in a timed run.
+            torch.compiler.cudagraph_mark_step_begin()
+            compiled_forward(hidden_states)
+            recorded = True
+        torch.compiler.cudagraph_mark_step_begin()
+        # The result outlives the call, and the next replay reuses its buffer.
+        return compiled_forward(hidden_states).clone()
+
+    return forward
+
+
 def install_minimax_h3_vae_tile_parallel(vae) -> None:
     """Distribute MiniMax-H3 spatial VAE tiles across the existing VAE ranks.
 
@@ -884,11 +903,27 @@ class xFuserMiniMaxH3Model(xFuserModel):
             self._mark_cudagraph_steps(vae.decoder)
         log("MiniMax-H3 torch.compile enabled for repeated video VAE decoder blocks.")
 
+    def _compile_audio_vae_decoder(self, audio_vae) -> None:
+        mode = self._get_vae_compile_mode()
+        decoder = audio_vae.decoder
+        for module in decoder.modules():
+            if hasattr(module, "weight_g"):
+                torch.nn.utils.remove_weight_norm(module)
+        compiled_forward = torch.compile(decoder.forward, mode=mode, fullgraph=False)
+        if mode in self.CUDAGRAPH_COMPILE_MODES:
+            decoder.forward = _record_cudagraph_on_first_call(compiled_forward)
+        else:
+            decoder.forward = compiled_forward
+        log("MiniMax-H3 torch.compile enabled for the audio VAE decoder.")
+
     def _compile_model(self, input_args: dict) -> None:
         mode = self._get_compile_mode()
         vae = getattr(self.pipe, "vae", None)
         if vae is not None:
             self._compile_vae_decoder_blocks(vae)
+        audio_vae = getattr(self.pipe, "audio_vae", None)
+        if audio_vae is not None:
+            self._compile_audio_vae_decoder(audio_vae)
 
         if self.config.fully_shard_degree > 1:
             super()._compile_model(input_args)

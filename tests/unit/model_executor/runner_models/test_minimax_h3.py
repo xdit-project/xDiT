@@ -886,7 +886,9 @@ def test_vdn_step_count_runs_the_distilled_9_point_grid(monkeypatch):
         xFuserVDNMiniMaxH3Model._validate_args(model, {"num_inference_steps": 9})
 
     grid_points = []
-    scheduler = SimpleNamespace(set_timesteps=lambda n, device=None: grid_points.append(n))
+    scheduler = SimpleNamespace(
+        set_timesteps=lambda n, device=None: grid_points.append(n), set_begin_index=lambda index: None
+    )
     _count_steps_as_forwards(scheduler)
     scheduler.set_timesteps(xFuserVDNMiniMaxH3Model.default_input_values.num_inference_steps)
     assert grid_points == [9]

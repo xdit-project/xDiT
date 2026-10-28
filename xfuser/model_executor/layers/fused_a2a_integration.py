@@ -306,8 +306,11 @@ def preflight_attention_a2a(config: AttentionA2AConfig) -> None:
         _prepare_attention_a2a_packed_launcher()
         if getattr(PackedRoleResult, "_fields", ()) != ("payload", "scale"):
             raise RuntimeError("installed AITER has an incompatible PackedRoleResult contract")
-        if "valid_kv_len" not in inspect.signature(AttentionA2AIntraNodeOp.__init__).parameters:
+        constructor_parameters = inspect.signature(AttentionA2AIntraNodeOp.__init__).parameters
+        if "valid_kv_len" not in constructor_parameters:
             raise RuntimeError("installed AITER lacks Attention A2A direct valid K/V output")
+        if "group" not in constructor_parameters:
+            raise RuntimeError("installed AITER lacks mandatory Attention A2A group validation")
         source = inspect.getsource(AttentionA2AIntraNodeOp.__init__)
         required_codecs = {"e4m3_pc", "mxfp6_p"} if config.is_auto else set(config.codecs)
         missing = sorted(codec for codec in required_codecs & {"e4m3_pc", "mxfp6_p"} if repr(codec) not in source)
@@ -871,6 +874,7 @@ def _get_ops(
             softmax_scale=softmax_scale,
             hadamard=_TRANSPORT_HADAMARD,
             valid_kv_len=valid_kv_len,
+            group=_MORI_CPU_GROUP,
         )
         _OP_CACHE[key] = op
     return op

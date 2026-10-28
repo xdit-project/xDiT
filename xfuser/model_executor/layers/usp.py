@@ -451,6 +451,8 @@ def _ring_trim_trailing_kv_padding(attention_function, valid_kv_len, shard_len):
         return attention_function(query, key, value, *args, **kwargs)
 
     return wrapper
+
+
 def _allocate_compact_attention_a2a_kv(
     key,
     value,
@@ -1136,10 +1138,7 @@ def USP(
             pass
         elif _backend_strips_sp_pad(hb_backend, attention_kwargs):
             pass
-        elif (
-            get_ring_parallel_world_size() > 1
-            and attention_kwargs.get("indices_k") is None
-        ):
+        elif get_ring_parallel_world_size() > 1 and attention_kwargs.get("indices_k") is None:
             attention_function = _ring_trim_trailing_kv_padding(
                 attention_function,
                 valid_kv_len,

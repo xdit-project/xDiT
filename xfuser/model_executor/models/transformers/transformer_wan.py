@@ -469,19 +469,11 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
         # FP6-P profiles currently ask for 64 local tokens. This is a temporary
         # mitigation for the known AITER MHA-v4 race, not an Attention A2A
         # transport requirement; remove it when the upstream kernel is fixed.
-        pad_multiple = (
-            fused_a2a_pad_multiple(sp_world_size)
-            if attention_a2a_padding
-            else sp_world_size
-        )
-        pad_amount = (
-            pad_multiple - (hidden_states.shape[1] % pad_multiple)
-        ) % pad_multiple
+        pad_multiple = fused_a2a_pad_multiple(sp_world_size) if attention_a2a_padding else sp_world_size
+        pad_amount = (pad_multiple - (hidden_states.shape[1] % pad_multiple)) % pad_multiple
         # Padded keys would act as an attention sink. Publish the real global
         # length for ordinary USP slicing or direct packed K/V output.
-        self._self_attn_kwargs["valid_kv_len"] = (
-            seq_len if pad_amount else None
-        )
+        self._self_attn_kwargs["valid_kv_len"] = seq_len if pad_amount else None
         hidden_states = self._chunk_and_pad_sequence(hidden_states, sp_world_rank, sp_world_size, pad_amount, dim=1)
         self._sp_pad["local_rows"] = local_sp_pad_rows(seq_len, hidden_states.shape[1], sp_world_rank)
 

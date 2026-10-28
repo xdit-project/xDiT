@@ -1706,6 +1706,7 @@ def test_minimax_h3_compile_preserves_forward_signature(monkeypatch):
     model.pipe = SimpleNamespace(transformer=transformer, vae=vae)
     model._enable_compute_comm_overlap = lambda: None
     model._get_compile_mode = lambda: "default"
+    model._get_vae_compile_mode = lambda: "default"
     model._run_timed_pipe = lambda input_args: None
     monkeypatch.setattr(
         "xfuser.model_executor.models.runner_models.minimax_h3.log",

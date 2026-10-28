@@ -23,7 +23,7 @@ from xfuser.core.distributed import (
 )
 from xfuser.core.utils.runner_utils import log
 from xfuser.core.utils.video_utils import encode_video_with_audio
-from xfuser.envs import get_device_name
+from xfuser.envs import PACKAGES_CHECKER, get_device_name
 from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
@@ -819,12 +819,23 @@ class xFuserMiniMaxH3Model(xFuserModel):
         if input_args.get("negative_prompt") is not None:
             raise ValueError("MiniMax-H3 is guidance-distilled and does not accept a negative prompt.")
 
+    def _get_vae_compile_mode(self) -> str:
+        if PACKAGES_CHECKER._on_rdna4():
+            return "default"
+        return "reduce-overhead"
+
+    def _compile_vae_decoder_blocks(self, vae) -> None:
+        mode = self._get_vae_compile_mode()
+        vae.compile_repeated_blocks(mode=mode, fullgraph=False)
+        if mode in self.CUDAGRAPH_COMPILE_MODES:
+            self._mark_cudagraph_steps(vae.decoder)
+        log("MiniMax-H3 torch.compile enabled for repeated video VAE decoder blocks.")
+
     def _compile_model(self, input_args: dict) -> None:
         mode = self._get_compile_mode()
         vae = getattr(self.pipe, "vae", None)
         if vae is not None:
-            vae.compile_repeated_blocks(mode=mode, fullgraph=False)
-            log("MiniMax-H3 torch.compile enabled for repeated video VAE decoder blocks.")
+            self._compile_vae_decoder_blocks(vae)
 
         if self.config.fully_shard_degree > 1:
             super()._compile_model(input_args)

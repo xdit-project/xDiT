@@ -1831,6 +1831,7 @@ def test_minimax_h3_compile_preserves_forward_signature(monkeypatch):
     model.pipe = SimpleNamespace(transformer=transformer, vae=vae)
     model._enable_compute_comm_overlap = lambda: None
     model._get_compile_mode = lambda: "default"
+    model._get_vae_compile_mode = lambda: "default"
     model._run_timed_pipe = lambda input_args: None
     monkeypatch.setattr(
         "xfuser.model_executor.models.runner_models.minimax_h3.log",
@@ -1846,15 +1847,17 @@ def test_minimax_h3_compile_preserves_forward_signature(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("runner", "rdna4", "transformer_mode"),
+    ("runner", "rdna4", "transformer_mode", "vae_mode"),
     [
-        ("xFuserMiniMaxH3Model", False, "reduce-overhead"),
-        ("xFuserMiniMaxH3Model", True, "default"),
-        ("xFuserFastH3Model", False, "default"),
+        ("xFuserMiniMaxH3Model", False, "reduce-overhead", "reduce-overhead"),
+        ("xFuserMiniMaxH3Model", True, "default", "default"),
+        ("xFuserFastH3Model", False, "default", "reduce-overhead"),
     ],
 )
-def test_minimax_h3_takes_cuda_graphs_for_the_transformer_only(monkeypatch, runner, rdna4, transformer_mode):
-    """The video VAE decoder reads graph outputs across calls, so it keeps the runner's mode."""
+def test_minimax_h3_picks_the_transformer_and_vae_decoder_modes_separately(
+    monkeypatch, runner, rdna4, transformer_mode, vae_mode
+):
+    """The video VAE decoder reads graph outputs across calls, so its graphs need a step mark per call."""
     from xfuser.envs import PACKAGES_CHECKER
     from xfuser.model_executor.models.runner_models import minimax_h3
 
@@ -1867,16 +1870,18 @@ def test_minimax_h3_takes_cuda_graphs_for_the_transformer_only(monkeypatch, runn
     model.config = SimpleNamespace(fully_shard_degree=1)
     vae_calls = []
     transformer = torch.nn.Linear(2, 2)
-    model.pipe = SimpleNamespace(
-        transformer=transformer, vae=SimpleNamespace(compile_repeated_blocks=lambda **kwargs: vae_calls.append(kwargs))
+    vae = SimpleNamespace(
+        compile_repeated_blocks=lambda **kwargs: vae_calls.append(kwargs), decoder=torch.nn.Identity()
     )
+    model.pipe = SimpleNamespace(transformer=transformer, vae=vae)
     model._enable_compute_comm_overlap = lambda: None
     model._get_compile_mode = lambda: "default"
     model._run_timed_pipe = lambda input_args: None
 
     model._compile_model({"num_inference_steps": 50})
 
-    assert vae_calls == [{"mode": "default", "fullgraph": False}]
+    assert vae_calls == [{"mode": vae_mode, "fullgraph": False}]
+    assert getattr(vae.decoder, "_xfuser_marks_cudagraph_steps", False) == (vae_mode == "reduce-overhead")
     assert modes == [transformer_mode]
     # The base runner's capture warmup must see the transformer's graphs.
     assert model._records_cudagraphs() == (transformer_mode == "reduce-overhead")

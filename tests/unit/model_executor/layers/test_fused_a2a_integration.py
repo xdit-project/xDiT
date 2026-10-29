@@ -179,6 +179,19 @@ def test_direct_valid_kv_falls_back_when_padding_spans_multiple_ranks():
     )
 
 
+def test_tier2_collapses_waits_only_for_mx_qk_profiles():
+    input_source = inspect.getsource(fused_a2a_integration.fused_a2a_input)
+    registration_source = inspect.getsource(fused_a2a_integration._register_input_collective)
+
+    assert '_ATTENTION_A2A_CONFIG.codecs[0] in ("mxfp4", "mxfp6")' in input_source
+    assert "outputs[-1]" in input_source
+    assert "for tensor in outputs" in input_source
+    assert "_INPUT_COLLECTIVE_WAIT_COUNTS[handle] += 1" in registration_source
+    assert "if collapse_waits or remaining == 0" in registration_source
+    assert "_INPUT_COLLECTIVE_WAITS.pop(result.payload.data_ptr(), None)" in registration_source
+    assert "_INPUT_COLLECTIVE_WAITS.pop(result.scale.data_ptr(), None)" in registration_source
+
+
 def test_runtime_does_not_access_private_aiter_buffers():
     source = inspect.getsource(fused_a2a_integration)
 

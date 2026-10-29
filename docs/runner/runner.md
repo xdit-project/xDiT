@@ -114,6 +114,7 @@ Individual model classes that inherit from `xFuserModel`:
 | LTX-Video 0.9.7 | `LTX-Video-0.9.7-dev`, `Lightricks/LTX-Video-0.9.7-dev` |
 | Lumina-Image-2.0 | `Lumina2`, `Lumina-Image-2.0`, `Alpha-VLLM/Lumina-Image-2.0` |
 | MiniMax-H3 | `MiniMaxAI/MiniMax-H3`, `MiniMax-H3`, `MiniMax-H3-Ref2VA` |
+| MiniMax-H3 Turbo (lightx2v LoRA) | `MiniMax-H3-Turbo` |
 | VDN-H3 | `OpenVDN/vdn-minimax-h3`, `VDN-H3` |
 | Prism (preview-alpha) | `Prism`, `Prism-preview-alpha`, `FrancisRing/Prism` |
 | FastH3 Preview v1 | `FastH3`, `FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree`, `FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1300`, `FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1900` |
@@ -141,7 +142,7 @@ Individual model classes that inherit from `xFuserModel`:
 
 ### Model Selection
 
-For startup adapter fusion on FLUX.1-dev, see [LoRA support and limitations](lora.md).
+For startup adapter fusion on FLUX.1-dev and MiniMax-H3 Turbo, see [LoRA support and limitations](lora.md).
 
 | Argument | Description |
 |----------|-------------|

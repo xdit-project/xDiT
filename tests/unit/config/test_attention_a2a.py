@@ -125,8 +125,10 @@ def test_auto_infers_dense_mha_v4_profiles():
 
 
 def test_profiles_use_validated_wan_launch_geometry():
-    assert AttentionA2AConfig(profile="mxfp6-mxfp4").block_num == 512
-    assert AttentionA2AConfig(profile="e4m3-e4m3").block_num == 512
+    for profile in ("mxfp6-e4m3", "mxfp6-mxfp6", "mxfp6-mxfp4"):
+        assert AttentionA2AConfig(profile=profile).block_num == 256
+    for profile in ("e4m3-e4m3", "int8-e4m3", "mxfp8-e4m3", "e4m3-mxfp6", "mxfp4-mxfp4"):
+        assert AttentionA2AConfig(profile=profile).block_num == 512
 
 
 @pytest.mark.parametrize(

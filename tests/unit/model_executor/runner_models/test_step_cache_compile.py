@@ -53,13 +53,22 @@ def boundaries(monkeypatch):
     monkeypatch.setattr(base_model, "get_pipeline_parallel_world_size", lambda: 1)
     monkeypatch.setattr(hunyuan, "get_runtime_state", _runtime_state(False))
     # The runner sets global Inductor options; restore them after each test.
-    for name in (
-        "post_grad_custom_post_pass",
-        "reorder_for_compute_comm_overlap",
-        "reorder_for_compute_comm_overlap_passes",
-    ):
-        monkeypatch.setattr(inductor_config, name, getattr(inductor_config, name))
-    return SimpleNamespace(compiled=compiled, warmups=warmups)
+    # pytest's monkeypatch records a torch config as absent because its value is
+    # not in the module ``__dict__``, then deletes it on undo. Deletion hides the
+    # option for the rest of the process, so later tests cannot read it.
+    saved_inductor_config = {
+        name: getattr(inductor_config, name)
+        for name in (
+            "post_grad_custom_post_pass",
+            "reorder_for_compute_comm_overlap",
+            "reorder_for_compute_comm_overlap_passes",
+        )
+    }
+    try:
+        yield SimpleNamespace(compiled=compiled, warmups=warmups)
+    finally:
+        for name, value in saved_inductor_config.items():
+            setattr(inductor_config, name, value)
 
 
 def _transformer(*block_attrs):

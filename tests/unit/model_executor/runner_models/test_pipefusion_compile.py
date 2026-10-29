@@ -230,8 +230,13 @@ def test_pipefusion_raises_recompile_limit_for_patch_specializations(monkeypatch
     model = object.__new__(_Runner)
     model.config = SimpleNamespace(num_pipeline_patch=8)
     monkeypatch.setattr(base_model_module, "get_pipeline_parallel_world_size", lambda: 8)
-    monkeypatch.setattr(torch._dynamo.config, "recompile_limit", 8)
-
-    model._enable_compute_comm_overlap()
-
-    assert torch._dynamo.config.recompile_limit == 20
+    # Assign directly. monkeypatch.setattr deletes a torch config on undo because
+    # the value is not stored in the module ``__dict__``, and that hides
+    # ``recompile_limit`` from later tests such as flex attention.
+    previous_recompile_limit = torch._dynamo.config.recompile_limit
+    torch._dynamo.config.recompile_limit = 8
+    try:
+        model._enable_compute_comm_overlap()
+        assert torch._dynamo.config.recompile_limit == 20
+    finally:
+        torch._dynamo.config.recompile_limit = previous_recompile_limit

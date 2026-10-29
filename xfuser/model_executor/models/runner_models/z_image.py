@@ -100,9 +100,41 @@ def _set_effective_heads_for_ulysses(transformer, ulysses_degree: int) -> None:
     transformer.config.num_attention_heads = effective_heads
 
 
+class _ZImageCompileMixin:
+    """The compile plan both Z-Image runners share.
+
+    Separate from either class so the two cannot drift: the transformer, the
+    text encoder and the VAE decoder are all the same components here, and the
+    measurements below were taken on the base model and confirmed on Turbo.
+    """
+
+    def _compile_model(self, input_args: dict) -> None:
+        # Compiles the decoder submodule, not the VAE: pipelines call
+        # vae.decode, so torch.compile(vae) would never be entered.  No-ops
+        # under --use_parallel_vae.  Worth ~4.4 ms of a 1024x1024 decode.
+        self._compile_vae_decoder()
+        super()._compile_model(input_args)
+
+    def _get_compiled_pipe_components(self) -> list[str]:
+        """Compile the text encoder alongside the transformer.
+
+        Run eager it is ~4800 kernel launches per call and ~44 ms of the ~880 ms
+        this model spends on the GPU -- almost none of it arithmetic.  Its
+        RMSNorms alone come out as a mean/pow/rsqrt/mul/mul quintet per norm,
+        each a few microseconds of launch for a couple of MB of data.  Letting
+        Inductor fuse it takes that to ~1700 launches and ~28 ms.
+
+        Safe to compile because the shape is pinned: ``ZImagePipeline`` tokenizes
+        with ``padding="max_length"``, so the encoder sees the same sequence
+        length whatever the prompt is, and nothing here re-triggers compilation
+        between requests.
+        """
+        return ["transformer", "text_encoder"]
+
+
 @register_model("Tongyi-MAI/Z-Image")
 @register_model("Z-Image")
-class xFuserZImageModel(xFuserModel):
+class xFuserZImageModel(_ZImageCompileMixin, xFuserModel):
     # From the registered checkpoint's transformer config.
     attention_heads = 30
     # The attention processor pads heads before the Ulysses exchange.
@@ -207,7 +239,7 @@ class xFuserZImageModel(xFuserModel):
 
 @register_model("Tongyi-MAI/Z-Image-Turbo")
 @register_model("Z-Image-Turbo")
-class xFuserZImageTurboModel(xFuserModel):
+class xFuserZImageTurboModel(_ZImageCompileMixin, xFuserModel):
     # From the registered checkpoint's transformer config.
     attention_heads = 30
     # The attention processor pads heads before the Ulysses exchange.

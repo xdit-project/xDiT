@@ -926,6 +926,10 @@ class xFuserModel(abc.ABC):
         component.register_forward_pre_hook(_mark, with_kwargs=True, prepend=True)
         component._xfuser_marks_cudagraph_steps = True
 
+    def _compile_vae_decoder(self, mode: str = "default") -> None:
+        """Forward decoder compilation to the VAE manager, which owns the policy."""
+        self._vae_manager.compile_decoders(self._decoding_vaes(), mode=mode)
+
     def _get_compiled_pipe_components(self) -> List[str]:
         return ["transformer"]
 

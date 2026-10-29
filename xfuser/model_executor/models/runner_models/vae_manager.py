@@ -17,12 +17,13 @@ from xfuser.core.utils.runner_utils import (
     convert_model_convs_to_channels_last,
     log,
 )
-from xfuser.envs import restore_torch_group_norm_for_distvae
+from xfuser.envs import (
+    restore_torch_group_norm_for_distvae,
+    restore_torch_group_norm_in,
+)
 
 
-def _validate_vae_tile_pair(
-    config, capabilities, settings, kind, minimum, constraint
-) -> None:
+def _validate_vae_tile_pair(config, capabilities, settings, kind, minimum, constraint) -> None:
     names = tuple(f"vae_tile_{kind}_{axis}" for axis in ("height", "width"))
     flags = tuple(f"--{name}" for name in names)
     values = tuple(getattr(config, name, None) for name in names)
@@ -40,8 +41,7 @@ def _validate_vae_tile_pair(
         raise ValueError(f"{joined_flags} require --enable_tiling.")
     if not capabilities.enable_tiling:
         raise ValueError(
-            f"{joined_flags} configure tiled VAE decoding, "
-            f"which model {settings.model_name} does not support."
+            f"{joined_flags} configure tiled VAE decoding, which model {settings.model_name} does not support."
         )
 
 
@@ -54,12 +54,8 @@ def validate_vae_config(config, capabilities, settings) -> None:
                 "identify and shard the GroupNorm layers."
             )
 
-    _validate_vae_tile_pair(
-        config, capabilities, settings, "size", 1, "positive"
-    )
-    _validate_vae_tile_pair(
-        config, capabilities, settings, "overlap", 0, "non-negative"
-    )
+    _validate_vae_tile_pair(config, capabilities, settings, "size", 1, "positive")
+    _validate_vae_tile_pair(config, capabilities, settings, "overlap", 0, "non-negative")
 
 
 class VAEManager:
@@ -85,9 +81,7 @@ class VAEManager:
         tiling_flag = self._tiling_flag()
         for vae in vaes:
             if self.config.enable_slicing:
-                vae_tiling.require_vae_support(
-                    vae, "slicing", "--enable_slicing"
-                )
+                vae_tiling.require_vae_support(vae, "slicing", "--enable_slicing")
                 log(f"Enabling VAE slicing on {type(vae).__name__}...")
                 vae.enable_slicing()
 
@@ -135,8 +129,7 @@ class VAEManager:
             global_ranks=tuple(coordinator.ranks),
         )
         log(
-            f"VAE parallel group: world_size={coordinator.world_size}, "
-            f"rank={coordinator.rank_in_group}",
+            f"VAE parallel group: world_size={coordinator.world_size}, rank={coordinator.rank_in_group}",
             debug=True,
         )
         try:
@@ -145,9 +138,7 @@ class VAEManager:
             AutoencoderKLMiniMaxH3 = None
 
         for vae in vaes:
-            if AutoencoderKLMiniMaxH3 is not None and isinstance(
-                vae, AutoencoderKLMiniMaxH3
-            ):
+            if AutoencoderKLMiniMaxH3 is not None and isinstance(vae, AutoencoderKLMiniMaxH3):
                 from xfuser.model_executor.models.runner_models.minimax_h3 import (
                     install_minimax_h3_vae_tile_parallel,
                 )
@@ -162,14 +153,10 @@ class VAEManager:
                 )
             else:
                 adapter = vae_parallel.parallelize_decoder(vae, vae_group)
-                log(
-                    f"Parallel VAE decoder enabled on {type(vae).__name__} via {adapter}."
-                )
+                log(f"Parallel VAE decoder enabled on {type(vae).__name__} via {adapter}.")
             if self.capabilities.use_parallel_vae_encoder:
                 adapter = vae_parallel.parallelize_encoder(vae, vae_group)
-                log(
-                    f"Parallel VAE encoder enabled on {type(vae).__name__} via {adapter}."
-                )
+                log(f"Parallel VAE encoder enabled on {type(vae).__name__} via {adapter}.")
 
     def convert_to_channels_last(self, vaes) -> None:
         """Convert every supplied decoding VAE to channels-last exactly once."""
@@ -182,11 +169,7 @@ class VAEManager:
         convert_model_convs_to_channels_last(vae)
 
         original_decode = vae.decode
-        memory_format = (
-            torch.channels_last
-            if self.settings.model_output_type == "image"
-            else torch.channels_last_3d
-        )
+        memory_format = torch.channels_last if self.settings.model_output_type == "image" else torch.channels_last_3d
 
         @functools.wraps(original_decode)
         def decode_wrapper(*args, **kwargs):
@@ -200,6 +183,51 @@ class VAEManager:
 
         vae.decode = decode_wrapper
         vae._xfuser_decode_channels_last = True
+
+    def compile_decoders(self, vaes, mode: str = "default") -> None:
+        """Compile each VAE's decoder, after taking AITER's GroupNorm back out of it.
+
+        Two separate things, but neither pays off without the other.
+
+        ``torch.compile(vae)`` would be a no-op: pipelines call ``vae.decode``,
+        not ``vae.forward``, so the compiled wrapper is never entered.  The
+        decoder submodule is the thing whose ``forward`` actually runs.
+
+        And compiling it alone only gets part of the win, because xDiT swaps
+        ``torch.nn.GroupNorm`` for AITER's globally at import.  AITER's is much
+        the faster of the two run eagerly, but it is an opaque custom op and so
+        also a fusion barrier: the SiLU, the convolution bias and the residual
+        add on either side of it each stay their own pass over a full-resolution
+        activation.  Handing those back to Inductor beats the
+        faster-but-unfusable kernel -- but only once there is a compiler to hand
+        them to, so the restore is scoped to these decoders and coupled to the
+        compile, and must not outlive it.  That is why this calls
+        :func:`restore_torch_group_norm_in` and not its global sibling
+        :func:`restore_torch_group_norm_for_distvae`, which rebinds the class
+        for the whole process and would not touch an already-built decoder.
+
+        ``mode`` defaults to "default" rather than the caller's compile mode on
+        purpose: under CUDA Graphs the decoded image would live in the graph's
+        buffer pool and be valid only until the next replay, and the transformer
+        replays many times between one decode and the next.
+
+        Does nothing under ``--use_parallel_vae``, which shards the decoder
+        across ranks and owns its execution.
+        """
+        if self.config.use_parallel_vae:
+            return
+        for vae in vaes:
+            decoder = getattr(vae, "decoder", None)
+            if decoder is None or isinstance(decoder, torch._dynamo.OptimizedModule):
+                continue
+            restored = restore_torch_group_norm_in(decoder)
+            if restored:
+                log(
+                    f"Restored {restored} torch GroupNorm layer(s) in "
+                    f"{type(vae).__name__}'s decoder so Inductor can fuse across them.",
+                    debug=True,
+                )
+            vae.decoder = torch.compile(decoder, mode=mode)
 
     def _requested_vae_tile_shape(self) -> Optional[Tuple[int, int]]:
         height = getattr(self.config, "vae_tile_size_height", None)
@@ -224,11 +252,7 @@ class VAEManager:
         plan = vae_tiling.tile_shape_plan(vae, height, width)
         if plan is None:
             native = vae_tiling.tile_shape(vae)
-            native_shown = (
-                f" The VAE's default tile shape is {native[0]}x{native[1]}."
-                if native is not None
-                else ""
-            )
+            native_shown = f" The VAE's default tile shape is {native[0]}x{native[1]}." if native is not None else ""
             raise ValueError(
                 f"--vae_tile_size_height {height} with --vae_tile_size_width {width} "
                 f"is not a shape this VAE ({type(vae).__name__}) can tile exactly."
@@ -236,15 +260,10 @@ class VAEManager:
                 "scale and tile stride."
             )
         vae_tiling.apply_tile_plan(vae, plan)
-        log(
-            f"VAE tile window set to {height}x{width}px "
-            f"({', '.join(f'{a}={v}' for a, v in sorted(plan.items()))})"
-        )
+        log(f"VAE tile window set to {height}x{width}px ({', '.join(f'{a}={v}' for a, v in sorted(plan.items()))})")
         return shape
 
-    def _apply_vae_tile_overlap(
-        self, vae, sample_shape: Tuple[int, int]
-    ) -> None:
+    def _apply_vae_tile_overlap(self, vae, sample_shape: Tuple[int, int]) -> None:
         """Apply exact per-axis output-pixel tile overlap when requested."""
         requested = self._requested_vae_tile_overlap()
         if requested is None:
@@ -258,11 +277,7 @@ class VAEManager:
         )
         if plan is None:
             shape = vae_tiling.tile_shape(vae)
-            shape_shown = (
-                f"{shape[0]}x{shape[1]} pixels"
-                if shape is not None
-                else "an unknown pixel shape"
-            )
+            shape_shown = f"{shape[0]}x{shape[1]} pixels" if shape is not None else "an unknown pixel shape"
             raise ValueError(
                 f"The requested VAE tile overlap of {overlap_height}x{overlap_width} pixels "
                 f"is not exact for this VAE ({type(vae).__name__}) at its current tile shape "
@@ -271,23 +286,12 @@ class VAEManager:
             )
         vae_tiling.apply_tile_plan(vae, plan)
         landed = vae_tiling.tile_overlap(vae)
-        shown = (
-            f"{landed[0]}x{landed[1]}px"
-            if landed is not None
-            else f"{overlap_height}x{overlap_width}px"
-        )
-        log(
-            f"VAE tile overlap set to {shown} "
-            f"({', '.join(f'{a}={v:g}' for a, v in sorted(plan.items()))})"
-        )
+        shown = f"{landed[0]}x{landed[1]}px" if landed is not None else f"{overlap_height}x{overlap_width}px"
+        log(f"VAE tile overlap set to {shown} ({', '.join(f'{a}={v:g}' for a, v in sorted(plan.items()))})")
 
-    def _check_tiles_against_parallel_vae(
-        self, vae, native_shape: Optional[Tuple[int, int]]
-    ) -> None:
+    def _check_tiles_against_parallel_vae(self, vae, native_shape: Optional[Tuple[int, int]]) -> None:
         """Refuse a tile holding fewer latent rows than row-sharding ranks."""
-        if not (
-            self.config.use_parallel_vae and self.capabilities.use_parallel_vae
-        ):
+        if not (self.config.use_parallel_vae and self.capabilities.use_parallel_vae):
             return
         if vae_tile_parallel.context_of(vae) is not None:
             return
@@ -296,17 +300,9 @@ class VAEManager:
         if ranks < 2 or rows is None or rows >= ranks:
             return
         shape = vae_tiling.tile_shape(vae)
-        smallest = self._minimum_vae_tile_shape(
-            vae, shape, native_shape, ranks
-        )
-        shown = (
-            f"{shape[0]}x{shape[1]}px" if shape is not None else "unknown-size"
-        )
-        native_shown = (
-            f"{native_shape[0]}x{native_shape[1]}px"
-            if native_shape is not None
-            else "unknown"
-        )
+        smallest = self._minimum_vae_tile_shape(vae, shape, native_shape, ranks)
+        shown = f"{shape[0]}x{shape[1]}px" if shape is not None else "unknown-size"
+        native_shown = f"{native_shape[0]}x{native_shape[1]}px" if native_shape is not None else "unknown"
         raise ValueError(
             f"A {shown} VAE tile contains {rows} latent rows, but --use_parallel_vae uses "
             f"{ranks} ranks and requires at least one latent row per rank"
@@ -348,10 +344,7 @@ class VAEManager:
         """Install local or group-dispatched tiled decode when DistVAE provides one."""
         context = vae_tile_parallel.context_of(vae)
         if context is None:
-            if (
-                self._requested_vae_tile_shape() is None
-                and self._requested_vae_tile_overlap() is None
-            ):
+            if self._requested_vae_tile_shape() is None and self._requested_vae_tile_overlap() is None:
                 return
             installed = vae_tiling.tiled_decode_for(vae)
         else:
@@ -361,10 +354,7 @@ class VAEManager:
             return
         vae.tiled_decode = installed
         if context is None:
-            log(
-                f"VAE tiled decode on {type(vae).__name__}: using DistVAE's local "
-                "overlap loop."
-            )
+            log(f"VAE tiled decode on {type(vae).__name__}: using DistVAE's local overlap loop.")
             return
         log(
             f"VAE tiled decode on {type(vae).__name__}: assigning contiguous groups of "
@@ -372,9 +362,7 @@ class VAEManager:
             "outputs."
         )
 
-    def _install_vae_decode_guard(
-        self, vae, tile_shape: Optional[Tuple[int, int]] = None
-    ) -> None:
+    def _install_vae_decode_guard(self, vae, tile_shape: Optional[Tuple[int, int]] = None) -> None:
         """Add actionable OOM and narrow-tile diagnostics to a VAE decode."""
         vae._xfuser_guarded_tile_shape = tile_shape
         if getattr(vae, "_xfuser_decode_guarded", False):
@@ -388,9 +376,7 @@ class VAEManager:
             except VAERowSplitError as e:
                 raise ValueError(self._vae_row_split_hint(vae, e)) from e
             except torch.cuda.OutOfMemoryError as e:
-                raise torch.cuda.OutOfMemoryError(
-                    f"{self._vae_decode_oom_hint(vae)}\n{e}"
-                ) from e
+                raise torch.cuda.OutOfMemoryError(f"{self._vae_decode_oom_hint(vae)}\n{e}") from e
             except RuntimeError as e:
                 shape = getattr(vae, "_xfuser_guarded_tile_shape", None)
                 if shape is None or not vae_tiling.is_tile_padding_error(e):
@@ -421,9 +407,7 @@ class VAEManager:
             )
         ]
         if self.capabilities.enable_tiling and vae_tiling.supports_tile_parallel(vae):
-            actions.append(
-                "enable --enable_tiling to distribute complete tiles instead"
-            )
+            actions.append("enable --enable_tiling to distribute complete tiles instead")
         actions.append("disable --use_parallel_vae")
         return f"{message} {', '.join(actions[:-1])}, or {actions[-1]}."
 
@@ -431,13 +415,9 @@ class VAEManager:
         if not getattr(vae, "use_tiling", False):
             if self.capabilities.enable_tiling:
                 return (
-                    "VAE decode ran out of memory with tiling disabled. Re-run with "
-                    "--enable_tiling to decode in tiles."
+                    "VAE decode ran out of memory with tiling disabled. Re-run with --enable_tiling to decode in tiles."
                 )
-            return (
-                f"VAE decode ran out of memory, and model {self.settings.model_name} does not "
-                "support VAE tiling."
-            )
+            return f"VAE decode ran out of memory, and model {self.settings.model_name} does not support VAE tiling."
 
         shape = vae_tiling.tile_shape(vae)
         if shape is None:

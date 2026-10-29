@@ -538,6 +538,38 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         step_cache_config={"fbcache": None},
     )
 
+    def _compile_model(self, input_args: dict) -> None:
+        """Compile the text encoder and VAE decoder as well as the transformer.
+
+        Both run eagerly by default and both are launch-bound rather than
+        arithmetic-bound: at 1024x1024 the text encoder is ~2200 kernels and
+        ~23 ms of the ~347 ms this model spends on the GPU, the decoder another
+        ~30 ms.  Letting Inductor fuse them is worth ~7 ms together.
+
+        It takes mode="default" rather than this model's "reduce-overhead"
+        because CUDA Graphs are worth nothing here -- measured both ways, the
+        two land inside this benchmark's run-to-run spread -- while the risk on
+        the other side is real: a graph's outputs live in its buffer pool and
+        are valid only until the next replay, and the transformer replays many
+        times between one decode and the next.  Compiling the decoder under
+        CUDA Graphs also moved the decoded image by ~47 dB PSNR for no reason
+        that was chased down.  Zero upside, unexplained output change, and a
+        failure mode the base class carries explicit machinery for: take the
+        boring mode.
+
+        The text encoder is the same story and takes the same mode: ~2200
+        kernel launches and ~23 ms of that GPU time, averaging ~10 us apiece --
+        comfortably longer than the launch a graph would be hiding.  It is safe
+        to compile because its shape is pinned: the pipeline tokenizes with
+        ``padding="max_length"`` at ``tokenizer_max_length``, so it sees the
+        same sequence length whatever the prompt is.  Worth ~5.1 ms.
+        """
+        self._compile_vae_decoder()
+        text_encoder = getattr(self.pipe, "text_encoder", None)
+        if text_encoder is not None:
+            self.pipe.text_encoder = torch.compile(text_encoder, mode="default")
+        super()._compile_model(input_args)
+
     def _get_compile_mode(self) -> str:
         # CUDA graphs incompatible with cross-step caching, and
         # cause pathological re-captures on RDNA4.

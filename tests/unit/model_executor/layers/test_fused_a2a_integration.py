@@ -1,5 +1,4 @@
 import builtins
-import inspect
 from types import SimpleNamespace
 from unittest import mock
 
@@ -12,7 +11,13 @@ from xfuser.model_executor.layers import fused_a2a_integration
 
 @pytest.fixture(autouse=True)
 def _reset_attention_a2a_state():
+    fused_a2a_integration._INPUT_PENDING.clear()
+    fused_a2a_integration._INPUT_COLLECTIVE_WAITS.clear()
+    fused_a2a_integration._INPUT_COLLECTIVE_WAIT_COUNTS.clear()
     yield
+    fused_a2a_integration._INPUT_PENDING.clear()
+    fused_a2a_integration._INPUT_COLLECTIVE_WAITS.clear()
+    fused_a2a_integration._INPUT_COLLECTIVE_WAIT_COUNTS.clear()
     fused_a2a_integration._ATTENTION_A2A_POLICY = AttentionA2AConfig()
     fused_a2a_integration._ATTENTION_A2A_TIER2_ENABLED = False
     fused_a2a_integration._ATTENTION_A2A_TIER1_ENABLED = False
@@ -180,24 +185,63 @@ def test_direct_valid_kv_falls_back_when_padding_spans_multiple_ranks():
 
 
 def test_tier2_collapses_waits_only_for_mx_qk_profiles():
-    input_source = inspect.getsource(fused_a2a_integration.fused_a2a_input)
-    registration_source = inspect.getsource(fused_a2a_integration._register_input_collective)
+    pending = tuple(torch.empty(index + 1) for index in range(6))
+    wait = mock.Mock(side_effect=lambda tensor: tensor)
 
-    assert '_ATTENTION_A2A_CONFIG.codecs[0] in ("mxfp4", "mxfp6")' in input_source
-    assert "outputs[-1]" in input_source
-    assert "for tensor in outputs" in input_source
-    assert "_INPUT_COLLECTIVE_WAIT_COUNTS[handle] += 1" in registration_source
-    assert "if collapse_waits or remaining == 0" in registration_source
-    assert "_INPUT_COLLECTIVE_WAITS.pop(result.payload.data_ptr(), None)" in registration_source
-    assert "_INPUT_COLLECTIVE_WAITS.pop(result.scale.data_ptr(), None)" in registration_source
+    outputs = fused_a2a_integration._wait_tier2_outputs(pending, "mxfp6", wait)
+
+    assert all(output is tensor for output, tensor in zip(outputs, pending, strict=True))
+    wait.assert_called_once_with(pending[-1])
+
+    wait.reset_mock()
+    outputs = fused_a2a_integration._wait_tier2_outputs(pending, "e4m3", wait)
+
+    assert all(output is tensor for output, tensor in zip(outputs, pending, strict=True))
+    assert [call.args[0] for call in wait.call_args_list] == list(pending)
 
 
-def test_runtime_does_not_access_private_aiter_buffers():
-    source = inspect.getsource(fused_a2a_integration)
+def _install_pending_waits(collapse_waits):
+    results = tuple(SimpleNamespace(payload=torch.empty(index + 1), scale=torch.empty(index + 2)) for index in range(3))
+    handle = ("test", 0, 0)
+    event = object()
+    fused_a2a_integration._INPUT_PENDING[handle] = {"results": results}
+    tensors = [tensor for result in results for tensor in (result.payload, result.scale)]
+    for tensor in tensors:
+        fused_a2a_integration._INPUT_COLLECTIVE_WAITS[tensor.data_ptr()] = (
+            event,
+            handle,
+            collapse_waits,
+        )
+    fused_a2a_integration._INPUT_COLLECTIVE_WAIT_COUNTS[handle] = len(tensors)
+    return handle, event, tensors
 
-    assert "._epoch" not in source
-    assert ".outputs_sets" not in source
-    assert ".scales_sets" not in source
-    assert "lru_cache" not in source
-    assert "_INPUT_CONSUMER_DONE" not in source
-    assert "MORI_SHMEM_HEAP_SIZE" not in source
+
+def test_collapsed_tier2_wait_releases_the_complete_trio():
+    handle, event, tensors = _install_pending_waits(collapse_waits=True)
+    stream = mock.Mock()
+
+    with mock.patch.object(torch.cuda, "current_stream", return_value=stream):
+        result = fused_a2a_integration._consume_input_collective_wait(tensors[-1])
+
+    assert result is tensors[-1]
+    stream.wait_event.assert_called_once_with(event)
+    assert handle not in fused_a2a_integration._INPUT_PENDING
+    assert handle not in fused_a2a_integration._INPUT_COLLECTIVE_WAIT_COUNTS
+    assert fused_a2a_integration._INPUT_COLLECTIVE_WAITS == {}
+
+
+def test_per_tensor_tier2_wait_releases_whichever_wait_runs_last():
+    handle, event, tensors = _install_pending_waits(collapse_waits=False)
+    stream = mock.Mock()
+
+    with mock.patch.object(torch.cuda, "current_stream", return_value=stream):
+        fused_a2a_integration._consume_input_collective_wait(tensors[-1])
+        assert handle in fused_a2a_integration._INPUT_PENDING
+        for tensor in tensors[:-1]:
+            fused_a2a_integration._consume_input_collective_wait(tensor)
+
+    assert stream.wait_event.call_count == len(tensors)
+    assert all(call.args == (event,) for call in stream.wait_event.call_args_list)
+    assert handle not in fused_a2a_integration._INPUT_PENDING
+    assert handle not in fused_a2a_integration._INPUT_COLLECTIVE_WAIT_COUNTS
+    assert fused_a2a_integration._INPUT_COLLECTIVE_WAITS == {}

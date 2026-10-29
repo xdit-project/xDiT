@@ -13,11 +13,9 @@ from xfuser.model_executor.layers import fused_a2a_integration
 def _reset_attention_a2a_state():
     fused_a2a_integration._INPUT_PENDING.clear()
     fused_a2a_integration._INPUT_COLLECTIVE_WAITS.clear()
-    fused_a2a_integration._INPUT_COLLECTIVE_WAIT_COUNTS.clear()
     yield
     fused_a2a_integration._INPUT_PENDING.clear()
     fused_a2a_integration._INPUT_COLLECTIVE_WAITS.clear()
-    fused_a2a_integration._INPUT_COLLECTIVE_WAIT_COUNTS.clear()
     fused_a2a_integration._ATTENTION_A2A_POLICY = AttentionA2AConfig()
     fused_a2a_integration._ATTENTION_A2A_TIER2_ENABLED = False
     fused_a2a_integration._ATTENTION_A2A_TIER1_ENABLED = False
@@ -184,64 +182,52 @@ def test_direct_valid_kv_falls_back_when_padding_spans_multiple_ranks():
     )
 
 
-def test_tier2_collapses_waits_only_for_mx_qk_profiles():
+def test_tier2_waits_on_every_output():
     pending = tuple(torch.empty(index + 1) for index in range(6))
     wait = mock.Mock(side_effect=lambda tensor: tensor)
 
-    outputs = fused_a2a_integration._wait_tier2_outputs(pending, "mxfp6", wait)
-
-    assert all(output is tensor for output, tensor in zip(outputs, pending, strict=True))
-    wait.assert_called_once_with(pending[-1])
-
-    wait.reset_mock()
-    outputs = fused_a2a_integration._wait_tier2_outputs(pending, "e4m3", wait)
+    outputs = fused_a2a_integration._wait_tier2_outputs(pending, wait)
 
     assert all(output is tensor for output, tensor in zip(outputs, pending, strict=True))
     assert [call.args[0] for call in wait.call_args_list] == list(pending)
 
 
-def _install_pending_waits(collapse_waits):
+def _install_pending_waits():
     results = tuple(SimpleNamespace(payload=torch.empty(index + 1), scale=torch.empty(index + 2)) for index in range(3))
     handle = ("test", 0, 0)
-    event = object()
-    fused_a2a_integration._INPUT_PENDING[handle] = {"results": results}
-    tensors = [tensor for result in results for tensor in (result.payload, result.scale)]
-    for tensor in tensors:
-        fused_a2a_integration._INPUT_COLLECTIVE_WAITS[tensor.data_ptr()] = (
-            event,
-            handle,
-            collapse_waits,
-        )
-    fused_a2a_integration._INPUT_COLLECTIVE_WAIT_COUNTS[handle] = len(tensors)
-    return handle, event, tensors
+    events = [object() for _ in results]
+    trio = {"events": list(events), "waited": -1, "stream": None}
+    fused_a2a_integration._INPUT_PENDING[handle] = {"results": results, "trio_waits": trio}
+    tensors = []
+    for role, result in enumerate(results):
+        for tensor in (result.payload, result.scale):
+            fused_a2a_integration._INPUT_COLLECTIVE_WAITS[tensor.data_ptr()] = (trio, handle, role)
+            tensors.append(tensor)
+    return handle, trio, events, tensors
 
 
-def test_collapsed_tier2_wait_releases_the_complete_trio():
-    handle, event, tensors = _install_pending_waits(collapse_waits=True)
+def test_tier2_waits_once_per_trio_on_the_latest_event():
+    handle, _, events, tensors = _install_pending_waits()
     stream = mock.Mock()
 
     with mock.patch.object(torch.cuda, "current_stream", return_value=stream):
-        result = fused_a2a_integration._consume_input_collective_wait(tensors[-1])
+        for index in (2, 4, 3, 5, 0, 1):
+            assert fused_a2a_integration._consume_input_collective_wait(tensors[index]) is tensors[index]
 
-    assert result is tensors[-1]
-    stream.wait_event.assert_called_once_with(event)
+    stream.wait_event.assert_called_once_with(events[-1])
     assert handle not in fused_a2a_integration._INPUT_PENDING
-    assert handle not in fused_a2a_integration._INPUT_COLLECTIVE_WAIT_COUNTS
     assert fused_a2a_integration._INPUT_COLLECTIVE_WAITS == {}
 
 
-def test_per_tensor_tier2_wait_releases_whichever_wait_runs_last():
-    handle, event, tensors = _install_pending_waits(collapse_waits=False)
+def test_tier2_wait_before_later_submits_waits_again_for_them():
+    _, trio, events, tensors = _install_pending_waits()
+    del trio["events"][1:]
     stream = mock.Mock()
 
     with mock.patch.object(torch.cuda, "current_stream", return_value=stream):
-        fused_a2a_integration._consume_input_collective_wait(tensors[-1])
-        assert handle in fused_a2a_integration._INPUT_PENDING
-        for tensor in tensors[:-1]:
+        fused_a2a_integration._consume_input_collective_wait(tensors[0])
+        trio["events"].extend(events[1:])
+        for tensor in tensors[1:]:
             fused_a2a_integration._consume_input_collective_wait(tensor)
 
-    assert stream.wait_event.call_count == len(tensors)
-    assert all(call.args == (event,) for call in stream.wait_event.call_args_list)
-    assert handle not in fused_a2a_integration._INPUT_PENDING
-    assert handle not in fused_a2a_integration._INPUT_COLLECTIVE_WAIT_COUNTS
-    assert fused_a2a_integration._INPUT_COLLECTIVE_WAITS == {}
+    assert [call.args[0] for call in stream.wait_event.call_args_list] == [events[0], events[-1]]

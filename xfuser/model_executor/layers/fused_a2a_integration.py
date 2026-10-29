@@ -50,7 +50,6 @@ _OP_CACHE = {}
 _INPUT_SIDE_STREAMS = {}
 _INPUT_PENDING = {}
 _INPUT_COLLECTIVE_WAITS = {}
-_INPUT_COLLECTIVE_WAIT_COUNTS = {}
 _INPUT_COLLECTIVE_LIB = None
 _FUSED_A2A_COLLECTIVE = False
 _ATTENTION_A2A_TIER2_ENABLED = False
@@ -180,29 +179,21 @@ def _register_ordered_effect(op):
     has_side_effect(op)
 
 
-def _wait_tier2_outputs(pending, qk_codec, wait_op=None):
-    outputs = list(pending)
+def _wait_tier2_outputs(pending, wait_op=None):
     wait_op = wait_op or torch.ops.xfuser.fused_a2a_input_wait.default
-    if qk_codec in ("mxfp4", "mxfp6"):
-        outputs[-1] = wait_op(outputs[-1])
-    else:
-        outputs = [wait_op(tensor) for tensor in outputs]
-    return outputs
+    return [wait_op(tensor) for tensor in pending]
 
 
 def _consume_input_collective_wait(input):
-    done, handle, collapse_waits = _INPUT_COLLECTIVE_WAITS.pop(input.data_ptr())
-    torch.cuda.current_stream(input.device).wait_event(done)
-    remaining = _INPUT_COLLECTIVE_WAIT_COUNTS[handle] - 1
-    if collapse_waits or remaining == 0:
-        pending = _INPUT_PENDING.pop(handle, None)
-        _INPUT_COLLECTIVE_WAIT_COUNTS.pop(handle, None)
-        if pending is not None:
-            for result in pending["results"]:
-                _INPUT_COLLECTIVE_WAITS.pop(result.payload.data_ptr(), None)
-                _INPUT_COLLECTIVE_WAITS.pop(result.scale.data_ptr(), None)
-    else:
-        _INPUT_COLLECTIVE_WAIT_COUNTS[handle] = remaining
+    trio, handle, role = _INPUT_COLLECTIVE_WAITS.pop(input.data_ptr())
+    stream = torch.cuda.current_stream(input.device)
+    if trio["waited"] < role or trio["stream"] != stream:
+        # Q/K/V share one side stream, so its latest event also covers earlier roles.
+        stream.wait_event(trio["events"][-1])
+        trio["waited"] = len(trio["events"]) - 1
+        trio["stream"] = stream
+    if role == 2:
+        _INPUT_PENDING.pop(handle, None)
     return input
 
 
@@ -249,12 +240,10 @@ def _register_input_collective():
         scale = result.scale
         done = torch.cuda.Event()
         done.record(pending["side"])
-        collapse_waits = _ATTENTION_A2A_CONFIG.codecs[0] in ("mxfp4", "mxfp6")
-        if role == 0:
-            _INPUT_COLLECTIVE_WAIT_COUNTS[handle] = 0
+        trio = pending.setdefault("trio_waits", {"events": [], "waited": -1, "stream": None})
+        trio["events"].append(done)
         for tensor in (payload, scale):
-            _INPUT_COLLECTIVE_WAITS[tensor.data_ptr()] = (done, handle, collapse_waits)
-            _INPUT_COLLECTIVE_WAIT_COUNTS[handle] += 1
+            _INPUT_COLLECTIVE_WAITS[tensor.data_ptr()] = (trio, handle, role)
         return [payload, scale]
 
     def submit_fake(input, lifetime, previous, role, profile, rank, world_size, valid_kv_len, group_name):
@@ -1098,10 +1087,9 @@ def fused_a2a_input(
     if _FUSED_A2A_COLLECTIVE and pending is not None:
         if len(pending) != 6:
             raise ValueError("Tier-2 input requires all three role outputs")
-        # Q/K/V submissions share one side stream. For MX Q/K, waiting on the
-        # final V-scale event orders the complete trio before packed MHA while
-        # avoiding the redundant waits exposed by newer Torch/ROCm.
-        outputs = _wait_tier2_outputs(pending, _ATTENTION_A2A_CONFIG.codecs[0])
+        # Inductor keeps a collective's input alive only until that output's
+        # wait, so every payload and scale needs its own wait before MHA.
+        outputs = _wait_tier2_outputs(pending)
         b, h, s, d = query.shape
         output_shape = (
             b,

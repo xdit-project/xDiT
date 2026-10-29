@@ -4,6 +4,8 @@ import copy
 import dataclasses
 import functools
 import inspect
+import os
+from dataclasses import dataclass
 from types import MethodType, SimpleNamespace
 
 import numpy as np
@@ -97,6 +99,27 @@ FASTH3_V1_MODEL_IDS = frozenset(
         "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1900",
     }
 )
+
+TURBO_LORA_REPO = "lightx2v/Minimax-h3-Turbo"
+# The adapter LightX2V Studio serves, at the base model's 768x1344 default resolution.
+TURBO_DEFAULT_WEIGHT_NAME = "minimax_h3_fl2v_turbo_8step_v1.0_768p_bf16.safetensors"
+
+
+@dataclass(frozen=True)
+class TurboAdapterSpec:
+    """Published sampling contract of one lightx2v FL2VA Turbo adapter."""
+
+    steps: tuple[int, ...]  # supported transformer forwards; the first is the default
+    video_shift: float  # the audio shift is 3.0, the checkpoint default, for every adapter
+
+
+# From the Minimax-H3-Turbo model specs (github.com/ModelTC/Minimax-H3-Turbo).
+TURBO_ADAPTERS = {
+    "minimax_h3_fl2v_turbo_4step_v0.1.safetensors": TurboAdapterSpec(steps=(4,), video_shift=12.0),
+    "minimax_h3_fl2v_turbo_8step_v1.0_bf16.safetensors": TurboAdapterSpec(steps=(8, 4), video_shift=12.0),
+    "minimax_h3_fl2v_turbo_4step_v1.0_768p_bf16.safetensors": TurboAdapterSpec(steps=(4,), video_shift=6.0),
+    "minimax_h3_fl2v_turbo_8step_v1.0_768p_bf16.safetensors": TurboAdapterSpec(steps=(8,), video_shift=6.0),
+}
 
 
 def _minimax_h3_parallel_decode_clip(self, z: torch.Tensor) -> torch.Tensor:
@@ -320,6 +343,87 @@ def _wrap_compiled_forward(transformer, original_forward, compiled_forward):
     return forward_outside_the_graph
 
 
+_LORA_A_SUFFIX = ".lora_A.default.weight"
+_LORA_B_SUFFIX = ".lora_B.default.weight"
+# Alpha the lightx2v adapters were trained with when the file does not record it (v0.1).
+_DEFAULT_LORA_ALPHA = 8.0
+
+
+def _resolve_lora_file(lora_path: str, weight_name: str | None) -> str:
+    """Return a local safetensors file for ``--lora_path``/``--lora_weight_name``.
+
+    ``lora_path`` is a file, a directory holding ``weight_name``, or a Hugging
+    Face repository id that ``weight_name`` is downloaded from.
+    """
+    if os.path.isfile(lora_path):
+        return lora_path
+    if not weight_name:
+        raise ValueError(f"--lora_weight_name is required when --lora_path ({lora_path}) is not a file.")
+    if os.path.isdir(lora_path):
+        return os.path.join(lora_path, weight_name)
+    from huggingface_hub import hf_hub_download
+
+    return hf_hub_download(repo_id=lora_path, filename=weight_name)
+
+
+def _merge_lora_into_transformer(transformer, lora_path: str, scale: float) -> None:
+    """Fold a PEFT LoRA checkpoint into the transformer's Linear weights in place.
+
+    Must run before ``fuse_qkv_projections`` (which replaces the ``to_q/k/v`` the
+    adapter targets with a single ``to_qkv``) and before FP8 conversion, so the
+    merged weights are what gets quantized. Each target gets
+    ``W += (alpha / rank) * scale * (B @ A)``, matching PEFT's scaling, with
+    ``alpha`` read from the file's metadata.
+    """
+    from safetensors import safe_open
+    from safetensors.torch import load_file
+
+    with safe_open(lora_path, framework="pt") as handle:
+        alpha = float((handle.metadata() or {}).get("alpha", _DEFAULT_LORA_ALPHA))
+    state_dict = load_file(lora_path)
+    pairs: dict[str, dict[str, torch.Tensor]] = {}
+    for key, tensor in state_dict.items():
+        if key.endswith(_LORA_A_SUFFIX):
+            pairs.setdefault(key[: -len(_LORA_A_SUFFIX)], {})["A"] = tensor
+        elif key.endswith(_LORA_B_SUFFIX):
+            pairs.setdefault(key[: -len(_LORA_B_SUFFIX)], {})["B"] = tensor
+        else:
+            raise ValueError(f"Unexpected LoRA tensor {key!r} in {lora_path}.")
+
+    merged = 0
+    missing_modules, incomplete = [], []
+    for name, ab in sorted(pairs.items()):
+        if "A" not in ab or "B" not in ab:
+            incomplete.append(name)
+            continue
+        try:
+            module = transformer.get_submodule(name)
+        except AttributeError:
+            missing_modules.append(name)
+            continue
+        lora_a, lora_b = ab["A"], ab["B"]
+        rank = lora_a.shape[0]
+        weight = module.weight
+        delta = (lora_b.to(torch.float32) @ lora_a.to(torch.float32)) * (alpha / rank * scale)
+        if delta.shape != tuple(weight.shape):
+            raise ValueError(f"LoRA delta {tuple(delta.shape)} does not match {name} weight {tuple(weight.shape)}.")
+        with torch.no_grad():
+            weight.add_(delta.to(weight.dtype).to(weight.device))
+        merged += 1
+    if incomplete or missing_modules:
+        raise ValueError(
+            f"LoRA {lora_path} did not merge cleanly: "
+            f"incomplete A/B pairs={incomplete[:3]}, unresolved modules={missing_modules[:3]} "
+            f"({len(missing_modules)} total)."
+        )
+    log(f"Merged LoRA {os.path.basename(lora_path)} into {merged} modules (alpha={alpha}, scale={scale}).")
+
+
+def _set_video_shift(scheduler, flow_shift: float | None) -> None:
+    """Sample the video schedule with ``flow_shift``, or the checkpoint's shift when None."""
+    scheduler.set_shift(scheduler.config.shift if flow_shift is None else flow_shift)
+
+
 def _count_steps_as_forwards(scheduler) -> None:
     set_grid_points = scheduler.set_timesteps
 
@@ -514,6 +618,12 @@ class xFuserMiniMaxH3Model(xFuserModel):
         )
         pipe.update_components(transformer=transformer)
         pipe.load_components(dtype=torch.bfloat16)
+        if self.config.lora_path:
+            _merge_lora_into_transformer(
+                pipe.transformer,
+                _resolve_lora_file(self.config.lora_path, self.config.lora_weight_name),
+                scale=self.config.lora_scale,
+            )
         pipe.transformer.fuse_qkv_projections()
         pipe.text_encoder.lm_head = None
         self._parallelize_text_encoder(pipe.text_encoder)
@@ -587,6 +697,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
             "generator": torch.Generator(device=get_device_name()).manual_seed(input_args["seed"]),
             "output_type": "pt",
         }
+        _set_video_shift(self.pipe.scheduler, input_args.get("flow_shift"))
         images = input_args.get("input_images") or []
         task = input_args.get("task")
         if task is None:
@@ -823,6 +934,69 @@ class xFuserFastH3V2Model(xFuserFastH3Model):
         xFuserMiniMaxH3Model._validate_args(self, input_args)
         if input_args["num_inference_steps"] != 8:
             raise ValueError(f"FastH3 V2 requires 8 transformer forwards, got {input_args['num_inference_steps']}.")
+
+
+@register_model("MiniMax-H3-Turbo")
+class xFuserMiniMaxH3TurboModel(xFuserMiniMaxH3Model):
+    """MiniMax-H3 with a lightx2v Turbo LoRA fused into the base transformer.
+
+    The adapter comes from ``--lora_path``/``--lora_weight_name`` and defaults to
+    the 8-step 768p FL2VA adapter. For the adapters in ``TURBO_ADAPTERS`` the step
+    count and video shift default to their published values and other step counts
+    are refused; any other adapter needs ``--num_inference_steps`` and ``--flow_shift``.
+    """
+
+    default_input_values = DefaultInputValues(
+        height=768,
+        width=1344,
+        num_frames=124,
+        num_inference_steps=8,
+        flow_shift=6.0,
+    )
+
+    settings = copy.deepcopy(xFuserMiniMaxH3Model.settings)
+    settings.output_name = "minimax_h3_turbo"
+    capabilities = dataclasses.replace(
+        xFuserMiniMaxH3Model.capabilities,
+        supports_lora=True,
+        supports_lora_with_quantized_gemms=True,
+    )
+
+    def _customize_settings(self, config) -> None:
+        super()._customize_settings(config)
+        if not config.lora_path:
+            config.lora_path = TURBO_LORA_REPO
+            config.lora_weight_name = TURBO_DEFAULT_WEIGHT_NAME
+        self._adapter_name = config.lora_weight_name or os.path.basename(config.lora_path)
+        self._adapter_spec = TURBO_ADAPTERS.get(self._adapter_name)
+        spec = self._adapter_spec
+        self.default_input_values = dataclasses.replace(
+            self.default_input_values,
+            num_inference_steps=spec.steps[0] if spec else None,
+            flow_shift=spec.video_shift if spec else None,
+        )
+
+    def _validate_config(self, config) -> None:
+        if not config.lora_weight_name and not os.path.isfile(config.lora_path):
+            raise ValueError(f"--lora_weight_name is required when --lora_path ({config.lora_path}) is not a file.")
+        if self._adapter_name.startswith("minimax_h3_ref2v"):
+            raise ValueError(f"{self._adapter_name} is a Ref2VA adapter; MiniMax-H3-Turbo runs the FL2VA transformer.")
+        super()._validate_config(config)
+
+    def _validate_args(self, input_args: dict) -> None:
+        steps = input_args["num_inference_steps"]
+        if self._adapter_spec is None:
+            if steps is None or input_args.get("flow_shift") is None:
+                raise ValueError(
+                    f"{self._adapter_name} has no published Turbo settings; "
+                    "pass --num_inference_steps and --flow_shift for it."
+                )
+        elif steps not in self._adapter_spec.steps:
+            raise ValueError(
+                f"{self._adapter_name} is distilled for {' or '.join(map(str, self._adapter_spec.steps))} "
+                f"transformer forwards, got {steps}."
+            )
+        super()._validate_args(input_args)
 
 
 VDN_H3_MODEL_ID = "OpenVDN/vdn-minimax-h3"

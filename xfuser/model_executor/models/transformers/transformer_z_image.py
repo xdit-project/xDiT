@@ -5,6 +5,7 @@ from typing import List, Optional
 from diffusers.models.transformers.transformer_z_image import ZImageTransformer2DModel
 from diffusers.models.attention_processor import Attention
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
+from diffusers.utils import apply_lora_scale
 
 
 from xfuser.model_executor.layers.attention_mask import MaskMetaCache
@@ -189,6 +190,7 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
             return None
         return key_padding_mask(self._key_padding_cache, None, prefix_key_mask, tuple(item_seqlens), keys, device)
 
+    @apply_lora_scale("joint_attention_kwargs")
     def forward(
         self,
         x: List[torch.Tensor],
@@ -197,6 +199,7 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
         patch_size=2,
         f_patch_size=1,
         return_dict: bool = True,
+        joint_attention_kwargs: Optional[dict] = None,
     ):
         assert patch_size in self.all_patch_size
         assert f_patch_size in self.all_f_patch_size

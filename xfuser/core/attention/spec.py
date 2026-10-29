@@ -261,6 +261,28 @@ class Spec:
     def is_sparse(self) -> bool:
         return self.sparsity is not None
 
+    @property
+    def applies_attn_mask(self) -> bool:
+        """Whether every call this backend serves applies ``attention_kwargs["attn_mask"]``.
+
+        Read from ``accepts`` (MASKED_VARLEN), and the fallback has to apply it
+        too: run() hands it the calls this kernel refuses, mask and all. Such a
+        backend needs no packed keys alongside a key-padding mask.
+        """
+        if not self.accepts.applies_attn_mask():
+            return False
+        return self._fallback is None or self._fallback.applies_attn_mask
+
+    @property
+    def serves_key_padding(self) -> bool:
+        """Whether the kernel keeps out the keys a key-padding mask excludes.
+
+        It applies the ``attn_mask`` or attends over the packed keys built from
+        it. A call this kernel refuses for another reason goes to the fallback
+        with both, which serves it the same way or refuses it in turn.
+        """
+        return self.accepts.applies_attn_mask() or self.accepts.attends_packed_keys()
+
     def unavailable(self) -> Optional[str]:
         """Why this backend cannot run here, or None. Never says 'update X':
         the same missing symbol means too-old or too-new, and we cannot tell."""

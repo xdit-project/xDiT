@@ -79,6 +79,25 @@ def test_a6w4_weight_activation_and_output_contract(runtime, fake_aiter):
     assert fake_aiter["gemm"] == [(6, 4, 8)]
 
 
+def test_a6w4_prequantized_activation_matches_forward(runtime, fake_aiter):
+    torch, module = runtime.torch, runtime.module
+    layer = module.xFuserA6W4Linear(8, 4, bias=True, dtype=torch.bfloat16)
+    layer.load_and_quantize_weights(
+        torch.randn(4, 8, dtype=torch.bfloat16),
+        torch.randn(4, dtype=torch.bfloat16),
+    )
+    activation = torch.randn(1, 6, 8, dtype=torch.bfloat16)
+    payload, scale = module.quant_mxfp6_gemm(activation.view(-1, 8))
+
+    assert layer.prequantized_input_codec == "mxfp6"
+    output = layer.forward_prequantized(payload, scale, tuple(activation.shape))
+    assert output.shape == (1, 6, 4)
+    assert torch.equal(output, layer(activation))
+    assert fake_aiter["gemm"] == [(6, 4, 8), (6, 4, 8)]
+    with pytest.raises(ValueError, match="packed sizes"):
+        layer.forward_prequantized(payload[1:], scale, tuple(activation.shape))
+
+
 def test_a6w4_dynamic_rows_compile_fullgraph(runtime, fake_aiter):
     torch, cls = runtime.torch, runtime.module.xFuserA6W4Linear
     if not hasattr(torch, "compile"):

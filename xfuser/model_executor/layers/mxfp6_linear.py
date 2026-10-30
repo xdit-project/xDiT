@@ -53,8 +53,49 @@ def _(
     )
 
 
+@torch.library.custom_op("xfuser::mxfp6_gemm_prequantized", mutates_args=())
+def _mxfp6_gemm_prequantized(
+    activation_packed: torch.Tensor,
+    activation_scale: torch.Tensor,
+    weight_packed: torch.Tensor,
+    weight_scale: torch.Tensor,
+    rows: int,
+    out_features: int,
+    in_features: int,
+) -> torch.Tensor:
+    return gemm_a6w6(
+        activation_packed,
+        weight_packed,
+        activation_scale,
+        weight_scale,
+        rows,
+        out_features,
+        in_features,
+        dtype=torch.bfloat16,
+    )
+
+
+@_mxfp6_gemm_prequantized.register_fake
+def _(
+    activation_packed: torch.Tensor,
+    activation_scale: torch.Tensor,
+    weight_packed: torch.Tensor,
+    weight_scale: torch.Tensor,
+    rows: int,
+    out_features: int,
+    in_features: int,
+) -> torch.Tensor:
+    return torch.empty(
+        (rows, out_features),
+        dtype=torch.bfloat16,
+        device=activation_packed.device,
+    )
+
+
 class xFuserMXFP6Linear(nn.Module):
     """Drop-in BF16 linear using AITER's MXFP6 A6W6 GEMM."""
+
+    prequantized_input_codec = "mxfp6"
 
     def __init__(
         self,
@@ -268,6 +309,37 @@ class xFuserMXFP6Linear(nn.Module):
         if self.bias is not None:
             output = output + self.bias
         return output.reshape(*original_shape[:-1], self.out_features)
+
+    def forward_prequantized(
+        self,
+        payload: torch.Tensor,
+        scale: torch.Tensor,
+        logical_shape: tuple[int, ...],
+    ) -> torch.Tensor:
+        """Run the GEMM on an activation already packed in the A6W6 layout."""
+        rows = math.prod(logical_shape[:-1])
+        if logical_shape[-1] != self.in_features or (payload.numel(), scale.numel()) != tuple(
+            mxfp6_gemm_pack_size(rows, self.in_features)
+        ):
+            raise ValueError(
+                f"MXFP6 packed sizes {(payload.numel(), scale.numel())} do not match "
+                f"logical input shape {tuple(logical_shape)}"
+            )
+        if not hasattr(self, "weight_packed"):
+            self._quantize_weights()
+
+        output = torch.ops.xfuser.mxfp6_gemm_prequantized(
+            payload,
+            scale,
+            self.weight_packed,
+            self.weight_scale,
+            rows,
+            self.out_features,
+            self.in_features,
+        )
+        if self.bias is not None:
+            output = output + self.bias
+        return output.reshape(*logical_shape[:-1], self.out_features)
 
     def extra_repr(self) -> str:
         return f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}"

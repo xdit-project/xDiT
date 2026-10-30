@@ -168,6 +168,23 @@ def _validate_mixed_output(
     return output.contiguous()
 
 
+def _validate_packed_weight(
+    weight_packed: torch.Tensor,
+    weight_scale: torch.Tensor,
+    *,
+    out_features: int,
+    in_features: int,
+) -> None:
+    _validate_packed_pair(
+        weight_packed,
+        weight_scale,
+        rows=out_features,
+        in_features=in_features,
+        format_="fp4",
+        name="A6W4 weight",
+    )
+
+
 def _run_mixed_gemm(
     input_2d: torch.Tensor,
     weight_packed: torch.Tensor,
@@ -180,13 +197,11 @@ def _run_mixed_gemm(
         name="A6W4 activation",
         features=in_features,
     )
-    _validate_packed_pair(
+    _validate_packed_weight(
         weight_packed,
         weight_scale,
-        rows=out_features,
+        out_features=out_features,
         in_features=in_features,
-        format_="fp4",
-        name="A6W4 weight",
     )
     if input_2d.device != weight_packed.device:
         raise ValueError("A6W4 activation and weight must share a device")
@@ -198,6 +213,26 @@ def _run_mixed_gemm(
             device=input_2d.device,
         )
     activation_packed, activation_scale = _require_api("quant_mxfp6_gemm", quant_mxfp6_gemm)(input_2d)
+    return _run_packed_mixed_gemm(
+        activation_packed,
+        activation_scale,
+        weight_packed,
+        weight_scale,
+        rows,
+        out_features,
+        in_features,
+    )
+
+
+def _run_packed_mixed_gemm(
+    activation_packed: torch.Tensor,
+    activation_scale: torch.Tensor,
+    weight_packed: torch.Tensor,
+    weight_scale: torch.Tensor,
+    rows: int,
+    out_features: int,
+    in_features: int,
+) -> torch.Tensor:
     _validate_packed_pair(
         activation_packed,
         activation_scale,
@@ -255,8 +290,57 @@ def _(
     )
 
 
+@torch.library.custom_op("xfuser::a6w4_linear_prequantized", mutates_args=())
+def _a6w4_linear_prequantized(
+    activation_packed: torch.Tensor,
+    activation_scale: torch.Tensor,
+    weight_packed: torch.Tensor,
+    weight_scale: torch.Tensor,
+    rows: int,
+    out_features: int,
+    in_features: int,
+) -> torch.Tensor:
+    _validate_packed_weight(
+        weight_packed,
+        weight_scale,
+        out_features=out_features,
+        in_features=in_features,
+    )
+    if activation_packed.device != weight_packed.device:
+        raise ValueError("A6W4 activation and weight must share a device")
+    return _run_packed_mixed_gemm(
+        activation_packed,
+        activation_scale,
+        weight_packed,
+        weight_scale,
+        rows,
+        out_features,
+        in_features,
+    )
+
+
+@_a6w4_linear_prequantized.register_fake
+def _(
+    activation_packed: torch.Tensor,
+    activation_scale: torch.Tensor,
+    weight_packed: torch.Tensor,
+    weight_scale: torch.Tensor,
+    rows: int,
+    out_features: int,
+    in_features: int,
+) -> torch.Tensor:
+    del activation_scale, weight_packed, weight_scale, in_features
+    return torch.empty(
+        (rows, out_features),
+        dtype=torch.bfloat16,
+        device=activation_packed.device,
+    )
+
+
 class _xFuserMixedMXFPLinear(nn.Module):
     """Inference-only mixed-MXFP linear; subclasses choose operand formats."""
+
+    prequantized_input_codec = "mxfp6"
 
     kind: str
     weight_format: str
@@ -470,6 +554,29 @@ class _xFuserMixedMXFPLinear(nn.Module):
         ).to(input.dtype)
         output = self._add_bias(output, input.dtype)
         return output.reshape(*original_shape[:-1], self.out_features).contiguous()
+
+    def forward_prequantized(
+        self,
+        payload: torch.Tensor,
+        scale: torch.Tensor,
+        logical_shape: tuple[int, ...],
+    ) -> torch.Tensor:
+        """Run the GEMM on an activation already packed in the MXFP6 A6W4 layout."""
+        if logical_shape[-1] != self.in_features:
+            raise ValueError(f"{self.kind.upper()} input must end in {self.in_features}")
+        if not hasattr(self, "weight_packed"):
+            self._quantize_weights()
+        output = torch.ops.xfuser.a6w4_linear_prequantized(
+            payload,
+            scale,
+            self.weight_packed,
+            self.weight_scale,
+            math.prod(logical_shape[:-1]),
+            self.out_features,
+            self.in_features,
+        ).to(self._compute_dtype)
+        output = self._add_bias(output, self._compute_dtype)
+        return output.reshape(*logical_shape[:-1], self.out_features).contiguous()
 
     def extra_repr(self) -> str:
         return (

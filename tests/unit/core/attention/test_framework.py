@@ -926,6 +926,7 @@ VARLEN_CAPABLE = {
     "AITER_I8FP8",
     "AITER_F8F6",
     "AITER_MXFP6",
+    "AITER_F6F6",
     "AITER_F6F4",
     "AITER_MXFP4",
     "AITER_F4F4",

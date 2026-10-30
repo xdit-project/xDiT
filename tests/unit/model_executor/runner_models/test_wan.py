@@ -46,6 +46,16 @@ def test_wan21_t2v_14b_keeps_accepting_ulysses_degree_8():
     _build("Wan2.1-T2V", ulysses_degree=8)
 
 
+def test_wan22_t2v_accepts_the_temporal_hybrid_gemm_schedule():
+    _build(
+        "Wan2.2-T2V",
+        ulysses_degree=8,
+        gemm_quantization="low=fp4,high=fp8",
+        use_hybrid_gemm_schedule=True,
+        num_hybrid_gemm_high_precision_steps=5,
+    )
+
+
 @pytest.mark.parametrize("model_name", ["Wan2.2-T2V", "Wan2.1-I2V", "Wan2.2-I2V"])
 def test_attention_a2a_is_enabled_for_validated_wan_runners(model_name):
     _build(

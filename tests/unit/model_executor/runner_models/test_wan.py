@@ -56,6 +56,29 @@ def test_wan22_t2v_accepts_the_temporal_hybrid_gemm_schedule():
     )
 
 
+def test_attention_a2a_output_requires_the_runner_capability(monkeypatch):
+    from dataclasses import replace
+
+    from xfuser.model_executor.models.runner_models.wan import xFuserWan22T2VModel
+
+    config = dict(
+        ulysses_degree=8,
+        attention_backend="aiter_fp8",
+        attention_a2a="auto",
+        attention_a2a_output="mori",
+        gemm_quantization="fp8",
+    )
+    _build("Wan2.2-T2V", **config)
+
+    monkeypatch.setattr(
+        xFuserWan22T2VModel,
+        "capabilities",
+        replace(xFuserWan22T2VModel.capabilities, supports_attention_a2a_output=False),
+    )
+    with pytest.raises(ValueError, match="does not support --attention_a2a_output"):
+        _build("Wan2.2-T2V", **config)
+
+
 @pytest.mark.parametrize("model_name", ["Wan2.2-T2V", "Wan2.1-I2V", "Wan2.2-I2V"])
 def test_attention_a2a_is_enabled_for_validated_wan_runners(model_name):
     _build(

@@ -200,8 +200,9 @@ For startup adapter fusion on FLUX.1-dev and MiniMax-H3 Turbo, see [LoRA support
 
 ### Quantized Attention A2A
 
-Wan2.2 T2V can replace the Ulysses input RCCL all-to-all with AITER's
-intranode Attention A2A transport. The output hop remains RCCL.
+Wan2.2 T2V, Wan2.1 I2V, and Wan2.2 I2V can replace the Ulysses input RCCL
+all-to-all with AITER's intranode Attention A2A transport. The output hop
+remains RCCL.
 
 ```bash
 xdit \

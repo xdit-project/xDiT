@@ -788,6 +788,7 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
         use_fp8_comms=True,
         use_hybrid_gemm_schedule=True,
         supports_attention_a2a=True,
+        supports_attention_a2a_output=True,
     )
 
     def _customize_settings(self, config: xFuserArgs) -> None:

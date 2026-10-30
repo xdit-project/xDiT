@@ -239,6 +239,7 @@ class ModelCapabilities:
     supports_lora_with_quantized_gemms: bool = False
     use_fp8_comms: bool = False
     supports_attention_a2a: bool = False
+    supports_attention_a2a_output: bool = False
     use_hybrid_attn_schedule: bool = False
     use_hybrid_gemm_schedule: bool = False
     cross_attention_backend: bool = False
@@ -808,6 +809,8 @@ class xFuserModel(abc.ABC):
         _validate_attention_head_dims(self, config)
         if config.attention_a2a != "none" and not self.capabilities.supports_attention_a2a:
             raise ValueError(f"Model {self.settings.model_name} does not support --attention_a2a.")
+        if config.attention_a2a_output != "none" and not self.capabilities.supports_attention_a2a_output:
+            raise ValueError(f"Model {self.settings.model_name} does not support --attention_a2a_output.")
         for key in ModelCapabilities.__annotations__.keys():
             config_value = getattr(
                 config, key, None

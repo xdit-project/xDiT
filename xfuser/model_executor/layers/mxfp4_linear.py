@@ -35,12 +35,32 @@ def _(
     return torch.empty(M, N, dtype=a.dtype, device=a.device)
 
 
+@torch.library.custom_op("xfuser::mxfp4_gemm_prequantized", mutates_args=())
+def _mxfp4_gemm_prequantized(
+    a_quant: torch.Tensor, a_scale: torch.Tensor, w_quant: torch.Tensor, w_scale: torch.Tensor
+) -> torch.Tensor:
+    return aiter.gemm_a4w4(
+        a_quant.view(aiter.dtypes.fp4x2),
+        w_quant,
+        a_scale.view(aiter.dtypes.fp8_e8m0),
+        w_scale,
+        bpreshuffle=True,
+    )
+
+
+@_mxfp4_gemm_prequantized.register_fake
+def _(a_quant: torch.Tensor, a_scale: torch.Tensor, w_quant: torch.Tensor, w_scale: torch.Tensor) -> torch.Tensor:
+    return torch.empty(a_quant.shape[0], w_quant.shape[0], dtype=torch.bfloat16, device=a_quant.device)
+
+
 class xFuserMXFP4Linear(nn.Module):
     """
     Custom Linear layer using MXFP4 GEMM operation
 
     Drop-in replacement for nn.Linear.
     """
+
+    prequantized_input_codec = "mxfp4"
 
     def __init__(self, in_features, out_features, bias=True, device=None, dtype=None):
         factory_kwargs = {"device": device, "dtype": dtype}
@@ -242,6 +262,23 @@ class xFuserMXFP4Linear(nn.Module):
 
         return output
 
+    def forward_prequantized(
+        self, payload: torch.Tensor, scale: torch.Tensor, logical_shape: tuple[int, ...]
+    ) -> torch.Tensor:
+        """Run the GEMM on an activation already packed with shuffled per-1x32 E8M0 scales."""
+        rows = math.prod(logical_shape[:-1])
+        if logical_shape[-1] != self.in_features or tuple(payload.shape) != (rows, self.in_features // 2):
+            raise ValueError(
+                f"MXFP4 payload {tuple(payload.shape)} does not match logical input shape {tuple(logical_shape)}"
+            )
+        if not hasattr(self, "weight_shuffle"):
+            self._quantize_weights()
+
+        output = torch.ops.xfuser.mxfp4_gemm_prequantized(payload, scale, self.weight_shuffle, self.weight_scale)
+        if self.bias is not None:
+            output = output + self.bias
+        return output.view(*logical_shape[:-1], self.out_features)
+
     def extra_repr(self):
         """String representation (for print(model))"""
         return f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}"
@@ -262,12 +299,16 @@ class xFuserHybridMXFP4Linear(nn.Module):
         self.high_precision_linear = high_precision_linear
         self.low_precision_linear = low_precision_linear
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def active_linear(self) -> nn.Module:
+        """The linear the current diffusion step runs."""
         runtime_state = get_runtime_state()
         use_high_precision = getattr(runtime_state, "use_high_precision_gemm", True)
         if use_high_precision:
-            return self.high_precision_linear(input)
-        return self.low_precision_linear(input)
+            return self.high_precision_linear
+        return self.low_precision_linear
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return self.active_linear()(input)
 
     def extra_repr(self):
         return "hybrid_gemm_schedule=True"

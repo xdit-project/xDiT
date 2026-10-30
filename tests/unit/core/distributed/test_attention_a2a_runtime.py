@@ -1,4 +1,6 @@
 import builtins
+import sys
+from collections import namedtuple
 from types import SimpleNamespace
 from unittest import mock
 
@@ -7,6 +9,7 @@ import torch
 
 from xfuser.config.attention_a2a import AttentionA2AConfig
 from xfuser.core.distributed import attention_a2a as fused_a2a_integration
+from xfuser.model_executor.layers.quantized_attention_output import e4m3_external_scale_from_amax
 
 
 @pytest.fixture(autouse=True)
@@ -231,3 +234,136 @@ def test_tier2_wait_before_later_submits_waits_again_for_them():
             fused_a2a_integration._consume_input_collective_wait(tensor)
 
     assert [call.args[0] for call in stream.wait_event.call_args_list] == [events[0], events[-1]]
+
+
+_OUTPUT_MODULE = "aiter.ops.flydsl.attention_output_a2a_intranode"
+
+
+class _FakeOutputOp:
+    instances = []
+
+    def __init__(self, *, rank, world_size, shape, group, codec):
+        self.rank, self.world_size, self.shape, self.codec = rank, world_size, shape, codec
+        self.destination_scales = []
+        self.payload = torch.arange(6, dtype=torch.uint8)
+        self.scale = torch.ones(2, dtype=torch.uint8)
+        _FakeOutputOp.instances.append(self)
+
+    def __call__(self, output, destination_scales=None):
+        self.destination_scales.append(destination_scales)
+        scale = self.scale if destination_scales is None else destination_scales[self.rank : self.rank + 1].view(1, 1)
+        return SimpleNamespace(payload=self.payload, scale=scale)
+
+
+@pytest.fixture
+def fake_output_transport(monkeypatch):
+    _FakeOutputOp.instances.clear()
+    group = SimpleNamespace(group_name="ulysses")
+    monkeypatch.setitem(sys.modules, _OUTPUT_MODULE, SimpleNamespace(AttentionOutputA2AIntraNodeOp=_FakeOutputOp))
+    monkeypatch.setattr(fused_a2a_integration, "_group_ranks", lambda group: (0, 1))
+    monkeypatch.setattr(fused_a2a_integration, "_init_mori", lambda group, ranks: None)
+    monkeypatch.setattr(fused_a2a_integration.dist.distributed_c10d, "_resolve_process_group", lambda name: group)
+    monkeypatch.setattr(fused_a2a_integration.dist, "get_world_size", lambda group=None: 2)
+    monkeypatch.setattr(fused_a2a_integration.dist, "all_reduce", lambda tensor, op=None, group=None: None)
+    yield group
+    fused_a2a_integration._OUTPUT_OP_CACHE.clear()
+
+
+def test_output_hop_caches_one_op_and_returns_its_buffers(fake_output_transport):
+    output = torch.randn(1, 8, 2, 128, dtype=torch.bfloat16)
+
+    payload, scale = fused_a2a_integration.fused_a2a_output(output, fake_output_transport, 1, "mxfp4")
+    fused_a2a_integration.fused_a2a_output(output, fake_output_transport, 1, "mxfp4")
+
+    (op,) = _FakeOutputOp.instances
+    assert (op.rank, op.world_size, op.shape, op.codec) == (1, 2, (1, 8, 2, 128), "mxfp4")
+    assert op.destination_scales == [None, None]
+    assert payload.data_ptr() == op.payload.data_ptr()
+    assert scale.data_ptr() == op.scale.data_ptr()
+
+
+def test_e4m3_external_scale_quantizes_each_destination_with_its_own_amax(fake_output_transport):
+    output = torch.zeros(1, 8, 2, 128, dtype=torch.bfloat16)
+    output[:, :4] = 0.5
+    output[:, 4:, 1, 7] = -3.140625
+
+    _, scale = fused_a2a_integration.fused_a2a_output(output, fake_output_transport, 1, "e4m3_external_scale")
+
+    (op,) = _FakeOutputOp.instances
+    expected = e4m3_external_scale_from_amax(torch.tensor([0.5, 3.140625], dtype=torch.bfloat16))
+    assert torch.equal(op.destination_scales[0], expected)
+    assert torch.equal(scale, expected[1:].view(1, 1))
+    assert scale.storage_offset() == 0
+
+
+def test_output_hop_rejects_codecs_without_an_xdit_consumer(fake_output_transport):
+    output = torch.zeros(1, 8, 2, 128, dtype=torch.bfloat16)
+
+    with pytest.raises(ValueError, match="unsupported Attention A2A output codec 'e4m3'"):
+        fused_a2a_integration.fused_a2a_output(output, fake_output_transport, 0, "e4m3")
+    assert _FakeOutputOp.instances == []
+
+
+@pytest.mark.parametrize(
+    ("codec", "payload_shape", "scale_shape", "scale_dtype"),
+    [
+        ("e4m3_external_scale", (1, 1184, 40, 128), (1, 1), torch.float32),
+        ("mxfp4", (1184, 2560), (1280, 160), torch.uint8),
+    ],
+)
+def test_output_fake_matches_the_projection_layouts(codec, payload_shape, scale_shape, scale_dtype):
+    output = torch.empty(1, 9472, 5, 128, dtype=torch.bfloat16, device="meta")
+
+    payload, scale = fused_a2a_integration._fused_a2a_output_fake(output, codec, 0, 8, "ulysses")
+
+    assert (tuple(payload.shape), payload.dtype) == (payload_shape, torch.uint8)
+    assert (tuple(scale.shape), scale.dtype) == (scale_shape, scale_dtype)
+
+
+def test_mxfp6_output_fake_uses_the_a6w6_pack_sizes():
+    gemm_op_a6w6 = pytest.importorskip("aiter.ops.gemm_op_a6w6")
+    output = torch.empty(1, 9472, 5, 128, dtype=torch.bfloat16, device="meta")
+
+    payload, scale = fused_a2a_integration._fused_a2a_output_fake(output, "mxfp6", 0, 8, "ulysses")
+
+    assert (payload.numel(), scale.numel()) == tuple(gemm_op_a6w6.mxfp6_gemm_pack_size(1184, 5120))
+
+
+def test_output_preflight_requires_every_consumer_codec(monkeypatch):
+    module = SimpleNamespace(
+        ATTENTION_OUTPUT_A2A_CODECS=("e4m3", "mxfp4"),
+        PackedAttentionOutputResult=namedtuple("PackedAttentionOutputResult", ("payload", "scale")),
+    )
+    monkeypatch.setitem(sys.modules, _OUTPUT_MODULE, module)
+
+    with pytest.raises(RuntimeError, match=r"lacks attention-output A2A codec\(s\) e4m3_external_scale, mxfp6"):
+        fused_a2a_integration._check_attention_output_a2a_contract()
+
+    module.ATTENTION_OUTPUT_A2A_CODECS = ("e4m3", "e4m3_external_scale", "mxfp4", "mxfp6")
+    fused_a2a_integration._check_attention_output_a2a_contract()
+
+
+def test_output_hop_follows_the_active_recipe():
+    with (
+        mock.patch.object(fused_a2a_integration, "_tier2_support_status", return_value=(False, "unavailable")),
+        mock.patch.object(fused_a2a_integration, "_tier1_support_status", return_value=(True, None)),
+        mock.patch.object(fused_a2a_integration, "preflight_attention_a2a"),
+    ):
+        fused_a2a_integration.configure_attention_a2a(AttentionA2AConfig(profile="auto", output="mori"), "aiter_mxfp6")
+
+    assert fused_a2a_integration.get_fused_a2a_profile() == "mxfp6-e4m3"
+    assert fused_a2a_integration.use_fused_a2a_output()
+
+    fused_a2a_integration._activate_attention_a2a_config(AttentionA2AConfig())
+    assert not fused_a2a_integration.use_fused_a2a_output()
+
+
+def test_output_ops_freeze_the_policy_until_shutdown():
+    fused_a2a_integration._OUTPUT_OP_CACHE["op"] = object()
+
+    with pytest.raises(RuntimeError, match="cannot change after its runtime state is created"):
+        fused_a2a_integration.configure_attention_a2a(AttentionA2AConfig(profile="e4m3-e4m3", output="mori"))
+    with mock.patch.object(torch.cuda, "is_available", return_value=False):
+        fused_a2a_integration.shutdown_attention_a2a()
+
+    assert fused_a2a_integration._OUTPUT_OP_CACHE == {}

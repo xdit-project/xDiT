@@ -12,9 +12,10 @@ E4M3_EXTERNAL_SCALE = "e4m3_external_scale"
 class QuantizedAttentionOutput(NamedTuple):
     """Attention output already quantized for the following output projection.
 
-    ``payload`` and ``scale`` hold this rank's sequence shard in the projection
-    GEMM's activation layout. They alias transport buffers that are rewritten two
-    attention calls later, so the projection must consume them immediately.
+    ``payload`` and ``scale`` hold this rank's sequence shard in the activation
+    layout of the projection GEMM that consumes ``codec``. They alias transport
+    buffers that are rewritten two attention calls later, so the projection must
+    consume them immediately.
     """
 
     payload: torch.Tensor

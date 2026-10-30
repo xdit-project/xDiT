@@ -1,11 +1,15 @@
+import contextlib
 from types import SimpleNamespace
 from unittest import mock
 
+import pytest
 import torch
+from torch import nn
 
 from xfuser.core.attention.backends.aiter_mha_v4 import attention_a2a as aiter_attention_a2a
 from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.model_executor.layers import usp
+from xfuser.model_executor.layers.quantized_attention_output import QuantizedAttentionOutput
 
 
 def _runtime_state():
@@ -72,6 +76,79 @@ def test_tiled_padding_is_compacted_by_the_aiter_backend_adapter():
     assert result[1] is compact[1]
     assert result[2][0] is scales[0]
     assert all(actual is expected for actual, expected in zip(result[2][1:], compact[2:], strict=True))
+
+
+def _patch_packed_usp(stack, *, output_hop):
+    packed_query = torch.empty(1, 16, 2, 128, dtype=torch.uint8)
+    packed = (packed_query, torch.empty_like(packed_query), torch.empty_like(packed_query))
+    for name, value in {
+        "get_sequence_parallel_world_size": 2,
+        "get_ulysses_parallel_world_size": 2,
+        "get_ulysses_parallel_rank": 0,
+        "get_ring_parallel_world_size": 1,
+        "get_runtime_state": _runtime_state(),
+        "_ulysses_extra_inputs": [],
+        "_has_kv_cache": False,
+        "get_fused_a2a_mode": 1,
+        "use_fused_a2a_packed": True,
+        "use_fused_a2a_output": output_hop,
+        "get_fused_a2a_profile": "e4m3-e4m3",
+    }.items():
+        stack.enter_context(mock.patch.object(usp, name, return_value=value))
+    stack.enter_context(
+        mock.patch.object(usp, "PROCESS_GROUP", SimpleNamespace(ULYSSES_PG=SimpleNamespace(group_name="test")))
+    )
+    return stack.enter_context(
+        mock.patch.object(usp, "fused_a2a_input", return_value=(packed, (torch.empty(1),) * 3)),
+    )
+
+
+def _call_usp(output_projection):
+    query = torch.randn(1, 4, 8, 128)
+    return usp.USP(
+        query,
+        torch.randn_like(query),
+        torch.randn_like(query),
+        backend=AttentionBackendType.AITER_FP8,
+        attn_layer=object(),
+        attention_a2a_enabled=True,
+        output_projection=output_projection,
+    )
+
+
+def test_output_hop_returns_the_quantized_output_instead_of_rccl():
+    output = torch.randn(1, 16, 2, 128, dtype=torch.bfloat16)
+    payload, scale = torch.empty(4, dtype=torch.uint8), torch.empty(1, 1)
+
+    with contextlib.ExitStack() as stack:
+        _patch_packed_usp(stack, output_hop=True)
+        stack.enter_context(mock.patch.object(usp, "launch_attention_a2a_packed", return_value=output))
+        output_hop = stack.enter_context(mock.patch.object(usp, "fused_a2a_output", return_value=(payload, scale)))
+        rccl_output = stack.enter_context(mock.patch.object(usp, "_ft_c_output_all_to_all"))
+        result = _call_usp(SimpleNamespace(prequantized_input_codec="mxfp4"))
+        output_hop.assert_called_once_with(output, usp.PROCESS_GROUP.ULYSSES_PG, 0, "mxfp4")
+
+    rccl_output.assert_not_called()
+    assert isinstance(result, QuantizedAttentionOutput)
+    assert result.payload is payload and result.scale is scale and result.codec == "mxfp4"
+
+
+def test_output_hop_rejects_a_bf16_projection_before_transport():
+    with contextlib.ExitStack() as stack:
+        input_a2a = _patch_packed_usp(stack, output_hop=True)
+        with pytest.raises(RuntimeError, match="requires a quantized output projection; Linear consumes"):
+            _call_usp(nn.Linear(8, 8))
+
+    input_a2a.assert_not_called()
+
+
+def test_output_projection_requires_the_output_hop():
+    with contextlib.ExitStack() as stack:
+        input_a2a = _patch_packed_usp(stack, output_hop=False)
+        with pytest.raises(ValueError, match="output_projection requires the Attention A2A output hop"):
+            _call_usp(SimpleNamespace(prequantized_input_codec="mxfp4"))
+
+    input_a2a.assert_not_called()
 
 
 def test_routes_packed_a2a_input_and_rccl_output():

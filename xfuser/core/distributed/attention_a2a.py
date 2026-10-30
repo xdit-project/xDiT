@@ -51,6 +51,8 @@ _FUSED_A2A_V_PACK = "default"
 _MORI_GROUP_KEY = None
 _MORI_CPU_GROUP = None
 _OP_CACHE = {}
+_OUTPUT_OP_CACHE = {}
+_OUTPUT_CODECS = ("e4m3_external_scale", "mxfp4", "mxfp6")
 _INPUT_SIDE_STREAMS = {}
 _INPUT_PENDING = {}
 _INPUT_COLLECTIVE_WAITS = {}
@@ -311,6 +313,19 @@ def _prepare_attention_a2a_packed_launcher():
         _ATTENTION_A2A_PACKED_LAUNCHER = mha_v4_attention_a2a_packed
 
 
+def _check_attention_output_a2a_contract():
+    from aiter.ops.flydsl.attention_output_a2a_intranode import (
+        ATTENTION_OUTPUT_A2A_CODECS,
+        PackedAttentionOutputResult,
+    )
+
+    if getattr(PackedAttentionOutputResult, "_fields", ()) != ("payload", "scale"):
+        raise RuntimeError("installed AITER has an incompatible attention-output A2A result")
+    missing = sorted(set(_OUTPUT_CODECS) - set(ATTENTION_OUTPUT_A2A_CODECS))
+    if missing:
+        raise RuntimeError("installed AITER lacks attention-output A2A codec(s) " + ", ".join(missing))
+
+
 def preflight_attention_a2a(config: AttentionA2AConfig) -> None:
     """Collectively validate the optional A2A runtime before model execution."""
     if not config.enabled:
@@ -336,6 +351,8 @@ def preflight_attention_a2a(config: AttentionA2AConfig) -> None:
         missing = sorted(codec for codec in required_codecs & {"e4m3_pc", "mxfp6_p"} if repr(codec) not in source)
         if missing:
             raise RuntimeError("installed AITER lacks Attention A2A codec(s) " + ", ".join(missing))
+        if config.output_enabled:
+            _check_attention_output_a2a_contract()
         required_mori = (
             "shmem_torch_process_group_init",
             "mori_shmem_create_tensor",
@@ -349,6 +366,8 @@ def preflight_attention_a2a(config: AttentionA2AConfig) -> None:
             raise RuntimeError(f"Attention A2A requires gfx942 or gfx950, found {arch}")
         if (config.is_auto or any(codec.startswith("mxfp") for codec in config.codecs)) and arch != "gfx950":
             raise RuntimeError("MX Attention A2A profiles require gfx950")
+        if config.output_enabled and arch != "gfx950":
+            raise RuntimeError("the Attention A2A output hop requires gfx950")
         if dist.is_initialized():
             hosts = [None] * dist.get_world_size()
             dist.all_gather_object(hosts, socket.gethostname())
@@ -382,7 +401,7 @@ def configure_attention_a2a(
     if not isinstance(config, AttentionA2AConfig):
         raise TypeError("Attention A2A configuration must be AttentionA2AConfig")
     if config != _ATTENTION_A2A_POLICY and (
-        _OP_CACHE or _INPUT_SIDE_STREAMS or _INPUT_PENDING or _MORI_GROUP_KEY is not None
+        _OP_CACHE or _OUTPUT_OP_CACHE or _INPUT_SIDE_STREAMS or _INPUT_PENDING or _MORI_GROUP_KEY is not None
     ):
         raise RuntimeError("Attention A2A policy cannot change after its runtime state is created")
     if not config.enabled:
@@ -451,7 +470,9 @@ def shutdown_attention_a2a() -> None:
 
     finalize_error = None
     try:
-        if torch.cuda.is_available() and (_OP_CACHE or _INPUT_SIDE_STREAMS or _MORI_GROUP_KEY is not None):
+        if torch.cuda.is_available() and (
+            _OP_CACHE or _OUTPUT_OP_CACHE or _INPUT_SIDE_STREAMS or _MORI_GROUP_KEY is not None
+        ):
             torch.cuda.synchronize()
         if _MORI_GROUP_KEY is not None:
             import mori.shmem as ms
@@ -464,6 +485,7 @@ def shutdown_attention_a2a() -> None:
         _INPUT_COLLECTIVE_WAITS.clear()
         _INPUT_SIDE_STREAMS.clear()
         _OP_CACHE.clear()
+        _OUTPUT_OP_CACHE.clear()
         if _MORI_CPU_GROUP is not None and dist.is_initialized():
             try:
                 dist.destroy_process_group(_MORI_CPU_GROUP)
@@ -524,10 +546,11 @@ def _activate_attention_a2a_config(config: AttentionA2AConfig) -> None:
     _FUSED_A2A_COLLECTIVE = desired_collective
     if config.enabled and dist.is_initialized() and dist.get_rank() == 0:
         logger.info(
-            "[ATTENTION_A2A_PROFILE] %s->%s hadamard=%s path=%s",
+            "[ATTENTION_A2A_PROFILE] %s->%s hadamard=%s output=%s path=%s",
             previous.profile,
             config.profile,
             effective_hadamard,
+            config.output,
             "tier2" if desired_collective else "tier1",
         )
 
@@ -566,6 +589,10 @@ def use_fused_a2a_packed():
 
 def use_fused_a2a_collective():
     return _FUSED_A2A_COLLECTIVE
+
+
+def use_fused_a2a_output():
+    return _ATTENTION_A2A_ENABLED and _ATTENTION_A2A_CONFIG.output_enabled
 
 
 def get_attention_a2a_execution_path():
@@ -1147,6 +1174,115 @@ def _fused_a2a_wait_fake(
 
 
 _register_ordered_effect(torch.ops.xfuser.fused_a2a_wait.default)
+
+
+def _get_output_op(group, rank, shape, device, codec):
+    from aiter.ops.flydsl.attention_output_a2a_intranode import (
+        AttentionOutputA2AIntraNodeOp,
+    )
+
+    ranks = _group_ranks(group)
+    key = ((id(group), ranks), rank, (device.type, device.index), shape, codec)
+    op = _OUTPUT_OP_CACHE.get(key)
+    if op is None:
+        if len(_OUTPUT_OP_CACHE) >= _MAX_OP_CACHE_ENTRIES:
+            raise RuntimeError(
+                "Attention A2A output symmetric-buffer cache limit reached; "
+                "shutdown and reinitialize before using another shape/codec"
+            )
+        _init_mori(group, ranks)
+        op = AttentionOutputA2AIntraNodeOp(
+            rank=rank,
+            world_size=len(ranks),
+            shape=shape,
+            group=_MORI_CPU_GROUP,
+            codec=codec,
+        )
+        _OUTPUT_OP_CACHE[key] = op
+    return op
+
+
+def _e4m3_destination_scales(output, world_size, group):
+    """Descales of every destination's full attention output, as its TorchAO projection computes them."""
+    from xfuser.model_executor.layers.quantized_attention_output import e4m3_external_scale_from_amax
+
+    b, s, h_local, d = output.shape
+    amax = output.view(b, world_size, s // world_size, h_local, d).abs().amax(dim=(0, 2, 3, 4))
+    dist.all_reduce(amax, op=dist.ReduceOp.MAX, group=group)
+    return e4m3_external_scale_from_amax(amax)
+
+
+def fused_a2a_output(output, group, rank, codec):
+    """Quantize the BSHD MHA output for ``codec`` and return this rank's sequence shard.
+
+    Returns the payload and scale in the activation layout of the output projection
+    GEMM that consumes ``codec``.
+    """
+    return torch.ops.xfuser.fused_a2a_output.default(
+        output,
+        codec,
+        rank,
+        dist.get_world_size(group),
+        group.group_name,
+    )
+
+
+@torch.library.custom_op(
+    "xfuser::fused_a2a_output",
+    mutates_args=(),
+    **_CUSTOM_OP_OPTIONS,
+)
+def _fused_a2a_output(
+    output: torch.Tensor,
+    codec: str,
+    rank: int,
+    world_size: int,
+    group_name: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if codec not in _OUTPUT_CODECS:
+        raise ValueError(f"unsupported Attention A2A output codec {codec!r}")
+    group = dist.distributed_c10d._resolve_process_group(group_name)
+    if dist.get_world_size(group) != world_size:
+        raise ValueError("Attention A2A output world size changed after tracing")
+    destination_scales = None
+    if codec == "e4m3_external_scale":
+        destination_scales = _e4m3_destination_scales(output, world_size, group)
+    op = _get_output_op(group, rank, tuple(output.shape), output.device, codec)
+    result = op(output, destination_scales=destination_scales)
+    if destination_scales is not None:
+        # This rank's descale is a view at offset ``rank``; Inductor requires 16-byte aligned op outputs.
+        return result.payload, result.scale.clone()
+    return result.payload, result.scale
+
+
+@_fused_a2a_output.register_fake
+def _fused_a2a_output_fake(output, codec, rank, world_size, group_name):
+    del rank, group_name
+    if codec not in _OUTPUT_CODECS:
+        raise ValueError(f"unsupported Attention A2A output codec {codec!r}")
+    b, s, h_local, d = output.shape
+    rows, features = b * s // world_size, h_local * world_size * d
+    if codec == "e4m3_external_scale":
+        return (
+            output.new_empty((b, s // world_size, h_local * world_size, d), dtype=torch.uint8),
+            output.new_empty((1, 1), dtype=torch.float32),
+        )
+    if codec == "mxfp4":
+        # A4W4 scales use 256-row and 8-column tiles.
+        return (
+            output.new_empty((rows, features // 2), dtype=torch.uint8),
+            output.new_empty(((rows + 255) // 256 * 256, (features // 32 + 7) // 8 * 8), dtype=torch.uint8),
+        )
+    from aiter.ops.gemm_op_a6w6 import mxfp6_gemm_pack_size
+
+    payload_size, scale_size = mxfp6_gemm_pack_size(rows, features)
+    return (
+        output.new_empty((payload_size,), dtype=torch.uint8),
+        output.new_empty((scale_size,), dtype=torch.uint8),
+    )
+
+
+_register_ordered_effect(torch.ops.xfuser.fused_a2a_output.default)
 
 
 # Cached outputs are persistent symmetric buffers. A same-key launch is safe only

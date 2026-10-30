@@ -792,6 +792,7 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
         xFuserWan21T2VModel.capabilities,
         use_aiter_int8_gemms=True,
         use_fp8_comms=True,
+        use_hybrid_gemm_schedule=True,
         supports_attention_a2a=True,
     )
 

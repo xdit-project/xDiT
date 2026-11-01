@@ -607,6 +607,12 @@ class xFuserMiniMaxH3Model(xFuserModel):
             config.enable_model_cpu_offload or config.enable_sequential_cpu_offload or config.enable_group_cpu_offload
         ):
             raise ValueError("MiniMax-H3 text encoder TP is incompatible with CPU offloading.")
+        if config.enable_sequential_cpu_offload or config.enable_group_cpu_offload:
+            raise ValueError(
+                "MiniMax-H3 supports CPU offload only through --enable_model_cpu_offload, "
+                "which keeps the transformer and VAEs on the device and streams the text "
+                "encoder from host memory."
+            )
         if config.batch_size is not None or config.dataset_path is not None:
             raise ValueError(
                 "MiniMax-H3 packs one request into one audiovisual sequence and "
@@ -622,6 +628,27 @@ class xFuserMiniMaxH3Model(xFuserModel):
         if isinstance(args.get("prompt"), list) and len(args["prompt"]) == 1:
             args["prompt"] = args["prompt"][0]
         return args
+
+    def offload_resident_components(self) -> tuple[str, ...]:
+        # Model offload moves only the text encoder: the transformer runs every step and is
+        # quantized on the device, and the VAEs are small.
+        names = (self._transformer_component_name, "vae", "audio_vae")
+        return tuple(name for name in names if getattr(self.pipe, name, None) is not None)
+
+    def _enable_cpu_offload(self) -> None:
+        """Stream the text encoder from host memory under --enable_model_cpu_offload.
+
+        ModularPipeline has no enable_model_cpu_offload, and the 63 GB Qwen3-VL encoder is the one
+        component that runs once per request, so it is the one worth leaving on the host. Leaf-level
+        group offload keeps its weights pinned there and streams them in layer by layer, so nothing
+        is copied back after encoding. _validate_config refuses the other offload modes.
+        """
+        if not self.config.enable_model_cpu_offload:
+            return
+        from diffusers.hooks import apply_group_offloading
+
+        log("Enabling MiniMax-H3 CPU offload: text encoder streamed from host, transformer and VAEs on device.")
+        apply_group_offloading(module=self.pipe.text_encoder, **self._group_offload_kwargs("leaf_level"))
 
     def _load_model(self):
         from diffusers import ModularPipeline

@@ -1248,6 +1248,81 @@ def test_minimax_h3_text_encoder_tp_rejects_cpu_offload(offload_flag):
         xFuserMiniMaxH3Model(config)
 
 
+@pytest.mark.parametrize("offload_flag", ["enable_sequential_cpu_offload", "enable_group_cpu_offload"])
+def test_minimax_h3_points_other_offload_modes_at_model_offload(offload_flag):
+    """Group offload trips on the audio VAE mid-run and is refused for FP4; say so before loading."""
+    from xfuser.config import xFuserArgs
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        xFuserMiniMaxH3Model,
+    )
+
+    config = xFuserArgs(model="MiniMax-H3", task="t2va", **{offload_flag: True})
+
+    with pytest.raises(ValueError, match="only through --enable_model_cpu_offload"):
+        xFuserMiniMaxH3Model(config)
+
+
+def test_minimax_h3_accepts_model_cpu_offload():
+    from xfuser.config import xFuserArgs
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        xFuserMiniMaxH3Model,
+    )
+
+    xFuserMiniMaxH3Model(xFuserArgs(model="MiniMax-H3", task="t2va", enable_model_cpu_offload=True))
+
+
+@pytest.mark.parametrize(
+    ("model_cls_name", "components", "resident"),
+    [
+        (
+            "xFuserMiniMaxH3Model",
+            ("transformer", "text_encoder", "vae", "audio_vae"),
+            ("transformer", "vae", "audio_vae"),
+        ),
+        (
+            "xFuserMiniMaxH3Ref2VAModel",
+            ("transformer_ref", "text_encoder", "vae", "audio_vae"),
+            ("transformer_ref", "vae", "audio_vae"),
+        ),
+        # A workflow that loaded no audio VAE has none to place.
+        ("xFuserMiniMaxH3Model", ("transformer", "text_encoder", "vae"), ("transformer", "vae")),
+    ],
+)
+def test_minimax_h3_model_offload_keeps_all_but_the_text_encoder_on_device(model_cls_name, components, resident):
+    from xfuser.model_executor.models.runner_models import minimax_h3
+
+    model = object.__new__(getattr(minimax_h3, model_cls_name))
+    model.pipe = SimpleNamespace(**{name: object() for name in components})
+
+    assert model.offload_resident_components() == resident
+
+
+def test_minimax_h3_model_offload_streams_only_the_text_encoder(monkeypatch):
+    from diffusers import hooks
+
+    from xfuser.model_executor.models.runner_models import base_model, minimax_h3
+
+    monkeypatch.setattr(base_model, "get_world_group", lambda: SimpleNamespace(local_rank=2))
+    monkeypatch.setattr(minimax_h3, "log", lambda *args, **kwargs: None)
+    offloaded = []
+    monkeypatch.setattr(
+        hooks,
+        "apply_group_offloading",
+        lambda module, **kwargs: offloaded.append((module, kwargs)),
+    )
+    model = object.__new__(minimax_h3.xFuserMiniMaxH3Model)
+    model.config = SimpleNamespace(enable_model_cpu_offload=True, group_offload_low_cpu_mem=False)
+    text_encoder = object()
+    model.pipe = SimpleNamespace(transformer=object(), text_encoder=text_encoder, vae=object(), audio_vae=object())
+
+    model._enable_cpu_offload()
+
+    assert [module for module, _ in offloaded] == [text_encoder]
+    kwargs = offloaded[0][1]
+    assert kwargs["offload_type"] == "leaf_level"
+    assert str(kwargs["onload_device"]) == "cuda:2"
+
+
 def test_minimax_h3_patches_shared_qwen_encoder_helper(monkeypatch):
     from diffusers.modular_pipelines.minimax_h3 import encoders
 

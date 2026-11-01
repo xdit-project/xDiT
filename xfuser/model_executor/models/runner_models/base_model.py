@@ -601,7 +601,7 @@ class xFuserModel(abc.ABC):
         self._vae_manager.enable_options(self._decoding_vaes())
         self._enable_cpu_offload()
 
-    def offload_resident_components(self) -> tuple[str, ...]:
+    def _offload_resident_components(self) -> tuple[str, ...]:
         """Pipeline components placed on the device even when CPU offload is requested.
 
         Offload placement otherwise leaves every component on the host for the offload hooks to

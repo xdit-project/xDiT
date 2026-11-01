@@ -126,7 +126,7 @@ def test_offload_places_only_the_runners_resident_components(monkeypatch):
             use_int8_gemms=False,
         ),
         pipe=pipe,
-        offload_resident_components=lambda: ("transformer",),
+        _offload_resident_components=lambda: ("transformer",),
     )
     loader = SimpleNamespace(
         model=model,

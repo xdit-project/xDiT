@@ -69,7 +69,7 @@ def place_pipeline_components(loader) -> None:
         model.pipe = model.pipe.to(f"cuda:{local_rank}")
     else:
         # Before FP4/FP6 setup, which quantizes a resident component where it lies.
-        for name in model.offload_resident_components():
+        for name in model._offload_resident_components():
             getattr(model.pipe, name).to(f"cuda:{local_rank}")
 
     if model.config.use_fp4_gemms:

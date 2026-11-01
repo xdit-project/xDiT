@@ -286,15 +286,37 @@ def _patch_minimax_h3_text_encoder_broadcast() -> None:
     encoders._xfuser_broadcast_patched = True
 
 
+# build_row_timesteps gives every packed row one of four timesteps (generated
+# video, generated audio, conditioning video, reference audio) and hands the
+# transformer the distinct ones, so a step carries between one and four.
+_MAX_DISTINCT_TIMESTEPS = 4
+
+
+def _pad_timestep(timestep):
+    """Give the timestep the same length on every denoising step.
+
+    Its length is the number of distinct timesteps in the step, which varies
+    along the denoising steps, and dynamo would recompile when it does. Padding
+    to the most a step can carry keeps the shape static. The padding repeats
+    the last timestep: ``timestep_indices`` never address the extra rows, and a
+    repeated row cannot change the per-tensor activation scale of the FP8
+    AdaLN projection that FP4 runs keep, so the real rows come out the same.
+    """
+    missing = _MAX_DISTINCT_TIMESTEPS - timestep.shape[0]
+    if missing <= 0:
+        return timestep
+    return torch.cat((timestep, timestep[-1:].expand(missing)))
+
+
 def _mark_dynamic_timestep(timestep):
     """Keep the timestep's length out of dynamo's guards.
 
-    Without this dynamo specializes on timestep shape 1 vs >1 and recompiles
-    when it changes; the timestep is a 1-D tensor whose length varies along the
-    denoising steps. ``mark_unbacked`` is only exposed on
-    ``torch._dynamo.decorators``, not on ``torch._dynamo`` itself, and
-    ``mark_dynamic`` is the weaker fallback: it avoids specializing on the exact
-    size but still splits 1 from >1.
+    Fallback for a timestep longer than _pad_timestep covers. Not usable with
+    the FP4 runs' FP8 AdaLN projection: torchao's quantizer compares the
+    unbacked length with 1, which dynamo cannot guard on. ``mark_unbacked`` is
+    only exposed on ``torch._dynamo.decorators``, not on ``torch._dynamo``
+    itself, and ``mark_dynamic`` is the weaker fallback: it avoids specializing
+    on the exact size but still splits 1 from >1.
     """
     from torch._dynamo import decorators as dynamo_decorators
 
@@ -307,8 +329,8 @@ def _wrap_compiled_forward(transformer, original_forward, compiled_forward):
 
     Two jobs, both of which would otherwise force a recompile or a graph break:
 
-    * mark the timestep's length dynamic, since marking must happen outside the
-      compiled region to take effect;
+    * give the timestep a fixed length (or, past what padding covers, mark its
+      length dynamic), since a shape the graph sees must be settled before it;
     * prime VSA-H3's tile geometry, which is recovered from ``position_ids``
       *values*. That forces device syncs and cannot be traced, so
       ``fullgraph=True`` would reject it. It is constant for a run, so priming
@@ -326,7 +348,10 @@ def _wrap_compiled_forward(transformer, original_forward, compiled_forward):
         bound.apply_defaults()
         timestep = bound.arguments.get("timestep")
         if isinstance(timestep, torch.Tensor) and timestep.dim() > 0:
-            _mark_dynamic_timestep(timestep)
+            if timestep.shape[0] <= _MAX_DISTINCT_TIMESTEPS:
+                bound.arguments["timestep"] = _pad_timestep(timestep)
+            else:
+                _mark_dynamic_timestep(timestep)
         if prime_vsa_h3:
             transformer.prepare_vsa_h3_metadata(
                 bound.arguments["position_ids"],
@@ -334,7 +359,7 @@ def _wrap_compiled_forward(transformer, original_forward, compiled_forward):
                 bound.arguments["audio_indices"],
                 bound.arguments["text_indices"],
             )
-        return compiled_forward(*args, **kwargs)
+        return compiled_forward(*bound.args, **bound.kwargs)
 
     # The denoise block picks which layout fields to pass by inspecting
     # signature(transformer.forward), so the wrapper has to expose the real
@@ -760,8 +785,8 @@ class xFuserMiniMaxH3Model(xFuserModel):
             fullgraph=not use_hybrid,
         )
 
-        # Marking the timestep dynamic fixes a recompile: it avoids more than
-        # one graph realizing after compile-warmup.
+        # Padding the timestep to a fixed length fixes a recompile: it avoids
+        # more than one graph realizing after compile-warmup.
         transformer.forward = _wrap_compiled_forward(transformer, original_forward, compiled_forward)
         compile_args = copy.deepcopy(input_args)
         if not get_runtime_state().has_attention_schedule():

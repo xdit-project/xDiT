@@ -2015,29 +2015,34 @@ class _WrapperTransformer:
         return hidden_states
 
 
-def test_fasth3_compile_wrapper_primes_geometry_and_marks_the_timestep(
-    monkeypatch,
-):
-    """Both jobs the compiled region cannot do itself, in one wrapper."""
+def _compiled_timesteps(monkeypatch, transformer):
+    """Wrap ``transformer`` and record the timestep the compiled forward receives and any marking."""
     from xfuser.model_executor.models.runner_models import minimax_h3
 
     marked = []
     monkeypatch.setattr(minimax_h3, "_mark_dynamic_timestep", marked.append)
+    received = []
 
+    def compiled_forward(*args, **kwargs):
+        bound = inspect.signature(transformer.forward).bind(*args, **kwargs)
+        received.append(bound.arguments["timestep"])
+
+    forward = minimax_h3._wrap_compiled_forward(transformer, transformer.forward, compiled_forward)
+    return forward, received, marked
+
+
+def test_fasth3_compile_wrapper_primes_geometry_and_pads_the_timestep(
+    monkeypatch,
+):
+    """Both jobs the compiled region cannot do itself, in one wrapper."""
     transformer = _WrapperTransformer(use_vsa_h3=True)
-    compiled_calls = []
-    forward = minimax_h3._wrap_compiled_forward(
-        transformer,
-        transformer.forward,
-        lambda *args, **kwargs: compiled_calls.append((args, kwargs)),
-    )
+    forward, received, marked = _compiled_timesteps(monkeypatch, transformer)
 
     # Timestep positionally, the rest by keyword: the wrapper binds the
     # signature, so where an argument came from does not matter.
-    timestep = torch.tensor([0.7, 0.3])
     forward(
         1,
-        timestep,
+        torch.tensor([0.3, 0.7]),
         position_ids=2,
         video_indices=3,
         audio_indices=4,
@@ -2045,42 +2050,48 @@ def test_fasth3_compile_wrapper_primes_geometry_and_marks_the_timestep(
     )
 
     assert transformer.primed == [2]
-    assert marked == [timestep]
-    assert len(compiled_calls) == 1
+    assert len(received) == 1
+    assert torch.equal(received[0], torch.tensor([0.3, 0.7, 0.7, 0.7]))
+    assert marked == []
     assert inspect.signature(forward) == inspect.signature(transformer.forward)
 
 
-def test_fasth3_compile_wrapper_marks_the_timestep_for_other_backends(
-    monkeypatch,
-):
-    """Non-VSA-H3 backends skip the priming but keep the timestep marking."""
-    from xfuser.model_executor.models.runner_models import minimax_h3
-
-    marked = []
-    monkeypatch.setattr(minimax_h3, "_mark_dynamic_timestep", marked.append)
-
+@pytest.mark.parametrize("count", [1, 2, 3, 4])
+def test_compile_wrapper_gives_every_step_the_same_timestep_length(monkeypatch, count):
+    """A fixed length keeps the compiled graph off an unbacked size the FP8 AdaLN cannot guard on."""
     transformer = _WrapperTransformer(use_vsa_h3=False)
-    forward = minimax_h3._wrap_compiled_forward(transformer, transformer.forward, lambda *args, **kwargs: None)
+    forward, received, marked = _compiled_timesteps(monkeypatch, transformer)
+    timestep = torch.linspace(0.1, 0.9, count)
 
-    timestep = torch.tensor([0.7])
     forward(1, timestep, 2, 3, 4, 5)
 
     assert transformer.primed == []
+    assert received[0].shape == (4,)
+    assert torch.equal(received[0][:count], timestep)
+    assert (received[0][count:] == timestep[-1]).all()
+    assert marked == []
+
+
+def test_compile_wrapper_marks_a_timestep_longer_than_padding_covers(monkeypatch):
+    transformer = _WrapperTransformer(use_vsa_h3=False)
+    forward, received, marked = _compiled_timesteps(monkeypatch, transformer)
+    timestep = torch.linspace(0.1, 0.9, 5)
+
+    forward(1, timestep, 2, 3, 4, 5)
+
+    assert received == [timestep]
     assert marked == [timestep]
 
 
 def test_fasth3_compile_wrapper_ignores_a_scalar_timestep(monkeypatch):
-    """Nothing to mark when the timestep has no length to vary."""
-    from xfuser.model_executor.models.runner_models import minimax_h3
-
-    marked = []
-    monkeypatch.setattr(minimax_h3, "_mark_dynamic_timestep", marked.append)
-
+    """Nothing to pad or mark when the timestep has no length to vary."""
     transformer = _WrapperTransformer(use_vsa_h3=False)
-    forward = minimax_h3._wrap_compiled_forward(transformer, transformer.forward, lambda *args, **kwargs: None)
+    forward, received, marked = _compiled_timesteps(monkeypatch, transformer)
+    timestep = torch.tensor(0.7)
 
-    forward(1, torch.tensor(0.7), 2, 3, 4, 5)
+    forward(1, timestep, 2, 3, 4, 5)
 
+    assert received == [timestep]
     assert marked == []
 
 

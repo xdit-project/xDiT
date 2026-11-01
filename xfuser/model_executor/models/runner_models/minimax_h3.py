@@ -81,6 +81,11 @@ _VDN_WINDOW_BACKEND_FOR_ATTENTION = {
 }
 _SUPPORTED_ULYSSES_DEGREES = frozenset({1, 2, 4, 8})
 _SUPPORTED_TASKS = frozenset({"t2va", "i2va", "l2va", "fl2va", "ref2va"})
+# Transformer blocks that FP4 runs keep whole at FP8. MXFP4 error is spread over all
+# 50 blocks rather than concentrated in a few, so no small set fixes it; blocks 0 and 1
+# and the back half of the stack carry the most of it. Holding those at FP8 brings the
+# FP4 output close to the FP8 profile's while the rest keeps most of the FP4 speedup.
+_FP4_FP8_BLOCKS = ("0.", "1.") + tuple(f"{index}." for index in range(25, 50))
 FASTH3_V1_DATAFREE_MODEL_ID = "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree"
 # Dense-attention ablation of the same 4-step preview: distilled without VSA
 FASTH3_V1_DENSE_DATAFREE_MODEL_ID = "FastVideo/FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree"
@@ -498,6 +503,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
         fp8_gemm_module_list=["transformer.transformer_blocks"],
         fp8_gemm_include_suffixes=("attn.to_qkv", "ff.net.0.proj"),
         fp4_gemm_module_list=["transformer.transformer_blocks"],
+        fp8_precision_overrides=_FP4_FP8_BLOCKS,
         fp8_precision_override_suffixes=(
             "attn.to_out.0",
             "ff.net.2",
@@ -1213,6 +1219,7 @@ class xFuserMiniMaxH3Ref2VAModel(xFuserMiniMaxH3Model):
         fp8_gemm_module_list=["transformer_ref.transformer_blocks"],
         fp8_gemm_include_suffixes=("attn.to_qkv", "ff.net.0.proj"),
         fp4_gemm_module_list=["transformer_ref.transformer_blocks"],
+        fp8_precision_overrides=_FP4_FP8_BLOCKS,
         fp8_precision_override_suffixes=(
             "attn.to_out.0",
             "ff.net.2",

@@ -333,8 +333,8 @@ A listed target is only half the answer: the format still has to survive the har
 Several runners hold part of an FP4 target at FP8 where full FP4 costs too much
 quality: Wan 2.1 I2V and T2V keep blocks 0-9 and 30-39, Wan 2.2 TI2V keeps
 blocks 0, 1, 28, and 29 plus the `.net.0.proj` and `.net.2` leaves, Cosmos3-Super
-keeps layers 0-9 and 54-63, and both MiniMax-H3 runners keep the `attn.to_out.0`,
-`ff.net.2`, and `adaln_proj.linear` leaves. Wan 2.2 I2V and T2V declare no block
+keeps layers 0-9 and 54-63, and both MiniMax-H3 runners keep blocks 0, 1, and
+25-49 plus the `attn.to_out.0`, `ff.net.2`, and `adaln_proj.linear` leaves. Wan 2.2 I2V and T2V declare no block
 overrides at all. `--fp8_precision_override_prefix_patterns` and
 `--fp8_precision_override_suffix_patterns` replace the declared prefix or suffix
 list rather than adding to it.

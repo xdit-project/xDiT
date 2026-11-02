@@ -15,6 +15,7 @@ from xfuser.model_executor.models.transformers.transformers_utils import (
     chunk_and_pad_sequence,
     gather_and_unpad,
     local_sp_pad_rows,
+    zero_sp_pad_rows,
     zero_sp_pad_rows_hook,
 )
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
@@ -263,7 +264,7 @@ def _stack_is_pipelinable(layers) -> bool:
     )
 
 
-def _run_modulated_stack(layers, x, attn_mask, freqs_cis, adaln_input, sp_padded=False):
+def _run_modulated_stack(layers, x, attn_mask, freqs_cis, adaln_input, pad_rows: int = 0):
     """Run a stack of modulated blocks, software-pipelined by one norm.
 
     A Z-Image block opens with ``attention_norm1(x) * scale_msa`` and closes
@@ -277,23 +278,31 @@ def _run_modulated_stack(layers, x, attn_mask, freqs_cis, adaln_input, sp_padded
     Falls back to the plain per-layer loop whenever the stack is not
     pipelinable, so this changes the schedule, never the result.
 
-    ``sp_padded`` is the one condition that is about correctness rather than
-    support.  The rotation is the only thing here that crosses a block
-    boundary, and the wrapper hangs ``zero_sp_pad_rows_hook`` on that boundary:
-    each block's output has its trailing SP pad rows zeroed before the next
-    block's opening norm reads them.  Running the two as one kernel would
-    normalise the pad rows the hook has not cleared yet, and what a block
-    leaves there feeds per-tensor statistics that real tokens share (FP8-comms
-    calibration, the step cache's residual, Sage / AITER FP8 query scales).
-    So when this rank's shard can hold pad, the stack runs block by block and
-    the hook keeps its boundary; ``_fused_block_forward`` still fuses the pair
-    *inside* each block, which upstream does not zero between either.
+    ``pad_rows`` is this rank's trailing SP pad row count, and clearing those
+    rows is this runner's job rather than the hook's.  The wrapper hangs
+    ``zero_sp_pad_rows_hook`` on every block, but a hook only fires through
+    ``Module.__call__`` and the pipelined path never gets there -- it drives
+    ``layer.attention`` and ``layer.feed_forward`` directly.  So each block
+    output this loop produces is cleared here instead.
 
-    The flag is derived from the global sequence length, not from this rank's
-    own pad count, so every rank takes the same branch and the collectives
-    inside attention stay in lockstep.
+    It matters because what a block leaves in its pad rows feeds per-tensor
+    statistics that real tokens share: FP8-comms calibration, the step cache's
+    residual, Sage / AITER FP8 query scales.
+
+    Clearing *after* the rotated call reaches the same values the hook would
+    have produced.  The unfused pair zeroes block ``i``'s output and then norms
+    it for block ``i + 1``, and ``RMSNorm(0) * scale`` is zero, so both outputs
+    of the rotated call are zero on a pad row -- computing them from stale data
+    and overwriting lands exactly on the reference.  The pair *inside* a block
+    is left alone: it crosses no block boundary, and upstream does not zero
+    between those two either.
+
+    Nothing here branches on the pad count, so every rank issues the same
+    sequence of launches and the collectives inside attention stay in lockstep.
     """
-    if sp_padded or torch.is_grad_enabled() or not _stack_is_pipelinable(layers):
+    if torch.is_grad_enabled() or not _stack_is_pipelinable(layers):
+        # This loop goes through layer.forward, so zero_sp_pad_rows_hook fires
+        # and owns the pad rows; clearing them again here would be redundant.
         for layer in layers:
             x = layer(x, attn_mask, freqs_cis, adaln_input)
         return x
@@ -323,9 +332,15 @@ def _run_modulated_stack(layers, x, attn_mask, freqs_cis, adaln_input, sp_padded
                 layers[i + 1].attention_norm1,
                 all_scale_msa[i + 1],
             )
+            # ``x`` is block i's output -- the tensor the hook would have
+            # cleared -- and ``h`` is block i + 1's opening norm of it, zero on
+            # a pad row for the reason in the docstring.
+            zero_sp_pad_rows(x, pad_rows)
+            zero_sp_pad_rows(h, pad_rows)
         else:
             # Peeled epilogue: nothing left to pre-normalise for.
             x = x + all_gate_mlp[i] * layer.ffn_norm2(ffn_out)
+            zero_sp_pad_rows(x, pad_rows)
     return x
 
 
@@ -441,7 +456,12 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
                 x = self._gradient_checkpointing_func(layer, x, x_attn_mask, x_freqs_cis_chunked, adaln_input)
         else:
             x = _run_modulated_stack(
-                self.noise_refiner, x, x_attn_mask, x_freqs_cis_chunked, adaln_input, sp_padded=bool(pad_amount)
+                self.noise_refiner,
+                x,
+                x_attn_mask,
+                x_freqs_cis_chunked,
+                adaln_input,
+                pad_rows=self._sp_pad["local_rows"],
             )
 
         # Gather SP outputs and remove padding
@@ -522,7 +542,12 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
                 )
         else:
             unified = _run_modulated_stack(
-                self.layers, unified, unified_attn_mask, unified_freqs_cis, adaln_input, sp_padded=bool(pad_amount)
+                self.layers,
+                unified,
+                unified_attn_mask,
+                unified_freqs_cis,
+                adaln_input,
+                pad_rows=self._sp_pad["local_rows"],
             )
 
         # Gather SP outputs and remove padding

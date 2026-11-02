@@ -954,7 +954,11 @@ class xFuserModel(abc.ABC):
             # KV cache updates specialize on full/patch mode and the Python patch
             # index. The default limit of eight variants is too small for larger
             # patch counts and silently falls back to eager execution.
-            required_recompile_limit = 2 * getattr(self.config, "num_pipeline_patch", 1) + 4
+            # Use the normalized engine config: the runner's CLI config keeps
+            # ``None`` when --num_pipeline_patch was omitted, while
+            # PipeFusionParallelConfig resolves it to the pipeline degree.
+            num_pipeline_patch = self.engine_config.parallel_config.pp_config.num_pipeline_patch
+            required_recompile_limit = 2 * num_pipeline_patch + 4
             torch._dynamo.config.recompile_limit = max(
                 torch._dynamo.config.recompile_limit,
                 required_recompile_limit,

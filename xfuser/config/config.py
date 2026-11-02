@@ -53,6 +53,8 @@ class RuntimeConfig:
     use_cuda_graph: bool = False
     use_hybrid_attn_schedule: bool = False
     use_parallel_vae: bool = False
+    runner_managed_parallel_vae: bool = False
+    runner_managed_torch_compile: bool = False
     use_profiler: bool = False
     use_torch_compile: bool = False
     use_onediff: bool = False
@@ -87,6 +89,8 @@ class RuntimeConfig:
     fp8_comms_safety_factor: float = DEFAULT_FP8_COMMS_SAFETY_FACTOR
 
     def __post_init__(self):
+        if self.warmup_steps < 0:
+            raise ValueError("warmup_steps must be greater than or equal to 0")
         check_packages()
         if self.use_cuda_graph:
             check_env()
@@ -192,24 +196,25 @@ class VaeParallelConfig:
 class PipeFusionParallelConfig:
     pp_degree: int = 1
     num_pipeline_patch: Optional[int] = None
-    attn_layer_num_for_pp: Optional[List[int]] = (None,)
+    attn_layer_num_for_pp: Optional[List[int]] = None
     dit_parallel_size: int = 1
 
     def __post_init__(self):
-        assert self.pp_degree is not None and self.pp_degree >= 1, (
-            "pipefusion_degree must be set and greater than 1 to use pipefusion"
-        )
-        assert self.pp_degree <= self.dit_parallel_size, (
-            "pipefusion_degree must be less than or equal to dit_parallel_size"
-        )
+        if self.pp_degree is None or self.pp_degree < 1:
+            raise ValueError("pipefusion_degree must be greater than or equal to 1")
+        if self.pp_degree > self.dit_parallel_size:
+            raise ValueError("pipefusion_degree must be less than or equal to dit_parallel_size")
         if self.num_pipeline_patch is None:
             self.num_pipeline_patch = self.pp_degree
             logger.info(f"Pipeline patch number not set, using default value {self.pp_degree}")
+        elif self.num_pipeline_patch < 1:
+            raise ValueError("num_pipeline_patch must be greater than 0")
         if self.attn_layer_num_for_pp is not None:
             logger.info(f"attn_layer_num_for_pp set, splitting attention layersto {self.attn_layer_num_for_pp}")
-            assert len(self.attn_layer_num_for_pp) == self.pp_degree, (
-                "attn_layer_num_for_pp must have the same length as pp_degree if not None"
-            )
+            if len(self.attn_layer_num_for_pp) != self.pp_degree:
+                raise ValueError("attn_layer_num_for_pp must have the same length as pp_degree")
+            if any(layer_count < 1 for layer_count in self.attn_layer_num_for_pp):
+                raise ValueError("attn_layer_num_for_pp entries must be greater than 0")
         if self.pp_degree == 1 and self.num_pipeline_patch > 1:
             logger.warning("Pipefusion degree is 1, pipeline will not be used,num_pipeline_patch will be ignored")
             self.num_pipeline_patch = 1

@@ -152,6 +152,11 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
 
 
 class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
+    # When True, blocks receive the RoPE table for the full padded sequence instead
+    # of this rank's slice; the attention processor must apply RoPE after its
+    # sequence-gathering all-to-all.
+    _rope_full_sequence = False
+
     def __init__(
         self,
         num_attention_heads: int = 56,
@@ -457,25 +462,32 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
         local_stop = local_start + local_sequence_length
 
         rotary_emb = self.rope(padded_position_ids)
-        rotary_emb = (
-            rotary_emb[0][local_start:local_stop],
-            rotary_emb[1][local_start:local_stop],
-        )
-        if _HAS_FLYDSL:
-            # Build the folded width-D rope tables ONCE per forward and carry
-            # them alongside the originals.  The fused kernel needs them; the
-            # unfused fallback needs the originals, so both travel together as a
-            # 4-tuple down the existing block argument.  A tuple rather than
-            # shared mutable state because this model runs under
-            # mode="reduce-overhead": per-call Python is not replayed, so a
-            # mutated box would bake a stale tensor into every CUDA-Graph replay.
-            #
-            # Per-forward, not per-layer: this is a cat over [S_local, D] and
-            # rebuilding it in each of the 50 blocks would cost more bandwidth
-            # than the fusion saves.
-            rotary_emb = rotary_emb + prepare_neox_rope_tables(
-                rotary_emb[0], rotary_emb[1], self.config.attention_head_dim
+        if not self._rope_full_sequence:
+            rotary_emb = (
+                rotary_emb[0][local_start:local_stop],
+                rotary_emb[1][local_start:local_stop],
             )
+            if _HAS_FLYDSL:
+                # Build the folded width-D rope tables ONCE per forward and
+                # carry them alongside the originals.  The fused kernel needs
+                # them; the unfused fallback needs the originals, so both travel
+                # together as a 4-tuple down the existing block argument.  A
+                # tuple rather than shared mutable state because this model runs
+                # under mode="reduce-overhead": per-call Python is not replayed,
+                # so a mutated box would bake a stale tensor into every
+                # CUDA-Graph replay.
+                #
+                # Per-forward, not per-layer: this is a cat over [S_local, D]
+                # and rebuilding it in each of the 50 blocks would cost more
+                # bandwidth than the fusion saves.
+                #
+                # Only on the sliced path.  A full-sequence table goes to a
+                # processor that rotates after its own sequence-gathering
+                # all-to-all and splats the tuple into a three-argument rotate,
+                # so it must stay a plain (cos, sin) pair.
+                rotary_emb = rotary_emb + prepare_neox_rope_tables(
+                    rotary_emb[0], rotary_emb[1], self.config.attention_head_dim
+                )
 
         packed_hidden_states = packed_hidden_states[:, local_start:local_stop]
         local_timestep_indices = padded_timestep_indices[local_start:local_stop]

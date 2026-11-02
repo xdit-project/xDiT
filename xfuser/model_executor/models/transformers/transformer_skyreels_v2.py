@@ -171,8 +171,9 @@ class xFuserSkyReelsV2Transformer3DWrapper(SkyReelsV2Transformer3DModel):
         seq_len = hidden_states.shape[1]
         pad_amount = (sp_world_size - seq_len % sp_world_size) % sp_world_size
         if pad_amount and get_ring_parallel_world_size() > 1:
-            # Ring attention sees one chunk of keys per step, so the padded keys
-            # cannot be dropped and would leak into every real token's attention.
+            # USP now drops the padded keys of each ring step when valid_kv_len is
+            # published (usp._ring_trim_trailing_kv_padding), so this guard can be
+            # removed once a ring + pad test covers this model.
             raise ValueError(
                 f"SkyReels-V2 with ring attention needs the latent token count ({seq_len}) "
                 f"to be divisible by the sequence-parallel degree ({sp_world_size}); "

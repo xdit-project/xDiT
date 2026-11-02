@@ -49,6 +49,7 @@ if is_ftfy_available():
     import ftfy
 
 from xfuser.config import EngineConfig, InputConfig
+from xfuser.envs import get_device_name
 from xfuser.logger import init_logger
 from xfuser.core.distributed import (
     get_classifier_free_guidance_world_size,
@@ -99,7 +100,7 @@ class xFuserSanaPipeline(xFuserPipelineBaseWrapper):
             width=input_config.width,
             prompt=prompt,
             num_inference_steps=steps,
-            generator=torch.Generator(device="cuda").manual_seed(42),
+            generator=torch.Generator(device=get_device_name()).manual_seed(42),
             output_type=input_config.output_type,
         )
         get_runtime_state().runtime_config.warmup_steps = warmup_steps

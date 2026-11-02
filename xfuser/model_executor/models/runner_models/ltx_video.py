@@ -104,6 +104,9 @@ class xFuserLTXVideoModel(xFuserModel):
         ring_degree = self.config.ring_degree or 1
         sp_degree = (self.config.ulysses_degree or 1) * ring_degree
         tokens = ltx_video_token_count(input_args["height"], input_args["width"], num_frames)
+        # USP now drops the padded keys of each ring step when valid_kv_len is
+        # published (usp._ring_trim_trailing_kv_padding), so this check and the
+        # transformer's can be removed once a ring + pad test covers LTX-Video.
         if ring_degree > 1 and tokens % sp_degree != 0:
             raise ValueError(
                 f"With ring_degree > 1 the {tokens} video tokens of a {input_args['height']}x"

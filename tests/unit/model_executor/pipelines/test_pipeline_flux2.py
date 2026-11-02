@@ -21,7 +21,7 @@ from xfuser.model_executor.pipelines.pipeline_flux2_klein import xFuserFlux2Klei
 def test_warmup_uses_the_requested_guidance_scale(monkeypatch, guidance_scale):
     runtime_state = SimpleNamespace(runtime_config=SimpleNamespace(warmup_steps=2))
     monkeypatch.setattr(pipeline_flux2, "get_runtime_state", lambda: runtime_state)
-    # The warmup seeds a CUDA generator; this test has no accelerator.
+    # The warmup seeds a generator; this test has no accelerator.
     monkeypatch.setattr(torch, "Generator", lambda device=None: Mock())
     pipeline = xFuserFlux2KleinPipeline.__new__(xFuserFlux2KleinPipeline)
     pipeline.__call__ = Mock()

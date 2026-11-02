@@ -26,6 +26,8 @@ from xfuser.core.utils.runner_utils import (
     load_dataset_prompts,
     rgetattr,
 )
+from xfuser.model_executor.models.runner_models.image_postprocess import enable_fast_pil_postprocess
+from xfuser.model_executor.pipelines.base_pipeline import xFuserPipelineBaseWrapper
 from xfuser.model_executor.models.runner_models.vae_manager import (
     VAEManager,
     validate_vae_config,
@@ -89,6 +91,9 @@ _SPARSE_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SS
 _SPARGE_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SPARGE) | attention_registry.types_where(
     sparsity=Sparsity.VSA
 )
+# Prism's block-sparse attention needs a token grid that only models declaring the
+# capability publish; anywhere else it would quietly run dense.
+_BSA_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.BSA)
 
 
 def _parse_attention_backend(name: Optional[str], kind: str) -> Optional[AttentionBackendType]:
@@ -222,6 +227,7 @@ class ModelCapabilities:
     cross_attention_backend: bool = False
     supports_sparse_attention_backends: bool = False
     supports_sparge_attention_backends: bool = False
+    supports_bsa_attention_backends: bool = False
     supports_distilled_weights: bool = False
     profile_capture_phase: bool = False
 
@@ -382,11 +388,14 @@ class xFuserModel(abc.ABC):
 
     # Lowest diffusers release this model is expected to run on, used only to name an
     # upgrade target when a load fails. It never gates a load, so a value above the
-    # true minimum costs an over-stated recommendation and blocks nothing, while a
-    # value below it is a bug that tests/integration/cpu/repository/test_diffusers_floors.py
-    # catches. Use DIFFUSERS_FROM_SOURCE when the model's support has not been released yet,
-    # and leave None when no floor is known.
+    # true minimum costs an over-stated recommendation and blocks nothing. A value
+    # below the release that ships the symbols still fails in _load_model, and
+    # _load_model_checked reports this floor. Use DIFFUSERS_FROM_SOURCE when the
+    # model's support has not been released yet, and leave None when no floor is known.
     min_diffusers_version: Optional[str] = None
+
+    # The pipeline when it is a legacy xFuserPipelineBaseWrapper, set by initialize().
+    _legacy_pipe: Optional[xFuserPipelineBaseWrapper] = None
 
     def __init__(self, config: xFuserArgs) -> None:
         self.settings = copy.deepcopy(self.__class__.settings)
@@ -465,12 +474,16 @@ class xFuserModel(abc.ABC):
         self.engine_config, _ = self.config.create_config()
         log("Loading model pipeline...")
         self.pipe = self._load_model_checked()
+        enable_fast_pil_postprocess([self.pipe, getattr(self, "second_pipe", None)])
+        self._legacy_pipe = self.pipe if isinstance(self.pipe, xFuserPipelineBaseWrapper) else None
+        if self._legacy_pipe is not None:
+            self._legacy_pipe.prompts_split_by_caller = True
 
         log("Initializing runtime state...")
         initialize_runtime_state(self._get_runtime_state_pipeline(), self.engine_config)
 
         self._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
+        if self.config.use_parallel_vae and not self._wrapper_parallelizes_vae():
             self._vae_manager.setup_parallel_vae(self._decoding_vaes())
         self._enable_options()
         fp8_comms = get_runtime_state().fp8_comms if runtime_state_is_initialized() else None
@@ -684,6 +697,20 @@ class xFuserModel(abc.ABC):
 
         self._validate_supported_attn_backends(config)
 
+        if not self.capabilities.supports_bsa_attention_backends:
+            for value, label in (
+                (config.attention_backend, "attention backend"),
+                (config.cross_attention_backend, "cross attention backend"),
+                (config.hybrid_attn_low_precision_backend, "hybrid low-precision attention backend"),
+                (config.hybrid_attn_high_precision_backend, "hybrid high-precision attention backend"),
+            ):
+                bsa = _parse_attention_backend(value, label)
+                if bsa in _BSA_ATTENTION_BACKENDS:
+                    raise ValueError(
+                        f"Model {config.model} does not support {bsa.name}: it publishes no token grid "
+                        f"for block-sparse attention, so every call would run dense."
+                    )
+
         backend = _parse_attention_backend(config.attention_backend, "attention backend")
         supports_sparse = self.capabilities.supports_sparse_attention_backends
         supports_sparge = self.capabilities.supports_sparge_attention_backends
@@ -790,6 +817,10 @@ class xFuserModel(abc.ABC):
     def _get_compile_dynamic(self) -> Optional[bool]:
         return None  # torch default (auto)
 
+    def _prefer_blockwise_compile(self) -> bool:
+        """Compile per block even without FSDP or caching, for forwards that sync to host outside the block loop."""
+        return False
+
     def _mark_cudagraph_steps(self, component: torch.nn.Module) -> None:
         """Tell CUDA Graphs where one inference step ends, so the next may reuse its buffers.
 
@@ -867,7 +898,7 @@ class xFuserModel(abc.ABC):
                 and component_name in self.settings.fsdp_strategy
                 and (requested_shards is None or component_name in requested_shards)
             )
-            if component_is_sharded or self.config.cache_method:
+            if component_is_sharded or self.config.cache_method or self._prefer_blockwise_compile():
                 # Per-block compile: leaves transformer as original object so cache-dit's
                 # transformer.forward patch remains visible during compiled execution.
                 wrap_attrs = self.settings.fsdp_strategy.get(component_name, {}).get("wrap_attrs", [])
@@ -977,6 +1008,10 @@ class xFuserModel(abc.ABC):
                 warmup_args["prompt"] = warmup_args["prompt"][: self.config.batch_size]
             self._run_warmup_calls(warmup_args)
 
+        # Compile warmup traces the graphs, then frees its outputs, so the next
+        # call re-records. Absorb that here unless an explicit warmup already did.
+        captured_cudagraph = self._warmup_cudagraph_capture(input_args)
+
         if self.config.determinism_check > 0:
             log(
                 f"Since determinism check is enabled ({self.config.determinism_check}), "
@@ -1014,8 +1049,8 @@ class xFuserModel(abc.ABC):
 
         output = self._gather_dp_outputs(output)
 
-        if not self.config.warmup_calls and len(timings) > 1:
-            # Without warmup calls, the first timed run absorbs one-time costs such as compilation.
+        if not self.config.warmup_calls and not captured_cudagraph and len(timings) > 1:
+            # Without a warmup, the first timed run absorbs one-time costs such as compilation.
             timings.pop(0)
         log(f"Average time over {len(timings)} runs: {sum(timings) / len(timings):.2f}s")
         log(f"Total time spent: {inference_start.elapsed_time(inference_end) / 1000:.2f}s")
@@ -1044,6 +1079,31 @@ class xFuserModel(abc.ABC):
             log(f"Batch {batch_index} completed in {timing:.2f}s")
 
         return DiffusionOutput.from_outputs(all_outputs, self.settings.model_output_type), timings
+
+    def _warmup_cudagraph_capture(self, input_args: dict) -> bool:
+        """Record CUDA graphs once, before timings, and report whether that happened.
+
+        This is not the compile-time capture. ``_run_compile_warmup`` still traces
+        the graphs (and, with ``--profile_capture_phase``, profiles that recording).
+        ``--warmup_calls`` is also left to do its own full pipe calls. Both of those
+        already give the measured loop a warmed allocator, so this adds a call only
+        when neither has, and only for modes that actually record CUDA graphs.
+        """
+        if not getattr(self.config, "use_torch_compile", False):
+            return False
+        if self.config.warmup_calls:
+            return False
+        if self._get_compile_mode() not in self.CUDAGRAPH_COMPILE_MODES:
+            return False
+
+        capture_args = copy.deepcopy(input_args)
+        if self.config.batch_size and isinstance(capture_args.get("prompt"), list):
+            capture_args["prompt"] = capture_args["prompt"][: self.config.batch_size]
+        log("CUDA graph capture warmup (untimed, excluded from timings)...")
+        _output, timing = self._run_timed_pipe(capture_args)
+        del _output
+        log(f"CUDA graph capture warmup completed in {timing:.2f}s")
+        return True
 
     def _run_warmup_calls(self, input_args: dict) -> None:
         """Run initial warmup calls if specified"""
@@ -1352,6 +1412,12 @@ class xFuserModel(abc.ABC):
                 f"Number of prompts ({len(prompts)}) is less than data_parallel_world_size ({dp_world_size}). "
             )
 
+        if self._wrapper_parallelizes_vae() and len(prompts) % dp_world_size:
+            raise ValueError(
+                f"--use_parallel_vae gathers the latents of every DP group, so the {len(prompts)} prompts "
+                f"must divide evenly across --data_parallel_degree {dp_world_size}."
+            )
+
         local_prompts = prompts[dp_rank::dp_world_size]
         if isinstance(negative_prompts, list) and len(negative_prompts) != 1:
             local_negative_prompts = negative_prompts[dp_rank::dp_world_size]
@@ -1364,6 +1430,13 @@ class xFuserModel(abc.ABC):
         split_args["negative_prompt"] = local_negative_prompts
         return split_args
 
+    def _wrapper_parallelizes_vae(self) -> bool:
+        """Return whether a legacy wrapper decodes with its own parallel VAE.
+
+        Such a wrapper shards its decoder at construction, so the runner must not shard it again.
+        """
+        return self._legacy_pipe is not None and self._legacy_pipe.parallelizes_vae()
+
     def _gather_dp_outputs(self, output: DiffusionOutput) -> Optional[DiffusionOutput]:
         """
         Gathers DiffusionOutput objects from all DP groups onto the last rank.
@@ -1372,14 +1445,21 @@ class xFuserModel(abc.ABC):
         Only the first rank in the SP group sends the real payload,
         the other ranks send None to keep the collective valid.
 
+        A legacy pipeline wrapper returns images only on the ranks its own
+        ``is_dp_last_group()`` selects, so those ranks send instead.
         """
-        if self.config.data_parallel_degree == 1:
+        # Without DP the output is already on the saving rank, unless a legacy
+        # wrapper decodes with a parallel VAE and so returns it on rank 0.
+        if self.config.data_parallel_degree == 1 and not self._wrapper_parallelizes_vae():
             return output
 
         world_group = get_world_group()
         last_rank = world_group.world_size - 1
 
-        is_representative = get_sequence_parallel_rank() == 0 and get_classifier_free_guidance_rank() == 0
+        if self._legacy_pipe is not None:
+            is_representative = self._legacy_pipe.is_dp_last_group()
+        else:
+            is_representative = get_sequence_parallel_rank() == 0 and get_classifier_free_guidance_rank() == 0
         send_obj = output if is_representative else None
 
         gather_list = [None] * world_group.world_size if world_group.rank == last_rank else None

@@ -93,3 +93,58 @@ def test_accelerator_directory_implies_the_accelerator_mark(tmp_path):
     _write(tmp_path, "tests/e2e/test_pipeline.py", "def test_pipeline():\n    pass\n")
 
     assert _layout.find_problems(tmp_path) == []
+
+
+def test_source_inspection_and_unmarked_device_placement_are_rejected(tmp_path):
+    _write(tmp_path, "pytest.ini", _PYTEST_INI)
+    _write(
+        tmp_path,
+        "tests/unit/test_policy.py",
+        """\
+        import ast
+        import inspect
+
+        def test_reads_source():
+            ast.parse("x = 1")
+
+        def test_reads_callable_source():
+            inspect.getsource(test_reads_source)
+
+        def test_places_a_tensor():
+            torch.randn(2, device="cuda")
+            torch.rand_like(source, device="cuda:1")
+            tensor.cuda()
+            tensor.to("cuda")
+        """,
+    )
+    _write(
+        tmp_path,
+        "tests/e2e/test_reads_source.py",
+        """\
+        import ast
+
+        def test_reads_source():
+            ast.parse("x = 1")
+        """,
+    )
+    _write(
+        tmp_path,
+        "tests/unit/test_marked_device.py",
+        """\
+        import pytest
+
+        @pytest.mark.accelerator
+        def test_places_a_tensor_on_purpose():
+            torch.zeros(2, device="cuda")
+        """,
+    )
+
+    problems = _layout.find_problems(tmp_path)
+
+    assert problems == [
+        "tests/e2e/test_reads_source.py inspects source with ast.parse",
+        "tests/unit/test_policy.py inspects source with ast.parse",
+        "tests/unit/test_policy.py inspects source with inspect.getsource",
+        "tests/unit/test_policy.py::test_places_a_tensor places a tensor on cuda "
+        "but is not marked accelerator, so the CPU selector runs it",
+    ]

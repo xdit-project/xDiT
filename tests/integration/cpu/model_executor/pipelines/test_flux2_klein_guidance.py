@@ -86,6 +86,9 @@ def _worker(rank, world_size, init_method, result_queue):
 
         import xfuser.envs as envs
         from xfuser.config.args import xFuserArgs
+
+        # Importing xDiT on ROCm replaces GroupNorm with an accelerator kernel.
+        envs.restore_torch_group_norm_for_distvae()
         from xfuser.core.distributed import parallel_state
         from xfuser.model_executor.pipelines.base_pipeline import xFuserPipelineBaseWrapper
         from xfuser.model_executor.pipelines.pipeline_flux2_klein import xFuserFlux2KleinPipeline

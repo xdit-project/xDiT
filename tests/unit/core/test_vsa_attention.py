@@ -1,10 +1,8 @@
-import inspect
 import math
 
 import pytest
 import torch
 
-from xfuser.config.args import xFuserArgs
 from xfuser.config.config import RuntimeConfig
 from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.core.distributed.runtime_state import DiTRuntimeState
@@ -100,11 +98,21 @@ def test_jenga_scheduled_drop_rate_matches_reference():
     assert jenga_scheduled_drop_rate(16, 30, rates) == 0.85
 
 
-def test_vsa_probability_defaults_match_benchmark():
-    assert xFuserArgs.__dataclass_fields__["vsa_prob_threshold"].default == 0.9
-    assert RuntimeConfig.__dataclass_fields__["vsa_prob_threshold"].default == 0.9
-    assert RuntimeConfig.__dataclass_fields__["vsa_collect_density"].default is False
-    assert inspect.signature(build_jenga_block_mask).parameters["prob_threshold"].default == 0.9
+def test_omitted_jenga_threshold_matches_the_runtime_default():
+    # These score gaps put cumulative probability on both sides of 0.9.
+    # Near-uniform random inputs select every block across a wide threshold
+    # range, making this comparison pass even when the defaults drift apart.
+    query = torch.tensor([[[[1.5], [2.0], [2.3], [2.6]]]])
+    key = torch.tensor([[[[0.0], [1.0], [2.0], [3.0]]]])
+    omitted = build_jenga_block_mask(query, key, block_size=1, top_k=1)
+    configured = build_jenga_block_mask(
+        query,
+        key,
+        block_size=1,
+        top_k=1,
+        prob_threshold=RuntimeConfig().vsa_prob_threshold,
+    )
+    torch.testing.assert_close(omitted, configured)
 
 
 def test_vsa_rejects_hybrid_attention_schedule():

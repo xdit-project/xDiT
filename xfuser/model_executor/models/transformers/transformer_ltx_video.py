@@ -264,6 +264,9 @@ class xFuserLTXVideoTransformer3DWrapper(LTXVideoTransformer3DModel):
 
         batch_size, seq_len = hidden_states.shape[:2]
         pad_amount = (-seq_len) % layout.sp_world_size
+        # USP now drops the padded keys of each ring step when valid_kv_len is
+        # published (usp._ring_trim_trailing_kv_padding), so this guard and the
+        # runner's can be removed once a ring + pad test covers this model.
         if pad_amount and layout.ring_world_size > 1:
             raise ValueError(
                 f"LTX-Video with ring_degree > 1 needs the {seq_len} video tokens to be "

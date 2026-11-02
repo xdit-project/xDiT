@@ -16,11 +16,13 @@ def _hip_quant_per_1x128():
     # triton twin get_triton_quant is lru_cached; the hip one is not).
     return aiter.get_hip_quant(aiter.QuantType.per_1x128)
 
+
 try:
     from aiter.ops.shuffle import shuffle_weight
     from aiter.ops.triton.gemm.basic.gemm_a8w8_blockscale import (
         gemm_a8w8_blockscale_preshuffle,
     )
+
     _HAS_PRESHUFFLE = True
 except ImportError:
     _HAS_PRESHUFFLE = False  # older AITER without preshuffle blockscale GEMM
@@ -58,7 +60,8 @@ def _pad_cols_to_multiple(t: torch.Tensor, block: int) -> tuple[torch.Tensor, bo
 
 
 def quantize_weight_to_fp8_blockscale_plain(
-    weight: torch.Tensor, device: Optional[torch.device] = None,
+    weight: torch.Tensor,
+    device: Optional[torch.device] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Block-128 FP8 quantize a weight to the plain (non-preshuffle) layout.
 
@@ -78,7 +81,7 @@ def quantize_weight_to_fp8_blockscale_plain(
         w = torch.nn.functional.pad(w, (0, c_pad, 0, r_pad))
     w_blocks = w.reshape(n_blocks, _FP8_BLOCK, k_blocks, _FP8_BLOCK)
     w_amax = w_blocks.abs().amax(dim=(1, 3)).clamp(min=1e-12)
-    w_scale = (w_amax.float() / _fp8_max())
+    w_scale = w_amax.float() / _fp8_max()
     w_q = _quantize_weight_blocks(w_blocks, w_amax)
     w_q = w_q.reshape(n_blocks * _FP8_BLOCK, k_blocks * _FP8_BLOCK)
     if r_pad or c_pad:
@@ -170,8 +173,9 @@ class xFuserFP8BlockScaleLinear(nn.Module):
         x_scale (runtime): [M, K/128]
     """
 
-    def __init__(self, in_features: int, out_features: int, bias: bool = True,
-                 device=None, dtype=None, preshuffle: bool = True):
+    def __init__(
+        self, in_features: int, out_features: int, bias: bool = True, device=None, dtype=None, preshuffle: bool = True
+    ):
         super().__init__()
         # Preshuffle needs a newer AITER and can be disabled via env for A/B measurement.
         # Fall back to the plain blockscale path when the kernel is absent or forced off.
@@ -184,14 +188,14 @@ class xFuserFP8BlockScaleLinear(nn.Module):
         self._compute_dtype = dtype or torch.bfloat16
         self.register_parameter("weight", None)
         if bias:
-            self.bias = nn.Parameter(
-                torch.empty(out_features, device=device, dtype=dtype)
-            )
+            self.bias = nn.Parameter(torch.empty(out_features, device=device, dtype=dtype))
         else:
             self.register_parameter("bias", None)
 
     def load_and_quantize_weights(
-        self, weight: torch.Tensor, bias: Optional[torch.Tensor] = None,
+        self,
+        weight: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
         device: Optional[torch.device] = None,
     ) -> None:
         self._quantize_weights(weight, device=device)
@@ -248,7 +252,7 @@ class xFuserFP8BlockScaleLinear(nn.Module):
 
         w_blocks = w.reshape(n_blocks, _FP8_BLOCK, k_blocks, _FP8_BLOCK)
         w_amax = w_blocks.abs().amax(dim=(1, 3)).clamp(min=1e-12)  # [n_blocks, k_blocks]
-        w_scale = (w_amax.float() / _fp8_max())
+        w_scale = w_amax.float() / _fp8_max()
 
         w_q = _quantize_weight_blocks(w_blocks, w_amax)
         w_q = w_q.reshape(n_blocks * _FP8_BLOCK, k_blocks * _FP8_BLOCK)
@@ -320,15 +324,26 @@ class xFuserFP8BlockScaleLinear(nn.Module):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         original_shape = input.shape
         x = input.reshape(-1, self.in_features)
+        if x.dtype not in (torch.bfloat16, torch.float16):
+            compute_dtype = (
+                self._compute_dtype if self._compute_dtype in (torch.bfloat16, torch.float16) else torch.bfloat16
+            )
+            x = x.to(compute_dtype)
         weight_fp8, weight_scale = self._gemm_operands(x)
         if self.preshuffle:
             k_padded = ((self.in_features + _FP8_BLOCK - 1) // _FP8_BLOCK) * _FP8_BLOCK
             output = torch.ops.xfuser.fp8_blockscale_gemm_preshuffle(
-                x, weight_fp8, weight_scale, self.out_features, k_padded,
+                x,
+                weight_fp8,
+                weight_scale,
+                self.out_features,
+                k_padded,
             ).to(input.dtype)
         else:
             output = torch.ops.xfuser.fp8_blockscale_gemm(
-                x, weight_fp8, weight_scale,
+                x,
+                weight_fp8,
+                weight_scale,
             ).to(input.dtype)
         if self.bias is not None:
             output = output + self.bias
@@ -361,7 +376,4 @@ class xFuserFP8BlockScaleLinear(nn.Module):
         return module
 
     def extra_repr(self):
-        return (
-            f"in_features={self.in_features}, out_features={self.out_features}, "
-            f"bias={self.bias is not None}"
-        )
+        return f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}"

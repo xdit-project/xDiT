@@ -71,7 +71,11 @@ def _parity_worker(rank, world_size, init_method, rope_type):
         torch.manual_seed(0)
         reference = LTX2VideoTransformer3DModel(**config).to(device).eval()
         parallel = xFuserLTX2VideoTransformer3DWrapper(**config)
-        parallel.load_state_dict(reference.state_dict())
+        # The wrapper swaps affine-free RMSNorms for an AITER kernel that keeps a
+        # ones buffer. Those buffers are not parameters of the stock model.
+        missing, unexpected = parallel.load_state_dict(reference.state_dict(), strict=False)
+        assert unexpected == []
+        assert all(name.endswith("._ones_weight") for name in missing), missing
         parallel = parallel.to(device).eval()
         initialize_runtime_state(pipeline=_Pipeline(parallel), engine_config=engine_config)
         get_runtime_state().set_attention_backend("SDPA")

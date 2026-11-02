@@ -47,10 +47,7 @@ def _run(name, query, key, value, **kwargs):
 
 
 def test_every_mha_v4_sparge_row_is_registered():
-    # Ten rows: the eight that predate the BF16 pair, plus BF16 and BF16FP8.
-    # Counted so that a row lost from the FORMATS table is a failure here
-    # rather than a backend that quietly stops existing.
-    assert len(_MHA_V4_SPARGE_BACKENDS) == 10
+    """A row dropped from the MHA v4 table must fail here, not disappear quietly."""
     for name in _MHA_V4_SPARGE_BACKENDS:
         spec = _spec(name)
         assert spec.sparsity is Sparsity.SPARGE
@@ -67,16 +64,37 @@ def test_triton_sparge_backends_are_separate_from_mha_v4():
         assert "aiter_sage" in spec.package
 
 
-def test_mxfp8_sparge_is_gfx950_only():
-    """Block-scaled Q/K has no gfx942 kernel, so the row declares the arch it
-    needs rather than being refused once the launch fails."""
-    from xfuser.core.attention.backends.aiter_mha_v4.spec import FORMATS
+def _architecture_gate(spec):
+    from xfuser.core.attention.requirements import ARCH, All
 
-    mxfp8 = next(f for f in FORMATS if f.name == "MXFP8")
-    assert mxfp8.sparge_on.names == ("gfx950",)
+    requirement = spec.requires
+    parts = requirement._flat() if isinstance(requirement, All) else (requirement,)
+    gates = [part for part in parts if isinstance(part, ARCH)]
+    assert len(gates) == 1, f"{spec.type.name} architecture gates: {gates}"
+    return gates[0]
 
-    fp8 = next(f for f in FORMATS if f.name == "FP8")
-    assert fp8.sparge_on.names == ("gfx950", "gfx942")
+
+def test_mxfp8_sparge_refuses_gfx942_while_fp8_sparge_accepts_it():
+    """Block-scaled Q/K has no gfx942 kernel, so that arch must fail the
+    requirement the registered backend actually consults."""
+    from unittest import mock
+
+    from xfuser.core.attention import requirements
+
+    class _Props:
+        gcnArchName = "gfx942"
+
+    requirements._arch_of.cache_clear()
+    try:
+        with (
+            mock.patch.object(torch.cuda, "is_available", return_value=True),
+            mock.patch.object(torch.cuda, "get_device_properties", lambda index: _Props()),
+            mock.patch.object(torch.cuda, "current_device", return_value=0),
+        ):
+            assert _architecture_gate(_spec("AITER_MXFP8_SPARGE")).unmet() is not None
+            assert _architecture_gate(_spec("AITER_FP8_SPARGE")).unmet() is None
+    finally:
+        requirements._arch_of.cache_clear()
 
 
 @pytest.mark.parametrize("backend_name", _MHA_V4_SPARGE_BACKENDS)

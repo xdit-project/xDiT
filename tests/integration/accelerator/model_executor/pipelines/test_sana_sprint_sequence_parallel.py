@@ -6,6 +6,8 @@ yunchang no longer defines, so the model failed to load. And xDiT's cross-attent
 processor dropped the prompt's attention mask, so image tokens also attended to the
 prompt's padding tokens. Two ranks with Ulysses attention run a tiny Sana Sprint
 with a padded prompt for two steps and compare with diffusers.
+
+Pipeline parallelism is not supported: the pipeline must refuse it rather than hang.
 """
 
 import pytest
@@ -16,7 +18,7 @@ from xfuser.core.distributed import init_distributed_environment
 from xfuser.core.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
 
 
-def _tiny_sana_sprint():
+def _tiny_sana_sprint(num_layers=1):
     from diffusers import SanaSprintPipeline, SanaTransformer2DModel, SCMScheduler
 
     torch.manual_seed(0)
@@ -24,7 +26,7 @@ def _tiny_sana_sprint():
         patch_size=1,
         in_channels=4,
         out_channels=4,
-        num_layers=1,
+        num_layers=num_layers,
         num_attention_heads=2,
         attention_head_dim=4,
         num_cross_attention_heads=2,
@@ -81,3 +83,27 @@ def _worker(rank, world_size, init_method):
 @pytest.mark.multi_gpu
 def test_sana_sprint_sequence_parallel_matches_diffusers(accelerator_ranks):
     accelerator_ranks(_worker, world_size=2, timeout=240, init_filename="sana-sprint-sp")
+
+
+def _pipeline_parallel_worker(rank, world_size, init_method):
+    from xfuser.model_executor.pipelines.pipeline_sana_sprint import xFuserSanaSprintPipeline
+
+    torch.cuda.set_device(rank)
+    device = torch.device("cuda", rank)
+    init_distributed_environment(rank=rank, world_size=world_size, local_rank=rank, distributed_init_method=init_method)
+    # As many warmup steps as denoising steps, so the request would take the synchronous loop.
+    args = xFuserArgs(model="tiny", pipefusion_parallel_degree=world_size, warmup_steps=2, attention_backend="sdpa")
+    engine_config, _ = args.create_config()
+    engine_config.runtime_config.dtype = torch.float32
+
+    # One transformer layer per pipeline stage.
+    pipeline = xFuserSanaSprintPipeline(_tiny_sana_sprint(num_layers=world_size).to(device), engine_config)
+    with pytest.raises(NotImplementedError, match="Pipeline parallelism is not supported"):
+        pipeline(**_call_kwargs(device))
+    destroy_model_parallel()
+    destroy_distributed_environment()
+
+
+@pytest.mark.multi_gpu
+def test_sana_sprint_refuses_pipeline_parallelism(accelerator_ranks):
+    accelerator_ranks(_pipeline_parallel_worker, world_size=2, timeout=240, init_filename="sana-sprint-pp")

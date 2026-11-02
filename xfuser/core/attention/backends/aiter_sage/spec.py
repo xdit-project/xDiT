@@ -14,6 +14,7 @@ import functools
 from xfuser.core.attention.numerics import hadamard
 from xfuser.core.attention.constraints import (
     HEAD_DIM,
+    NON_CAUSAL,
     NO_VARLEN,
     SELF_ATTENTION,
 )
@@ -69,7 +70,9 @@ SPECS = [
         impl=Impl("kernel:sage"),
         ring=ALWAYS,
         low_precision=True,
-        accepts=NO_VARLEN,
+        # The v1 kernel is never passed `causal`, so a causal call would silently
+        # get full attention. Refuse it until the kernel forwards the flag.
+        accepts=NON_CAUSAL & NO_VARLEN,
         requires=V1,
     ),
     Spec(

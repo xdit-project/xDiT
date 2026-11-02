@@ -48,6 +48,11 @@ from xfuser.core.distributed.parallel_state import _SP
 from xfuser.envs import PACKAGES_CHECKER
 
 from xfuser.model_executor.layers.usp import USP
+from xfuser.model_executor.models.transformers.transformers_utils import (
+    local_sp_pad_rows,
+    sp_pad_spans_ranks,
+    zero_sp_pad_rows_hook,
+)
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
 from xfuser.model_executor.layers import (
     xFuserLayerWrappersRegister,
@@ -81,8 +86,9 @@ _BLOCKS_SPLIT_MODULATION = hasattr(Flux2Modulation, "split")
 
 @xFuserAttentionProcessorRegister.register(Flux2AttnProcessor)
 class xFuserFlux2AttnProcessor(Flux2AttnProcessor):
-    def __init__(self):
+    def __init__(self, attention_kwargs=None):
         super().__init__()
+        self.attention_kwargs = attention_kwargs
         self.use_long_ctx_attn_kvcache = HAS_LONG_CTX_ATTN and _SP and get_sequence_parallel_world_size() > 1
 
     def __call__(
@@ -202,8 +208,33 @@ class xFuserFlux2AttnProcessor(Flux2AttnProcessor):
             # The stale-KV cache was updated above. Passing the module as attn_layer
             # would make USP update it again with the joint text+image KV.
             hidden_states = USP(query, key, value, head_balance_layer=attn)
+        elif (self.attention_kwargs or {}).get("replicated_prompt_tokens"):
+            # Every rank holds the whole prompt: attend to it once, as joint tokens.
+            # The image keys alone are padded, and USP trims them.
+            joint_q, query = query.split([num_encoder_tokens, query.shape[2] - num_encoder_tokens], dim=2)
+            joint_k, key = key.split([num_encoder_tokens, key.shape[2] - num_encoder_tokens], dim=2)
+            joint_v, value = value.split([num_encoder_tokens, value.shape[2] - num_encoder_tokens], dim=2)
+            hidden_states = USP(
+                query,
+                key,
+                value,
+                joint_query=joint_q,
+                joint_key=joint_k,
+                joint_value=joint_v,
+                joint_strategy="front",
+                attn_layer=attn,
+                attention_kwargs=self.attention_kwargs,
+            )
         else:
-            hidden_states = USP(query, key, value, attn_layer=attn)
+            # Each rank holds [text shard, image shard] and only the last rank's
+            # image shard ends with padding, so the gathered keys end with it.
+            hidden_states = USP(
+                query,
+                key,
+                value,
+                attn_layer=attn,
+                attention_kwargs=self.attention_kwargs,
+            )
 
         # Transpose back to original shape
         hidden_states = hidden_states.transpose(1, 2)
@@ -232,8 +263,9 @@ class xFuserFlux2AttnProcessor(Flux2AttnProcessor):
 
 @xFuserAttentionProcessorRegister.register(Flux2ParallelSelfAttnProcessor)
 class xFuserFlux2ParallelSelfAttnProcessor(Flux2ParallelSelfAttnProcessor):
-    def __init__(self):
+    def __init__(self, attention_kwargs=None):
         super().__init__()
+        self.attention_kwargs = attention_kwargs
         self.use_long_ctx_attn_kvcache = HAS_LONG_CTX_ATTN and _SP and get_sequence_parallel_world_size() > 1
 
     def __call__(
@@ -328,8 +360,34 @@ class xFuserFlux2ParallelSelfAttnProcessor(Flux2ParallelSelfAttnProcessor):
         elif distri_cache_updated:
             # The stale-KV cache was updated above; see xFuserFlux2AttnProcessor.
             hidden_states = USP(query, key, value, combine_qkv_a2a=True, head_balance_layer=attn)
+        elif (self.attention_kwargs or {}).get("replicated_prompt_tokens"):
+            # As in the double-stream blocks: the replicated prompt joins as joint tokens.
+            num_prompt = self.attention_kwargs["replicated_prompt_tokens"]
+            joint_q, query = query.split([num_prompt, query.shape[2] - num_prompt], dim=2)
+            joint_k, key = key.split([num_prompt, key.shape[2] - num_prompt], dim=2)
+            joint_v, value = value.split([num_prompt, value.shape[2] - num_prompt], dim=2)
+            hidden_states = USP(
+                query,
+                key,
+                value,
+                joint_query=joint_q,
+                joint_key=joint_k,
+                joint_value=joint_v,
+                joint_strategy="front",
+                combine_qkv_a2a=True,
+                attn_layer=attn,
+                attention_kwargs=self.attention_kwargs,
+            )
         else:
-            hidden_states = USP(query, key, value, combine_qkv_a2a=True, attn_layer=attn)
+            # The single blocks run on [text shard, image shard] too.
+            hidden_states = USP(
+                query,
+                key,
+                value,
+                combine_qkv_a2a=True,
+                attn_layer=attn,
+                attention_kwargs=self.attention_kwargs,
+            )
 
         # Transpose back to original shape
         hidden_states = hidden_states.transpose(1, 2)
@@ -452,10 +510,14 @@ class xFuserFlux2Transformer2DWrapper(Flux2Transformer2DModel):
             **guidance_kwargs,
         )
 
+        self._self_attn_kwargs = {"valid_kv_len": None, "replicated_prompt_tokens": 0}
+        self._sp_pad = {"local_rows": 0}
         for block in self.transformer_blocks:
-            block.attn.processor = xFuserFlux2AttnProcessor()
+            block.attn.processor = xFuserFlux2AttnProcessor(self._self_attn_kwargs)
+            block.register_forward_hook(zero_sp_pad_rows_hook(self._sp_pad, index=1))
         for block in self.single_transformer_blocks:
-            block.attn.processor = xFuserFlux2ParallelSelfAttnProcessor()
+            block.attn.processor = xFuserFlux2ParallelSelfAttnProcessor(self._self_attn_kwargs)
+            block.register_forward_hook(zero_sp_pad_rows_hook(self._sp_pad, index=1))
         register_fp8_comms_eligible_modules(self, flux_attn_modules(self))
 
     def _pad_to_sp_divisible(self, tensor: torch.Tensor, padding_length: int, dim: int) -> torch.Tensor:
@@ -481,7 +543,34 @@ class xFuserFlux2Transformer2DWrapper(Flux2Transformer2DModel):
     ):
         sp_world_size = get_sequence_parallel_world_size()
         sequence_length = hidden_states.shape[1]
+        prompt_length = encoder_hidden_states.shape[1]
         padding_length = (sp_world_size - (sequence_length % sp_world_size)) % sp_world_size
+        if sp_pad_spans_ranks(sequence_length, sp_world_size):
+            raise ValueError(
+                "FLUX.2 SP padding must fit in the last image shard; "
+                "increase the image token count or reduce the sequence parallel degree."
+            )
+        if padding_length and get_runtime_state().num_pipeline_patch > 1:
+            # PipeFusion's attention calls declare no padded keys, so they would attend to the pad.
+            # Declare it as in the SP-only path (USP's `valid_kv_len`) and delete this check.
+            raise NotImplementedError(
+                f"FLUX.2 cannot pad {sequence_length} image tokens for {sp_world_size} sequence parallel ranks "
+                "under PipeFusion. Make the image token count divisible by the sequence parallel degree."
+            )
+        # A prompt that does not split evenly is not sharded: every rank keeps all of it and attends to it
+        # as joint tokens (as FLUX.1 does), so only the image keys carry the pad.
+        replicated_prompt = prompt_length % sp_world_size != 0
+        if replicated_prompt and get_runtime_state().fp8_comms is not None:
+            # USP runs neither the FP8 all-to-all nor its calibration for joint tensors.
+            raise ValueError(
+                f"--use_fp8_comms needs the prompt length ({prompt_length} tokens) to be divisible by the "
+                f"sequence parallel degree ({sp_world_size}). Change --max_sequence_length or the parallel "
+                "degrees, or drop --use_fp8_comms."
+            )
+        self._self_attn_kwargs["replicated_prompt_tokens"] = prompt_length if replicated_prompt else 0
+        self._self_attn_kwargs["valid_kv_len"] = (
+            (sequence_length if replicated_prompt else sequence_length + prompt_length) if padding_length else None
+        )
         if padding_length > 0:
             hidden_states = self._pad_to_sp_divisible(hidden_states, padding_length, dim=1)
             img_ids = self._pad_to_sp_divisible(img_ids, padding_length, dim=1)
@@ -496,14 +585,18 @@ class xFuserFlux2Transformer2DWrapper(Flux2Transformer2DModel):
         hidden_states = torch.chunk(hidden_states, get_sequence_parallel_world_size(), dim=-2)[
             get_sequence_parallel_rank()
         ]
+        self._sp_pad["local_rows"] = local_sp_pad_rows(
+            sequence_length, hidden_states.shape[1], get_sequence_parallel_rank()
+        )
         encoder_hidden_states = torch.chunk(encoder_hidden_states, get_classifier_free_guidance_world_size(), dim=0)[
             get_classifier_free_guidance_rank()
         ]
-        encoder_hidden_states = torch.chunk(encoder_hidden_states, get_sequence_parallel_world_size(), dim=-2)[
-            get_sequence_parallel_rank()
-        ]
         img_ids = torch.chunk(img_ids, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
-        txt_ids = torch.chunk(txt_ids, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
+        if not replicated_prompt:
+            encoder_hidden_states = torch.chunk(encoder_hidden_states, get_sequence_parallel_world_size(), dim=-2)[
+                get_sequence_parallel_rank()
+            ]
+            txt_ids = torch.chunk(txt_ids, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
 
         output = super().forward(
             hidden_states,

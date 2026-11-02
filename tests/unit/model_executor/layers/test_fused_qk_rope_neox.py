@@ -5,7 +5,7 @@ The FlyDSL kernel itself needs a GPU, so what is checkable here is everything
 
 * the table fold in :func:`prepare_neox_rope_tables`, which is what lets the
   kernel body be branch-free, and is pure arithmetic;
-* :func:`_pick_block`'s ``half`` divisibility rule, the invariant the kernel's
+* :func:`_pick_tiling`'s ``half`` divisibility rule, the invariant the kernel's
   partner-reload relies on to never straddle the rotary half boundary;
 * :func:`_reference_neox`, the fallback taken whenever flydsl is importable but
   the shape is out of envelope, including its handling of the 4-tuple
@@ -24,7 +24,7 @@ import torch
 
 from xfuser.model_executor.layers import fused_qk_rope_flydsl as _module
 from xfuser.model_executor.layers.fused_qk_rope_flydsl import (
-    _pick_block,
+    _pick_tiling,
     _reference_neox,
     flydsl_fused_qk_norm_rope,
     prepare_neox_rope_tables,
@@ -171,27 +171,28 @@ def test_passthrough_tail_normalizes_negative_zero_to_positive_zero():
 
 
 @pytest.mark.parametrize("wave_size", [64, 32])
-def test_pick_block_keeps_a_lane_inside_one_rotary_half(wave_size):
+def test_pick_tiling_keeps_a_lane_inside_one_rotary_half(wave_size):
     """The partner-reload is only correct while no VEC block straddles ``half``.
 
     ``vec | half`` is what guarantees that, and -- because ``vec | d`` too --
-    that the partner block is itself VEC-aligned. wave32 is covered because the
-    kernel caps BLOCK_THREADS at the device wave, and gfx12xx is wave32.
+    that the partner block is itself VEC-aligned. wave32 is covered because a
+    head's lane group has to fit inside one device wave, and gfx12xx is wave32.
     """
     half = ROTARY_DIM // 2
 
-    block_threads, vec = _pick_block(HEAD_DIM, wave_size, half)
+    block_threads, vec, lanes_per_head, pairs_per_block = _pick_tiling(HEAD_DIM, wave_size, half)
 
-    assert block_threads * vec == HEAD_DIM
-    assert block_threads <= wave_size
+    assert lanes_per_head * vec == HEAD_DIM
+    assert lanes_per_head <= wave_size
+    assert block_threads == lanes_per_head * pairs_per_block
     assert half % vec == 0
     assert vec % 2 == 0
 
 
-def test_pick_block_rejects_a_rotary_half_no_lane_width_divides():
-    # head_dim 128 with wave 64 forces vec=2, then 4, then 8 ...; an odd half
-    # divides none of them, so there is no legal lane assignment.
-    assert _pick_block(HEAD_DIM, 64, 7) is None
+def test_pick_tiling_rejects_a_rotary_half_no_lane_width_divides():
+    # The candidate lane widths are all even; an odd half divides none of them,
+    # so there is no legal lane assignment.
+    assert _pick_tiling(HEAD_DIM, 64, 7) is None
 
 
 @pytest.fixture

@@ -189,7 +189,9 @@ def setup_sparge(
             "Sparge with reorder_sequence=True requires `attention_kwargs['thw']` to be published by the model wrapper."
         )
 
-    if thw is not None and (reorder_sequence or use_static_block_mask):
+    # The SP pad is stripped whenever the layout is known, not only for reorder or
+    # the static mask: its zero keys would otherwise be attended (they get logit 0).
+    if thw is not None:
         spatial_len = thw[0] * thw[1] * thw[2]
         sp_pad_len = image_len_post_deint - spatial_len
         if sp_pad_len < 0:

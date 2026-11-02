@@ -8,7 +8,7 @@ from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
 from xfuser.core.utils.runner_utils import log
 from xfuser.core.utils.video_utils import encode_video_with_audio
-from xfuser.envs import PACKAGES_CHECKER
+from xfuser.envs import PACKAGES_CHECKER, get_device_name
 from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
@@ -542,15 +542,26 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
             diff_decoder.set_attn_processor(LTX2VideoVaeNeighborhoodNattenProcessor())
             log("Diffusion decoder: using NATTEN attention processor.")
         except (ImportError, RuntimeError, FileNotFoundError):
-            # NATTEN is not available
-            # Fall back to tiled PyTorch SDPA
-            # Works on CUDA, ROCm and CPU. Ported from LTX-2 EagerSdpaAttention.
-            from xfuser.model_executor.layers.ltx2.na3d_eager_attn import (
-                LTX2VideoVaeEagerSdpaAttnProcessor,
-            )
+            # NATTEN unavailable — try AITER's Triton flash-NA3D kernel (ROCm gfx942/gfx950).
+            try:
+                from xfuser.model_executor.layers.ltx2.na3d_mfma_flash import (
+                    LTX2VideoVaeMfmaAttnProcessor,
+                )
 
-            diff_decoder.set_attn_processor(LTX2VideoVaeEagerSdpaAttnProcessor())
-            log("Diffusion decoder: NATTEN unavailable; using tiled PyTorch SDPA fallback.")
+                processor = LTX2VideoVaeMfmaAttnProcessor()
+                log("Diffusion decoder: using AITER Triton flash-NA3D attention processor.")
+            except (ImportError, RuntimeError) as e:
+                # Tiled PyTorch SDPA (works on CUDA, ROCm, CPU).
+                from xfuser.model_executor.layers.ltx2.na3d_eager_attn import (
+                    LTX2VideoVaeEagerSdpaAttnProcessor,
+                )
+
+                processor = LTX2VideoVaeEagerSdpaAttnProcessor()
+                log(
+                    f"Diffusion decoder: NATTEN and AITER flash-NA3D unavailable ({e}); "
+                    "using tiled PyTorch SDPA fallback."
+                )
+            diff_decoder.set_attn_processor(processor)
         self.decode_pipe = LTX2VideoDiffusionDecodePipeline(
             diffusion_decoder=diff_decoder,
             scheduler=pipe.scheduler,
@@ -600,7 +611,7 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
         )
 
         is_i2v = self.config.task == "i2v"
-        generator = torch.Generator(device="cuda").manual_seed(input_args["seed"])
+        generator = torch.Generator(device=get_device_name()).manual_seed(input_args["seed"])
 
         shared = {
             "prompt": input_args["prompt"],

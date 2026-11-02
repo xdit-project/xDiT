@@ -10,7 +10,7 @@ Run with:
 """
 
 import json
-import os
+from pathlib import Path
 
 import pytest
 
@@ -31,8 +31,9 @@ safetensors = pytest.importorskip("safetensors")
 def _write_safetensors(path, tensors):
     from safetensors.torch import save_file
 
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    save_file(tensors, path)
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    save_file(tensors, destination)
 
 
 @pytest.fixture

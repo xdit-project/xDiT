@@ -78,6 +78,47 @@ def _summarise_schedule(backends) -> str:
     return ", ".join(f"{count}x {backend.name}" for backend, count in runs)
 
 
+def select_default_attention_backend() -> AttentionBackendType:
+    """The dense attention backend this platform runs best, for when none is named.
+
+    Also what a sparse backend falls back to on calls it cannot make sparse.
+    """
+    if envs._is_hip():
+        if env_info["has_aiter"] and PACKAGES_CHECKER._on_rdna4():
+            backend = AttentionBackendType.AITER_FLYDSL
+        elif env_info["has_aiter"]:
+            backend = AttentionBackendType.AITER
+        elif env_info["has_flash_attn"]:
+            backend = AttentionBackendType.FLASH
+        else:
+            backend = AttentionBackendType.SDPA
+
+    elif env_info["has_flash_attn_4"]:
+        backend = AttentionBackendType.FLASH_4
+    elif env_info["has_flash_attn_3"]:
+        backend = AttentionBackendType.FLASH_3
+    elif torch.backends.cudnn.is_available():
+        backend = AttentionBackendType.CUDNN
+    elif env_info["has_flash_attn"]:
+        backend = AttentionBackendType.FLASH
+    elif env_info["has_npu_flash_attn"]:
+        backend = AttentionBackendType.NPU
+    else:
+        backend = AttentionBackendType.SDPA
+
+    # The choice above reads what torch and the installed packages were
+    # built with, not what this host can run (a CUDA wheel on a CPU-only
+    # host, say). Fall back to SDPA rather than refuse to start, and say so.
+    unavailable = attention_registry.find(backend).unavailable()
+    if unavailable is not None:
+        logger.warning(
+            f"Automatically selected attention backend {backend.name} is unavailable: {unavailable}. "
+            "Falling back to SDPA; set attention_backend to choose a backend explicitly."
+        )
+        backend = AttentionBackendType.SDPA
+    return backend
+
+
 class RuntimeState(metaclass=ABCMeta):
     attention_backend: AttentionBackendType = AttentionBackendType.SDPA_FLASH
     cross_attention_backend: Optional[AttentionBackendType] = None
@@ -218,41 +259,7 @@ class RuntimeState(metaclass=ABCMeta):
         """
         if engine_config and engine_config.runtime_config.attention_backend:
             return AttentionBackendType[engine_config.runtime_config.attention_backend.upper()]
-
-        if envs._is_hip():
-            if env_info["has_aiter"] and PACKAGES_CHECKER._on_rdna4():
-                backend = AttentionBackendType.AITER_FLYDSL
-            elif env_info["has_aiter"]:
-                backend = AttentionBackendType.AITER
-            elif env_info["has_flash_attn"]:
-                backend = AttentionBackendType.FLASH
-            else:
-                backend = AttentionBackendType.SDPA
-
-        elif env_info["has_flash_attn_4"]:
-            backend = AttentionBackendType.FLASH_4
-        elif env_info["has_flash_attn_3"]:
-            backend = AttentionBackendType.FLASH_3
-        elif torch.backends.cudnn.is_available():
-            backend = AttentionBackendType.CUDNN
-        elif env_info["has_flash_attn"]:
-            backend = AttentionBackendType.FLASH
-        elif env_info["has_npu_flash_attn"]:
-            backend = AttentionBackendType.NPU
-        else:
-            backend = AttentionBackendType.SDPA
-
-        # The choice above reads what torch and the installed packages were
-        # built with, not what this host can run (a CUDA wheel on a CPU-only
-        # host, say). Fall back to SDPA rather than refuse to start, and say so.
-        unavailable = attention_registry.find(backend).unavailable()
-        if unavailable is not None:
-            logger.warning(
-                f"Automatically selected attention backend {backend.name} is unavailable: {unavailable}. "
-                "Falling back to SDPA; set attention_backend to choose a backend explicitly."
-            )
-            backend = AttentionBackendType.SDPA
-        return backend
+        return select_default_attention_backend()
 
     def _check_if_backend_compatible_with_current_configuration(self, attention_backend: AttentionBackendType):
         """Refuse a backend the current machine or configuration cannot serve.

@@ -39,6 +39,7 @@ if is_ftfy_available():
     import ftfy
 
 from xfuser.config import EngineConfig, InputConfig
+from xfuser.envs import get_device_name
 from xfuser.logger import init_logger
 from xfuser.core.distributed import (
     get_pipeline_parallel_world_size,
@@ -97,7 +98,7 @@ class xFuserSanaSprintPipeline(xFuserPipelineBaseWrapper):
             width=input_config.width,
             prompt=prompt,
             num_inference_steps=steps,
-            generator=torch.Generator(device="cuda").manual_seed(42),
+            generator=torch.Generator(device=get_device_name()).manual_seed(42),
             output_type=input_config.output_type,
         )
         get_runtime_state().runtime_config.warmup_steps = warmup_steps
@@ -747,10 +748,11 @@ class xFuserSanaSprintPipeline(xFuserPipelineBaseWrapper):
         timesteps = timesteps[:-1]
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         self._num_timesteps = len(timesteps)
-        num_pipeline_warmup_steps = get_runtime_state().runtime_config.warmup_steps
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            if get_pipeline_parallel_world_size() > 1 and self._num_timesteps > num_pipeline_warmup_steps:
+            # The sync loop below never passes a stage's output on, so even a request
+            # that fits in the warmup steps would wait forever on the next stage.
+            if get_pipeline_parallel_world_size() > 1:
                 raise NotImplementedError(
                     f"Pipeline parallelism is not supported with {self.__class__.__name__} pipeline."
                 )

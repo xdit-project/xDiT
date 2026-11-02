@@ -54,7 +54,7 @@ from xfuser.core.attention.spec import AttentionBackendType
             ("e4m3", "e4m3", "mxfp6_p"),
             ("e4m3", "e4m3", "mxfp6"),
             "preprocess",
-            64,
+            32,
             False,
         ),
         (
@@ -72,7 +72,7 @@ from xfuser.core.attention.spec import AttentionBackendType
             ("mxfp6", "mxfp6", "mxfp6_p"),
             ("mxfp6", "mxfp6", "mxfp6"),
             "preprocess",
-            64,
+            32,
             True,
         ),
         (
@@ -81,7 +81,7 @@ from xfuser.core.attention.spec import AttentionBackendType
             ("mxfp4", "mxfp4", "mxfp4"),
             ("mxfp4", "mxfp4", "mxfp4"),
             "preprocess",
-            64,
+            32,
             True,
         ),
         (
@@ -90,7 +90,7 @@ from xfuser.core.attention.spec import AttentionBackendType
             ("mxfp6", "mxfp6", "mxfp4"),
             ("mxfp6", "mxfp6", "mxfp4"),
             "preprocess",
-            64,
+            32,
             True,
         ),
     ),

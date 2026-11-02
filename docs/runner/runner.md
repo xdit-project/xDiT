@@ -248,11 +248,6 @@ back to the Tier-1 ordered custom-op path. If neither path is supported,
 initialization fails and the run must disable the feature with
 `--attention_a2a none`.
 
-FP6-P profiles currently pad each rank's transport input to a multiple of 64.
-This is an empirical mitigation for a known AITER MHA-v4 race, not a transport
-correctness guarantee, and should be revisited when the upstream race is
-fixed.
-
 ### Loading and Quantization Contract
 
 The quantization flags select model-declared linear-layer targets; they do not quantize every pipeline component. Unless noted below, the VAE and untargeted text encoders retain the pipeline dtype.

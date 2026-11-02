@@ -466,9 +466,6 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
             and get_ring_parallel_world_size() == 1
             and not get_runtime_state().runtime_config.use_spargeattn_head_balance
         )
-        # FP6-P profiles currently ask for 64 local tokens. This is a temporary
-        # mitigation for the known AITER MHA-v4 race, not an Attention A2A
-        # transport requirement; remove it when the upstream kernel is fixed.
         pad_multiple = fused_a2a_pad_multiple(sp_world_size) if attention_a2a_padding else sp_world_size
         pad_amount = (pad_multiple - (hidden_states.shape[1] % pad_multiple)) % pad_multiple
         # Padded keys would act as an attention sink. Publish the real global

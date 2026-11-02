@@ -13,7 +13,8 @@ from diffusers.utils import (
     scale_lora_layers,
     unscale_lora_layers,
 )
-from xfuser.model_executor.layers.usp import USP
+from xfuser.model_executor.layers.attention_mask import MaskMetaCache
+from xfuser.model_executor.layers.usp import USP, key_padding_attention_kwargs, key_padding_mask
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
 from xfuser.core.distributed import (
     get_runtime_state,
@@ -25,6 +26,7 @@ from xfuser.model_executor.models.transformers.transformers_utils import (
     gather_and_unpad,
     local_sp_pad_rows,
     sp_pad_spans_ranks,
+    text_image_key_mask,
     zero_sp_pad_rows_hook,
 )
 
@@ -115,11 +117,15 @@ class xFuserQwenDoubleStreamAttnProcessor:
                 txt_query = apply_rotary_emb_qwen(txt_query, txt_freqs, use_real=False)
                 txt_key = apply_rotary_emb_qwen(txt_key, txt_freqs, use_real=False)
 
+        # The wrapper's key-padding mask, when the prompts are padded, is in the
+        # order the attention sees the keys.
+        attention_kwargs = key_padding_attention_kwargs(self.attention_kwargs, attention_mask)
+
         if self.attention_kwargs.get("replicated_prompt_tokens"):
             # Every rank holds the whole prompt rather than a shard of it. Attend to it
             # once, as joint tokens: left in the sharded sequence its keys would be
             # gathered once per rank. The gathered image keys then end with the padding,
-            # which USP drops.
+            # which USP drops, or which the key-padding mask covers.
             joint_hidden_states = USP(
                 img_query.transpose(1, 2),
                 img_key.transpose(1, 2),
@@ -131,7 +137,7 @@ class xFuserQwenDoubleStreamAttnProcessor:
                 joint_value=txt_value.transpose(1, 2),
                 joint_strategy="front",
                 attn_layer=attn,
-                attention_kwargs=self.attention_kwargs,
+                attention_kwargs=attention_kwargs,
             ).transpose(1, 2)
             joint_dtype = img_query.dtype
         else:
@@ -150,7 +156,7 @@ class xFuserQwenDoubleStreamAttnProcessor:
                 dropout_p=0.0,
                 is_causal=False,
                 attn_layer=attn,
-                attention_kwargs=self.attention_kwargs,
+                attention_kwargs=attention_kwargs,
             ).transpose(1, 2)
             joint_dtype = joint_query.dtype
 
@@ -210,6 +216,7 @@ class xFuserQwenImageTransformerWrapper(QwenImageTransformer2DModel):
             # Qwen returns (encoder, image) and its text stream is never SP padded.
             block.register_forward_hook(zero_sp_pad_rows_hook(self._sp_pad, index=1))
         register_fp8_comms_eligible_modules(self, [block.attn for block in self.transformer_blocks])
+        self._key_padding_cache = MaskMetaCache()
 
     def forward(
         self,
@@ -262,6 +269,8 @@ class xFuserQwenImageTransformerWrapper(QwenImageTransformer2DModel):
             # weight the lora layers by setting `lora_scale` for each PEFT layer
             scale_lora_layers(self, lora_scale)
 
+        # The pipeline's own mask tensor, the same object at every step, keys the key-padding cache.
+        prompt_mask = encoder_hidden_states_mask
         hidden_states = self.img_in(hidden_states)
 
         timestep = timestep.to(hidden_states.dtype)
@@ -315,12 +324,18 @@ class xFuserQwenImageTransformerWrapper(QwenImageTransformer2DModel):
         # Construct joint attention mask once to avoid reconstructing in every block
         # This eliminates 60 GPU syncs during training while maintaining torch.compile compatibility
         block_attention_kwargs = attention_kwargs.copy() if attention_kwargs is not None else {}
-        if encoder_hidden_states_mask is not None:
-            # Build joint mask: [text_mask, all_ones_for_image]
-            batch_size, image_seq_len = hidden_states.shape[:2]
-            image_mask = torch.ones((batch_size, image_seq_len), dtype=torch.bool, device=hidden_states.device)
-            joint_attention_mask = torch.cat([encoder_hidden_states_mask, image_mask], dim=1)
-            block_attention_kwargs["attention_mask"] = joint_attention_mask
+        if prompt_mask is not None:
+            # diffusers' Qwen-Image pipelines pass None when no prompt token is padding, so a mask here
+            # means prompts of different lengths.
+            block_attention_kwargs["attention_mask"] = key_padding_mask(
+                self._key_padding_cache,
+                prompt_mask,
+                text_image_key_mask,
+                image_seq_len,
+                pad_amount,
+                sp_world_size,
+                "front" if replicated_text else None,
+            )
 
         for index_block, block in enumerate(self.transformer_blocks):
             if torch.is_grad_enabled() and self.gradient_checkpointing:

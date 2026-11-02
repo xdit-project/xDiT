@@ -380,6 +380,27 @@ def test_resolving_a_spec_resolves_its_fallback():
         assert spec._fallback._resolved is not None
 
 
+@pytest.mark.parametrize(
+    "accepts, fallback_accepts, applies",
+    [
+        pytest.param(MASKED_VARLEN & HEAD_DIM(128), None, True, id="masked-varlen"),
+        pytest.param(NO_VARLEN, None, False, id="no-varlen"),
+        pytest.param(MASKED_VARLEN & HEAD_DIM(128), MASKED_VARLEN, True, id="fallback-applies-it-too"),
+        pytest.param(MASKED_VARLEN & HEAD_DIM(128), NO_VARLEN, False, id="fallback-drops-it"),
+    ],
+)
+def test_a_backend_applies_attn_mask_only_if_every_kernel_it_dispatches_to_does(accepts, fallback_accepts, applies):
+    """usp keeps the selected backend for a masked call only when it applies the
+    mask, and run() hands the calls the selected kernel refuses, mask and all,
+    to its fallback."""
+    fallback = None if fallback_accepts is None else AttentionBackendType.SDPA
+    specs = [_spec(AttentionBackendType.AITER_BF16, accepts=accepts, fallback=fallback)]
+    if fallback is not None:
+        specs.append(_spec(AttentionBackendType.SDPA, accepts=fallback_accepts))
+    with registry.using(specs):
+        assert registry.get(AttentionBackendType.AITER_BF16).applies_attn_mask is applies
+
+
 def test_a_warm_spec_does_not_rewalk_its_fallback_chain():
     """The chain is walked after the cache check, so resolving twice costs one
     attribute read. Safe because _resolved is set only after the fallback is,
@@ -998,6 +1019,16 @@ def test_a_masked_pack_reaches_the_varlen_and_mask_applying_backends_only():
     accepting = {backend.name for backend, spec in registry.REGISTRY.items() if spec.rejects(q, q, q, call) is None}
     expected = VARLEN_CAPABLE | MASK_APPLYING
     assert accepting == expected, f"unexpected: {sorted(accepting - expected)}, missing: {sorted(expected - accepting)}"
+
+
+def test_a_backend_serves_key_padding_exactly_when_the_masked_pack_reaches_its_kernel():
+    """usp refuses a batch of prompts of different lengths on any other backend, so the property it reads
+    must agree with what the specs accept for a masked pack."""
+    from xfuser.core.attention import registry
+
+    serving = {backend.name for backend, spec in registry.REGISTRY.items() if spec.serves_key_padding}
+    expected = VARLEN_CAPABLE | MASK_APPLYING
+    assert serving == expected, f"unexpected: {sorted(serving - expected)}, missing: {sorted(expected - serving)}"
 
 
 # --------------------------------------------------------------------------

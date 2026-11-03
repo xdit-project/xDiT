@@ -229,6 +229,9 @@ def test_pipefusion_compile_replay_failure_is_raised_collectively(monkeypatch):
 def test_pipefusion_raises_recompile_limit_for_patch_specializations(monkeypatch):
     model = object.__new__(_Runner)
     model.config = SimpleNamespace(num_pipeline_patch=8)
+    model.engine_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(pp_config=SimpleNamespace(num_pipeline_patch=8))
+    )
     monkeypatch.setattr(base_model_module, "get_pipeline_parallel_world_size", lambda: 8)
     # Assign directly. monkeypatch.setattr deletes a torch config on undo because
     # the value is not stored in the module ``__dict__``, and that hides
@@ -238,5 +241,21 @@ def test_pipefusion_raises_recompile_limit_for_patch_specializations(monkeypatch
     try:
         model._enable_compute_comm_overlap()
         assert torch._dynamo.config.recompile_limit == 20
+    finally:
+        torch._dynamo.config.recompile_limit = previous_recompile_limit
+
+
+def test_pipefusion_uses_normalized_engine_patch_count_when_cli_value_is_none(monkeypatch):
+    model = object.__new__(_Runner)
+    model.config = SimpleNamespace(num_pipeline_patch=None)
+    model.engine_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(pp_config=SimpleNamespace(num_pipeline_patch=4))
+    )
+    monkeypatch.setattr(base_model_module, "get_pipeline_parallel_world_size", lambda: 4)
+    previous_recompile_limit = torch._dynamo.config.recompile_limit
+    torch._dynamo.config.recompile_limit = 8
+    try:
+        model._enable_compute_comm_overlap()
+        assert torch._dynamo.config.recompile_limit == 12
     finally:
         torch._dynamo.config.recompile_limit = previous_recompile_limit

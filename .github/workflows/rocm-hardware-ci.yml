@@ -1,12 +1,14 @@
-# Manually requests AMD hardware validation and mirrors the correlated remote result.
+# Requests AMD hardware validation manually or through a /ci-rocm PR comment.
 name: ROCm Hardware CI
 run-name: "ROCm HW CI [origin:${{ inputs.original_run_id || github.run_id }}]"
 
 on:
+  issue_comment:
+    types: [created]
   workflow_dispatch:
     inputs:
       benchmarks:
-        description: 'Comma-separated benchmark names to run'
+        description: 'Benchmark names or --name/--tag filters to run'
         required: true
       architectures:
         description: 'Comma-separated GPU architectures to test'
@@ -23,6 +25,10 @@ on:
         description: 'Automatic retry only; leave empty'
         required: false
         default: ''
+      pr_number:
+        description: 'Automatic retry only; PR receiving the final result'
+        required: false
+        default: ''
 
 env:
   PARTNER_REPO: AMD-AGI/diffusion-models-inference
@@ -31,9 +37,15 @@ env:
 permissions:
   contents: read
   actions: write
+  issues: write
 
 jobs:
   wait:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.issue.pull_request &&
+       (github.event.comment.body == '/ci-rocm' ||
+        startsWith(github.event.comment.body, '/ci-rocm ')))
     runs-on: ubuntu-latest
     # Five minutes under the hosted-runner limit; this job may automatically retry up to 3 times.
     timeout-minutes: 355
@@ -45,8 +57,40 @@ jobs:
       BENCHMARKS: ${{ inputs.benchmarks }}
       ARCHITECTURES: ${{ inputs.architectures }}
       AMD_REF: ${{ inputs.amd_ref }}
+      PR_NUMBER: ${{ github.event.issue.number || inputs.pr_number }}
     steps:
+      - name: Checkout trusted comment parser
+        if: github.event_name == 'issue_comment'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Read comment request
+        if: github.event_name == 'issue_comment'
+        run: |
+          python3 .github/scripts/rocm_ci_request.py
+
+      - name: Resolve PR commit
+        if: github.event_name == 'issue_comment'
+        env:
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          pr=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")
+          if [[ $(printf '%s' "$pr" | jq -r '.state') != open ]]; then
+            echo "::error::ROCm CI requires an open pull request."
+            exit 1
+          fi
+          sha=$(printf '%s' "$pr" | jq -r '.head.sha')
+          if [[ ! "$sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::PR head SHA is missing or invalid."
+            exit 1
+          fi
+          echo "XDIT_SHA=${sha}" >> "$GITHUB_ENV"
+
       - name: Validate request
+        id: request
         run: |
           set -euo pipefail
 
@@ -56,6 +100,10 @@ jobs:
           fi
           if [[ ! "$CONTINUATION_COUNT" =~ ^[0-9]+$ ]] || [ "$CONTINUATION_COUNT" -gt 3 ]; then
             echo "::error::Invalid continuation count: ${CONTINUATION_COUNT}"
+            exit 1
+          fi
+          if [[ -n "$PR_NUMBER" && ! "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::Invalid PR number: ${PR_NUMBER}"
             exit 1
           fi
           if [[ -z "$BENCHMARKS" || "$BENCHMARKS" == *$'\n'* || "$BENCHMARKS" == *$'\r'* ]]; then
@@ -73,19 +121,30 @@ jobs:
           fi
 
           echo "WAIT_DEADLINE=$(( $(date +%s) + 21000 ))" >> "$GITHUB_ENV"
+          echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - name: Acknowledge command
+        if: github.event_name == 'issue_comment'
+        env:
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: |
+          gh api --method POST \
+            "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" \
+            -f content=eyes
 
       - name: Publish request metadata
-        if: inputs.original_run_id == ''
+        if: github.event_name == 'issue_comment' || inputs.original_run_id == ''
         run: |
           mkdir -p request
           jq -n \
             --arg benchmarks "$BENCHMARKS" \
             --arg architectures "$ARCHITECTURES" \
             --arg amd_ref "$AMD_REF" \
-            '{benchmarks: $benchmarks, architectures: $architectures, amd_ref: $amd_ref}' > request/request.json
+            --arg xdit_sha "${XDIT_SHA:-$GITHUB_SHA}" \
+            '{benchmarks: $benchmarks, architectures: $architectures, amd_ref: $amd_ref, xdit_sha: $xdit_sha}' > request/request.json
 
       - name: Upload request metadata
-        if: inputs.original_run_id == ''
+        if: github.event_name == 'issue_comment' || inputs.original_run_id == ''
         uses: actions/upload-artifact@v4
         with:
           name: rocm-hardware-request
@@ -101,6 +160,7 @@ jobs:
           fi
 
       - name: Wait for the hardware run
+        id: wait
         run: |
           set -euo pipefail
           marker="[xdit-run:${ORIGINAL_RUN_ID}]"
@@ -124,6 +184,7 @@ jobs:
             if [ -n "$run" ]; then
               status=$(echo "$run" | jq -r '.status')
               url=$(echo "$run" | jq -r '.html_url')
+              echo "hardware_url=${url}" >> "$GITHUB_OUTPUT"
               if [ "$status" = "completed" ]; then
                 conclusion=$(echo "$run" | jq -r '.conclusion')
                 {
@@ -151,5 +212,26 @@ jobs:
             -f 'inputs[architectures]='"$ARCHITECTURES" \
             -f 'inputs[amd_ref]='"$AMD_REF" \
             -f 'inputs[original_run_id]='"$ORIGINAL_RUN_ID" \
-            -f 'inputs[continuation_count]='"$next_continuation"
+            -f 'inputs[continuation_count]='"$next_continuation" \
+            -f 'inputs[pr_number]='"$PR_NUMBER"
+          echo "continued=true" >> "$GITHUB_OUTPUT"
           echo "retrying original run ${ORIGINAL_RUN_ID} (${next_continuation}/3)"
+
+      - name: Comment final result on PR
+        if: >-
+          always() && !cancelled() &&
+          steps.request.outputs.pr_number != '' &&
+          steps.wait.outputs.continued != 'true'
+        env:
+          RESULT_PR_NUMBER: ${{ steps.request.outputs.pr_number }}
+          WAIT_OUTCOME: ${{ steps.wait.outcome }}
+          HARDWARE_URL: ${{ steps.wait.outputs.hardware_url }}
+        run: |
+          result=failed
+          if [[ "$WAIT_OUTCOME" == success ]]; then
+            result=completed
+          fi
+          url=${HARDWARE_URL:-${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}}
+          gh api --method POST \
+            "repos/${GITHUB_REPOSITORY}/issues/${RESULT_PR_NUMBER}/comments" \
+            -f body="CI run ${result}, ${url}"

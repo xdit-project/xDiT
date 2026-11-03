@@ -1,4 +1,5 @@
 import abc
+import contextlib
 import torch
 import copy
 import json
@@ -962,16 +963,42 @@ class xFuserModel(abc.ABC):
         return 2  # None = skip step reduction, run full warmup cycle
 
     def _get_pipefusion_recompile_limit(self) -> Optional[int]:
-        """Return the Dynamo budget needed by this rank's PP specializations."""
+        """Return the Dynamo recompile limit this rank's PipeFusion graphs need, or ``None``.
+
+        Dynamo keeps compiled graphs in a cache attached to the Python code object it traces, not
+        to a module instance. ``torch._dynamo.config.recompile_limit`` (8 by default) caps how many
+        entries that cache may hold for one frame. Once the cap is reached, a call whose guards
+        match no entry is not compiled and runs eagerly. Each block in a declared block list gets
+        its own ``torch.compile`` wrapper, but blocks of one class execute the same code, so their
+        specializations all count against one limit.
+
+        Outside PipeFusion each block sees one input shape, and the default limit is enough. A
+        PipeFusion stage calls each local block with the full latent during the synchronous warmup
+        steps, then once per patch. Patch heights can differ, and the KV cache reads the patch mode
+        and patch index from runtime state, so Dynamo specializes every patch separately. One rank
+        can therefore need an entry per local block for the full latent and for each patch, plus a
+        small margin:
+
+            max(2 * num_patches + 4, local_blocks * (num_patches + 1) + 4)
+
+        ``local_blocks`` counts the blocks in ``fsdp_strategy[*]["wrap_attrs"]`` of the compiled
+        components on this rank. The first term is the floor for a stage with no declared block
+        list, where only the bound stage ``forward`` is compiled. An unset patch count falls back
+        to one patch per stage. ``None`` means the PipeFusion degree is not an int above 1, and the
+        process limit is left alone.
+        """
         pp_degree = getattr(
             self.config,
             "pipefusion_parallel_degree",
             1,
         )
-        if pp_degree <= 1:
+        if not isinstance(pp_degree, int) or isinstance(pp_degree, bool) or pp_degree <= 1:
             return None
 
-        num_patches = getattr(self.config, "num_pipeline_patch", 1)
+        num_patches = getattr(self.config, "num_pipeline_patch", None)
+        if not isinstance(num_patches, int) or isinstance(num_patches, bool) or num_patches < 1:
+            # Args leave this unset; PipeFusionParallelConfig then uses one patch per stage.
+            num_patches = pp_degree
         local_block_count = 0
         component_names = (
             self._get_compiled_pipe_components() if hasattr(self, "pipe") and hasattr(self, "settings") else ()
@@ -990,6 +1017,37 @@ class xFuserModel(abc.ABC):
             2 * num_patches + 4,
             max(local_block_count, 1) * (num_patches + 1) + 4,
         )
+
+    @contextlib.contextmanager
+    def _pipefusion_recompile_budget(self):
+        """Hold the PipeFusion recompile limit for one ``_compile_model``, ``run``, or ``profile`` call.
+
+        Compilation alone does not create every specialization. Step-cache adapters are installed
+        after ``_compile_model``, so the specializations they add, such as cache compute versus
+        reuse steps in full-latent and patch contexts, are first traced during execution warmup
+        inside ``run`` or ``profile``. Those calls need the same raised limit; under the default
+        limit the new specializations would run eagerly.
+
+        On entry the limit becomes the larger of its current value and
+        ``_get_pipefusion_recompile_limit``, so a caller's higher limit is kept. On exit, including
+        on error, it returns to the value seen at that entry. Nested scopes therefore unwind in
+        order: a ``_compile_model`` call inside ``run`` restores ``run``'s raised limit, and
+        ``run`` restores the caller's. When the required limit is ``None`` the process limit is
+        not touched.
+        """
+        required_recompile_limit = self._get_pipefusion_recompile_limit()
+        if required_recompile_limit is None:
+            yield
+            return
+        original_recompile_limit = torch._dynamo.config.recompile_limit
+        torch._dynamo.config.recompile_limit = max(
+            original_recompile_limit,
+            required_recompile_limit,
+        )
+        try:
+            yield
+        finally:
+            torch._dynamo.config.recompile_limit = original_recompile_limit
 
     def _enable_compute_comm_overlap(self) -> None:
         """Enables compute-communication overlap for the model while caring for
@@ -1032,10 +1090,11 @@ class xFuserModel(abc.ABC):
         Pipeline runs disable Inductor's SPMD graph-consistency collective
         (pipeline stages intentionally compile different graphs) and size
         Dynamo's recompile limit for every local block's full-sequence and
-        patch-index specializations. The larger budget remains active through
-        execution warmup because step-cache adapters are installed after this
-        method and can introduce their final specializations there. ``run`` or
-        ``profile`` restores the caller's original budget on exit.
+        patch-index specializations. This method holds that budget only while
+        it compiles, then restores the caller's limit. ``run`` and ``profile``
+        raise it again for the whole call so execution warmup can still create
+        the cache-aware specializations, and each of those calls restores it
+        on exit.
 
         Compilation is deliberately runner-managed because pipeline wrapping,
         FSDP, and step-cache adapters all change the safe graph boundary:
@@ -1066,33 +1125,8 @@ class xFuserModel(abc.ABC):
         cycle. This method runs before step-cache adapters are applied, so
         compilation always sees the original blocks.
         """
-        original_recompile_limit = torch._dynamo.config.recompile_limit
-        required_recompile_limit = self._get_pipefusion_recompile_limit()
-        if required_recompile_limit is not None:
-            self._dynamo_recompile_limit_to_restore = getattr(
-                self,
-                "_dynamo_recompile_limit_to_restore",
-                original_recompile_limit,
-            )
-            torch._dynamo.config.recompile_limit = max(
-                original_recompile_limit,
-                required_recompile_limit,
-            )
-        try:
+        with self._pipefusion_recompile_budget():
             return self._compile_model_unscoped(input_args)
-        except Exception:
-            self._restore_dynamo_recompile_limit()
-            raise
-
-    def _restore_dynamo_recompile_limit(self) -> None:
-        original = getattr(
-            self,
-            "_dynamo_recompile_limit_to_restore",
-            None,
-        )
-        if original is not None:
-            torch._dynamo.config.recompile_limit = original
-            del self._dynamo_recompile_limit_to_restore
 
     def _compile_model_unscoped(self, input_args: dict) -> None:
         self._enable_compute_comm_overlap()
@@ -1294,10 +1328,8 @@ class xFuserModel(abc.ABC):
         the first timed output and sets the failure count at which the failure
         handler starts being called.
         """
-        try:
+        with self._pipefusion_recompile_budget():
             return self._run_with_compile_budget(input_args)
-        finally:
-            self._restore_dynamo_recompile_limit()
 
     def _run_with_compile_budget(self, input_args: dict) -> Tuple[DiffusionOutput, list]:
         self._validate_args(input_args)
@@ -1422,10 +1454,8 @@ class xFuserModel(abc.ABC):
     @torch.inference_mode()
     def profile(self, input_args: dict) -> Tuple[DiffusionOutput, list, torch.profiler.profiler.profile]:
         """Profile the model execution"""
-        try:
+        with self._pipefusion_recompile_budget():
             return self._profile_with_compile_budget(input_args)
-        finally:
-            self._restore_dynamo_recompile_limit()
 
     def _profile_with_compile_budget(
         self, input_args: dict

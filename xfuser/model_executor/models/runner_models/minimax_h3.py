@@ -81,6 +81,13 @@ _VDN_WINDOW_BACKEND_FOR_ATTENTION = {
 }
 _SUPPORTED_ULYSSES_DEGREES = frozenset({1, 2, 4, 8})
 _SUPPORTED_TASKS = frozenset({"t2va", "i2va", "l2va", "fl2va", "ref2va"})
+# Transformer blocks that FP4 runs keep whole at FP8. MXFP4 error is spread over all
+# 50 blocks rather than concentrated in a few, so no small set fixes it; blocks 0 and 1
+# and the back half of the stack carry the most of it. Holding those at FP8 brings the
+# FP4 output close to the FP8 profile's while the rest keeps most of the FP4 speedup.
+# Written for the 50-block transformer and transformer_ref (num_layers in their configs);
+# a deeper variant would leave its extra blocks at FP4, since prefixes match by index.
+_FP4_FP8_BLOCKS = tuple(f"{i}." for i in [0, 1] + list(range(25, 50)))
 FASTH3_V1_DATAFREE_MODEL_ID = "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree"
 # Dense-attention ablation of the same 4-step preview: distilled without VSA
 FASTH3_V1_DENSE_DATAFREE_MODEL_ID = "FastVideo/FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree"
@@ -286,20 +293,30 @@ def _patch_minimax_h3_text_encoder_broadcast() -> None:
     encoders._xfuser_broadcast_patched = True
 
 
-def _mark_dynamic_timestep(timestep):
-    """Keep the timestep's length out of dynamo's guards.
+# build_row_timesteps gives every packed row one of four timesteps (generated
+# video, generated audio, conditioning video, reference audio) and hands the
+# transformer the distinct ones, so a step carries between one and four.
+_MAX_DISTINCT_TIMESTEPS = 4
 
-    Without this dynamo specializes on timestep shape 1 vs >1 and recompiles
-    when it changes; the timestep is a 1-D tensor whose length varies along the
-    denoising steps. ``mark_unbacked`` is only exposed on
-    ``torch._dynamo.decorators``, not on ``torch._dynamo`` itself, and
-    ``mark_dynamic`` is the weaker fallback: it avoids specializing on the exact
-    size but still splits 1 from >1.
+
+def _pad_timestep(timestep):
+    """Give the timestep the same length on every denoising step.
+
+    Its length is the number of distinct timesteps in the step, which varies
+    along the denoising steps, and dynamo would recompile when it does. Padding
+    to the most a step can carry keeps the shape static. The padding repeats
+    the last timestep: ``timestep_indices`` never address the extra rows, and a
+    repeated row cannot change the per-tensor activation scale of the FP8
+    AdaLN projection that FP4 runs keep, so the real rows come out the same.
+
+    A longer timestep, which build_row_timesteps cannot produce today, passes
+    through unchanged: dynamo then recompiles once and treats the length as a
+    dynamic size it can still guard on.
     """
-    from torch._dynamo import decorators as dynamo_decorators
-
-    mark = getattr(dynamo_decorators, "mark_unbacked", dynamo_decorators.mark_dynamic)
-    mark(timestep, 0)
+    missing = _MAX_DISTINCT_TIMESTEPS - timestep.shape[0]
+    if missing <= 0:
+        return timestep
+    return torch.cat((timestep, timestep[-1:].expand(missing)))
 
 
 def _wrap_compiled_forward(transformer, original_forward, compiled_forward):
@@ -307,8 +324,8 @@ def _wrap_compiled_forward(transformer, original_forward, compiled_forward):
 
     Two jobs, both of which would otherwise force a recompile or a graph break:
 
-    * mark the timestep's length dynamic, since marking must happen outside the
-      compiled region to take effect;
+    * give the timestep a fixed length, since a shape the graph sees must be
+      settled before it;
     * prime VSA-H3's tile geometry, which is recovered from ``position_ids``
       *values*. That forces device syncs and cannot be traced, so
       ``fullgraph=True`` would reject it. It is constant for a run, so priming
@@ -326,7 +343,7 @@ def _wrap_compiled_forward(transformer, original_forward, compiled_forward):
         bound.apply_defaults()
         timestep = bound.arguments.get("timestep")
         if isinstance(timestep, torch.Tensor) and timestep.dim() > 0:
-            _mark_dynamic_timestep(timestep)
+            bound.arguments["timestep"] = _pad_timestep(timestep)
         if prime_vsa_h3:
             transformer.prepare_vsa_h3_metadata(
                 bound.arguments["position_ids"],
@@ -334,7 +351,7 @@ def _wrap_compiled_forward(transformer, original_forward, compiled_forward):
                 bound.arguments["audio_indices"],
                 bound.arguments["text_indices"],
             )
-        return compiled_forward(*args, **kwargs)
+        return compiled_forward(*bound.args, **bound.kwargs)
 
     # The denoise block picks which layout fields to pass by inspecting
     # signature(transformer.forward), so the wrapper has to expose the real
@@ -473,6 +490,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
         fp8_gemm_module_list=["transformer.transformer_blocks"],
         fp8_gemm_include_suffixes=("attn.to_qkv", "ff.net.0.proj"),
         fp4_gemm_module_list=["transformer.transformer_blocks"],
+        fp8_precision_overrides=_FP4_FP8_BLOCKS,
         fp8_precision_override_suffixes=(
             "attn.to_out.0",
             "ff.net.2",
@@ -572,10 +590,19 @@ class xFuserMiniMaxH3Model(xFuserModel):
                 "MiniMax-H3 text encoder TP reuses the Ulysses ranks, so "
                 "--text_encoder_tp_degree must be 1 or match --ulysses_degree."
             )
-        if text_encoder_tp_degree > 1 and (
-            config.enable_model_cpu_offload or config.enable_sequential_cpu_offload or config.enable_group_cpu_offload
-        ):
-            raise ValueError("MiniMax-H3 text encoder TP is incompatible with CPU offloading.")
+        if config.enable_sequential_cpu_offload or config.enable_group_cpu_offload:
+            raise ValueError(
+                "MiniMax-H3 supports CPU offload only through --enable_model_cpu_offload, "
+                "which keeps the transformer and VAEs on the device and streams the text "
+                "encoder from host memory."
+            )
+        # Every rank would pin its own host copy of the text encoder, which only the first rank
+        # runs, and FSDP places the encoder on the device before offload is applied.
+        if config.enable_model_cpu_offload and (ulysses_degree > 1 or config.fully_shard_degree > 1):
+            raise ValueError(
+                "MiniMax-H3 --enable_model_cpu_offload is for single-GPU runs. Multi-GPU runs "
+                "shard the text encoder with --text_encoder_tp_degree instead."
+            )
         if config.batch_size is not None or config.dataset_path is not None:
             raise ValueError(
                 "MiniMax-H3 packs one request into one audiovisual sequence and "
@@ -591,6 +618,27 @@ class xFuserMiniMaxH3Model(xFuserModel):
         if isinstance(args.get("prompt"), list) and len(args["prompt"]) == 1:
             args["prompt"] = args["prompt"][0]
         return args
+
+    def _offload_resident_components(self) -> tuple[str, ...]:
+        # Model offload moves only the text encoder: the transformer runs every step and is
+        # quantized on the device, and the VAEs are small.
+        names = (self._transformer_component_name, "vae", "audio_vae")
+        return tuple(name for name in names if getattr(self.pipe, name, None) is not None)
+
+    def _enable_cpu_offload(self) -> None:
+        """Stream the text encoder from host memory under --enable_model_cpu_offload.
+
+        ModularPipeline has no enable_model_cpu_offload, and the 63 GB Qwen3-VL encoder is the one
+        component that runs once per request, so it is the one worth leaving on the host. Leaf-level
+        group offload keeps its weights pinned there and streams them in layer by layer, so nothing
+        is copied back after encoding. _validate_config refuses the other offload modes.
+        """
+        if not self.config.enable_model_cpu_offload:
+            return
+        from diffusers.hooks import apply_group_offloading
+
+        log("Enabling MiniMax-H3 CPU offload: text encoder streamed from host, transformer and VAEs on device.")
+        apply_group_offloading(module=self.pipe.text_encoder, **self._group_offload_kwargs("leaf_level"))
 
     def _load_model(self):
         from diffusers import ModularPipeline
@@ -760,8 +808,8 @@ class xFuserMiniMaxH3Model(xFuserModel):
             fullgraph=not use_hybrid,
         )
 
-        # Marking the timestep dynamic fixes a recompile: it avoids more than
-        # one graph realizing after compile-warmup.
+        # Padding the timestep to a fixed length fixes a recompile: it avoids
+        # more than one graph realizing after compile-warmup.
         transformer.forward = _wrap_compiled_forward(transformer, original_forward, compiled_forward)
         compile_args = copy.deepcopy(input_args)
         if not get_runtime_state().has_attention_schedule():
@@ -1188,6 +1236,7 @@ class xFuserMiniMaxH3Ref2VAModel(xFuserMiniMaxH3Model):
         fp8_gemm_module_list=["transformer_ref.transformer_blocks"],
         fp8_gemm_include_suffixes=("attn.to_qkv", "ff.net.0.proj"),
         fp4_gemm_module_list=["transformer_ref.transformer_blocks"],
+        fp8_precision_overrides=_FP4_FP8_BLOCKS,
         fp8_precision_override_suffixes=(
             "attn.to_out.0",
             "ff.net.2",

@@ -28,21 +28,10 @@ def conversion_filter(module_path, excluded_paths, include_suffixes=None):
     excluded path sits below it or the run pins conversion to certain suffixes.
     """
 
-    overlapping = tuple(
-        path
-        for path in excluded_paths
-        if module_paths_overlap(module_path, path)
-    )
-    if any(
-        module_path_is_covered(module_path, path)
-        for path in overlapping
-    ):
+    overlapping = tuple(path for path in excluded_paths if module_paths_overlap(module_path, path))
+    if any(module_path_is_covered(module_path, path) for path in overlapping):
         return False, None
-    descendants = tuple(
-        path
-        for path in overlapping
-        if module_path_is_covered(path, module_path)
-    )
+    descendants = tuple(path for path in overlapping if module_path_is_covered(path, module_path))
     if not descendants and not include_suffixes:
         return True, None
 
@@ -50,10 +39,7 @@ def conversion_filter(module_path, excluded_paths, include_suffixes=None):
         full_path = module_path if not fqn else f"{module_path}.{fqn}"
         if include_suffixes and not full_path.endswith(tuple(include_suffixes)):
             return False
-        return not any(
-            module_path_is_covered(full_path, path)
-            for path in descendants
-        )
+        return not any(module_path_is_covered(full_path, path) for path in descendants)
 
     return True, filter_fn
 
@@ -81,6 +67,10 @@ def place_pipeline_components(loader) -> None:
 
     if not offload_requested:
         model.pipe = model.pipe.to(f"cuda:{local_rank}")
+    else:
+        # Before FP4/FP6 setup, which quantizes a resident component where it lies.
+        for name in model._offload_resident_components():
+            getattr(model.pipe, name).to(f"cuda:{local_rank}")
 
     if model.config.use_fp4_gemms:
         if _is_cuda():
@@ -94,11 +84,7 @@ def place_pipeline_components(loader) -> None:
 
     # FP4 setup owns its own hybrid FP8 path and any declared FP8-only modules, so the generic walk
     # would re-quantize inside the hybrid wrappers it just built.
-    if (
-        adapter is not None
-        and not adapter.converts_before_device_move
-        and not model.config.use_fp4_gemms
-    ):
+    if adapter is not None and not adapter.converts_before_device_move and not model.config.use_fp4_gemms:
         _convert_fp8_on_device(loader, adapter, local_rank)
 
     if model.config.use_int8_gemms:
@@ -120,9 +106,7 @@ def setup_mixed_mxfp_gemms(loader, local_rank) -> None:
     model = loader.model
     adapter = loader.backends.mixed_mxfp
     for module_name in loader.quantization_plan.module_list("a6w4"):
-        convert, filter_fn = conversion_filter(
-            module_name, loader.quantization_ledger.streaming_targets
-        )
+        convert, filter_fn = conversion_filter(module_name, loader.quantization_ledger.streaming_targets)
         if not convert:
             continue
         kwargs = {"filter_fn": filter_fn} if filter_fn is not None else {}
@@ -142,14 +126,9 @@ def _setup_format_gemms(loader, local_rank, *, stream_quant) -> None:
     model = loader.model
     adapter = loader.backends.format
     format_entries = getattr(loader.backends, "format_entries", None)
-    module_names = (
-        format_entries()
-        if callable(format_entries)
-        else tuple(model.settings.fp4_gemm_module_list or ())
-    )
+    module_names = format_entries() if callable(format_entries) else tuple(model.settings.fp4_gemm_module_list or ())
     use_fp6 = bool(getattr(model.config, "use_fp6_gemms", False))
     pure_fp6 = use_fp6 and not model.config.use_fp4_gemms
-    mixed_fp6 = use_fp6 and model.config.use_fp4_gemms
     offload_requested = any(
         getattr(model.config, name, False)
         for name in (
@@ -174,14 +153,8 @@ def _setup_format_gemms(loader, local_rank, *, stream_quant) -> None:
                 component_name=component_name,
                 targets=loader.backends.format_targets_for(component_name),
                 stream_quant=stream_quant,
-                precision_prefixes=(
-                    () if pure_fp6 else (model.settings.fp8_precision_overrides or ())
-                ),
-                precision_suffixes=(
-                    ()
-                    if pure_fp6
-                    else (model.settings.fp8_precision_override_suffixes or ())
-                ),
+                precision_prefixes=(() if pure_fp6 else (model.settings.fp8_precision_overrides or ())),
+                precision_suffixes=(() if pure_fp6 else (model.settings.fp8_precision_override_suffixes or ())),
                 hybrid=(False if pure_fp6 else model.config.use_hybrid_gemm_schedule),
             ).descriptor
             log(descriptor.log_message())
@@ -193,9 +166,7 @@ def _setup_format_gemms(loader, local_rank, *, stream_quant) -> None:
         adapter.convert_module(
             rgetattr(model.pipe, module_name),
             fp8_layers=(None if pure_fp6 else model.settings.fp8_precision_overrides),
-            fp8_suffix_layers=(
-                None if pure_fp6 else model.settings.fp8_precision_override_suffixes
-            ),
+            fp8_suffix_layers=(None if pure_fp6 else model.settings.fp8_precision_override_suffixes),
             hybrid=(False if pure_fp6 else model.config.use_hybrid_gemm_schedule),
             device=f"cuda:{local_rank}",
             **convert_kwargs,
@@ -214,38 +185,23 @@ def setup_fp8_only_gemm_modules(loader, local_rank) -> None:
 
     model = loader.model
     config = getattr(model, "config", None)
-    mixed_fp6 = bool(
-        getattr(config, "use_fp6_gemms", False)
-        and getattr(config, "use_fp4_gemms", False)
-    )
-    mixed_mxfp = bool(
-        getattr(config, "use_a6w4_gemms", False)
-        and getattr(config, "use_fp4_gemms", False)
-    )
+    mixed_fp6 = bool(getattr(config, "use_fp6_gemms", False) and getattr(config, "use_fp4_gemms", False))
+    mixed_mxfp = bool(getattr(config, "use_a6w4_gemms", False) and getattr(config, "use_fp4_gemms", False))
     fp4_modules = set(loader.quantization_plan.module_list("fp4"))
     fp8_only_modules = [
         name
         for name in loader.quantization_plan.module_list()
-        if not any(
-            module_path_is_covered(name, fp4_module)
-            for fp4_module in fp4_modules
-        )
+        if not any(module_path_is_covered(name, fp4_module) for fp4_module in fp4_modules)
     ]
     if not fp8_only_modules:
         return
     adapter = (
         loader.backends.fp6
         if mixed_fp6
-        else (
-            loader.backends.mixed_mxfp
-            if mixed_mxfp
-            else loader.backends.blockwise_fp8
-        )
+        else (loader.backends.mixed_mxfp if mixed_mxfp else loader.backends.blockwise_fp8)
     )
     for module_name in fp8_only_modules:
-        excluded_paths = fp4_modules | loader.quantization_ledger.already_quantized(
-            fp8=not (mixed_fp6 or mixed_mxfp)
-        )
+        excluded_paths = fp4_modules | loader.quantization_ledger.already_quantized(fp8=not (mixed_fp6 or mixed_mxfp))
         convert, filter_fn = conversion_filter(
             module_name,
             excluded_paths,
@@ -283,15 +239,9 @@ def _convert_fp8_on_host(loader, adapter, local_rank, offload_requested) -> None
             **convert_kwargs,
         )
         if replaced:
-            log(
-                f"Quantized {replaced} layers in {module_name} "
-                f"to FP8 ({adapter.storage_semantics})."
-            )
+            log(f"Quantized {replaced} layers in {module_name} to FP8 ({adapter.storage_semantics}).")
         else:
-            log(
-                f"{module_name} already FP8 (streamed quantize-on-load); "
-                "post-load walk no-op."
-            )
+            log(f"{module_name} already FP8 (streamed quantize-on-load); post-load walk no-op.")
 
 
 def _convert_fp8_on_device(loader, adapter, local_rank) -> None:
@@ -305,9 +255,9 @@ def _convert_fp8_on_device(loader, adapter, local_rank) -> None:
         )
         if not convert:
             continue
-        if component_name.startswith(
-            "transformer"
-        ) and loader.quantization_ledger.claim_description(component_name, fp8=True):
+        if component_name.startswith("transformer") and loader.quantization_ledger.claim_description(
+            component_name, fp8=True
+        ):
             log(
                 "Transformer quantization: requested=fp8, "
                 f"backend={adapter.backend.value}, "

@@ -1,13 +1,10 @@
 """Distributed and PipeFusion cache-context integration for Cache-DiT."""
 
-import logging
-import os
+import copy
 import types
 
 import torch
 import torch.distributed as dist
-
-logger = logging.getLogger(__name__)
 
 
 def is_parallelized_flag() -> bool:
@@ -50,6 +47,54 @@ def install_pipefusion_static_fn_bypass(
     manager.Fn_compute_blocks = types.MethodType(no_fn_blocks, manager)
     manager._xdit_static_fn_bypass_installed = True
     return True
+
+
+def _shift_patch_cache_config(cache_config, warmup_steps: int):
+    """Align one patch context's schedule with diffusion steps after warmup.
+
+    Cache-DiT indexes step schedules by the context's own counter. Patch contexts
+    start at zero when PipeFusion switches to patch mode, so give them a copy of
+    the config with schedule fields advanced by the full-sequence warmup. The
+    copy is required because Cache-DiT keeps the config by reference. The first
+    patch step still computes: its residual buffers are empty, since warmup ran
+    on the base context.
+
+    Forced refreshes are rejected: Cache-DiT rebuilds a refreshed context from
+    this shifted config, so the schedule after the refresh would be offset.
+    """
+    if warmup_steps <= 0:
+        return cache_config
+    if cache_config.force_refresh_step_hint is not None:
+        raise ValueError(
+            "cache_config.force_refresh_step_hint is not supported with PipeFusion warmup (--warmup_steps > 0)."
+        )
+    mask = cache_config.steps_computation_mask
+    warmup_horizon = cache_config.max_warmup_steps
+    if mask is not None:
+        first_continuous_compute_steps = 0
+        for value in mask:
+            if value != 1:
+                break
+            first_continuous_compute_steps += 1
+        warmup_horizon = min(warmup_horizon, first_continuous_compute_steps)
+    if (
+        cache_config.warmup_interval != 1
+        and warmup_steps < warmup_horizon
+        and warmup_steps % cache_config.warmup_interval
+    ):
+        raise ValueError(
+            "PipeFusion cache warmup is not phase-aligned: warmup_steps must be "
+            "divisible by cache_config.warmup_interval while scheduled warmup steps remain."
+        )
+    shifted = copy.deepcopy(cache_config)
+    if mask:
+        sliced = list(mask[warmup_steps:]) or [1]
+        sliced[0] = 1
+        shifted.steps_computation_mask = sliced
+    shifted.max_warmup_steps = max(cache_config.max_warmup_steps - warmup_steps, 1)
+    if cache_config.num_inference_steps is not None:
+        shifted.num_inference_steps = max(cache_config.num_inference_steps - warmup_steps, 1)
+    return shifted
 
 
 def install_cache_decision_sync(transformer: torch.nn.Module) -> None:
@@ -118,19 +163,6 @@ def install_cache_decision_sync(transformer: torch.nn.Module) -> None:
         if pipefusion and not sequence_parallel:
             if leader_key is not None and not shared:
                 self._xdit_pipefusion_leader_decisions[leader_key] = result
-            if os.environ.get("XDIT_LOG_PIPEFUSION_CACHE_DECISIONS") == "1":
-                from xfuser.core.distributed import get_runtime_state
-
-                state = get_runtime_state()
-                logger.info(
-                    "PipeFusion cache decision: context=%s step=%s patch=%s prefix=%s hit=%s shared=%s",
-                    getattr(self.get_context(), "name", None),
-                    self.get_current_step(),
-                    state.pipeline_patch_idx,
-                    kwargs.get("prefix", "Fn"),
-                    result,
-                    shared,
-                )
             return result
 
         if pipefusion:
@@ -190,12 +222,21 @@ def install_pipefusion_patch_contexts(transformer: torch.nn.Module) -> None:
         _reset=original_reset_context,
         **kwargs,
     ):
-        context = _reset(cached_context, *args, **kwargs)
+        patch_kwargs = None
+        state = None
         if isinstance(cached_context, str) and cached_context in _names:
+            state = get_runtime_state()
+            patch_kwargs = dict(kwargs)
+            if "cache_config" in kwargs:
+                patch_kwargs["cache_config"] = _shift_patch_cache_config(
+                    kwargs["cache_config"],
+                    state.runtime_config.warmup_steps,
+                )
+        context = _reset(cached_context, *args, **kwargs)
+        if patch_kwargs is not None:
             decisions = getattr(self, "_xdit_pipefusion_leader_decisions", None)
             if decisions is not None:
                 decisions.clear()
-            state = get_runtime_state()
             configured_patch_count = getattr(
                 getattr(
                     getattr(state, "parallel_config", None),
@@ -209,7 +250,7 @@ def install_pipefusion_patch_contexts(transformer: torch.nn.Module) -> None:
                 _reset(
                     f"{cached_context}:pipefusion_patch_{patch_index}",
                     *args,
-                    **kwargs,
+                    **patch_kwargs,
                 )
         return context
 

@@ -539,3 +539,127 @@ def test_pipefusion_patch_contexts_follow_patch_lifecycle(monkeypatch):
     ]
     assert manager.selected_name == "blocks:pipefusion_patch_1"
     assert manager._xdit_pipefusion_leader_decisions == {}
+
+
+def _db_cache_config(**overrides):
+    cache_dit = pytest.importorskip("cache_dit")
+    kwargs = {
+        "residual_diff_threshold": 0.0,
+        "enable_separate_cfg": False,
+    }
+    kwargs.update(overrides)
+    return cache_dit.DBCacheConfig(**kwargs)
+
+
+def _install_patch_contexts(monkeypatch, manager, *, pipeline_warmup):
+    state = SimpleNamespace(
+        patch_mode=False,
+        pipeline_patch_idx=0,
+        num_pipeline_patch=2,
+        parallel_config=SimpleNamespace(pp_config=SimpleNamespace(num_pipeline_patch=2)),
+        runtime_config=SimpleNamespace(warmup_steps=pipeline_warmup),
+    )
+    monkeypatch.setattr(distributed, "get_runtime_state", lambda: state)
+    context.install_pipefusion_patch_contexts(
+        SimpleNamespace(
+            _context_manager=manager,
+            _context_names=["blocks"],
+        )
+    )
+    return state
+
+
+def _patch_context_reuse_steps(monkeypatch, cache_config, *, pipeline_warmup):
+    cache_manager = pytest.importorskip("cache_dit.caching.cache_contexts.cache_manager")
+    manager = cache_manager.CachedContextManager()
+    state = _install_patch_contexts(monkeypatch, manager, pipeline_warmup=pipeline_warmup)
+    manager.reset_context("blocks", cache_config=cache_config)
+
+    reuse_steps = []
+    for step in range(cache_config.num_inference_steps):
+        state.patch_mode = step >= pipeline_warmup
+        manager.set_context("blocks")
+        manager.mark_step_begin()
+        if manager.can_cache(torch.zeros(1), prefix="Fn"):
+            reuse_steps.append(step)
+    return reuse_steps
+
+
+def test_pipefusion_alternating_mask_stays_on_diffusion_steps(monkeypatch):
+    mask = [1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1]
+    cache_config = _db_cache_config(
+        steps_computation_mask=list(mask),
+        steps_computation_policy="static",
+        max_warmup_steps=8,
+        num_inference_steps=len(mask),
+    )
+
+    reuse_steps = _patch_context_reuse_steps(monkeypatch, cache_config, pipeline_warmup=1)
+
+    assert reuse_steps == [8, 10, 12, 14, 16, 18, 20, 22]
+    assert cache_config.steps_computation_mask == mask
+
+
+def test_pipefusion_first_patch_step_computes_with_empty_buffers(monkeypatch):
+    cache_config = _db_cache_config(
+        steps_computation_mask=[1, 0, 1, 1],
+        steps_computation_policy="static",
+        max_warmup_steps=1,
+        num_inference_steps=4,
+    )
+
+    reuse_steps = _patch_context_reuse_steps(monkeypatch, cache_config, pipeline_warmup=1)
+
+    assert reuse_steps == []
+
+
+class _RecordingManager:
+    def __init__(self):
+        self.reset_names = []
+
+    def reset_context(self, name, *args, **kwargs):
+        self.reset_names.append(name)
+        return name
+
+    def set_context(self, name, *args, **kwargs):
+        return name
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        (
+            {"warmup_interval": 2, "max_warmup_steps": 4},
+            "warmup is not phase-aligned",
+        ),
+        (
+            {"force_refresh_step_hint": 8},
+            "force_refresh_step_hint is not supported with PipeFusion warmup",
+        ),
+    ],
+)
+def test_pipefusion_rejected_schedule_leaves_contexts_and_decisions(monkeypatch, overrides, message):
+    cache_config = _db_cache_config(num_inference_steps=20, **overrides)
+    manager = _RecordingManager()
+    manager._xdit_pipefusion_leader_decisions = {("live",): True}
+    _install_patch_contexts(monkeypatch, manager, pipeline_warmup=1)
+
+    with pytest.raises(ValueError, match=message):
+        manager.reset_context("blocks", cache_config=cache_config)
+
+    assert manager.reset_names == []
+    assert manager._xdit_pipefusion_leader_decisions == {("live",): True}
+
+
+def test_pipefusion_force_refresh_is_allowed_without_warmup(monkeypatch):
+    cache_config = _db_cache_config(num_inference_steps=20, force_refresh_step_hint=8)
+    manager = _RecordingManager()
+    _install_patch_contexts(monkeypatch, manager, pipeline_warmup=0)
+
+    manager.reset_context("blocks", cache_config=cache_config)
+
+    assert manager.reset_names == [
+        "blocks",
+        "blocks:pipefusion_patch_0",
+        "blocks:pipefusion_patch_1",
+    ]

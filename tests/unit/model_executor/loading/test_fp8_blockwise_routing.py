@@ -269,6 +269,34 @@ def test_fp4_target_keeps_precision_overrides_in_fp4_owner(monkeypatch):
     assert adapter.calls == []
 
 
+def test_stage_local_block_uses_global_checkpoint_path_and_policy_index():
+    adapter = RecordingAdapter()
+    format_adapter = RecordingFormatAdapter()
+    model = _hybrid_model(
+        adapter=adapter,
+        format_adapter=format_adapter,
+        overrides=("0.wrong", "7.attn.proj"),
+    )
+    block = SimpleNamespace(
+        _xfuser_checkpoint_fqn="blocks.7",
+        _xfuser_checkpoint_block_index=7,
+    )
+    component = SimpleNamespace(blocks=[block])
+
+    quantize = shard.build_block_quantize_fn(
+        runtime(model),
+        "transformer",
+        ["blocks"],
+        local_rank=1,
+        component=component,
+    )
+    quantize(block, 0)
+
+    call_block, call_kwargs = format_adapter.calls[0]
+    assert call_block is block
+    assert call_kwargs["fp8_layers"] == ("attn.proj",)
+
+
 @pytest.mark.parametrize(
     ("format_name", "config_flags", "target_setting"),
     [

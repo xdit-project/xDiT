@@ -604,6 +604,7 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
             if guidance_scale != 1.0:
                 log("Using guidance_scale=1.0. Other guidance scale values are not supported with this model.")
 
+    @torch.inference_mode()
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         from diffusers.pipelines.ltx2.utils import (
             DISTILLED_SIGMA_VALUES,

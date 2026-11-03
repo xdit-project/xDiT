@@ -143,7 +143,7 @@ class xFuserCausalWanModel(xFuserModel):
                 )
             state_dict = load_file(weight_path)
             model.load_state_dict(state_dict, strict=True)
-            return model.to(torch.bfloat16)
+            return model.eval().to(torch.bfloat16)
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = self._load_transformer("transformer")

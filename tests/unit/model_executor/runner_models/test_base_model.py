@@ -1,10 +1,13 @@
 import json
+import logging
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from xfuser.config import xFuserArgs
 from xfuser.model_executor.models.runner_models import base_model
+from xfuser import logger as xfuser_logger
 
 
 @pytest.fixture(autouse=True)
@@ -243,3 +246,56 @@ def test_legacy_wrapper_sends_from_the_ranks_its_own_decode_selects(monkeypatch,
 @pytest.mark.parametrize(("sp_rank", "expected"), [(0, ["output"]), (1, [None])])
 def test_other_runners_send_from_the_first_sequence_parallel_rank(monkeypatch, sp_rank, expected):
     assert _gather_dp_outputs(monkeypatch, dp_degree=2, legacy_pipe=None, sp_rank=sp_rank) == expected
+
+
+def _pipeline(**modules):
+    """Stands in for any pipeline: the eval pass walks attributes, not `components`."""
+    return SimpleNamespace(scheduler=object(), **modules)
+
+
+@pytest.fixture
+def runner_warnings(monkeypatch):
+    """Warnings the runner logged during this test, each exactly once.
+
+    caplog.handler is not used: pytest keeps that handler on the root logger as well, so any
+    unrelated warning reaching root during the test (or a propagated copy) would be counted.
+    """
+    records = []
+    handler = logging.Handler(level=logging.WARNING)
+    handler.emit = records.append
+    # warn_once drops repeats across the whole session.
+    monkeypatch.setattr(xfuser_logger, "_logged_once", set())
+    base_model.logger.addHandler(handler)
+    yield lambda: [record.getMessage() for record in records]
+    base_model.logger.removeHandler(handler)
+
+
+def test_eval_pass_reaches_modules_beside_and_inside_pipelines(runner_warnings):
+    shared_vae = torch.nn.Linear(2, 2).eval()
+    swapped_block = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Dropout(0.5)).eval()
+    swapped_block[1].train()  # eval-mode parent, training-mode child
+    model = object.__new__(_StubModel)
+    model.pipe = _pipeline(vae=shared_vae, transformer=swapped_block)
+    model.decode_pipe = _pipeline(vae=shared_vae, decoder=torch.nn.Dropout(0.5))
+    model.upsampler = torch.nn.BatchNorm1d(2)
+
+    model._set_eval_mode()
+
+    for module in (shared_vae, swapped_block, model.decode_pipe.decoder, model.upsampler):
+        assert not any(submodule.training for submodule in module.modules())
+        warnings = runner_warnings()
+        assert len(warnings) == 1, warnings
+        (warning,) = warnings
+
+    for name in ("pipe.transformer", "decode_pipe.decoder", "upsampler"):
+        assert name in warning
+    assert "vae" not in warning
+
+
+def test_eval_pass_is_silent_when_everything_is_already_in_eval_mode(runner_warnings):
+    model = object.__new__(_StubModel)
+    model.pipe = _pipeline(transformer=torch.nn.Dropout(0.5).eval())
+
+    model._set_eval_mode()
+
+    assert runner_warnings() == []

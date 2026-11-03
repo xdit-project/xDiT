@@ -104,7 +104,11 @@ def _worker(rank, world_size, init_method, result_queue, *, degrees, use_paralle
                 runtime_state._RUNTIME = state
                 pipe = _LegacyPipeline.__new__(_LegacyPipeline)
                 vae = _tiny_vae()
-                if use_parallel_vae and not pipe.use_naive_forward():
+                if (
+                    use_parallel_vae
+                    and not pipe.use_naive_forward()
+                    and not self.engine_config.runtime_config.runner_managed_parallel_vae
+                ):
                     vae = pipe._convert_vae(vae)
                 pipe.module = SimpleNamespace(vae=vae)
                 return pipe

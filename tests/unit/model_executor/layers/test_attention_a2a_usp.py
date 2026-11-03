@@ -3,6 +3,7 @@ from unittest import mock
 
 import torch
 
+from xfuser.core.attention.backends.aiter_mha_v4 import attention_a2a as aiter_attention_a2a
 from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.model_executor.layers import usp
 
@@ -26,7 +27,7 @@ def test_trims_plain_packed_attention_padding():
         torch.empty(1),
     )
 
-    key, value, scales = usp._trim_packed_attention_a2a_padding(
+    key, value, scales = aiter_attention_a2a.trim_aiter_mha_v4_a2a_padding(
         key,
         value,
         scales,
@@ -39,37 +40,38 @@ def test_trims_plain_packed_attention_padding():
     assert all(scale.numel() == 1 for scale in scales)
 
 
-def test_packed_attention_is_traceable_without_an_outer_custom_op():
-    query = torch.empty(1, 16, 2, 128, dtype=torch.uint8)
-    key = torch.empty_like(query)
-    value = torch.empty_like(query)
+def test_tiled_padding_is_compacted_by_the_aiter_backend_adapter():
+    key = torch.empty(1, 256, 2, 64, dtype=torch.uint8)
+    value = torch.empty_like(key)
     scales = (torch.empty(1), torch.empty(1), torch.empty(1))
-    output = torch.randn(1, 16, 2, 128, dtype=torch.bfloat16)
+    compact = tuple(torch.empty(1) for _ in range(4))
 
     with mock.patch.object(
-        usp,
-        "launch_attention_a2a_packed",
-        return_value=output,
-    ) as launch:
-        result = usp._attention_a2a_packed_attn_call(
-            query,
+        aiter_attention_a2a,
+        "_compact_aiter_mha_v4_kv",
+        return_value=compact,
+    ) as compact_kv:
+        result = aiter_attention_a2a.trim_aiter_mha_v4_a2a_padding(
             key,
             value,
-            *scales,
-            "e4m3-e4m3",
-            0.125,
+            scales,
+            127,
+            ("mxfp4", "mxfp4", "mxfp4"),
+            "mxfp4-mxfp4",
         )
 
-    launch.assert_called_once_with(
-        query,
+    compact_kv.assert_called_once_with(
         key,
         value,
-        *scales,
-        "e4m3-e4m3",
-        0.125,
+        scales[1],
+        scales[2],
+        127,
+        "mxfp4-mxfp4",
     )
-    assert torch.equal(result, output.transpose(1, 2))
-    assert not hasattr(torch.ops.xfuser, "attention_a2a_packed_attention")
+    assert result[0] is compact[0]
+    assert result[1] is compact[1]
+    assert result[2][0] is scales[0]
+    assert all(actual is expected for actual, expected in zip(result[2][1:], compact[2:], strict=True))
 
 
 def test_routes_packed_a2a_input_and_rccl_output():
@@ -88,7 +90,6 @@ def test_routes_packed_a2a_input_and_rccl_output():
     final_output = torch.randn_like(attention_output)
 
     with (
-        mock.patch.object(usp, "get_sequence_parallel_world_size", return_value=2),
         mock.patch.object(usp, "get_ulysses_parallel_world_size", return_value=2),
         mock.patch.object(usp, "get_ulysses_parallel_rank", return_value=0),
         mock.patch.object(usp, "get_ring_parallel_world_size", return_value=1),
@@ -115,15 +116,14 @@ def test_routes_packed_a2a_input_and_rccl_output():
         ) as input_a2a,
         mock.patch.object(
             usp,
-            "_attention_a2a_packed_attn_call",
-            return_value=attention_output,
+            "launch_attention_a2a_packed",
+            return_value=attention_output.transpose(1, 2),
         ) as packed_attention,
         mock.patch.object(
             usp,
             "_ft_c_output_all_to_all",
             return_value=final_output,
         ) as output_a2a,
-        mock.patch.object(usp, "fp8_observe_output"),
     ):
         result = usp.USP(
             query,
@@ -139,7 +139,9 @@ def test_routes_packed_a2a_input_and_rccl_output():
     input_a2a.assert_called_once()
     assert input_a2a.call_args.kwargs["valid_kv_len"] == 13
     packed_attention.assert_called_once()
-    output_a2a.assert_called_once_with(attention_output)
+    assert output_a2a.call_count == 1
+    assert torch.equal(output_a2a.call_args.args[0], attention_output)
+    assert not hasattr(torch.ops.xfuser, "attention_a2a_packed_attention")
     packed_args = packed_attention.call_args.args
     assert packed_args[0] is packed_query
     assert packed_args[1].shape[1] == 13
@@ -162,18 +164,6 @@ def test_rejects_arbitrary_varlen_packing_before_transport():
         mock.patch.object(usp, "get_fused_a2a_mode", return_value=1),
         mock.patch.object(usp, "use_fused_a2a_packed", return_value=True),
         mock.patch.object(usp, "get_fused_a2a_profile", return_value="e4m3-e4m3"),
-        mock.patch.object(
-            usp.attention_registry,
-            "find",
-            return_value=SimpleNamespace(is_sparse=False),
-        ),
-        mock.patch.object(usp, "_get_attention_function"),
-        mock.patch.object(usp, "fp8_attention_kwargs", return_value={}),
-        mock.patch.object(
-            usp,
-            "apply_head_balance",
-            return_value=(query, query, query, False, kwargs),
-        ),
         mock.patch.object(usp, "_ulysses_extra_inputs", return_value=[]),
         mock.patch.object(usp, "_has_kv_cache", return_value=False),
         mock.patch.object(usp, "fused_a2a_input") as input_a2a,

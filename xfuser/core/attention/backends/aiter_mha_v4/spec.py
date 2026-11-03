@@ -76,6 +76,7 @@ class Scale(Enum):
     """Names must match AITER's AttentionScaleMode members."""
 
     E8M0_PER_1X32 = auto()
+    F32_PER_CHANNEL = auto()
     F32_PER_TENSOR = auto()
 
 

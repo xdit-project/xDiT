@@ -6,6 +6,10 @@ import socket
 import torch
 import torch.distributed as dist
 
+from xfuser.core.attention.backends.aiter_mha_v4.attention_a2a import (
+    fake_packed_raw_outputs,
+    packed_output_views,
+)
 from xfuser.logger import init_logger
 
 try:
@@ -249,7 +253,7 @@ def _register_input_collective():
     def submit_fake(input, lifetime, previous, role, profile, rank, world_size, valid_kv_len, group_name):
         del lifetime, previous, group_name, rank
         head_major = input.transpose(1, 2)
-        payloads, scales = _fake_packed_raw_outputs(
+        payloads, scales = fake_packed_raw_outputs(
             head_major,
             profile,
             world_size,
@@ -896,81 +900,6 @@ def _get_ops(
     return op
 
 
-def _packed_output_views(
-    outputs,
-    scales,
-    output_shape,
-    codecs=None,
-    valid_kv_len=None,
-):
-    """Rebuild the role-specific logical MHA-v4 views over A2A raw buffers."""
-    from aiter.ops.mha_v4 import (
-        mxfp4_k_view,
-        mxfp4_v_view,
-        mxfp6_k_view,
-    )
-
-    b, sequence, heads, d = output_shape
-    kv_sequence = sequence if valid_kv_len is None else valid_kv_len
-    kv_shape = (b, kv_sequence, heads, d)
-    q_raw, k_raw, v_raw = outputs
-    q_scales, k_scales, v_scales = scales
-    qk_codec, _, v_codec = codecs or _FUSED_A2A_CODECS
-    q_scale_shape = (*output_shape[:-1], d // 32)
-    k_scale_shape = (*kv_shape[:-1], d // 32)
-    tiles = (kv_sequence + 127) // 128
-
-    if qk_codec == "bf16":
-        q = q_raw.view(b, heads, sequence, d).transpose(1, 2)
-        k = k_raw.view(b, heads, kv_sequence, d).transpose(1, 2)
-    elif qk_codec in ("int8", "e4m3", "mxfp8"):
-        q = q_raw.view(output_shape)
-        k = k_raw.view(kv_shape)
-        if qk_codec not in ("int8", "e4m3"):
-            q_scales = q_scales.view(q_scale_shape)
-            k_scales = k_scales.view(k_scale_shape)
-    elif qk_codec == "mxfp4":
-        q_scales = q_scales.view(q_scale_shape)
-        k_scales = k_scales.view(k_scale_shape)
-        q = q_raw.view(*output_shape[:-1], d // 2)
-        k = mxfp4_k_view(k_raw, k_scales)
-    elif qk_codec == "mxfp6":
-        q_scales = q_scales.view(q_scale_shape)
-        q = q_raw.view(*output_shape[:-1], d // 32 * 24)
-        k, k_scales = mxfp6_k_view(
-            k_raw,
-            k_scales,
-            b,
-            kv_sequence,
-            heads,
-        )
-    else:
-        raise RuntimeError(f"unsupported packed Q/K codec {qk_codec!r}")
-
-    if v_codec == "e4m3":
-        v = v_raw.view(kv_shape)
-    elif v_codec == "e4m3_pc":
-        v = v_raw.view(kv_shape)
-        v_scales = v_scales.view(b, heads, d)
-    elif v_codec == "mxfp4":
-        v_scales = v_scales.view(b, heads, tiles * 512)
-        v = mxfp4_v_view(v_raw, v_scales, kv_sequence)
-    elif v_codec == "mxfp6_p":
-        v_scales = v_scales.view(b, heads, tiles * 512)
-        v = torch.as_strided(
-            v_raw,
-            (b, kv_sequence, heads, d),
-            (heads * tiles * 12288, 96, tiles * 12288, 1),
-        )
-    else:
-        raise RuntimeError(f"unsupported packed V codec {v_codec!r}")
-
-    return (
-        (q, k, v),
-        (q_scales, k_scales, v_scales),
-    )
-
-
 def _collect_packed_role_results(results):
     """Collect public per-role AITER results in Q/K/V order."""
     if len(results) != 3:
@@ -1045,10 +974,11 @@ def _fused_a2a_input_runtime(
     if _FUSED_A2A_PACKED:
         outputs, scales = outputs
         output_shape = (b, world_size * s_local, h_total // world_size, d)
-        return _packed_output_views(
+        return packed_output_views(
             outputs,
             scales,
             output_shape,
+            codecs=_FUSED_A2A_CODECS,
             valid_kv_len=valid_kv_len,
         )
     output_shape = (b, h_total // world_size, world_size * s_local, d)
@@ -1097,7 +1027,7 @@ def fused_a2a_input(
             h // dist.get_world_size(group),
             d,
         )
-        return _packed_output_views(
+        return packed_output_views(
             (outputs[0], outputs[2], outputs[4]),
             (outputs[1], outputs[3], outputs[5]),
             output_shape,
@@ -1170,93 +1100,6 @@ def _fused_a2a_wait(
     return [_owned_transport_tensor(tensor) for tensor in outputs]
 
 
-def _fake_packed_raw_outputs(
-    query,
-    profile,
-    world_size,
-    valid_kv_len=None,
-):
-    config = AttentionA2AConfig(profile=profile)
-    codecs = config.codecs
-    b, h, s, d = query.shape
-    shape = (b, s * world_size, h // world_size, d)
-    from aiter.ops.mha_v4_quant import (
-        mxfp4_k_raw_buffer_size,
-        mxfp4_v_raw_buffer_size,
-        mxfp6_v_raw_buffer_size,
-    )
-    from aiter.ops.triton.quant.mxfp6_fmha_pack import (
-        fp6_k_raw_buffer_sizes,
-    )
-
-    sequence = shape[1]
-    direct_valid_kv_len = _select_direct_valid_kv_len(
-        config,
-        valid_kv_len,
-        s,
-        world_size,
-    )
-    kv_sequence = sequence if direct_valid_kv_len is None else direct_valid_kv_len
-    heads = shape[2]
-    q_numel = b * sequence * heads * d
-    kv_numel = b * kv_sequence * heads * d
-    qk_codec, _, v_codec = codecs
-
-    if qk_codec in ("int8", "e4m3", "mxfp8"):
-        q_raw = query.new_empty((q_numel,), dtype=torch.uint8)
-        k_raw = query.new_empty((kv_numel,), dtype=torch.uint8)
-        if qk_codec in ("int8", "e4m3"):
-            q_scales = query.new_empty((1,), dtype=torch.float32)
-            k_scales = query.new_empty((1,), dtype=torch.float32)
-        else:
-            q_scales = query.new_empty((q_numel // 32,), dtype=torch.uint8)
-            k_scales = query.new_empty((kv_numel // 32,), dtype=torch.uint8)
-    elif qk_codec in ("mxfp4", "mxfp6"):
-        q_scales = query.new_empty((q_numel // 32,), dtype=torch.uint8)
-        if qk_codec == "mxfp4":
-            q_raw = query.new_empty((q_numel // 2,), dtype=torch.uint8)
-            k_raw = query.new_empty(
-                (mxfp4_k_raw_buffer_size(b, kv_sequence, heads),),
-                dtype=torch.uint8,
-            )
-            k_scales = query.new_empty((kv_numel // 32,), dtype=torch.uint8)
-        else:
-            q_raw = query.new_empty((q_numel * 3 // 4,), dtype=torch.uint8)
-            k_size, k_scale_size = fp6_k_raw_buffer_sizes(
-                b,
-                kv_sequence,
-                heads,
-            )
-            k_raw = query.new_empty((k_size,), dtype=torch.uint8)
-            k_scales = query.new_empty((k_scale_size,), dtype=torch.uint8)
-    else:
-        raise RuntimeError(f"unsupported packed Q/K codec {qk_codec!r}")
-
-    if v_codec == "e4m3":
-        v_raw = query.new_empty((kv_numel,), dtype=torch.uint8)
-        v_scales = query.new_empty((1,), dtype=torch.float32)
-    elif v_codec == "e4m3_pc":
-        v_raw = query.new_empty((kv_numel,), dtype=torch.uint8)
-        v_scales = query.new_empty((b, heads, d), dtype=torch.float32)
-    elif v_codec in ("mxfp4", "mxfp6_p"):
-        v_raw_size = (
-            mxfp4_v_raw_buffer_size(b, kv_sequence, heads)
-            if v_codec == "mxfp4"
-            else mxfp6_v_raw_buffer_size(b, kv_sequence, heads)
-        )
-        v_raw = query.new_empty(
-            (v_raw_size,),
-            dtype=torch.uint8,
-        )
-        v_scales = query.new_empty(
-            (b * heads * ((kv_sequence + 127) // 128) * 512,),
-            dtype=torch.uint8,
-        )
-    else:
-        raise RuntimeError(f"unsupported packed V codec {v_codec!r}")
-    return (q_raw, k_raw, v_raw), (q_scales, k_scales, v_scales)
-
-
 @_fused_a2a_wait.register_fake
 def _fused_a2a_wait_fake(
     query,
@@ -1286,14 +1129,14 @@ def _fused_a2a_wait_fake(
         s,
         world_size,
     )
-    raw_payloads, raw_scales = _fake_packed_raw_outputs(
+    raw_payloads, raw_scales = fake_packed_raw_outputs(
         query,
         profile,
         world_size,
         direct_valid_kv_len,
     )
     shape = (b, s * world_size, h // world_size, d)
-    payloads, scales = _packed_output_views(
+    payloads, scales = packed_output_views(
         raw_payloads,
         raw_scales,
         shape,

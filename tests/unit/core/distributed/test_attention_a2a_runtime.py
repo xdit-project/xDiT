@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from xfuser.config.attention_a2a import AttentionA2AConfig
-from xfuser.model_executor.layers import fused_a2a_integration
+from xfuser.core.distributed import attention_a2a as fused_a2a_integration
 
 
 @pytest.fixture(autouse=True)

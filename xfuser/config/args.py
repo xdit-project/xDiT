@@ -420,6 +420,8 @@ class xFuserArgs:
             profile=self.attention_a2a,
             hadamard=self.attention_a2a_hadamard,
         )
+        # Keep programmatic construction aligned with CLI parsing: the config
+        # object strips whitespace and normalizes case before validation.
         self.attention_a2a = config.profile
         self.attention_a2a_hadamard = config.hadamard
         if not config.enabled:

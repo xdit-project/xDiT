@@ -25,6 +25,11 @@ if envs._is_npu():
 
 from xfuser.core.attention import registry as attention_registry
 from xfuser.core.attention.spec import AttentionBackendType
+from xfuser.core.distributed.attention_a2a import (
+    activate_attention_a2a_backend,
+    configure_attention_a2a,
+    shutdown_attention_a2a,
+)
 from xfuser.core.distributed.attention_schedule import AttentionSchedule, GemmPrecisionSchedule
 from xfuser.core.distributed.fp8_comms import Fp8CommsState
 from xfuser.config.config import (
@@ -139,10 +144,6 @@ class RuntimeState(metaclass=ABCMeta):
         self._check_distributed_env(config.parallel_config)
         attention_backend = self._select_attention_backend(config)
         self.set_attention_backend(attention_backend)
-        from xfuser.model_executor.layers.fused_a2a_integration import (
-            configure_attention_a2a,
-        )
-
         configure_attention_a2a(
             self.runtime_config.attention_a2a,
             self.attention_backend,
@@ -176,10 +177,6 @@ class RuntimeState(metaclass=ABCMeta):
             )
 
     def destroy_distributed_env(self):
-        from xfuser.model_executor.layers.fused_a2a_integration import (
-            shutdown_attention_a2a,
-        )
-
         shutdown_attention_a2a()
         if model_parallel_is_initialized():
             destroy_model_parallel()
@@ -480,10 +477,6 @@ class DiTRuntimeState(RuntimeState):
         current_step = self.step_counter
         if self.attention_schedule is not None:
             self.attention_backend = self.attention_schedule.get_backend(current_step)
-            from xfuser.model_executor.layers.fused_a2a_integration import (
-                activate_attention_a2a_backend,
-            )
-
             activate_attention_a2a_backend(self.attention_backend)
         if self.gemm_schedule is not None:
             self.use_high_precision_gemm = self.gemm_schedule.is_high_precision(current_step)

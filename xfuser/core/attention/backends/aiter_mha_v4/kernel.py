@@ -34,17 +34,17 @@ FORMAT = {f: getattr(AttentionFormat, f.name) for f in Fmt if f is not Fmt.NATIV
 FORMAT[Fmt.NATIVE_FP8] = native_fp8_format()
 SCALE = {s: getattr(AttentionScaleMode, s.name) for s in Scale}
 _PACKED_FORMAT = {
-    "bf16": AttentionFormat.BF16,
-    "int8": AttentionFormat.INT8,
-    "e4m3": FORMAT[Fmt.NATIVE_FP8],
-    "mxfp8": FORMAT[Fmt.NATIVE_FP8],
-    "mxfp4": AttentionFormat.MXFP4,
-    "mxfp6": AttentionFormat.MXFP6,
+    "bf16": Fmt.BF16,
+    "int8": Fmt.INT8,
+    "e4m3": Fmt.NATIVE_FP8,
+    "mxfp8": Fmt.NATIVE_FP8,
+    "mxfp4": Fmt.MXFP4,
+    "mxfp6": Fmt.MXFP6,
 }
 _PACKED_SCALE = {
-    "f32_per_tensor": AttentionScaleMode.F32_PER_TENSOR,
-    "f32_per_channel": AttentionScaleMode.F32_PER_CHANNEL,
-    "e8m0_per_1x32": AttentionScaleMode.E8M0_PER_1X32,
+    "f32_per_tensor": Scale.F32_PER_TENSOR,
+    "f32_per_channel": Scale.F32_PER_CHANNEL,
+    "e8m0_per_1x32": Scale.E8M0_PER_1X32,
 }
 
 
@@ -103,8 +103,8 @@ def mha_v4_attention_a2a_packed(
     """
     config = AttentionA2AConfig(profile=profile)
     qk_codec, _, v_codec = config.consumer_codecs
-    qk_format = _PACKED_FORMAT[qk_codec]
-    v_format = _PACKED_FORMAT[v_codec]
+    qk_format = FORMAT[_PACKED_FORMAT[qk_codec]]
+    v_format = FORMAT[_PACKED_FORMAT[v_codec]]
 
     if qk_codec == "int8":
         q = q.view(torch.int8)
@@ -115,7 +115,7 @@ def mha_v4_attention_a2a_packed(
     if v_codec in ("e4m3", "mxfp8"):
         v = v.view(dtypes.fp8)
 
-    q_scale_mode, k_scale_mode, v_scale_mode = tuple(_PACKED_SCALE[mode] for mode in config.scale_modes)
+    q_scale_mode, k_scale_mode, v_scale_mode = tuple(SCALE[_PACKED_SCALE[mode]] for mode in config.scale_modes)
     v_pack = AttentionPack.V_FOR_FP6_P if config.v_pack == "fp6_p" else AttentionPack.DEFAULT
     return mha_v4_packed(
         q,

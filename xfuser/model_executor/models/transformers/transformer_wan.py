@@ -13,7 +13,7 @@ from xfuser.model_executor.layers.usp import (
     usp_fused_a2a_input_q,
     usp_fused_a2a_input_v,
 )
-from xfuser.model_executor.layers.fused_a2a_integration import (
+from xfuser.core.distributed.attention_a2a import (
     fused_a2a_pad_multiple,
     get_fused_a2a_hadamard_placement,
     get_fused_a2a_mode,
@@ -98,6 +98,27 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
         attention_mask: Optional[torch.Tensor] = None,
         rotary_emb: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
+        if get_fused_a2a_mode() > 0 and not self.is_cross_attention:
+            return self._call_attention_a2a(
+                attn,
+                hidden_states,
+                encoder_hidden_states,
+                rotary_emb,
+            )
+        return self._call_standard(
+            attn,
+            hidden_states,
+            encoder_hidden_states,
+            rotary_emb,
+        )
+
+    def _call_standard(
+        self,
+        attn: "WanAttention",
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor],
+        rotary_emb: Optional[tuple[torch.Tensor, torch.Tensor]],
+    ) -> torch.Tensor:
         backend = None
         if self.is_cross_attention:
             # We allow specifying a different backend for cross-attention than the main attention backend
@@ -105,33 +126,85 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
             backend = get_runtime_state().get_cross_attention_backend()
 
         activation_dtype = hidden_states.dtype
-
-        encoder_hidden_states_img = None
-        if attn.add_k_proj is not None:
-            # 512 is the context length of the text encoder, hardcoded for now
-            image_context_length = encoder_hidden_states.shape[1] - 512
-            encoder_hidden_states_img = encoder_hidden_states[:, :image_context_length]
-            encoder_hidden_states = encoder_hidden_states[:, image_context_length:]
-
-        a2a_preprocessing = (
-            get_fused_a2a_mode() > 0
-            and self.attention_function is USP
-            and not self.is_cross_attention
-            and encoder_hidden_states is None
-            and rotary_emb is not None
-            and _HAS_FLYDSL
-            and get_ulysses_parallel_world_size() > 1
-            and get_ring_parallel_world_size() == 1
-            and not get_runtime_state().runtime_config.use_spargeattn_head_balance
+        encoder_hidden_states, encoder_hidden_states_img = self._split_i2v_context(
+            attn,
+            encoder_hidden_states,
         )
-        interleave = a2a_preprocessing and use_fused_a2a_interleave() and not attn.fused_projections
+        query, key, value = self._get_qkv_projections(attn, hidden_states, encoder_hidden_states)
+
+        # Collapse norm_q -> norm_k -> apply_rotary_emb(q) -> apply_rotary_emb(k)
+        # into a single FlyDSL kernel: inductor cannot fuse RoPE into the norm
+        # (the RMS reduction sits between them) and the reference RoPE writes
+        # through two stride-2 scatters, so the reference is four uncoalesced
+        # bandwidth-bound passes over a [1, S, H*D] bf16 tensor.  FlyDSL is used
+        # automatically when importable (no env flag, no Triton path); the entry
+        # self-falls-back to the diffusers reference for out-of-envelope shapes.
+        # value carries no norm/rope -- it just needs the head split.
+        if _HAS_FLYDSL and rotary_emb is not None:
+            query, key = fused_qk_norm_rope(
+                query,
+                key,
+                attn.norm_q,
+                attn.norm_k,
+                rotary_emb[0],
+                rotary_emb[1],
+                attn.heads,
+            )
+            value = value.unflatten(2, (attn.heads, -1))
+        else:
+            query, key, value = self._qk_norm_rope_reference(attn, query, key, value, rotary_emb)
+
+        hidden_states_img = self._call_i2v_attention(
+            attn,
+            query,
+            encoder_hidden_states_img,
+            backend,
+            activation_dtype,
+        )
+        hidden_states = self.attention_function(
+            query.transpose(1, 2),
+            key.transpose(1, 2),
+            value.transpose(1, 2),
+            backend=backend,
+            attention_kwargs=self.attention_kwargs,
+            head_balance_layer=attn,
+            attn_layer=None if self.is_cross_attention else attn,
+        ).transpose(1, 2)
+
+        return self._finish_attention(
+            attn,
+            hidden_states,
+            activation_dtype,
+            hidden_states_img,
+        )
+
+    def _call_attention_a2a(
+        self,
+        attn: "WanAttention",
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor],
+        rotary_emb: Optional[tuple[torch.Tensor, torch.Tensor]],
+    ) -> torch.Tensor:
+        if self.attention_function is not USP:
+            raise RuntimeError("Attention A2A requires USP")
+        if encoder_hidden_states is not None or attn.add_k_proj is not None:
+            raise RuntimeError("Attention A2A supports Wan self-attention only")
+        if rotary_emb is None or not _HAS_FLYDSL:
+            raise RuntimeError("Attention A2A requires the Wan FlyDSL preprocessing path")
+        if get_ulysses_parallel_world_size() <= 1 or get_ring_parallel_world_size() != 1:
+            raise RuntimeError("Attention A2A requires Ulysses-only sequence parallelism")
+        if get_runtime_state().runtime_config.use_spargeattn_head_balance:
+            raise RuntimeError("Attention A2A does not support Sparge head balancing")
+
+        activation_dtype = hidden_states.dtype
         hadamard_placement = get_fused_a2a_hadamard_placement()
-        relocate_hadamard = a2a_preprocessing and hadamard_placement in ("preprocess", "epilogue")
-        attention_a2a_valid_kv_len = self.attention_kwargs.get("valid_kv_len")
-        attention_a2a_pending = None
+        valid_kv_len = self.attention_kwargs.get("valid_kv_len")
+        pending = None
+        interleave = use_fused_a2a_interleave() and not attn.fused_projections
+
         if interleave:
-            # Project and preprocess one role at a time so the public Q/K/V
-            # role submissions overlap the following projection on a side stream.
+            # Submit each role on the transport stream while the next
+            # projection is still running on the compute stream.
             query = attn.to_q(hidden_states)
             query, _ = fused_qk_norm_rope(
                 query,
@@ -146,10 +219,7 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
             )
             if hadamard_placement == "epilogue":
                 query = wan_flydsl_hadamard(query)
-            attention_a2a_pending = usp_fused_a2a_input_q(
-                query,
-                attention_a2a_valid_kv_len,
-            )
+            pending = usp_fused_a2a_input_q(query, valid_kv_len)
 
             key = attn.to_k(hidden_states)
             key, _ = fused_qk_norm_rope(
@@ -165,30 +235,12 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
             )
             if hadamard_placement == "epilogue":
                 key = wan_flydsl_hadamard(key)
-            attention_a2a_pending = usp_fused_a2a_input_k(
-                key,
-                attention_a2a_pending,
-                attention_a2a_valid_kv_len,
-            )
+            pending = usp_fused_a2a_input_k(key, pending, valid_kv_len)
 
             value = attn.to_v(hidden_states).unflatten(2, (attn.heads, -1))
-            attention_a2a_pending = usp_fused_a2a_input_v(
-                value,
-                attention_a2a_pending,
-                attention_a2a_valid_kv_len,
-            )
+            pending = usp_fused_a2a_input_v(value, pending, valid_kv_len)
         else:
-            query, key, value = self._get_qkv_projections(attn, hidden_states, encoder_hidden_states)
-
-        # Collapse norm_q -> norm_k -> apply_rotary_emb(q) -> apply_rotary_emb(k)
-        # into a single FlyDSL kernel: inductor cannot fuse RoPE into the norm
-        # (the RMS reduction sits between them) and the reference RoPE writes
-        # through two stride-2 scatters, so the reference is four uncoalesced
-        # bandwidth-bound passes over a [1, S, H*D] bf16 tensor.  FlyDSL is used
-        # automatically when importable (no env flag, no Triton path); the entry
-        # self-falls-back to the diffusers reference for out-of-envelope shapes.
-        # value carries no norm/rope -- it just needs the head split.
-        if not interleave and _HAS_FLYDSL and rotary_emb is not None:
+            query, key, value = self._get_qkv_projections(attn, hidden_states, None)
             query, key = fused_qk_norm_rope(
                 query,
                 key,
@@ -197,53 +249,62 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
                 rotary_emb[0],
                 rotary_emb[1],
                 attn.heads,
-                apply_hadamard=(relocate_hadamard and hadamard_placement == "preprocess"),
+                apply_hadamard=hadamard_placement == "preprocess",
             )
-            if relocate_hadamard and hadamard_placement == "epilogue":
+            if hadamard_placement == "epilogue":
                 query = wan_flydsl_hadamard(query)
                 key = wan_flydsl_hadamard(key)
             value = value.unflatten(2, (attn.heads, -1))
-        elif not interleave:
-            query, key, value = self._qk_norm_rope_reference(attn, query, key, value, rotary_emb)
 
-        # I2V task
-        hidden_states_img = None
-        if encoder_hidden_states_img is not None:
-            key_img, value_img = self._get_added_kv_projections(attn, encoder_hidden_states_img)
-            key_img = attn.norm_added_k(key_img)
-
-            key_img = key_img.unflatten(2, (attn.heads, -1))
-            value_img = value_img.unflatten(2, (attn.heads, -1))
-
-            hidden_states_img = self.attention_function(
-                query.transpose(1, 2),
-                key_img.transpose(1, 2),
-                value_img.transpose(1, 2),
-                backend=backend,
-                attention_kwargs=self.attention_kwargs,
-            ).transpose(1, 2)
-            hidden_states_img = hidden_states_img.flatten(2, 3)
-            hidden_states_img = hidden_states_img.to(activation_dtype)
-
-        attention_call_kwargs = {
-            "backend": backend,
-            "attention_kwargs": self.attention_kwargs,
-            "head_balance_layer": attn,
-            "attn_layer": None if self.is_cross_attention else attn,
-        }
-        if self.attention_function is USP:
-            attention_call_kwargs.update(
-                attention_a2a_enabled=(get_fused_a2a_mode() > 0 and not self.is_cross_attention),
-                attention_a2a_pending=attention_a2a_pending,
-            )
-
-        hidden_states = self.attention_function(
+        output = self.attention_function(
             query.transpose(1, 2),
             key.transpose(1, 2),
             value.transpose(1, 2),
-            **attention_call_kwargs,
+            backend=None,
+            attention_kwargs=self.attention_kwargs,
+            head_balance_layer=attn,
+            attn_layer=attn,
+            attention_a2a_enabled=True,
+            attention_a2a_pending=pending,
         ).transpose(1, 2)
+        return self._finish_attention(attn, output, activation_dtype)
 
+    @staticmethod
+    def _split_i2v_context(attn, encoder_hidden_states):
+        if attn.add_k_proj is None:
+            return encoder_hidden_states, None
+        # 512 is the context length of the text encoder, hardcoded for now.
+        image_context_length = encoder_hidden_states.shape[1] - 512
+        return (
+            encoder_hidden_states[:, image_context_length:],
+            encoder_hidden_states[:, :image_context_length],
+        )
+
+    def _call_i2v_attention(
+        self,
+        attn,
+        query,
+        encoder_hidden_states_img,
+        backend,
+        activation_dtype,
+    ):
+        if encoder_hidden_states_img is None:
+            return None
+        key_img, value_img = self._get_added_kv_projections(attn, encoder_hidden_states_img)
+        key_img = attn.norm_added_k(key_img)
+        key_img = key_img.unflatten(2, (attn.heads, -1))
+        value_img = value_img.unflatten(2, (attn.heads, -1))
+        output = self.attention_function(
+            query.transpose(1, 2),
+            key_img.transpose(1, 2),
+            value_img.transpose(1, 2),
+            backend=backend,
+            attention_kwargs=self.attention_kwargs,
+        ).transpose(1, 2)
+        return output.flatten(2, 3).to(activation_dtype)
+
+    @staticmethod
+    def _finish_attention(attn, hidden_states, activation_dtype, hidden_states_img=None):
         hidden_states = hidden_states.flatten(2, 3)
         hidden_states = hidden_states.to(activation_dtype)
 

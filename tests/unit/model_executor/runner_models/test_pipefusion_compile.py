@@ -4,6 +4,7 @@ import pytest
 import torch
 
 import xfuser.model_executor.models.runner_models.base_model as base_model_module
+import xfuser.model_executor.pipefusion.compile as pipefusion_compile
 from xfuser.core import distributed
 from xfuser.model_executor.cache import (
     CacheDitAdapterConfig,
@@ -11,6 +12,14 @@ from xfuser.model_executor.cache import (
     DBCacheSettings,
 )
 from xfuser.model_executor.models.runner_models.base_model import xFuserModel
+
+
+@pytest.fixture(autouse=True)
+def _restore_recompile_limit():
+    # Assigned directly: monkeypatch.setattr deletes this config key on teardown in torch 2.15.
+    original = torch._dynamo.config.recompile_limit
+    yield
+    torch._dynamo.config.recompile_limit = original
 
 
 class _Runner(xFuserModel):
@@ -213,6 +222,7 @@ def test_pipefusion_captures_before_wrap_and_replays_before_validation(monkeypat
         pp_patches_token_num=[1],
         pp_patches_token_start_idx_local=[0, 1],
         pp_patches_token_start_end_idx_global=[[0, 1]],
+        runtime_config=SimpleNamespace(warmup_steps=1),
     )
     transformer = _Stage(events)
     model = object.__new__(_Runner)
@@ -224,7 +234,6 @@ def test_pipefusion_captures_before_wrap_and_replays_before_validation(monkeypat
     )
     model.pipe = SimpleNamespace(transformer=transformer)
     model.settings = SimpleNamespace(fsdp_strategy={"transformer": {"wrap_attrs": ["transformer_blocks"]}})
-    model.engine_config = SimpleNamespace(runtime_config=SimpleNamespace(warmup_steps=1))
     model._enable_compute_comm_overlap = lambda: None
     model._get_compile_mode = lambda: "default"
     model._get_compile_dynamic = lambda _input_args=None: False
@@ -281,6 +290,7 @@ def test_pipefusion_compile_replay_failure_is_raised_collectively(monkeypatch):
         pp_patches_token_num=[1],
         pp_patches_token_start_idx_local=[0, 1],
         pp_patches_token_start_end_idx_global=[[0, 1]],
+        runtime_config=SimpleNamespace(warmup_steps=1),
     )
     transformer = _Stage(events)
     model = object.__new__(_Runner)
@@ -292,7 +302,6 @@ def test_pipefusion_compile_replay_failure_is_raised_collectively(monkeypatch):
     )
     model.pipe = SimpleNamespace(transformer=transformer)
     model.settings = SimpleNamespace(fsdp_strategy={"transformer": {"wrap_attrs": ["transformer_blocks"]}})
-    model.engine_config = SimpleNamespace(runtime_config=SimpleNamespace(warmup_steps=1))
     model._enable_compute_comm_overlap = lambda: None
     model._get_compile_mode = lambda: "default"
     model._get_compile_dynamic = lambda _input_args=None: False
@@ -324,7 +333,7 @@ def test_pipefusion_compile_replay_failure_is_raised_collectively(monkeypatch):
         lambda candidate, **_kwargs: candidate,
     )
     monkeypatch.setattr(
-        base_model_module.PipeFusionCompileCapture,
+        pipefusion_compile.PipeFusionCompileCapture,
         "replay",
         lambda *_args, **_kwargs: None,
     )
@@ -336,145 +345,54 @@ def test_pipefusion_compile_replay_failure_is_raised_collectively(monkeypatch):
     assert events == ["stage", "reset", "reset"]
 
 
-def test_pipefusion_compile_holds_recompile_budget_then_restores(monkeypatch):
+def _blocks_only_runner(pp_degree, num_patches, num_blocks):
     model = object.__new__(_Runner)
     model.config = SimpleNamespace(
-        num_pipeline_patch=8,
-        pipefusion_parallel_degree=8,
+        pipefusion_parallel_degree=pp_degree,
+        num_pipeline_patch=num_patches,
+        fully_shard_degree=1,
+        fully_shard_components=None,
+        cache_method=None,
     )
-    observed = []
-    model._compile_model_unscoped = lambda _args: observed.append(torch._dynamo.config.recompile_limit)
-    monkeypatch.setattr(base_model_module, "get_pipeline_parallel_world_size", lambda: 8)
-    original_limit = torch._dynamo.config.recompile_limit
-    torch._dynamo.config.recompile_limit = 8
-
-    try:
-        model._compile_model({})
-
-        assert observed == [20]
-        assert torch._dynamo.config.recompile_limit == 8
-    finally:
-        torch._dynamo.config.recompile_limit = original_limit
-
-
-def test_pipefusion_recompile_limit_covers_local_blocks_and_signatures(
-    monkeypatch,
-):
-    model = object.__new__(_Runner)
-    model.config = SimpleNamespace(
-        num_pipeline_patch=4,
-        pipefusion_parallel_degree=4,
-    )
-    model.pipe = SimpleNamespace(transformer=SimpleNamespace(transformer_blocks=[object() for _ in range(15)]))
+    model.pipe = SimpleNamespace(transformer=SimpleNamespace(transformer_blocks=[object() for _ in range(num_blocks)]))
     model.settings = SimpleNamespace(fsdp_strategy={"transformer": {"wrap_attrs": ["transformer_blocks"]}})
+    model._enable_compute_comm_overlap = lambda: None
+    model._get_compile_mode = lambda: "default"
+    model._get_compile_dynamic = lambda _input_args=None: False
     model._get_compiled_pipe_components = lambda: ["transformer"]
-    observed = []
-    model._compile_model_unscoped = lambda _args: observed.append(torch._dynamo.config.recompile_limit)
-    monkeypatch.setattr(base_model_module, "get_pipeline_parallel_world_size", lambda: 4)
-    original_limit = torch._dynamo.config.recompile_limit
+    model._get_compile_warmup_steps = lambda _input_args: None
+    model._run_compile_warmup = lambda _input_args: None
+    return model
+
+
+def test_pipefusion_compile_leaves_recompile_limit_raised_for_every_local_block(monkeypatch):
+    model = _blocks_only_runner(pp_degree=4, num_patches=4, num_blocks=15)
+    monkeypatch.setattr(base_model_module, "runtime_state_is_initialized", lambda: False)
+    monkeypatch.setattr(torch, "compile", lambda candidate, **_kwargs: candidate)
     torch._dynamo.config.recompile_limit = 8
 
-    try:
-        model._compile_model({})
+    model._compile_model({})
 
-        assert observed == [79]
-        assert torch._dynamo.config.recompile_limit == 8
-    finally:
-        torch._dynamo.config.recompile_limit = original_limit
+    # Step-cache adapters are installed after compile and trace their graphs during run().
+    assert torch._dynamo.config.recompile_limit > 8
 
 
-def test_pipefusion_restores_recompile_limit_when_compile_fails():
-    model = object.__new__(_Runner)
-    model.config = SimpleNamespace(
-        num_pipeline_patch=4,
-        pipefusion_parallel_degree=4,
-    )
+def test_pipefusion_compile_keeps_a_higher_recompile_limit(monkeypatch):
+    model = _blocks_only_runner(pp_degree=4, num_patches=4, num_blocks=15)
+    monkeypatch.setattr(base_model_module, "runtime_state_is_initialized", lambda: False)
+    monkeypatch.setattr(torch, "compile", lambda candidate, **_kwargs: candidate)
+    torch._dynamo.config.recompile_limit = 1000
 
-    def fail_compile(_args):
-        raise RuntimeError("compile failed")
+    model._compile_model({})
 
-    model._compile_model_unscoped = fail_compile
-    original_limit = torch._dynamo.config.recompile_limit
+    assert torch._dynamo.config.recompile_limit == 1000
+
+
+def test_compile_without_pipefusion_leaves_recompile_limit_alone(monkeypatch):
+    model = _blocks_only_runner(pp_degree=1, num_patches=1, num_blocks=15)
+    monkeypatch.setattr(torch, "compile", lambda candidate, **_kwargs: candidate)
     torch._dynamo.config.recompile_limit = 8
 
-    try:
-        with pytest.raises(RuntimeError, match="compile failed"):
-            model._compile_model({})
+    model._compile_model({})
 
-        assert torch._dynamo.config.recompile_limit == 8
-    finally:
-        torch._dynamo.config.recompile_limit = original_limit
-
-
-def test_pipefusion_reapplies_recompile_budget_on_every_run():
-    model = object.__new__(_Runner)
-    model.config = SimpleNamespace(
-        num_pipeline_patch=4,
-        pipefusion_parallel_degree=4,
-    )
-    original_limit = torch._dynamo.config.recompile_limit
-    torch._dynamo.config.recompile_limit = 8
-    seen = []
-
-    def record_run(_input_args):
-        seen.append(torch._dynamo.config.recompile_limit)
-        return None, []
-
-    model._run_with_compile_budget = record_run
-
-    try:
-        model.run({})
-        assert torch._dynamo.config.recompile_limit == 8
-        model.run({})
-
-        assert seen[0] > 8
-        assert seen[0] == seen[1]
-        assert torch._dynamo.config.recompile_limit == 8
-    finally:
-        torch._dynamo.config.recompile_limit = original_limit
-
-
-def test_pipefusion_recompile_budget_uses_degree_when_patch_count_is_unset():
-    model = object.__new__(_Runner)
-    model.config = SimpleNamespace(
-        num_pipeline_patch=None,
-        pipefusion_parallel_degree=2,
-    )
-    original_limit = torch._dynamo.config.recompile_limit
-    torch._dynamo.config.recompile_limit = 1
-    seen = []
-
-    def record_run(_input_args):
-        seen.append(torch._dynamo.config.recompile_limit)
-        return None, []
-
-    model._run_with_compile_budget = record_run
-    try:
-        model.run({})
-        assert seen[0] > 1
-        assert torch._dynamo.config.recompile_limit == 1
-    finally:
-        torch._dynamo.config.recompile_limit = original_limit
-
-
-def test_non_pipefusion_run_leaves_recompile_limit_unchanged():
-    model = object.__new__(_Runner)
-    model.config = SimpleNamespace(
-        num_pipeline_patch=1,
-        pipefusion_parallel_degree=1,
-    )
-    original_limit = torch._dynamo.config.recompile_limit
-    torch._dynamo.config.recompile_limit = 8
-
-    def record_run(_input_args):
-        assert torch._dynamo.config.recompile_limit == 8
-        return None, []
-
-    model._run_with_compile_budget = record_run
-
-    try:
-        model.run({})
-
-        assert torch._dynamo.config.recompile_limit == 8
-    finally:
-        torch._dynamo.config.recompile_limit = original_limit
+    assert torch._dynamo.config.recompile_limit == 8

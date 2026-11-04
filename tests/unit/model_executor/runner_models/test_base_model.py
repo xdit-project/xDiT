@@ -224,15 +224,18 @@ def test_a_block_size_is_checked_against_each_mha_v4_sparge_row_the_run_can_reac
     assert checked_tiles == [("FP8", (64, 64)), ("BF16", (64, 64))]
 
 
-@pytest.mark.parametrize("backend", ["FLEX_BLOCK_SPARGE", "AITER_SPARGE"])
-def test_a_block_size_is_refused_by_sparge_backends_that_cut_their_own_tile(checked_tiles, backend):
-    with pytest.raises(ValueError, match=f"not supported by {backend}"):
+def test_a_block_size_leaves_a_dense_cross_attention_backend_alone(checked_tiles):
+    config = _block_size_config(attention_backend="AITER_BF16_SPARGE", cross_attention_backend="AITER_BF16")
+
+    base_model._validate_sparseattn_block_size(config)
+
+    assert checked_tiles == [("BF16", (64, 64))]
+
+
+@pytest.mark.parametrize("backend", ["AITER_BF16", "FLEX_BLOCK_SPARGE"])
+def test_a_block_size_without_an_mha_v4_sparge_backend_is_refused(checked_tiles, backend):
+    with pytest.raises(ValueError, match="applies only to the AITER MHA v4 Sparge"):
         base_model._validate_sparseattn_block_size(_block_size_config(attention_backend=backend))
-
-
-def test_a_block_size_without_a_backend_that_honours_it_is_refused(checked_tiles):
-    with pytest.raises(ValueError, match="has no effect"):
-        base_model._validate_sparseattn_block_size(_block_size_config(attention_backend="AITER_BF16"))
 
 
 def _gather_dp_outputs(monkeypatch, *, dp_degree, legacy_pipe, rank=0, sp_rank=0):

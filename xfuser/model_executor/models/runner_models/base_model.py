@@ -599,7 +599,35 @@ class xFuserModel(abc.ABC):
             log("Enabling Sparge block-sparse head balancing...")
 
         self._vae_manager.enable_options(self._decoding_vaes())
+        self._enable_cpu_offload()
 
+    def _offload_resident_components(self) -> tuple[str, ...]:
+        """Pipeline components placed on the device even when CPU offload is requested.
+
+        Offload placement otherwise leaves every component on the host for the offload hooks to
+        move. A runner whose offload mode moves only some components names the rest here, and
+        they are placed before quantization like an unoffloaded pipeline's.
+        """
+        return ()
+
+    def _group_offload_kwargs(self, offload_type: str) -> dict:
+        kwargs = dict(
+            onload_device=self._local_onload_device(),
+            offload_type=offload_type,
+            use_stream=True,
+            record_stream=True,
+            # Pin each tensor as it is offloaded instead of pre-pinning the whole component:
+            # host RAM stays flat where it is the binding constraint, at some of the
+            # streaming win. Opt-in because it costs latency where host RAM is plentiful.
+            low_cpu_mem_usage=self.config.group_offload_low_cpu_mem,
+            non_blocking=True,
+        )
+        if offload_type == "block_level":
+            kwargs["num_blocks_per_group"] = 1
+        return kwargs
+
+    def _enable_cpu_offload(self) -> None:
+        """Apply the CPU offload mode the config selects, if any."""
         if self.config.enable_group_cpu_offload:
             # block_level groups only top-level ModuleLists: fits compiled transformers
             # (blocks are top-level) and avoids the per-block-compile recompile storm that
@@ -609,25 +637,12 @@ class xFuserModel(abc.ABC):
             from diffusers.hooks import apply_group_offloading
 
             log("Enabling group CPU offload (transformer block-level, others leaf-level, streamed)...")
-            onload_device = self._local_onload_device()
             block_level_names = set(self._get_compiled_pipe_components())
             for name, component in self.pipe.components.items():
                 if not isinstance(component, torch.nn.Module):
                     continue
                 offload_type = "block_level" if name in block_level_names else "leaf_level"
-                kwargs = dict(
-                    onload_device=onload_device,
-                    offload_type=offload_type,
-                    use_stream=True,
-                    record_stream=True,
-                    # Pin each tensor as it is offloaded instead of pre-pinning the whole component:
-                    # host RAM stays flat where it is the binding constraint, at some of the
-                    # streaming win. Opt-in because it costs latency where host RAM is plentiful.
-                    low_cpu_mem_usage=self.config.group_offload_low_cpu_mem,
-                    non_blocking=True,
-                )
-                if offload_type == "block_level":
-                    kwargs["num_blocks_per_group"] = 1
+                kwargs = self._group_offload_kwargs(offload_type)
                 if hasattr(component, "enable_group_offload"):
                     component.enable_group_offload(**kwargs)
                 else:

@@ -1223,29 +1223,100 @@ def test_minimax_h3_parallel_vae_caches_dtype_broadcast(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "offload_flag",
+    "parallel",
     [
-        "enable_model_cpu_offload",
-        "enable_sequential_cpu_offload",
-        "enable_group_cpu_offload",
+        {"ulysses_degree": 2},
+        {"ulysses_degree": 2, "text_encoder_tp_degree": 2},
+        {"fully_shard_degree": 2},
     ],
 )
-def test_minimax_h3_text_encoder_tp_rejects_cpu_offload(offload_flag):
+def test_minimax_h3_model_offload_is_single_gpu_only(parallel):
+    """Other ranks would pin encoder copies they never run; point them at text encoder TP."""
     from xfuser.config import xFuserArgs
     from xfuser.model_executor.models.runner_models.minimax_h3 import (
         xFuserMiniMaxH3Model,
     )
 
-    config = xFuserArgs(
-        model="MiniMax-H3",
-        task="t2va",
-        ulysses_degree=2,
-        text_encoder_tp_degree=2,
-        **{offload_flag: True},
+    config = xFuserArgs(model="MiniMax-H3", task="t2va", enable_model_cpu_offload=True, **parallel)
+
+    with pytest.raises(ValueError, match="--text_encoder_tp_degree instead"):
+        xFuserMiniMaxH3Model(config)
+
+
+@pytest.mark.parametrize("offload_flag", ["enable_sequential_cpu_offload", "enable_group_cpu_offload"])
+def test_minimax_h3_points_other_offload_modes_at_model_offload(offload_flag):
+    """Group offload trips on the audio VAE mid-run and is refused for FP4; say so before loading."""
+    from xfuser.config import xFuserArgs
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        xFuserMiniMaxH3Model,
     )
 
-    with pytest.raises(ValueError, match="incompatible with CPU offloading"):
+    config = xFuserArgs(model="MiniMax-H3", task="t2va", **{offload_flag: True})
+
+    with pytest.raises(ValueError, match="only through --enable_model_cpu_offload"):
         xFuserMiniMaxH3Model(config)
+
+
+def test_minimax_h3_accepts_model_cpu_offload():
+    """A single-GPU run with model offload passes validation."""
+    from xfuser.config import xFuserArgs
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        xFuserMiniMaxH3Model,
+    )
+
+    xFuserMiniMaxH3Model(xFuserArgs(model="MiniMax-H3", task="t2va", enable_model_cpu_offload=True))
+
+
+@pytest.mark.parametrize(
+    ("model_cls_name", "components", "resident"),
+    [
+        (
+            "xFuserMiniMaxH3Model",
+            ("transformer", "text_encoder", "vae", "audio_vae"),
+            ("transformer", "vae", "audio_vae"),
+        ),
+        (
+            "xFuserMiniMaxH3Ref2VAModel",
+            ("transformer_ref", "text_encoder", "vae", "audio_vae"),
+            ("transformer_ref", "vae", "audio_vae"),
+        ),
+        # A workflow that loaded no audio VAE has none to place.
+        ("xFuserMiniMaxH3Model", ("transformer", "text_encoder", "vae"), ("transformer", "vae")),
+    ],
+)
+def test_minimax_h3_model_offload_keeps_all_but_the_text_encoder_on_device(model_cls_name, components, resident):
+    from xfuser.model_executor.models.runner_models import minimax_h3
+
+    model = object.__new__(getattr(minimax_h3, model_cls_name))
+    model.pipe = SimpleNamespace(**{name: object() for name in components})
+
+    assert model._offload_resident_components() == resident
+
+
+def test_minimax_h3_model_offload_streams_only_the_text_encoder(monkeypatch):
+    from diffusers import hooks
+
+    from xfuser.model_executor.models.runner_models import base_model, minimax_h3
+
+    monkeypatch.setattr(base_model, "get_world_group", lambda: SimpleNamespace(local_rank=2))
+    monkeypatch.setattr(minimax_h3, "log", lambda *args, **kwargs: None)
+    offloaded = []
+    monkeypatch.setattr(
+        hooks,
+        "apply_group_offloading",
+        lambda module, **kwargs: offloaded.append((module, kwargs)),
+    )
+    model = object.__new__(minimax_h3.xFuserMiniMaxH3Model)
+    model.config = SimpleNamespace(enable_model_cpu_offload=True, group_offload_low_cpu_mem=False)
+    text_encoder = object()
+    model.pipe = SimpleNamespace(transformer=object(), text_encoder=text_encoder, vae=object(), audio_vae=object())
+
+    model._enable_cpu_offload()
+
+    assert [module for module, _ in offloaded] == [text_encoder]
+    kwargs = offloaded[0][1]
+    assert kwargs["offload_type"] == "leaf_level"
+    assert str(kwargs["onload_device"]) == "cuda:2"
 
 
 def test_minimax_h3_patches_shared_qwen_encoder_helper(monkeypatch):
@@ -2015,29 +2086,30 @@ class _WrapperTransformer:
         return hidden_states
 
 
-def test_fasth3_compile_wrapper_primes_geometry_and_marks_the_timestep(
-    monkeypatch,
-):
-    """Both jobs the compiled region cannot do itself, in one wrapper."""
+def _compiled_timesteps(transformer):
+    """Wrap ``transformer`` and record the timestep the compiled forward receives."""
     from xfuser.model_executor.models.runner_models import minimax_h3
 
-    marked = []
-    monkeypatch.setattr(minimax_h3, "_mark_dynamic_timestep", marked.append)
+    received = []
 
+    def compiled_forward(*args, **kwargs):
+        bound = inspect.signature(transformer.forward).bind(*args, **kwargs)
+        received.append(bound.arguments["timestep"])
+
+    forward = minimax_h3._wrap_compiled_forward(transformer, transformer.forward, compiled_forward)
+    return forward, received
+
+
+def test_fasth3_compile_wrapper_primes_geometry_and_pads_the_timestep():
+    """Both jobs the compiled region cannot do itself, in one wrapper."""
     transformer = _WrapperTransformer(use_vsa_h3=True)
-    compiled_calls = []
-    forward = minimax_h3._wrap_compiled_forward(
-        transformer,
-        transformer.forward,
-        lambda *args, **kwargs: compiled_calls.append((args, kwargs)),
-    )
+    forward, received = _compiled_timesteps(transformer)
 
     # Timestep positionally, the rest by keyword: the wrapper binds the
     # signature, so where an argument came from does not matter.
-    timestep = torch.tensor([0.7, 0.3])
     forward(
         1,
-        timestep,
+        torch.tensor([0.3, 0.7]),
         position_ids=2,
         video_indices=3,
         audio_indices=4,
@@ -2045,43 +2117,46 @@ def test_fasth3_compile_wrapper_primes_geometry_and_marks_the_timestep(
     )
 
     assert transformer.primed == [2]
-    assert marked == [timestep]
-    assert len(compiled_calls) == 1
+    assert len(received) == 1
+    assert torch.equal(received[0], torch.tensor([0.3, 0.7, 0.7, 0.7]))
     assert inspect.signature(forward) == inspect.signature(transformer.forward)
 
 
-def test_fasth3_compile_wrapper_marks_the_timestep_for_other_backends(
-    monkeypatch,
-):
-    """Non-VSA-H3 backends skip the priming but keep the timestep marking."""
-    from xfuser.model_executor.models.runner_models import minimax_h3
-
-    marked = []
-    monkeypatch.setattr(minimax_h3, "_mark_dynamic_timestep", marked.append)
-
+@pytest.mark.parametrize("count", [1, 2, 3, 4])
+def test_compile_wrapper_gives_every_step_the_same_timestep_length(count):
+    """A fixed length keeps the compiled graph off an unbacked size the FP8 AdaLN cannot guard on."""
     transformer = _WrapperTransformer(use_vsa_h3=False)
-    forward = minimax_h3._wrap_compiled_forward(transformer, transformer.forward, lambda *args, **kwargs: None)
+    forward, received = _compiled_timesteps(transformer)
+    timestep = torch.linspace(0.1, 0.9, count)
 
-    timestep = torch.tensor([0.7])
     forward(1, timestep, 2, 3, 4, 5)
 
     assert transformer.primed == []
-    assert marked == [timestep]
+    assert received[0].shape == (4,)
+    assert torch.equal(received[0][:count], timestep)
+    assert (received[0][count:] == timestep[-1]).all()
 
 
-def test_fasth3_compile_wrapper_ignores_a_scalar_timestep(monkeypatch):
-    """Nothing to mark when the timestep has no length to vary."""
-    from xfuser.model_executor.models.runner_models import minimax_h3
-
-    marked = []
-    monkeypatch.setattr(minimax_h3, "_mark_dynamic_timestep", marked.append)
-
+def test_compile_wrapper_passes_a_longer_timestep_through():
+    """Past what padding covers, dynamo's own dynamic-shape handling takes over."""
     transformer = _WrapperTransformer(use_vsa_h3=False)
-    forward = minimax_h3._wrap_compiled_forward(transformer, transformer.forward, lambda *args, **kwargs: None)
+    forward, received = _compiled_timesteps(transformer)
+    timestep = torch.linspace(0.1, 0.9, 5)
 
-    forward(1, torch.tensor(0.7), 2, 3, 4, 5)
+    forward(1, timestep, 2, 3, 4, 5)
 
-    assert marked == []
+    assert received == [timestep]
+
+
+def test_fasth3_compile_wrapper_ignores_a_scalar_timestep():
+    """Nothing to pad when the timestep has no length to vary."""
+    transformer = _WrapperTransformer(use_vsa_h3=False)
+    forward, received = _compiled_timesteps(transformer)
+    timestep = torch.tensor(0.7)
+
+    forward(1, timestep, 2, 3, 4, 5)
+
+    assert received == [timestep]
 
 
 def test_fasth3_accepts_torch_compile(monkeypatch):

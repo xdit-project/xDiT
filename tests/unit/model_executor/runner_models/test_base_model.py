@@ -238,6 +238,43 @@ def test_a_block_size_without_an_mha_v4_sparge_backend_is_refused(checked_tiles,
         base_model._validate_sparseattn_block_size(_block_size_config(attention_backend=backend))
 
 
+@pytest.fixture
+def checked_sol_tiles(monkeypatch):
+    """Stand in for the Sol-Attn recipe check, which reads the GPU's manifest, and record it."""
+    from xfuser.core.attention.sparsity import sol
+
+    checked = []
+    monkeypatch.setattr(
+        sol, "check_sol_attn_recipe", lambda recipe, block_tile=None: checked.append((recipe, block_tile))
+    )
+    return checked
+
+
+def test_a_block_size_is_checked_against_each_sol_recipe_the_run_can_reach(checked_tiles, checked_sol_tiles):
+    config = _block_size_config(
+        use_hybrid_attn_schedule=True,
+        hybrid_attn_schedule="AITER_FP8_SOL,AITER_BF16_SPARGE,AITER_F6F4_SOL",
+        cross_attention_backend="AITER_BF16",
+    )
+
+    base_model._validate_sparseattn_block_size(config)
+
+    assert checked_tiles == [("BF16", (64, 64))]
+    assert checked_sol_tiles == [("fp8", (64, 64)), ("f6f4", (64, 64))]
+
+
+def test_a_block_size_no_sol_kernel_serves_is_refused_as_a_config_error(monkeypatch):
+    from xfuser.core.attention.sparsity import sol
+
+    def refuse(recipe, block_tile=None):
+        raise sol.SolAttnUnsupported("--sparseattn_block_size 64x64 has no Sol-Attn kernel")
+
+    monkeypatch.setattr(sol, "check_sol_attn_recipe", refuse)
+
+    with pytest.raises(ValueError, match="has no Sol-Attn kernel"):
+        base_model._validate_sparseattn_block_size(_block_size_config(attention_backend="AITER_FP8_SOL"))
+
+
 def _gather_dp_outputs(monkeypatch, *, dp_degree, legacy_pipe, rank=0, sp_rank=0):
     """Run ``_gather_dp_outputs`` on a non-saving rank and return what it sent, or "not gathered"."""
     sent = []

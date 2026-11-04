@@ -53,6 +53,15 @@ class AttentionBackendType(Enum):
     AITER_F6F4_SPARGE = "AITER F6F4 Sparge"
     AITER_MXFP4_SPARGE = "AITER MXFP4 Sparge"
     AITER_F4F4_SPARGE = "AITER F4F4 Sparge"
+    AITER_BF16_SOL = "AITER BF16 Sol"
+    AITER_BF16FP8_SOL = "AITER BF16/FP8 Sol"
+    AITER_I8FP8_SOL = "AITER I8FP8 Sol"
+    AITER_FP8_SOL = "AITER FP8 Sol"
+    AITER_MXFP8_SOL = "AITER MXFP8 Sol"
+    AITER_F8F6_SOL = "AITER F8F6 Sol"
+    AITER_F6F6_SOL = "AITER F6F6 Sol"
+    AITER_F6F4_SOL = "AITER F6F4 Sol"
+    AITER_MXFP4_SOL = "AITER MXFP4 Sol"
     AITER_SAGE = "AITER Sage"
     AITER_SPARSE_SAGE = "AITER Sparse Sage"
     AITER_SAGE_V2 = "AITER Sage V2"
@@ -82,6 +91,10 @@ class Sparsity(Enum):
     SPARGE = "sparge"
     VSA = "vsa"
     H3 = "h3"
+    # Sol-Attn on AITER MHA v4: routes its own block selection and corrects the
+    # skipped blocks from pooled K/V. Not SPARGE, because a model checked for
+    # one is not thereby checked for the other.
+    SOL = "sol"
     BSA = "bsa"
 
 

@@ -239,7 +239,7 @@ def usp_kv_lens(monkeypatch):
     runtime_state = SimpleNamespace(
         fp8_comms=None,
         attention_backend=AttentionBackendType.SDPA,
-        runtime_config=SimpleNamespace(use_spargeattn_head_balance=False),
+        runtime_config=SimpleNamespace(use_sparseattn_head_balance=False),
     )
     monkeypatch.setattr(usp, "get_runtime_state", lambda: runtime_state)
     for degree in ("sequence", "ulysses", "ring"):

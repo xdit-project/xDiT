@@ -569,20 +569,31 @@ def _install_patch_contexts(monkeypatch, manager, *, pipeline_warmup):
     return state
 
 
-def _patch_context_reuse_steps(monkeypatch, cache_config, *, pipeline_warmup):
+def _patch_context_decisions(monkeypatch, cache_config, *, pipeline_warmup):
+    """Drive one real cache manager through warmup, then one call per patch step."""
     cache_manager = pytest.importorskip("cache_dit.caching.cache_contexts.cache_manager")
     manager = cache_manager.CachedContextManager()
     state = _install_patch_contexts(monkeypatch, manager, pipeline_warmup=pipeline_warmup)
     manager.reset_context("blocks", cache_config=cache_config)
 
-    reuse_steps = []
+    # A repeated residual lets a dynamic step reuse once the mask allows it.
+    # Compute steps refresh the buffer the way a real block would.
+    residual = torch.zeros(2, 4)
+    decisions = []
     for step in range(cache_config.num_inference_steps):
         state.patch_mode = step >= pipeline_warmup
         manager.set_context("blocks")
         manager.mark_step_begin()
-        if manager.can_cache(torch.zeros(1), prefix="Fn"):
-            reuse_steps.append(step)
-    return reuse_steps
+        reused = manager.can_cache(residual, prefix="Fn")
+        decisions.append(reused)
+        if not reused:
+            manager.set_Fn_buffer(residual, prefix="Fn")
+    return decisions
+
+
+def _patch_context_reuse_steps(monkeypatch, cache_config, *, pipeline_warmup):
+    decisions = _patch_context_decisions(monkeypatch, cache_config, pipeline_warmup=pipeline_warmup)
+    return [step for step, reused in enumerate(decisions) if reused]
 
 
 def test_pipefusion_alternating_mask_stays_on_diffusion_steps(monkeypatch):
@@ -597,6 +608,50 @@ def test_pipefusion_alternating_mask_stays_on_diffusion_steps(monkeypatch):
     reuse_steps = _patch_context_reuse_steps(monkeypatch, cache_config, pipeline_warmup=1)
 
     assert reuse_steps == [8, 10, 12, 14, 16, 18, 20, 22]
+    assert cache_config.steps_computation_mask == mask
+
+
+@pytest.mark.parametrize(
+    ("policy", "num_steps", "computation_policy", "pipeline_warmup"),
+    [
+        ("ultra", 25, "dynamic", 1),
+        ("ultra", 28, "dynamic", 1),
+        ("ultra", 25, "static", 1),
+        ("fast", 28, "dynamic", 1),
+        ("alternating", 25, "static", 1),
+        ("alternating", 28, "static", 1),
+        ("alternating", 25, "static", 4),
+    ],
+)
+def test_pipefusion_step_decisions_follow_the_diffusion_mask(
+    monkeypatch,
+    policy,
+    num_steps,
+    computation_policy,
+    pipeline_warmup,
+):
+    # FLUX ships ultra and SD3.5 ships fast. Alternating is the opt-in static policy.
+    # The patch contexts start at zero after the synchronous warmup, so a missing shift
+    # moves every reuse one or more diffusion steps later, including onto the last step.
+    mask = list(config._build_scm_mask(policy, num_steps, max_warmup_steps=8))
+    cache_config = _db_cache_config(
+        steps_computation_mask=list(mask),
+        steps_computation_policy=computation_policy,
+        max_warmup_steps=8,
+        num_inference_steps=num_steps,
+        residual_diff_threshold=1.0,
+    )
+
+    decisions = _patch_context_decisions(monkeypatch, cache_config, pipeline_warmup=pipeline_warmup)
+
+    # Each diffusion step reuses only where its own mask entry says so. The patch
+    # context must not consult mask[step - warmup], which is what made the last step
+    # cache-eligible before the shift.
+    assert [step for step, reused in enumerate(decisions) if reused] == [
+        step for step, value in enumerate(mask) if value == 0
+    ]
+    assert mask[-1] == 1
+    assert decisions[-1] is False
     assert cache_config.steps_computation_mask == mask
 
 

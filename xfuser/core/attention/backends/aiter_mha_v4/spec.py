@@ -142,8 +142,10 @@ FORMATS = [
 
 
 # Dense serves packed keys by shortening K/V -- slicing a declared trailing pad
-# or gathering the valid rows. Sparge cannot do either: its sorted-sparse launch
-# needs the key length padded to its KV tile, which is the alignment both remove.
+# or gathering the valid rows. Sparge cannot do either: it reorders and blocks Q
+# and K as one sequence, so K cannot be shortened apart from Q, and the
+# sorted-sparse launch takes no per-batch key lengths. A ragged length is fine;
+# the launcher pads it only on the rows that cannot bound a short last block.
 DENSE_CALLS = NO_DROPOUT & NON_CAUSAL & PACKED_KEYS & HEAD_DIM(128)
 SPARGE_CALLS = NO_DROPOUT & NON_CAUSAL & NO_VARLEN & HEAD_DIM(128) & MHA_ONLY & SELF_ATTENTION
 
@@ -199,3 +201,7 @@ SPECS = [_dense_spec(f) for f in FORMATS if f.dense] + [_sparge_spec(f) for f in
 # call constraints -- MiniMax-H3 checks it before relying on the trailing-pad
 # path. Derived from the table, so a new row joins by being added there.
 DENSE_BACKENDS = frozenset(AttentionBackendType[f"AITER_{fmt.name}"] for fmt in FORMATS if fmt.dense)
+
+# The Sparge rows by backend, for checking --sparseattn_block_size against the
+# format a selected backend dispatches.
+SPARGE_FORMATS = {AttentionBackendType[f"AITER_{fmt.name}_SPARGE"]: fmt for fmt in FORMATS if fmt.sparge_on is not None}

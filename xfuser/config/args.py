@@ -83,6 +83,18 @@ def nullable_str(val: str):
     return val
 
 
+def block_size(val: str) -> Tuple[int, int]:
+    """Parse a block-sparse tile written as ``QxKV``, e.g. ``64x64``."""
+    parts = val.lower().split("x")
+    try:
+        q_tile, kv_tile = (int(part) for part in parts)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"block size must be QxKV, e.g. 64x64; got {val!r}") from None
+    if q_tile <= 0 or kv_tile <= 0:
+        raise argparse.ArgumentTypeError(f"block size tiles must be positive; got {val!r}")
+    return q_tile, kv_tile
+
+
 _DETERMINISM_CHECK_HELP = (
     "Set to a positive failure threshold to compare every timed iteration with "
     "the first using exact equality, not a tolerance. The failure handler is "
@@ -351,6 +363,8 @@ class xFuserArgs:
     spargeattn_simthreshold: float = 0.3
     spargeattn_cdfthreshold: float = 0.92
     use_spargeattn_head_balance: bool = False
+    # Block-sparse tile as (q_tile, kv_tile). None takes each recipe's default.
+    sparseattn_block_size: Optional[Tuple[int, int]] = None
     # Sol-Attn
     sol_attn_tau: float = 0.2
     sol_attn_thresh_type: str = "exact"
@@ -377,6 +391,8 @@ class xFuserArgs:
     audio_prompt: Optional[str] = None
 
     def __post_init__(self):
+        if isinstance(self.sparseattn_block_size, str):
+            self.sparseattn_block_size = block_size(self.sparseattn_block_size)
         if not math.isfinite(self.lora_scale):
             raise ValueError("lora_scale must be finite")
         if not self.lora_path and (self.lora_weight_name or self.lora_scale != 1.0):
@@ -1526,6 +1542,15 @@ class xFuserArgs:
             "effect with ulysses_degree>1 and a Sparge attention backend.",
         )
         parser.add_argument(
+            "--sparseattn_block_size",
+            type=block_size,
+            default=None,
+            help="Block-sparse tile as QxKV, e.g. 64x64: the query rows and keys one mask "
+            "entry covers. Omit to use each recipe's default tile. Honoured by the AITER MHA v4 "
+            "Sparge backends; the run is refused at startup if this GPU has no kernel at that "
+            "tile for the selected recipe.",
+        )
+        parser.add_argument(
             "--sol_attn_tau",
             type=float,
             default=0.2,
@@ -1810,6 +1835,7 @@ class xFuserArgs:
             use_spargeattn_static_block_mask=self.use_spargeattn_static_block_mask,
             spargeattn_simthreshold=self.spargeattn_simthreshold,
             spargeattn_cdfthreshold=self.spargeattn_cdfthreshold,
+            sparseattn_block_size=self.sparseattn_block_size,
             use_spargeattn_head_balance=self.use_spargeattn_head_balance,
             sol_attn_tau=self.sol_attn_tau,
             sol_attn_thresh_type=self.sol_attn_thresh_type,

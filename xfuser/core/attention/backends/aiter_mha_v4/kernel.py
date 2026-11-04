@@ -1,6 +1,9 @@
 """MHA v4 launchers. Imported when one of the family is selected, so AITER is
 present and its enums can be translated once here rather than per call."""
 
+from dataclasses import dataclass
+from typing import Optional
+
 import torch
 
 from aiter import dtypes
@@ -29,7 +32,7 @@ from xfuser.core.attention.sparsity.sparge import (
 from xfuser.core.attention.spec import AttnCall
 from xfuser.core.distributed.runtime_state import get_runtime_state, runtime_state_is_initialized
 
-from .spec import Fmt, MhaV4Format, Scale
+from .spec import FORMATS, Fmt, MhaV4Format, Scale
 
 FORMAT = {f: getattr(AttentionFormat, f.name) for f in Fmt if f is not Fmt.NATIVE_FP8}
 FORMAT[Fmt.NATIVE_FP8] = native_fp8_format()
@@ -49,8 +52,23 @@ _PACKED_SCALE = {
 }
 
 
-def _read_kv_tile() -> int:
-    """Sparge's KV tile must match the kernel's sparse geometry."""
+@dataclass(frozen=True)
+class SparseGeometry:
+    """How one format's sorted-sparse row cuts and bounds the keys.
+
+    ``block_tile`` is the (q_tile, kv_tile) the Sparge mask must be cut at. The
+    rows do not agree on it: at 256 query rows gfx950 routes BF16 and BF16/FP8 on
+    64 keys and the rest on 128. ``ragged_kv`` says the row masks the keys past a
+    short last block itself, so the tail needs no zero pad -- which is not just a
+    copy saved, since a zero key inside a selected block is attended at score 0
+    rather than skipped.
+    """
+
+    block_tile: tuple[int, int]
+    ragged_kv: bool = False
+
+
+def _legacy_kv_tile() -> int:
     # Not hoisted: optional, with an arch-derived fallback below.
     try:
         from aiter.ops.mha_v4 import mha_v4_kv_tile
@@ -60,7 +78,77 @@ def _read_kv_tile() -> int:
         return 64 if "gfx942" in device_arch() else 128
 
 
-KV_TILE = _read_kv_tile()
+def _sparse_geometries(fmt: MhaV4Format) -> dict[Optional[tuple[int, int]], SparseGeometry]:
+    """Every tile this GPU serves ``fmt``'s sparse row at, keyed by tile, plus
+    its default under None. Empty when the format has no sparse row here."""
+    # Not hoisted: older AITER builds have none of these, and answer one KV tile
+    # for every row at a fixed 256 query rows.
+    try:
+        from aiter.ops.mha_v4 import (
+            MHA_V4_SPARSE_MODE,
+            AttentionPack,
+            mha_v4_block_tile,
+            mha_v4_block_tiles,
+            mha_v4_operands,
+            mha_v4_ragged_kv,
+            scale_modes_for_formats,
+        )
+    except ImportError:
+        return {None: SparseGeometry((256, _legacy_kv_tile()))}
+
+    qk, v = FORMAT[fmt.qk], FORMAT[fmt.v]
+    if fmt.qk_scale is None:
+        scales = scale_modes_for_formats(qk, qk, v)
+    else:
+        scales = (SCALE[fmt.qk_scale], SCALE[fmt.qk_scale], SCALE[fmt.v_scale])
+    # AITER repacks an MX V for the FP6 P operand on every row that has one,
+    # dense and sparse alike, so the row is only found under that pack.
+    pack = AttentionPack.V_FOR_FP6_P if fmt.v in (Fmt.MXFP6, Fmt.MXFP4) else AttentionPack.DEFAULT
+    operands = mha_v4_operands(qk, qk, v, *scales, pack)
+    default = mha_v4_block_tile(operands, MHA_V4_SPARSE_MODE)
+    if not default[1]:
+        return {}
+    geometries = {
+        tile: SparseGeometry(tile, mha_v4_ragged_kv(operands, MHA_V4_SPARSE_MODE, tile))
+        for tile in mha_v4_block_tiles(operands, MHA_V4_SPARSE_MODE)
+    }
+    geometries[None] = geometries[default]
+    return geometries
+
+
+# Read once per format, here, because the kernel module is imported at backend
+# selection: a manifest query per call would sit inside the traced region. A
+# format this GPU has no sparse row for has no entries; its spec is unselectable
+# there, so the lookup never happens.
+SPARSE_GEOMETRY = {fmt.name: _sparse_geometries(fmt) for fmt in FORMATS if fmt.sparge_on is not None}
+
+# Whether this AITER takes the mask's tile explicitly rather than assuming the
+# recipe's default.
+HAS_BLOCK_TILE = PARAM("aiter.ops.mha_v4:mha_v4", "block_tile").satisfied()
+
+
+def check_sparse_block_size(fmt: MhaV4Format, block_size: tuple[int, int]) -> None:
+    """Refuse a --sparseattn_block_size that ``fmt``'s sparse row is not built at."""
+    served = sorted(tile for tile in SPARSE_GEOMETRY[fmt.name] if tile is not None)
+    if HAS_BLOCK_TILE and tuple(block_size) in served:
+        return
+    q_tile, kv_tile = block_size
+    if not served or not HAS_BLOCK_TILE:
+        offered = "this AITER cannot select a tile"
+    else:
+        offered = "it serves " + ", ".join(f"{q}x{kv}" for q, kv in served)
+    raise ValueError(
+        f"--sparseattn_block_size {q_tile}x{kv_tile} has no AITER_{fmt.name}_SPARGE kernel on "
+        f"{device_arch()}: {offered}."
+    )
+
+
+def _sparse_geometry(fmt: MhaV4Format) -> SparseGeometry:
+    block_size = None
+    if runtime_state_is_initialized():
+        block_size = get_runtime_state().runtime_config.sparseattn_block_size
+    return SPARSE_GEOMETRY[fmt.name][None if block_size is None else tuple(block_size)]
+
 
 # Whether this AITER can be told how many keys each batch really has. Read once,
 # here, because the kernel module is imported at backend selection -- evaluating
@@ -86,7 +174,9 @@ def kv_splits_kwargs():
     return {}
 
 
-def _launch(q, k, v, fmt: MhaV4Format, block_mask=None, seqlens_k=None, return_lse=False, split_kv=False):
+def _launch(
+    q, k, v, fmt: MhaV4Format, block_mask=None, block_tile=None, seqlens_k=None, return_lse=False, split_kv=False
+):
     """One MHA v4 launch. Tensors are BSHD. Returns (output, lse-or-None)."""
     kwargs = kv_splits_kwargs() if split_kv else {}
     if fmt.qk_scale is not None:
@@ -95,6 +185,8 @@ def _launch(q, k, v, fmt: MhaV4Format, block_mask=None, seqlens_k=None, return_l
             "k_scale_mode": SCALE[fmt.qk_scale],
             "v_scale_mode": SCALE[fmt.v_scale],
         }
+    if block_tile is not None and HAS_BLOCK_TILE:
+        kwargs["block_tile"] = block_tile
     if seqlens_k is not None:
         kwargs["seqlens_k"] = seqlens_k
     if return_lse:
@@ -260,18 +352,20 @@ def mha_v4_dense(query, key, value, call: AttnCall, *, fmt: MhaV4Format):
 
 
 def mha_v4_sparge(query, key, value, call: AttnCall, *, fmt: MhaV4Format):
+    geometry = _sparse_geometry(fmt)
+    q_tile, kv_tile = geometry.block_tile
     q, k, v, state, block_mask = build_block_mask(
         query,
         key,
         value,
         is_causal=call.is_causal,
         config=SpargeConfig.from_kwargs(call.attention_kwargs),
-        block_m=256,
-        block_n=KV_TILE,
+        block_m=q_tile,
+        block_n=kv_tile,
         ulysses_world_size=call.ulysses_world_size,
         cost_sink=cost_sink_from(call.attention_kwargs),
-        pad_block_divisible=True,
+        pad_block_divisible=not geometry.ragged_kv,
     )
     q, k, v = to_bshd(q, k, v, contiguous=True)
-    output, _ = _launch(q, k, v, fmt, block_mask=block_mask)
+    output, _ = _launch(q, k, v, fmt, block_mask=block_mask, block_tile=geometry.block_tile)
     return restore_sparge_output(from_bshd(output), state), None

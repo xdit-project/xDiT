@@ -98,7 +98,6 @@ _SPARSE_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SS
 _SPARGE_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SPARGE) | attention_registry.types_where(
     sparsity=Sparsity.VSA
 )
-_SPARGE_ONLY_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SPARGE)
 # Prism's block-sparse attention needs a token grid that only models declaring the
 # capability publish; anywhere else it would quietly run dense.
 _BSA_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.BSA)
@@ -134,7 +133,11 @@ def _validate_cross_attention_for_sparge(config: xFuserArgs) -> None:
 
 def _selected_attention_backends(config: xFuserArgs) -> list[AttentionBackendType]:
     """Every backend the run would actually dispatch to, named as the user named them."""
-    if config.use_hybrid_attn_schedule:
+    scheduled: list[AttentionBackendType] = []
+    if config.use_hybrid_attn_schedule and config.hybrid_attn_schedule:
+        scheduled = AttentionSchedule.from_comma_delimited_string(config.hybrid_attn_schedule).backends
+        specs = []
+    elif config.use_hybrid_attn_schedule:
         specs = [
             (config.hybrid_attn_high_precision_backend, "hybrid attention high precision backend"),
             (config.hybrid_attn_low_precision_backend, "hybrid attention low precision backend"),
@@ -142,51 +145,22 @@ def _selected_attention_backends(config: xFuserArgs) -> list[AttentionBackendTyp
     else:
         specs = [(config.attention_backend, "attention backend")]
     specs.append((config.cross_attention_backend, "cross attention backend"))
-    return [backend for value, kind in specs if (backend := _parse_attention_backend(value, kind)) is not None]
-
-
-def _reachable_attention_backends(config: xFuserArgs) -> list[Optional[AttentionBackendType]]:
-    """Every backend the run could reach: the explicit ones and, under a hybrid schedule, each
-    scheduled backend. Unset entries are None."""
-    if config.use_hybrid_attn_schedule and config.hybrid_attn_schedule:
-        return list(AttentionSchedule.from_comma_delimited_string(config.hybrid_attn_schedule).backends)
-    return [
-        _parse_attention_backend(value, label)
-        for value, label in (
-            (config.attention_backend, "attention backend"),
-            (config.cross_attention_backend, "cross attention backend"),
-            (config.hybrid_attn_low_precision_backend, "hybrid low-precision attention backend"),
-            (config.hybrid_attn_high_precision_backend, "hybrid high-precision attention backend"),
-        )
+    return scheduled + [
+        backend for value, kind in specs if (backend := _parse_attention_backend(value, kind)) is not None
     ]
 
 
 def _validate_sparseattn_block_size(config: xFuserArgs) -> None:
-    """Refuse a --sparseattn_block_size that the selected backends cannot honour, before loading.
-
-    Only the AITER MHA v4 Sparge rows take a tile. Any other Sparge backend cuts its mask at its
-    own, so the flag would be silently ignored there; a tile the GPU has no kernel for would
-    otherwise surface at the first attention call, after the weights have loaded.
-    """
-    block_size = config.sparseattn_block_size
-    if block_size is None:
+    """Refuse, before loading, a --sparseattn_block_size no selected AITER MHA v4 Sparge backend has a kernel for."""
+    if config.sparseattn_block_size is None:
         return
-    honoured = False
-    for backend in _reachable_attention_backends(config):
-        fmt = MHA_V4_SPARGE_FORMATS.get(backend)
-        if fmt is not None:
-            from xfuser.core.attention.backends.aiter_mha_v4.kernel import check_sparse_block_size
+    formats = [MHA_V4_SPARGE_FORMATS[b] for b in _selected_attention_backends(config) if b in MHA_V4_SPARGE_FORMATS]
+    if not formats:
+        raise ValueError("--sparseattn_block_size applies only to the AITER MHA v4 Sparge attention backends.")
+    from xfuser.core.attention.backends.aiter_mha_v4.kernel import check_sparse_block_size
 
-            check_sparse_block_size(fmt, block_size)
-            honoured = True
-        elif backend in _SPARGE_ONLY_BACKENDS:
-            raise ValueError(
-                f"--sparseattn_block_size is not supported by {backend.name}, which cuts its mask "
-                f"at its own tile. It applies to the AITER MHA v4 Sparge backends: "
-                f"{', '.join(sorted(b.name for b in MHA_V4_SPARGE_FORMATS))}."
-            )
-    if not honoured:
-        raise ValueError("--sparseattn_block_size has no effect without an AITER MHA v4 Sparge attention backend.")
+    for fmt in formats:
+        check_sparse_block_size(fmt, config.sparseattn_block_size)
 
 
 def _validate_attention_head_dims(model: "xFuserModel", config: xFuserArgs) -> None:
@@ -774,7 +748,20 @@ class xFuserModel(abc.ABC):
         if allowed is None:
             return
 
-        for backend in _reachable_attention_backends(config):
+        if config.use_hybrid_attn_schedule and config.hybrid_attn_schedule:
+            candidates = list(AttentionSchedule.from_comma_delimited_string(config.hybrid_attn_schedule).backends)
+        else:
+            candidates = [
+                _parse_attention_backend(value, label)
+                for value, label in (
+                    (config.attention_backend, "attention backend"),
+                    (config.cross_attention_backend, "cross attention backend"),
+                    (config.hybrid_attn_low_precision_backend, "hybrid low-precision attention backend"),
+                    (config.hybrid_attn_high_precision_backend, "hybrid high-precision attention backend"),
+                )
+            ]
+
+        for backend in candidates:
             if backend is None or backend in allowed:
                 continue
             supported = ", ".join(sorted(b.name for b in allowed))

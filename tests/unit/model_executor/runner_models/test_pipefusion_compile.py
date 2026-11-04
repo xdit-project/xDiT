@@ -30,6 +30,11 @@ class _Runner(xFuserModel):
         raise NotImplementedError
 
 
+def _engine_config(num_patches):
+    """The normalized engine config that _compile_model and _enable_compute_comm_overlap read."""
+    return SimpleNamespace(parallel_config=SimpleNamespace(pp_config=SimpleNamespace(num_pipeline_patch=num_patches)))
+
+
 class _Stage(torch.nn.Module):
     def __init__(self, events):
         super().__init__()
@@ -109,6 +114,7 @@ def test_pipefusion_compiles_the_bound_stage_forward(monkeypatch):
         return value
 
     model = object.__new__(_Runner)
+    model.engine_config = _engine_config(2)
     model.config = SimpleNamespace(
         pipefusion_parallel_degree=2,
         fully_shard_degree=1,
@@ -137,6 +143,7 @@ def test_pipefusion_compiles_stage_local_blocks_when_declared(monkeypatch):
     original_forward = transformer.forward
     original_blocks = list(transformer.transformer_blocks)
     model = object.__new__(_Runner)
+    model.engine_config = _engine_config(2)
     model.config = SimpleNamespace(
         pipefusion_parallel_degree=2,
         fully_shard_degree=1,
@@ -226,6 +233,7 @@ def test_pipefusion_captures_before_wrap_and_replays_before_validation(monkeypat
     )
     transformer = _Stage(events)
     model = object.__new__(_Runner)
+    model.engine_config = _engine_config(2)
     model.config = SimpleNamespace(
         pipefusion_parallel_degree=2,
         fully_shard_degree=1,
@@ -294,6 +302,7 @@ def test_pipefusion_compile_replay_failure_is_raised_collectively(monkeypatch):
     )
     transformer = _Stage(events)
     model = object.__new__(_Runner)
+    model.engine_config = _engine_config(2)
     model.config = SimpleNamespace(
         pipefusion_parallel_degree=2,
         fully_shard_degree=1,
@@ -354,6 +363,7 @@ def _blocks_only_runner(pp_degree, num_patches, num_blocks):
         fully_shard_components=None,
         cache_method=None,
     )
+    model.engine_config = _engine_config(num_patches)
     model.pipe = SimpleNamespace(transformer=SimpleNamespace(transformer_blocks=[object() for _ in range(num_blocks)]))
     model.settings = SimpleNamespace(fsdp_strategy={"transformer": {"wrap_attrs": ["transformer_blocks"]}})
     model._enable_compute_comm_overlap = lambda: None
@@ -396,3 +406,34 @@ def test_compile_without_pipefusion_leaves_recompile_limit_alone(monkeypatch):
     model._compile_model({})
 
     assert torch._dynamo.config.recompile_limit == 8
+
+
+def test_pipefusion_raises_recompile_limit_for_patch_specializations(monkeypatch):
+    model = object.__new__(_Runner)
+    model.config = SimpleNamespace(num_pipeline_patch=8)
+    model.engine_config = _engine_config(8)
+    monkeypatch.setattr(base_model_module, "get_pipeline_parallel_world_size", lambda: 8)
+    # Assign directly. monkeypatch.setattr deletes a torch config on undo because
+    # the value is not stored in the module ``__dict__``, and that hides
+    # ``recompile_limit`` from later tests such as flex attention.
+    previous_recompile_limit = torch._dynamo.config.recompile_limit
+    torch._dynamo.config.recompile_limit = 8
+    try:
+        model._enable_compute_comm_overlap()
+        assert torch._dynamo.config.recompile_limit == 20
+    finally:
+        torch._dynamo.config.recompile_limit = previous_recompile_limit
+
+
+def test_pipefusion_uses_normalized_engine_patch_count_when_cli_value_is_none(monkeypatch):
+    model = object.__new__(_Runner)
+    model.config = SimpleNamespace(num_pipeline_patch=None)
+    model.engine_config = _engine_config(4)
+    monkeypatch.setattr(base_model_module, "get_pipeline_parallel_world_size", lambda: 4)
+    previous_recompile_limit = torch._dynamo.config.recompile_limit
+    torch._dynamo.config.recompile_limit = 8
+    try:
+        model._enable_compute_comm_overlap()
+        assert torch._dynamo.config.recompile_limit == 12
+    finally:
+        torch._dynamo.config.recompile_limit = previous_recompile_limit

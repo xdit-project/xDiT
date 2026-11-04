@@ -4,6 +4,8 @@ import copy
 import dataclasses
 import functools
 import inspect
+import os
+from dataclasses import dataclass
 from types import MethodType, SimpleNamespace
 
 import numpy as np
@@ -79,6 +81,13 @@ _VDN_WINDOW_BACKEND_FOR_ATTENTION = {
 }
 _SUPPORTED_ULYSSES_DEGREES = frozenset({1, 2, 4, 8})
 _SUPPORTED_TASKS = frozenset({"t2va", "i2va", "l2va", "fl2va", "ref2va"})
+# Transformer blocks that FP4 runs keep whole at FP8. MXFP4 error is spread over all
+# 50 blocks rather than concentrated in a few, so no small set fixes it; blocks 0 and 1
+# and the back half of the stack carry the most of it. Holding those at FP8 brings the
+# FP4 output close to the FP8 profile's while the rest keeps most of the FP4 speedup.
+# Written for the 50-block transformer and transformer_ref (num_layers in their configs);
+# a deeper variant would leave its extra blocks at FP4, since prefixes match by index.
+_FP4_FP8_BLOCKS = tuple(f"{i}." for i in [0, 1] + list(range(25, 50)))
 FASTH3_V1_DATAFREE_MODEL_ID = "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree"
 # Dense-attention ablation of the same 4-step preview: distilled without VSA
 FASTH3_V1_DENSE_DATAFREE_MODEL_ID = "FastVideo/FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree"
@@ -97,6 +106,27 @@ FASTH3_V1_MODEL_IDS = frozenset(
         "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1900",
     }
 )
+
+TURBO_LORA_REPO = "lightx2v/Minimax-h3-Turbo"
+# The adapter LightX2V Studio serves, at the base model's 768x1344 default resolution.
+TURBO_DEFAULT_WEIGHT_NAME = "minimax_h3_fl2v_turbo_8step_v1.0_768p_bf16.safetensors"
+
+
+@dataclass(frozen=True)
+class TurboAdapterSpec:
+    """Published sampling contract of one lightx2v FL2VA Turbo adapter."""
+
+    steps: tuple[int, ...]  # supported transformer forwards; the first is the default
+    video_shift: float  # the audio shift is 3.0, the checkpoint default, for every adapter
+
+
+# From the Minimax-H3-Turbo model specs (github.com/ModelTC/Minimax-H3-Turbo).
+TURBO_ADAPTERS = {
+    "minimax_h3_fl2v_turbo_4step_v0.1.safetensors": TurboAdapterSpec(steps=(4,), video_shift=12.0),
+    "minimax_h3_fl2v_turbo_8step_v1.0_bf16.safetensors": TurboAdapterSpec(steps=(8, 4), video_shift=12.0),
+    "minimax_h3_fl2v_turbo_4step_v1.0_768p_bf16.safetensors": TurboAdapterSpec(steps=(4,), video_shift=6.0),
+    "minimax_h3_fl2v_turbo_8step_v1.0_768p_bf16.safetensors": TurboAdapterSpec(steps=(8,), video_shift=6.0),
+}
 
 
 def _minimax_h3_parallel_decode_clip(self, z: torch.Tensor) -> torch.Tensor:
@@ -263,20 +293,30 @@ def _patch_minimax_h3_text_encoder_broadcast() -> None:
     encoders._xfuser_broadcast_patched = True
 
 
-def _mark_dynamic_timestep(timestep):
-    """Keep the timestep's length out of dynamo's guards.
+# build_row_timesteps gives every packed row one of four timesteps (generated
+# video, generated audio, conditioning video, reference audio) and hands the
+# transformer the distinct ones, so a step carries between one and four.
+_MAX_DISTINCT_TIMESTEPS = 4
 
-    Without this dynamo specializes on timestep shape 1 vs >1 and recompiles
-    when it changes; the timestep is a 1-D tensor whose length varies along the
-    denoising steps. ``mark_unbacked`` is only exposed on
-    ``torch._dynamo.decorators``, not on ``torch._dynamo`` itself, and
-    ``mark_dynamic`` is the weaker fallback: it avoids specializing on the exact
-    size but still splits 1 from >1.
+
+def _pad_timestep(timestep):
+    """Give the timestep the same length on every denoising step.
+
+    Its length is the number of distinct timesteps in the step, which varies
+    along the denoising steps, and dynamo would recompile when it does. Padding
+    to the most a step can carry keeps the shape static. The padding repeats
+    the last timestep: ``timestep_indices`` never address the extra rows, and a
+    repeated row cannot change the per-tensor activation scale of the FP8
+    AdaLN projection that FP4 runs keep, so the real rows come out the same.
+
+    A longer timestep, which build_row_timesteps cannot produce today, passes
+    through unchanged: dynamo then recompiles once and treats the length as a
+    dynamic size it can still guard on.
     """
-    from torch._dynamo import decorators as dynamo_decorators
-
-    mark = getattr(dynamo_decorators, "mark_unbacked", dynamo_decorators.mark_dynamic)
-    mark(timestep, 0)
+    missing = _MAX_DISTINCT_TIMESTEPS - timestep.shape[0]
+    if missing <= 0:
+        return timestep
+    return torch.cat((timestep, timestep[-1:].expand(missing)))
 
 
 def _wrap_compiled_forward(transformer, original_forward, compiled_forward):
@@ -284,8 +324,8 @@ def _wrap_compiled_forward(transformer, original_forward, compiled_forward):
 
     Two jobs, both of which would otherwise force a recompile or a graph break:
 
-    * mark the timestep's length dynamic, since marking must happen outside the
-      compiled region to take effect;
+    * give the timestep a fixed length, since a shape the graph sees must be
+      settled before it;
     * prime VSA-H3's tile geometry, which is recovered from ``position_ids``
       *values*. That forces device syncs and cannot be traced, so
       ``fullgraph=True`` would reject it. It is constant for a run, so priming
@@ -303,7 +343,7 @@ def _wrap_compiled_forward(transformer, original_forward, compiled_forward):
         bound.apply_defaults()
         timestep = bound.arguments.get("timestep")
         if isinstance(timestep, torch.Tensor) and timestep.dim() > 0:
-            _mark_dynamic_timestep(timestep)
+            bound.arguments["timestep"] = _pad_timestep(timestep)
         if prime_vsa_h3:
             transformer.prepare_vsa_h3_metadata(
                 bound.arguments["position_ids"],
@@ -311,13 +351,94 @@ def _wrap_compiled_forward(transformer, original_forward, compiled_forward):
                 bound.arguments["audio_indices"],
                 bound.arguments["text_indices"],
             )
-        return compiled_forward(*args, **kwargs)
+        return compiled_forward(*bound.args, **bound.kwargs)
 
     # The denoise block picks which layout fields to pass by inspecting
     # signature(transformer.forward), so the wrapper has to expose the real
     # parameter list rather than (*args, **kwargs).
     functools.update_wrapper(forward_outside_the_graph, original_forward)
     return forward_outside_the_graph
+
+
+_LORA_A_SUFFIX = ".lora_A.default.weight"
+_LORA_B_SUFFIX = ".lora_B.default.weight"
+# Alpha the lightx2v adapters were trained with when the file does not record it (v0.1).
+_DEFAULT_LORA_ALPHA = 8.0
+
+
+def _resolve_lora_file(lora_path: str, weight_name: str | None) -> str:
+    """Return a local safetensors file for ``--lora_path``/``--lora_weight_name``.
+
+    ``lora_path`` is a file, a directory holding ``weight_name``, or a Hugging
+    Face repository id that ``weight_name`` is downloaded from.
+    """
+    if os.path.isfile(lora_path):
+        return lora_path
+    if not weight_name:
+        raise ValueError(f"--lora_weight_name is required when --lora_path ({lora_path}) is not a file.")
+    if os.path.isdir(lora_path):
+        return os.path.join(lora_path, weight_name)
+    from huggingface_hub import hf_hub_download
+
+    return hf_hub_download(repo_id=lora_path, filename=weight_name)
+
+
+def _merge_lora_into_transformer(transformer, lora_path: str, scale: float) -> None:
+    """Fold a PEFT LoRA checkpoint into the transformer's Linear weights in place.
+
+    Must run before ``fuse_qkv_projections`` (which replaces the ``to_q/k/v`` the
+    adapter targets with a single ``to_qkv``) and before FP8 conversion, so the
+    merged weights are what gets quantized. Each target gets
+    ``W += (alpha / rank) * scale * (B @ A)``, matching PEFT's scaling, with
+    ``alpha`` read from the file's metadata.
+    """
+    from safetensors import safe_open
+    from safetensors.torch import load_file
+
+    with safe_open(lora_path, framework="pt") as handle:
+        alpha = float((handle.metadata() or {}).get("alpha", _DEFAULT_LORA_ALPHA))
+    state_dict = load_file(lora_path)
+    pairs: dict[str, dict[str, torch.Tensor]] = {}
+    for key, tensor in state_dict.items():
+        if key.endswith(_LORA_A_SUFFIX):
+            pairs.setdefault(key[: -len(_LORA_A_SUFFIX)], {})["A"] = tensor
+        elif key.endswith(_LORA_B_SUFFIX):
+            pairs.setdefault(key[: -len(_LORA_B_SUFFIX)], {})["B"] = tensor
+        else:
+            raise ValueError(f"Unexpected LoRA tensor {key!r} in {lora_path}.")
+
+    merged = 0
+    missing_modules, incomplete = [], []
+    for name, ab in sorted(pairs.items()):
+        if "A" not in ab or "B" not in ab:
+            incomplete.append(name)
+            continue
+        try:
+            module = transformer.get_submodule(name)
+        except AttributeError:
+            missing_modules.append(name)
+            continue
+        lora_a, lora_b = ab["A"], ab["B"]
+        rank = lora_a.shape[0]
+        weight = module.weight
+        delta = (lora_b.to(torch.float32) @ lora_a.to(torch.float32)) * (alpha / rank * scale)
+        if delta.shape != tuple(weight.shape):
+            raise ValueError(f"LoRA delta {tuple(delta.shape)} does not match {name} weight {tuple(weight.shape)}.")
+        with torch.no_grad():
+            weight.add_(delta.to(weight.dtype).to(weight.device))
+        merged += 1
+    if incomplete or missing_modules:
+        raise ValueError(
+            f"LoRA {lora_path} did not merge cleanly: "
+            f"incomplete A/B pairs={incomplete[:3]}, unresolved modules={missing_modules[:3]} "
+            f"({len(missing_modules)} total)."
+        )
+    log(f"Merged LoRA {os.path.basename(lora_path)} into {merged} modules (alpha={alpha}, scale={scale}).")
+
+
+def _set_video_shift(scheduler, flow_shift: float | None) -> None:
+    """Sample the video schedule with ``flow_shift``, or the checkpoint's shift when None."""
+    scheduler.set_shift(scheduler.config.shift if flow_shift is None else flow_shift)
 
 
 def _count_steps_as_forwards(scheduler) -> None:
@@ -369,6 +490,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
         fp8_gemm_module_list=["transformer.transformer_blocks"],
         fp8_gemm_include_suffixes=("attn.to_qkv", "ff.net.0.proj"),
         fp4_gemm_module_list=["transformer.transformer_blocks"],
+        fp8_precision_overrides=_FP4_FP8_BLOCKS,
         fp8_precision_override_suffixes=(
             "attn.to_out.0",
             "ff.net.2",
@@ -468,10 +590,19 @@ class xFuserMiniMaxH3Model(xFuserModel):
                 "MiniMax-H3 text encoder TP reuses the Ulysses ranks, so "
                 "--text_encoder_tp_degree must be 1 or match --ulysses_degree."
             )
-        if text_encoder_tp_degree > 1 and (
-            config.enable_model_cpu_offload or config.enable_sequential_cpu_offload or config.enable_group_cpu_offload
-        ):
-            raise ValueError("MiniMax-H3 text encoder TP is incompatible with CPU offloading.")
+        if config.enable_sequential_cpu_offload or config.enable_group_cpu_offload:
+            raise ValueError(
+                "MiniMax-H3 supports CPU offload only through --enable_model_cpu_offload, "
+                "which keeps the transformer and VAEs on the device and streams the text "
+                "encoder from host memory."
+            )
+        # Every rank would pin its own host copy of the text encoder, which only the first rank
+        # runs, and FSDP places the encoder on the device before offload is applied.
+        if config.enable_model_cpu_offload and (ulysses_degree > 1 or config.fully_shard_degree > 1):
+            raise ValueError(
+                "MiniMax-H3 --enable_model_cpu_offload is for single-GPU runs. Multi-GPU runs "
+                "shard the text encoder with --text_encoder_tp_degree instead."
+            )
         if config.batch_size is not None or config.dataset_path is not None:
             raise ValueError(
                 "MiniMax-H3 packs one request into one audiovisual sequence and "
@@ -487,6 +618,27 @@ class xFuserMiniMaxH3Model(xFuserModel):
         if isinstance(args.get("prompt"), list) and len(args["prompt"]) == 1:
             args["prompt"] = args["prompt"][0]
         return args
+
+    def _offload_resident_components(self) -> tuple[str, ...]:
+        # Model offload moves only the text encoder: the transformer runs every step and is
+        # quantized on the device, and the VAEs are small.
+        names = (self._transformer_component_name, "vae", "audio_vae")
+        return tuple(name for name in names if getattr(self.pipe, name, None) is not None)
+
+    def _enable_cpu_offload(self) -> None:
+        """Stream the text encoder from host memory under --enable_model_cpu_offload.
+
+        ModularPipeline has no enable_model_cpu_offload, and the 63 GB Qwen3-VL encoder is the one
+        component that runs once per request, so it is the one worth leaving on the host. Leaf-level
+        group offload keeps its weights pinned there and streams them in layer by layer, so nothing
+        is copied back after encoding. _validate_config refuses the other offload modes.
+        """
+        if not self.config.enable_model_cpu_offload:
+            return
+        from diffusers.hooks import apply_group_offloading
+
+        log("Enabling MiniMax-H3 CPU offload: text encoder streamed from host, transformer and VAEs on device.")
+        apply_group_offloading(module=self.pipe.text_encoder, **self._group_offload_kwargs("leaf_level"))
 
     def _load_model(self):
         from diffusers import ModularPipeline
@@ -514,6 +666,12 @@ class xFuserMiniMaxH3Model(xFuserModel):
         )
         pipe.update_components(transformer=transformer)
         pipe.load_components(dtype=torch.bfloat16)
+        if self.config.lora_path:
+            _merge_lora_into_transformer(
+                pipe.transformer,
+                _resolve_lora_file(self.config.lora_path, self.config.lora_weight_name),
+                scale=self.config.lora_scale,
+            )
         pipe.transformer.fuse_qkv_projections()
         pipe.text_encoder.lm_head = None
         self._parallelize_text_encoder(pipe.text_encoder)
@@ -587,6 +745,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
             "generator": torch.Generator(device=get_device_name()).manual_seed(input_args["seed"]),
             "output_type": "pt",
         }
+        _set_video_shift(self.pipe.scheduler, input_args.get("flow_shift"))
         images = input_args.get("input_images") or []
         task = input_args.get("task")
         if task is None:
@@ -649,8 +808,8 @@ class xFuserMiniMaxH3Model(xFuserModel):
             fullgraph=not use_hybrid,
         )
 
-        # Marking the timestep dynamic fixes a recompile: it avoids more than
-        # one graph realizing after compile-warmup.
+        # Padding the timestep to a fixed length fixes a recompile: it avoids
+        # more than one graph realizing after compile-warmup.
         transformer.forward = _wrap_compiled_forward(transformer, original_forward, compiled_forward)
         compile_args = copy.deepcopy(input_args)
         if not get_runtime_state().has_attention_schedule():
@@ -823,6 +982,69 @@ class xFuserFastH3V2Model(xFuserFastH3Model):
         xFuserMiniMaxH3Model._validate_args(self, input_args)
         if input_args["num_inference_steps"] != 8:
             raise ValueError(f"FastH3 V2 requires 8 transformer forwards, got {input_args['num_inference_steps']}.")
+
+
+@register_model("MiniMax-H3-Turbo")
+class xFuserMiniMaxH3TurboModel(xFuserMiniMaxH3Model):
+    """MiniMax-H3 with a lightx2v Turbo LoRA fused into the base transformer.
+
+    The adapter comes from ``--lora_path``/``--lora_weight_name`` and defaults to
+    the 8-step 768p FL2VA adapter. For the adapters in ``TURBO_ADAPTERS`` the step
+    count and video shift default to their published values and other step counts
+    are refused; any other adapter needs ``--num_inference_steps`` and ``--flow_shift``.
+    """
+
+    default_input_values = DefaultInputValues(
+        height=768,
+        width=1344,
+        num_frames=124,
+        num_inference_steps=8,
+        flow_shift=6.0,
+    )
+
+    settings = copy.deepcopy(xFuserMiniMaxH3Model.settings)
+    settings.output_name = "minimax_h3_turbo"
+    capabilities = dataclasses.replace(
+        xFuserMiniMaxH3Model.capabilities,
+        supports_lora=True,
+        supports_lora_with_quantized_gemms=True,
+    )
+
+    def _customize_settings(self, config) -> None:
+        super()._customize_settings(config)
+        if not config.lora_path:
+            config.lora_path = TURBO_LORA_REPO
+            config.lora_weight_name = TURBO_DEFAULT_WEIGHT_NAME
+        self._adapter_name = config.lora_weight_name or os.path.basename(config.lora_path)
+        self._adapter_spec = TURBO_ADAPTERS.get(self._adapter_name)
+        spec = self._adapter_spec
+        self.default_input_values = dataclasses.replace(
+            self.default_input_values,
+            num_inference_steps=spec.steps[0] if spec else None,
+            flow_shift=spec.video_shift if spec else None,
+        )
+
+    def _validate_config(self, config) -> None:
+        if not config.lora_weight_name and not os.path.isfile(config.lora_path):
+            raise ValueError(f"--lora_weight_name is required when --lora_path ({config.lora_path}) is not a file.")
+        if self._adapter_name.startswith("minimax_h3_ref2v"):
+            raise ValueError(f"{self._adapter_name} is a Ref2VA adapter; MiniMax-H3-Turbo runs the FL2VA transformer.")
+        super()._validate_config(config)
+
+    def _validate_args(self, input_args: dict) -> None:
+        steps = input_args["num_inference_steps"]
+        if self._adapter_spec is None:
+            if steps is None or input_args.get("flow_shift") is None:
+                raise ValueError(
+                    f"{self._adapter_name} has no published Turbo settings; "
+                    "pass --num_inference_steps and --flow_shift for it."
+                )
+        elif steps not in self._adapter_spec.steps:
+            raise ValueError(
+                f"{self._adapter_name} is distilled for {' or '.join(map(str, self._adapter_spec.steps))} "
+                f"transformer forwards, got {steps}."
+            )
+        super()._validate_args(input_args)
 
 
 VDN_H3_MODEL_ID = "OpenVDN/vdn-minimax-h3"
@@ -1014,6 +1236,7 @@ class xFuserMiniMaxH3Ref2VAModel(xFuserMiniMaxH3Model):
         fp8_gemm_module_list=["transformer_ref.transformer_blocks"],
         fp8_gemm_include_suffixes=("attn.to_qkv", "ff.net.0.proj"),
         fp4_gemm_module_list=["transformer_ref.transformer_blocks"],
+        fp8_precision_overrides=_FP4_FP8_BLOCKS,
         fp8_precision_override_suffixes=(
             "attn.to_out.0",
             "ff.net.2",

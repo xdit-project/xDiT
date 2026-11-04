@@ -235,6 +235,8 @@ class ModelCapabilities:
     use_a6w4_gemms: bool = False
     supports_step_caching: bool = False
     supports_lora: bool = False
+    # The runner fuses the LoRA into bf16 weights before quantized GEMMs are materialized.
+    supports_lora_with_quantized_gemms: bool = False
     use_fp8_comms: bool = False
     use_hybrid_attn_schedule: bool = False
     use_hybrid_gemm_schedule: bool = False
@@ -605,7 +607,35 @@ class xFuserModel(abc.ABC):
             log("Enabling Sparge block-sparse head balancing...")
 
         self._vae_manager.enable_options(self._decoding_vaes())
+        self._enable_cpu_offload()
 
+    def _offload_resident_components(self) -> tuple[str, ...]:
+        """Pipeline components placed on the device even when CPU offload is requested.
+
+        Offload placement otherwise leaves every component on the host for the offload hooks to
+        move. A runner whose offload mode moves only some components names the rest here, and
+        they are placed before quantization like an unoffloaded pipeline's.
+        """
+        return ()
+
+    def _group_offload_kwargs(self, offload_type: str) -> dict:
+        kwargs = dict(
+            onload_device=self._local_onload_device(),
+            offload_type=offload_type,
+            use_stream=True,
+            record_stream=True,
+            # Pin each tensor as it is offloaded instead of pre-pinning the whole component:
+            # host RAM stays flat where it is the binding constraint, at some of the
+            # streaming win. Opt-in because it costs latency where host RAM is plentiful.
+            low_cpu_mem_usage=self.config.group_offload_low_cpu_mem,
+            non_blocking=True,
+        )
+        if offload_type == "block_level":
+            kwargs["num_blocks_per_group"] = 1
+        return kwargs
+
+    def _enable_cpu_offload(self) -> None:
+        """Apply the CPU offload mode the config selects, if any."""
         if self.config.enable_group_cpu_offload:
             # block_level groups only top-level ModuleLists: fits compiled transformers
             # (blocks are top-level) and avoids the per-block-compile recompile storm that
@@ -615,25 +645,12 @@ class xFuserModel(abc.ABC):
             from diffusers.hooks import apply_group_offloading
 
             log("Enabling group CPU offload (transformer block-level, others leaf-level, streamed)...")
-            onload_device = self._local_onload_device()
             block_level_names = set(self._get_compiled_pipe_components())
             for name, component in self.pipe.components.items():
                 if not isinstance(component, torch.nn.Module):
                     continue
                 offload_type = "block_level" if name in block_level_names else "leaf_level"
-                kwargs = dict(
-                    onload_device=onload_device,
-                    offload_type=offload_type,
-                    use_stream=True,
-                    record_stream=True,
-                    # Pin each tensor as it is offloaded instead of pre-pinning the whole component:
-                    # host RAM stays flat where it is the binding constraint, at some of the
-                    # streaming win. Opt-in because it costs latency where host RAM is plentiful.
-                    low_cpu_mem_usage=self.config.group_offload_low_cpu_mem,
-                    non_blocking=True,
-                )
-                if offload_type == "block_level":
-                    kwargs["num_blocks_per_group"] = 1
+                kwargs = self._group_offload_kwargs(offload_type)
                 if hasattr(component, "enable_group_offload"):
                     component.enable_group_offload(**kwargs)
                 else:
@@ -778,9 +795,15 @@ class xFuserModel(abc.ABC):
                 or config.fully_shard_degree > 1
                 or config.memory_efficient_sharding
                 or config.memory_efficient_replicated_load
-                or not config.gemm_quantization_spec.is_pure("none")
             ):
                 raise ValueError("Startup LoRA fusion requires eager, unquantized loading without FSDP or PipeFusion.")
+            if (
+                not config.gemm_quantization_spec.is_pure("none")
+                and not self.capabilities.supports_lora_with_quantized_gemms
+            ):
+                raise ValueError(
+                    f"Model {self.settings.model_name} requires eager, unquantized loading for startup LoRA fusion."
+                )
         _validate_attention_head_dims(self, config)
         for key in ModelCapabilities.__annotations__.keys():
             config_value = getattr(
@@ -984,6 +1007,18 @@ class xFuserModel(abc.ABC):
         # graphs at data-dependent times), so that collective deadlocks. For SPMD
         # runs the check is a cheap, useful guard, so only disable it under PP.
         if get_pipeline_parallel_world_size() > 1:
+            # KV cache updates specialize on full/patch mode and the Python patch
+            # index. The default limit of eight variants is too small for larger
+            # patch counts and silently falls back to eager execution.
+            # Use the normalized engine config: the runner's CLI config keeps
+            # ``None`` when --num_pipeline_patch was omitted, while
+            # PipeFusionParallelConfig resolves it to the pipeline degree.
+            num_pipeline_patch = self.engine_config.parallel_config.pp_config.num_pipeline_patch
+            required_recompile_limit = 2 * num_pipeline_patch + 4
+            torch._dynamo.config.recompile_limit = max(
+                torch._dynamo.config.recompile_limit,
+                required_recompile_limit,
+            )
             _ado = getattr(torch._inductor.config, "aten_distributed_optimizations", None)
             if _ado is not None and hasattr(_ado, "spmd_check"):
                 _ado.spmd_check = False
@@ -1054,7 +1089,7 @@ class xFuserModel(abc.ABC):
         stages = {name: module for name, module in components.items() if name not in sharded} if pp_degree > 1 else {}
 
         if pp_degree > 1:
-            num_patches = getattr(self.config, "num_pipeline_patch", None)
+            num_patches = self.engine_config.parallel_config.pp_config.num_pipeline_patch
             local_blocks = sum(
                 len(block_list)
                 for name, module in components.items()

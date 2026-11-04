@@ -13,7 +13,7 @@ import torch
 
 from xfuser.model_executor.models.runner_models import base_model
 from xfuser.model_executor.models.runner_models.base_model import xFuserModel
-from xfuser.model_executor.models.runner_models.loading import transformer_load
+from xfuser.model_executor.models.runner_models.loading import placement, transformer_load
 
 
 @pytest.fixture(autouse=True)
@@ -51,6 +51,8 @@ def _model(*, local_rank, monkeypatch, **offload_flags):
         _get_compiled_pipe_components=lambda: [],
     )
     model._local_onload_device = lambda: xFuserModel._local_onload_device(model)
+    model._group_offload_kwargs = lambda offload_type: xFuserModel._group_offload_kwargs(model, offload_type)
+    model._enable_cpu_offload = lambda: xFuserModel._enable_cpu_offload(model)
     return model, calls
 
 
@@ -92,6 +94,50 @@ def test_group_offload_onloads_to_this_ranks_device(monkeypatch, local_rank):
     xFuserModel._enable_options(model)
 
     assert str(offloaded["onload_device"]) == f"cuda:{local_rank}"
+
+
+def test_offload_places_only_the_runners_resident_components(monkeypatch):
+    """A runner that offloads part of its pipeline gets the rest placed, and quantized, on device."""
+    monkeypatch.setattr(placement, "get_world_group", lambda: SimpleNamespace(local_rank=3))
+    moved = []
+
+    class Component:
+        def __init__(self, name):
+            self.name = name
+
+        def to(self, device):
+            moved.append((self.name, device))
+            return self
+
+    def whole_pipeline_to(device):
+        raise AssertionError("an offloaded pipeline must not be moved whole")
+
+    pipe = SimpleNamespace(
+        transformer=Component("transformer"),
+        text_encoder=Component("text_encoder"),
+        to=whole_pipeline_to,
+    )
+    model = SimpleNamespace(
+        config=SimpleNamespace(
+            enable_model_cpu_offload=True,
+            enable_sequential_cpu_offload=False,
+            enable_group_cpu_offload=False,
+            use_fp4_gemms=False,
+            use_int8_gemms=False,
+        ),
+        pipe=pipe,
+        _offload_resident_components=lambda: ("transformer",),
+    )
+    loader = SimpleNamespace(
+        model=model,
+        fill_eager_transformers=lambda: None,
+        replicated_broadcast_load=lambda: False,
+        backends=SimpleNamespace(fp8=None),
+    )
+
+    placement.place_pipeline_components(loader)
+
+    assert moved == [("transformer", "cuda:3")]
 
 
 @pytest.mark.parametrize(

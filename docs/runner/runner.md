@@ -114,6 +114,7 @@ Individual model classes that inherit from `xFuserModel`:
 | LTX-Video 0.9.7 | `LTX-Video-0.9.7-dev`, `Lightricks/LTX-Video-0.9.7-dev` |
 | Lumina-Image-2.0 | `Lumina2`, `Lumina-Image-2.0`, `Alpha-VLLM/Lumina-Image-2.0` |
 | MiniMax-H3 | `MiniMaxAI/MiniMax-H3`, `MiniMax-H3`, `MiniMax-H3-Ref2VA` |
+| MiniMax-H3 Turbo (lightx2v LoRA) | `MiniMax-H3-Turbo` |
 | VDN-H3 | `OpenVDN/vdn-minimax-h3`, `VDN-H3` |
 | Prism (preview-alpha) | `Prism`, `Prism-preview-alpha`, `FrancisRing/Prism` |
 | FastH3 Preview v1 | `FastH3`, `FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree`, `FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1300`, `FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1900` |
@@ -141,7 +142,7 @@ Individual model classes that inherit from `xFuserModel`:
 
 ### Model Selection
 
-For startup adapter fusion on FLUX.1-dev, see [LoRA support and limitations](lora.md).
+For startup adapter fusion on FLUX.1-dev and MiniMax-H3 Turbo, see [LoRA support and limitations](lora.md).
 
 | Argument | Description |
 |----------|-------------|
@@ -332,9 +333,10 @@ A listed target is only half the answer: the format still has to survive the har
 Several runners hold part of an FP4 target at FP8 where full FP4 costs too much
 quality: Wan 2.1 I2V and T2V keep blocks 0-9 and 30-39, Wan 2.2 TI2V keeps
 blocks 0, 1, 28, and 29 plus the `.net.0.proj` and `.net.2` leaves, Cosmos3-Super
-keeps layers 0-9 and 54-63, and both MiniMax-H3 runners keep the `attn.to_out.0`,
-`ff.net.2`, and `adaln_proj.linear` leaves. Wan 2.2 I2V and T2V declare no block
-overrides at all. `--fp8_precision_override_prefix_patterns` and
+keeps layers 0-9 and 54-63, and both MiniMax-H3 runners keep blocks 0, 1, and
+25-49 plus the `attn.to_out.0`, `ff.net.2`, and `adaln_proj.linear` leaves. Wan
+2.2 I2V and T2V declare no block overrides at all.
+`--fp8_precision_override_prefix_patterns` and
 `--fp8_precision_override_suffix_patterns` replace the declared prefix or suffix
 list rather than adding to it.
 
@@ -353,6 +355,7 @@ list rather than adding to it.
 - CPU/model offload can be combined with AITER FP8; converted leaves are evicted as they are processed. Other quantization backends first require their block or component on the GPU.
 - `--enable_group_cpu_offload` is rejected with FP4 on the AITER backend, including the hybrid FP8/FP4 mode, because packed FP4 weights survive neither leg of the offload: with `--group_offload_low_cpu_mem` the hook pins each tensor and torch has no `pin_memory` for `Float4_e2m1fn_x2`, and without it AITER binds a device from the parameter it is handed, so a host parameter resolves to an invalid ordinal and aborts the process. Offload at FP8 or bf16, or run FP4 without offload.
 - Offload works across ranks: each rank onloads to its own local device, so it combines with a parallel degree and with the replicated meta load.
+- MiniMax-H3 supports only `--enable_model_cpu_offload`, and there it keeps the transformer and both VAEs on the device and streams the Qwen3-VL text encoder from pinned host memory (leaf-level group offload), which costs one weight transfer per request. The transformer stays resident, so FP4 still quantizes on the device. Model offload is for single-GPU runs: multi-GPU runs use `--text_encoder_tp_degree` instead, and sequential and group offload are rejected.
 - `--enable_group_cpu_offload` and `--enable_sequential_cpu_offload` are rejected with `--fully_shard_degree > 1`, because both reach inside a parameter that sharding has replaced with a DTensor: the group hook asks each parameter whether it is pinned, for which torch registers no sharding strategy, and sequential offload rebuilds each parameter as it moves it, which needs a spec a plain tensor does not carry. `--enable_model_cpu_offload` moves whole components and does work on top of a sharded, blockwise-filled load. Combining the two does mean a component's weights are driven by two mechanisms at once — FSDP2 all-gathers the parameters, the offload hook moves the module — so anything a kernel needs that is not a parameter has to be checked against the launch device rather than assumed to have travelled: the AITER block-scale FP8 layer keeps its weight scale beside the weight as a replicated buffer and co-locates it in `forward` for that reason.
 
 #### Load and Quantization Examples

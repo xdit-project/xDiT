@@ -1,5 +1,5 @@
 from dataclasses import dataclass, fields
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 import torch
 from packaging import version
@@ -68,6 +68,8 @@ class RuntimeConfig:
     spargeattn_simthreshold: float = 0.3
     spargeattn_cdfthreshold: float = 0.92
     use_spargeattn_head_balance: bool = False
+    # Block-sparse tile as (q_tile, kv_tile). None takes each recipe's default.
+    sparseattn_block_size: Optional[Tuple[int, int]] = None
     # Sol-Attn. kv_splits "auto" is 4 on SM90 CuTe for sequences of at least
     # 65536 tokens, and 1 otherwise. sink_start None keeps a sink on the suffix.
     sol_attn_tau: float = 0.2

@@ -26,6 +26,7 @@ def _maybe_wait(tensor: torch.Tensor) -> torch.Tensor:
         return tensor.wait()
     return tensor
 
+
 def compute_perm(cost: torch.Tensor, world_size: int) -> torch.Tensor:
     """Balanced equal-cardinality head permutation from per-head costs.
 
@@ -36,10 +37,10 @@ def compute_perm(cost: torch.Tensor, world_size: int) -> torch.Tensor:
     boustrophedon order so heavy and light heads pair up).
     """
     H = cost.shape[0]
-    order = torch.argsort(cost, descending=True)            # densest-first head ids
+    order = torch.argsort(cost, descending=True)  # densest-first head ids
     pos = torch.arange(H, device=cost.device)
-    rnd = pos // world_size                                  # which "deal round"
-    col = pos % world_size                                   # position within the round
+    rnd = pos // world_size  # which "deal round"
+    col = pos % world_size  # position within the round
     # Snake: even rounds deal left->right, odd rounds right->left.
     rank_of_sorted = torch.where(rnd % 2 == 0, col, (world_size - 1) - col)
     # Stable group-by-rank preserves the (descending-cost) order within each bin.
@@ -47,30 +48,38 @@ def compute_perm(cost: torch.Tensor, world_size: int) -> torch.Tensor:
     return order[group_order]
 
 
-def scatter_to_global(full_in_applied_order: torch.Tensor,
-                      applied_perm: torch.Tensor) -> torch.Tensor:
+def scatter_to_global(full_in_applied_order: torch.Tensor, applied_perm: torch.Tensor) -> torch.Tensor:
     """Map per-head costs gathered in applied-permutation (rank, local) order
     back to global head order: global[applied_perm[j]] = full[j]. Traceable."""
     H = full_in_applied_order.shape[0]
-    glob = torch.zeros(H, dtype=full_in_applied_order.dtype,
-                       device=full_in_applied_order.device)
-    return glob.index_copy(0, applied_perm.to(full_in_applied_order.device),
-                           full_in_applied_order)
+    glob = torch.zeros(H, dtype=full_in_applied_order.dtype, device=full_in_applied_order.device)
+    return glob.index_copy(0, applied_perm.to(full_in_applied_order.device), full_in_applied_order)
 
 
-def apply_head_balance(query, key, value, head_balance_layer, *,
-                       enabled, ulysses_world_size, ring_world_size,
-                       is_sparge_backend, joint_strategy, attention_kwargs):
+def apply_head_balance(
+    query,
+    key,
+    value,
+    head_balance_layer,
+    *,
+    enabled,
+    ulysses_world_size,
+    ring_world_size,
+    backend_publishes_head_cost,
+    joint_strategy,
+    attention_kwargs,
+):
     """Conditionally apply Ulysses block-sparse head balancing before the input
     all-to-all.
 
     Balancing engages only when the feature flag is set and we are on the
-    Ulysses-only sparge path with a per-layer balancing buffer present. When it
-    does, Q,K,V heads are permuted by this step's plan so each rank receives a
-    cost-balanced subset, and a per-head "cost sink" (for the backend to fill)
-    plus the revert bookkeeping (applied + inverse permutation) are stashed in a
-    shallow-copied attention_kwargs -- keeping the head cost OUT of the
-    (output, softmax_lse) contract and leaving USP with no extra locals.
+    Ulysses-only path with a block-sparse backend that publishes a per-head cost
+    and a per-layer balancing buffer present. When it does, Q,K,V heads are
+    permuted by this step's plan so each rank receives a cost-balanced subset,
+    and a per-head "cost sink" (for the backend to fill) plus the revert
+    bookkeeping (applied + inverse permutation) are stashed in a shallow-copied
+    attention_kwargs -- keeping the head cost OUT of the (output, softmax_lse)
+    contract and leaving USP with no extra locals.
 
     Returns ``(query, key, value, hb_applied, attention_kwargs)``; when not
     applied the inputs are returned unchanged with ``hb_applied=False``. The gate
@@ -82,9 +91,17 @@ def apply_head_balance(query, key, value, head_balance_layer, *,
         and ulysses_world_size > 1
         and ring_world_size == 1
         and head_perm is not None
-        and is_sparge_backend
+        and backend_publishes_head_cost
         and joint_strategy is None
         and query.shape[1] % ulysses_world_size == 0
+        # MHA only. The permutation below is built over QUERY heads and applied
+        # to K and V as well, which is only a consistent relabelling when they
+        # have the same head count: under GQA it would index K/V out of range,
+        # and even clamped it would break the query-head -> KV-head mapping that
+        # kernels assume (the Sol rows' is a right shift by log2 of the
+        # ratio). Balancing GQA needs a group-wise permutation, so until then
+        # this is a no-op there rather than silent corruption.
+        and key.shape[1] == query.shape[1]
     )
     if not hb_applied:
         return query, key, value, False, attention_kwargs
@@ -94,8 +111,7 @@ def apply_head_balance(query, key, value, head_balance_layer, *,
     query = query.index_select(1, applied_perm)
     key = key.index_select(1, applied_perm)
     value = value.index_select(1, applied_perm)
-    cost_sink = query.new_zeros(query.shape[1] // ulysses_world_size,
-                                dtype=torch.float32)
+    cost_sink = query.new_zeros(query.shape[1] // ulysses_world_size, dtype=torch.float32)
     attention_kwargs = {
         **(attention_kwargs or {}),
         COST_SINK_KEY: cost_sink,
@@ -104,8 +120,7 @@ def apply_head_balance(query, key, value, head_balance_layer, *,
     return query, key, value, True, attention_kwargs
 
 
-def revert_head_balance(out, attention_kwargs, head_balance_layer,
-                        ulysses_world_size):
+def revert_head_balance(out, attention_kwargs, head_balance_layer, ulysses_world_size):
     """Undo head balancing on the attention output and plan the next step.
 
     Reads the cost sink and applied/inverse permutation back out of
@@ -118,9 +133,7 @@ def revert_head_balance(out, attention_kwargs, head_balance_layer,
     applied_perm, inv_perm = attention_kwargs[_HB_STATE_KEY]
     cost_sink = attention_kwargs[COST_SINK_KEY]
     out = out.index_select(1, inv_perm)
-    full = _maybe_wait(
-        ft_c.all_gather_tensor(cost_sink, 0, PROCESS_GROUP.ULYSSES_PG)
-    )
+    full = _maybe_wait(ft_c.all_gather_tensor(cost_sink, 0, PROCESS_GROUP.ULYSSES_PG))
     glob = scatter_to_global(full, applied_perm)
     head_balance_layer.head_perm.copy_(compute_perm(glob, ulysses_world_size))
     return out

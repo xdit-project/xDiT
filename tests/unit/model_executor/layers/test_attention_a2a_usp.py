@@ -13,7 +13,7 @@ def _runtime_state():
         attention_backend=AttentionBackendType.AITER_FP8,
         fp8_comms=None,
         runtime_config=SimpleNamespace(
-            use_spargeattn_head_balance=False,
+            use_sparseattn_head_balance=False,
         ),
     )
 

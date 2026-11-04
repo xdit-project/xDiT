@@ -30,7 +30,11 @@ from xfuser.core.distributed.attention_a2a import (
     configure_attention_a2a,
     shutdown_attention_a2a,
 )
-from xfuser.core.distributed.attention_schedule import AttentionSchedule, GemmPrecisionSchedule
+from xfuser.core.distributed.attention_schedule import (
+    AttentionSchedule,
+    GemmPrecisionSchedule,
+    SolAttnBetaSchedule,
+)
 from xfuser.core.distributed.fp8_comms import Fp8CommsState
 from xfuser.config.config import (
     ParallelConfig,
@@ -362,6 +366,8 @@ class DiTRuntimeState(RuntimeState):
     # Class-level default so states built without __init__ (as some tests do) can still
     # call set_input_parameters.
     split_latents_by_rows: bool = True
+    # Read by reset_step_counter() at every pipeline-run boundary, so it needs the same default.
+    step_counter: Optional[torch.Tensor] = None
 
     def __init__(self, pipeline: DiffusionPipeline, config: EngineConfig):
         self.attention_schedule: Optional[AttentionSchedule] = None
@@ -369,6 +375,13 @@ class DiTRuntimeState(RuntimeState):
         self.gemm_schedule: Optional[GemmPrecisionSchedule] = None
         self.gemm_schedule_total_steps: Optional[int] = None
         self.use_high_precision_gemm: bool = True
+        self.solattn_beta_schedule: Optional[SolAttnBetaSchedule] = None
+        self.solattn_beta_schedule_total_steps: Optional[int] = None
+        # The step's beta once a schedule is driving it, which the Sol-Attn backends read in
+        # preference to the one flag. None means no schedule, so --solattn_beta stands. A 0-d
+        # tensor rather than a float, so the value crosses into the compiled forward as an input
+        # instead of a constant the graph is recompiled for.
+        self.scheduled_solattn_beta: Optional[torch.Tensor] = None
         self.step_counter: Optional[int] = None
         self._vsa_denoising_step = -1
         self._vsa_last_timestep: Optional[float] = None
@@ -454,19 +467,72 @@ class DiTRuntimeState(RuntimeState):
             self._vsa_last_timestep = timestep
         return self._vsa_denoising_step, num_steps
 
+    _SCHEDULE_TOTAL_STEP_FIELDS = (
+        ("attention", "schedule_total_steps"),
+        ("GEMM", "gemm_schedule_total_steps"),
+        ("Sol-Attn beta", "solattn_beta_schedule_total_steps"),
+    )
+
     def _get_active_total_steps(self) -> Optional[int]:
-        attn_steps = self.schedule_total_steps
-        gemm_steps = self.gemm_schedule_total_steps
-        if attn_steps is not None and gemm_steps is not None and attn_steps != gemm_steps:
-            raise RuntimeError(
-                f"Attention and GEMM schedules must use the same total steps; got {attn_steps} and {gemm_steps}."
-            )
-        return attn_steps or gemm_steps
+        """The step count the counter wraps on, or None when nothing is scheduled.
+
+        Holds no comparison between the schedules' totals, which is not a simplification: these
+        are tensors, and reading one as a Python int runs inside the compiled transformer forward,
+        where it forces a host sync and breaks the graph once per forward. The totals cannot drift
+        apart after setup, so _check_schedule_total_steps compares them there instead.
+        """
+        for _, field in self._SCHEDULE_TOTAL_STEP_FIELDS:
+            steps = getattr(self, field)
+            if steps is not None:
+                return steps
+        return None
+
+    def _install_step_counter(self) -> None:
+        """Start the step counter from 0, on the device the active schedules need it on.
+
+        A beta schedule puts it on the accelerator. Its value is consumed by the routing's
+        threshold, which runs there, and inductor fuses the schedule lookup into that same kernel,
+        where a host-resident step would make the beta table a host pointer and abort the launch.
+        The attention and GEMM schedules read their step on the host whatever device it is on --
+        choosing a kernel or a precision is a host decision -- so this costs them nothing they were
+        not already paying.
+        """
+        device = torch.device("cpu")
+        if self.solattn_beta_schedule is not None and torch.cuda.is_available():
+            device = torch.device("cuda", torch.cuda.current_device())
+        self.step_counter = torch.tensor(0, dtype=torch.int, device=device)
+        # The totals go with it. Their only per-step use is the wrap, arithmetic against the
+        # counter, so a total left on the host is the same illegal pointer in the same device
+        # kernel. Setup reads them as numbers, which a device tensor still allows.
+        for _, field in self._SCHEDULE_TOTAL_STEP_FIELDS:
+            steps = getattr(self, field)
+            if steps is not None:
+                setattr(self, field, steps.to(device))
+
+    def _check_schedule_total_steps(self, kind: str, total_steps: int) -> None:
+        """Refuse a schedule whose length disagrees with one already installed.
+
+        They share a single step counter, so two lengths mean one of them is being read at the
+        wrong step for the whole run.
+        """
+        for other, field in self._SCHEDULE_TOTAL_STEP_FIELDS:
+            steps = getattr(self, field)
+            if other != kind and steps is not None and int(steps) != int(total_steps):
+                raise RuntimeError(
+                    f"Per-step schedules must all use the same total steps; the {other} schedule "
+                    f"has {int(steps)} and this {kind} schedule has {int(total_steps)}."
+                )
 
     def increment_step_counter(self):
         """
         Advance the denoising step and set per-step scheduled backends/modes when active.
         When the entire denoising process is over, the step counter is reset to 0.
+
+        Called from the transformer forward, so under torch.compile this runs inside the compiled
+        region: every step's value read here that becomes a Python number breaks the graph. The
+        beta schedule therefore hands back a tensor and the wrap is arithmetic rather than a
+        branch. A backend or GEMM-precision schedule cannot avoid it -- picking a kernel or a
+        precision is a host decision -- so those two still cost one break per forward.
         """
         if self.step_counter is None:
             return
@@ -475,17 +541,37 @@ class DiTRuntimeState(RuntimeState):
         if active_total_steps is None:
             return
 
-        current_step = self.step_counter
+        self._apply_schedules_at(self.step_counter)
+
+        # Wrapped by remainder, not by comparing the counter against the total and assigning 0:
+        # that comparison is between two tensors and the branch on it reads the result on the host.
+        self.step_counter = (self.step_counter + 1) % active_total_steps
+
+    def _apply_schedules_at(self, step) -> None:
+        """Point every active schedule at `step`."""
         if self.attention_schedule is not None:
-            self.attention_backend = self.attention_schedule.get_backend(current_step)
+            self.attention_backend = self.attention_schedule.get_backend(step)
             activate_attention_a2a_backend(self.attention_backend)
         if self.gemm_schedule is not None:
-            self.use_high_precision_gemm = self.gemm_schedule.is_high_precision(current_step)
+            self.use_high_precision_gemm = self.gemm_schedule.is_high_precision(step)
+        if self.solattn_beta_schedule is not None:
+            self.scheduled_solattn_beta = self.solattn_beta_schedule.get_beta_tensor(step)
 
-        self.step_counter = self.step_counter + 1
+    def reset_step_counter(self) -> None:
+        """Send the per-step schedules back to their first step, at a pipeline-run boundary.
 
-        if self.step_counter >= active_total_steps:
-            self.step_counter = 0
+        The counter only ever advances, wrapping on the schedule length, so any forward spent
+        outside the run being measured leaves it mid-schedule. A compile warmup of three steps
+        starts the real run on the fourth beta and wraps its last three steps back onto the
+        schedule's beginning -- silently, and in the direction that hurts most, since it pushes
+        every step's beta later in the ramp while the steps whose error propagates furthest are
+        the early ones. Wan 2.2 hid this by warming up a full cycle, which lands back on zero by
+        arithmetic; MiniMax-H3 warms up three steps and does not.
+        """
+        if self.step_counter is None:
+            return
+        self.step_counter = torch.zeros_like(self.step_counter)
+        self._apply_schedules_at(self.step_counter)
 
     def set_attention_schedule(
         self,
@@ -500,9 +586,10 @@ class DiTRuntimeState(RuntimeState):
             self._check_if_backend_compatible_with_current_configuration(backend)
             if self.runtime_config.attention_a2a.enabled:
                 self.runtime_config.attention_a2a.resolve_for_backend(backend)
+        self._check_schedule_total_steps("attention", total_steps)
         self.attention_schedule = attention_schedule
         self.schedule_total_steps = torch.tensor(total_steps, dtype=torch.int)
-        self.step_counter = torch.tensor(0, dtype=torch.int)
+        self._install_step_counter()
         warn_once(
             logger,
             "Per-step attention schedule over %d steps: %s.",
@@ -510,6 +597,38 @@ class DiTRuntimeState(RuntimeState):
             _summarise_schedule(attention_schedule.backends),
         )
         self._warn_if_low_precision(*set(attention_schedule.backends))
+
+    def set_solattn_beta_schedule(
+        self,
+        beta_schedule: SolAttnBetaSchedule,
+        total_steps: int,
+    ) -> None:
+        """
+        Set a per-step Sol-Attn routing threshold.
+        When set, increment_step_counter() records each step's beta and the Sol-Attn backends use
+        it in place of --solattn_beta.
+        """
+        if beta_schedule.total_steps != total_steps:
+            raise ValueError(
+                f"Sol-Attn beta schedule covers {beta_schedule.total_steps} steps but the run has {total_steps}."
+            )
+        self._check_schedule_total_steps("Sol-Attn beta", total_steps)
+        self.solattn_beta_schedule = beta_schedule
+        self.solattn_beta_schedule_total_steps = torch.tensor(total_steps, dtype=torch.int)
+        # Reinstalled rather than kept if another schedule already made one: a beta schedule needs
+        # it on the accelerator, and the two setters run in whichever order setup calls them.
+        self._install_step_counter()
+        self.scheduled_solattn_beta = beta_schedule.get_beta_tensor(self.step_counter)
+        logger.warning(
+            "Per-step Sol-Attn beta schedule enabled (total_steps=%d, beta %.4f to %.4f).",
+            total_steps,
+            beta_schedule.get_beta(0),
+            beta_schedule.get_beta(total_steps - 1),
+        )
+
+    def has_solattn_beta_schedule(self) -> bool:
+        """True if a per-step Sol-Attn beta schedule is active."""
+        return self.solattn_beta_schedule is not None
 
     def set_gemm_schedule(
         self,
@@ -520,9 +639,10 @@ class DiTRuntimeState(RuntimeState):
         Set a per-step GEMM precision schedule.
         When set, increment_step_counter() will update use_high_precision_gemm each step.
         """
+        self._check_schedule_total_steps("GEMM", total_steps)
         self.gemm_schedule = gemm_schedule
         self.gemm_schedule_total_steps = torch.tensor(total_steps, dtype=torch.int)
-        self.step_counter = torch.tensor(0, dtype=torch.int)
+        self._install_step_counter()
         warn_once(logger, "Per-step GEMM schedule enabled (total_steps=%d).", total_steps)
 
     def set_input_parameters(
@@ -1026,6 +1146,16 @@ def runtime_state_is_initialized():
 def get_runtime_state():
     assert _RUNTIME is not None, "Runtime state has not been initialized."
     return _RUNTIME
+
+
+def get_scheduled_solattn_beta():
+    """This step's scheduled Sol-Attn beta as a 0-d tensor, or None when nothing is scheduling one.
+
+    Tolerates an uninitialized runtime, unlike get_runtime_state: the attention functions are also
+    reached directly, from tests and from kernel-level callers, and for those "no schedule" is the
+    right answer rather than an error.
+    """
+    return getattr(_RUNTIME, "scheduled_solattn_beta", None) if _RUNTIME is not None else None
 
 
 def initialize_runtime_state(

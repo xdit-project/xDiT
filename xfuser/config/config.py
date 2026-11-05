@@ -90,6 +90,11 @@ class RuntimeConfig:
     fp8_comms_scale: Optional[float] = None
     fp8_comms_safety_factor: float = DEFAULT_FP8_COMMS_SAFETY_FACTOR
     attention_a2a: AttentionA2AConfig = field(default_factory=AttentionA2AConfig)
+    # Ulysses all-to-all transport and its SDMA options (see usp_sdma.configure_from).
+    ulysses_a2a: str = "default"
+    ulysses_sdma_head_groups: int = 2
+    ulysses_sdma_group_streams: bool = False
+    ulysses_sdma_overlap_qkv: bool = False
 
     def __post_init__(self):
         if self.warmup_steps < 0:

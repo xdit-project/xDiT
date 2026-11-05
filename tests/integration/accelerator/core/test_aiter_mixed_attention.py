@@ -186,15 +186,14 @@ def _require_mha_v4_recipe(backend_name):
         pytest.skip(f"Installed AITER has no kernel row for {backend_name}: {exc}")
 
 
-# Dense MXFP4 V returns garbage at any sequence length that is not a multiple of 128 on AITER
-# main: cosine against SDPA measures 0.040 at S=257 and -0.012 at S=129, while FP8 V and MXFP6 V
-# stay correct. AITER_MXFP4 stores V in MXFP4 and fails the same way. AITER's own
-# unaligned-sequence test asserts only eager==compiled and isfinite, so it does not catch this.
+# Dense MXFP4 V returned garbage at any sequence length that is not a multiple of 128: cosine
+# against SDPA measured 0.040 at S=257 and -0.012 at S=129. AITER main serves F6F4 and MXFP4
+# correctly there; F4F4 stays marked until a build with its gfx950 kernel shows the same.
 _MXFP4_V_BACKENDS = ("AITER_F4F4", "AITER_F6F4", "AITER_MXFP4")
 
 
 def _mixed_attention_case(backend_name, sequence_length):
-    if backend_name in _MXFP4_V_BACKENDS and sequence_length % 128:
+    if backend_name == "AITER_F4F4" and sequence_length % 128:
         return pytest.param(
             backend_name,
             sequence_length,

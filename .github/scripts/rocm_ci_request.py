@@ -16,6 +16,7 @@ def parse_command(body: str) -> dict[str, str]:
         "benchmarks": "--tag nightly",
         "architectures": "gfx942,gfx950",
         "amd_ref": "main",
+        "downstream_configs": "false",
     }
     seen = set()
     for token in tokens[1:]:
@@ -24,6 +25,8 @@ def parse_command(body: str) -> dict[str, str]:
             raise ValueError(f"Unknown, duplicate, or malformed input: {token!r}")
         if not value.strip() or any(ord(char) < 32 or ord(char) == 127 for char in value):
             raise ValueError(f"Input {key!r} must be a non-empty single-line value.")
+        if key == "downstream_configs" and value not in {"true", "false"}:
+            raise ValueError("downstream_configs must be true or false.")
         request[key] = value
         seen.add(key)
     return request

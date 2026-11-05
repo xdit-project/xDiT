@@ -28,7 +28,9 @@ from xfuser.model_executor.layers.fused_qk_rope_flydsl import (
     flydsl_fused_qk_norm_rope,
     prepare_neox_rope_tables,
 )
+from xfuser.model_executor.layers import usp_sdma
 from xfuser.model_executor.layers.usp import (
+    PROCESS_GROUP,
     ULYSSES_EXTRA_INPUTS_KEY,
     USP,
     attention,
@@ -55,6 +57,9 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
         self.attention_kwargs = attention_kwargs
         self.backend = backend
         self.use_vsa_h3 = use_fasth3_vsa and backend in VSA_H3_BACKENDS
+        # Q/K/V may be projected one head group at a time (usp_sdma.grouped_qkv_attention): the
+        # QK norm and RoPE act per head.
+        self.grouped_qkv = use_ulysses_parallel_attention and not self.use_vsa_h3
 
     def __call__(
         self,
@@ -69,6 +74,21 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
                 "the varlen metadata prepared by the transformer wrapper."
             )
 
+        use_ulysses = self.use_ulysses_parallel_attention and get_ulysses_parallel_world_size() > 1
+        if use_ulysses and self.grouped_qkv:
+            grouped = usp_sdma.grouped_qkv_attention(
+                attn,
+                hidden_states,
+                lambda q, k, v: (*self._norm_rope(attn, q, k, rotary_emb), v),
+                backend=self.backend,
+                attention_kwargs=self.attention_kwargs,
+                group=PROCESS_GROUP.ULYSSES_PG,
+            )
+            if grouped is not None:
+                hidden_states = grouped.transpose(1, 2).flatten(2, 3).type_as(hidden_states)
+                hidden_states = attn.to_out[0](hidden_states)
+                return attn.to_out[1](hidden_states)
+
         if attn.fused_projections:
             query, key, value = attn.to_qkv(hidden_states).chunk(3, dim=-1)
         else:
@@ -79,7 +99,48 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
         query = query.unflatten(-1, (attn.heads, -1))
         key = key.unflatten(-1, (attn.heads, -1))
         value = value.unflatten(-1, (attn.heads, -1))
+        query, key = self._norm_rope(attn, query, key, rotary_emb)
 
+        use_vsa_h3 = self.use_vsa_h3
+        if use_vsa_h3:
+            if self.attention_kwargs is None:
+                raise RuntimeError("FastH3 VSA metadata was not configured.")
+            if self.attention_kwargs.get("vsa_h3_metadata") is None:
+                raise RuntimeError("FastH3 VSA metadata was not prepared.")
+            self.attention_kwargs["vsa_h3_gate"] = (
+                attn.to_gate_compress(hidden_states).unflatten(-1, (attn.heads, -1)).transpose(1, 2)
+            )
+            # The gate is per-head like QKV, so it has to follow them through
+            # the Ulysses exchange before the VSA-H3 backend consumes it.
+            self.attention_kwargs[ULYSSES_EXTRA_INPUTS_KEY] = ("vsa_h3_gate",)
+
+        attention_function = USP if use_ulysses else attention
+        attention_args = {
+            "dropout_p": 0.0,
+            "is_causal": False,
+            "attention_kwargs": self.attention_kwargs,
+            "head_balance_layer": attn,
+            "backend": self.backend,
+        }
+        if use_ulysses:
+            attention_args["combine_qkv_a2a"] = True
+        hidden_states = attention_function(
+            query.transpose(1, 2),
+            key.transpose(1, 2),
+            value.transpose(1, 2),
+            **attention_args,
+        ).transpose(1, 2)
+        if use_vsa_h3 and self.attention_kwargs is not None:
+            self.attention_kwargs["vsa_h3_gate"] = None
+            self.attention_kwargs[ULYSSES_EXTRA_INPUTS_KEY] = None
+
+        hidden_states = hidden_states.flatten(2, 3).type_as(query)
+        hidden_states = attn.to_out[0](hidden_states)
+        hidden_states = attn.to_out[1](hidden_states)
+        return hidden_states
+
+    def _norm_rope(self, attn, query, key, rotary_emb):
+        """QK RMSNorm and RoPE of [b, s, heads, d] projections, for any subset of heads."""
         # Fuse norm_q -> norm_k -> rope(q) -> rope(k) into one FlyDSL kernel.
         # Unfused, inductor cannot fold the RoPE into the norm (the RMS
         # reduction sits between them) and emits a bandwidth-bound chain of
@@ -111,44 +172,7 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
                 query = _apply_rotary_emb(query, rotary_emb[0], rotary_emb[1])
                 key = _apply_rotary_emb(key, rotary_emb[0], rotary_emb[1])
 
-        use_vsa_h3 = self.use_vsa_h3
-        if use_vsa_h3:
-            if self.attention_kwargs is None:
-                raise RuntimeError("FastH3 VSA metadata was not configured.")
-            if self.attention_kwargs.get("vsa_h3_metadata") is None:
-                raise RuntimeError("FastH3 VSA metadata was not prepared.")
-            self.attention_kwargs["vsa_h3_gate"] = (
-                attn.to_gate_compress(hidden_states).unflatten(-1, (attn.heads, -1)).transpose(1, 2)
-            )
-            # The gate is per-head like QKV, so it has to follow them through
-            # the Ulysses exchange before the VSA-H3 backend consumes it.
-            self.attention_kwargs[ULYSSES_EXTRA_INPUTS_KEY] = ("vsa_h3_gate",)
-
-        use_ulysses = self.use_ulysses_parallel_attention and get_ulysses_parallel_world_size() > 1
-        attention_function = USP if use_ulysses else attention
-        attention_args = {
-            "dropout_p": 0.0,
-            "is_causal": False,
-            "attention_kwargs": self.attention_kwargs,
-            "head_balance_layer": attn,
-            "backend": self.backend,
-        }
-        if use_ulysses:
-            attention_args["combine_qkv_a2a"] = True
-        hidden_states = attention_function(
-            query.transpose(1, 2),
-            key.transpose(1, 2),
-            value.transpose(1, 2),
-            **attention_args,
-        ).transpose(1, 2)
-        if use_vsa_h3 and self.attention_kwargs is not None:
-            self.attention_kwargs["vsa_h3_gate"] = None
-            self.attention_kwargs[ULYSSES_EXTRA_INPUTS_KEY] = None
-
-        hidden_states = hidden_states.flatten(2, 3).type_as(query)
-        hidden_states = attn.to_out[0](hidden_states)
-        hidden_states = attn.to_out[1](hidden_states)
-        return hidden_states
+        return query, key
 
 
 class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):

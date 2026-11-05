@@ -74,7 +74,7 @@ def kv_splits_kwargs():
 
     Omitted on an AITER that predates split-KV, where "auto" means unsplit anyway.
     """
-    splits = "auto"
+    splits = 1
     if runtime_state_is_initialized():
         splits = get_runtime_state().runtime_config.mha_v4_kv_splits
     if HAS_KV_SPLITS:

@@ -284,7 +284,7 @@ class xFuserArgs:
     shard_t5_encoder: bool = False
     attention_backend: Optional[str] = None
     cross_attention_backend: Optional[str] = None
-    mha_v4_kv_splits: Union[str, int] = "auto"
+    mha_v4_kv_splits: Union[str, int] = 1
     gemm_quantization: Union[GemmQuantizationSpec, str, None] = None
     gemm_config: Optional[str] = None
     use_int8_gemms: bool = False
@@ -1005,13 +1005,14 @@ class xFuserArgs:
         parser.add_argument(
             "--mha_v4_kv_splits",
             type=str,
-            default="auto",
+            default="1",
             help=(
                 "Key ranges a dense AITER MHA v4 call is split into and merged by their LSE, which fills "
-                "the GPU when few heads per rank leave it idle (e.g. high Ulysses degrees). 'auto' lets "
-                "AITER pick per shape and runs unsplit wherever it cannot split (MX formats, packed "
-                "keys, gfx942); 1 disables splitting; a larger count is passed as is and AITER refuses "
-                "calls it cannot serve."
+                "the GPU when few heads per rank leave it idle (e.g. high Ulysses degrees). 1 (default) "
+                "never splits. 'auto' lets AITER pick per shape and runs unsplit wherever it cannot split "
+                "(MX formats, packed keys, gfx942); each split costs host time, so it pays off with "
+                "--use_torch_compile and slows eager runs. A larger count is passed as is and AITER "
+                "refuses calls it cannot serve."
             ),
         )
         _add_attention_a2a_args(parser)

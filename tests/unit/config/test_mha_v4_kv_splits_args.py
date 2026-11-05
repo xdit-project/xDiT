@@ -3,11 +3,13 @@ import pytest
 from xfuser.config.args import FlexibleArgumentParser, xFuserArgs
 
 
-def test_kv_splits_default_to_auto():
+def test_kv_splits_default_to_unsplit():
     parser = xFuserArgs.add_runner_args(FlexibleArgumentParser())
 
-    assert parser.parse_args(["--model", "test/model"]).mha_v4_kv_splits == "auto"
-    assert xFuserArgs().mha_v4_kv_splits == "auto"
+    assert (
+        xFuserArgs(mha_v4_kv_splits=parser.parse_args(["--model", "test/model"]).mha_v4_kv_splits).mha_v4_kv_splits == 1
+    )
+    assert xFuserArgs().mha_v4_kv_splits == 1
 
 
 @pytest.mark.parametrize(("value", "expected"), [("auto", "auto"), ("1", 1), ("4", 4), (4, 4)])

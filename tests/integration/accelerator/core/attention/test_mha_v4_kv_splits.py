@@ -74,7 +74,7 @@ def test_dense_calls_hand_the_configured_splits_to_mha_v4(mha_v4_kernel, kv_spli
     assert calls[0]["kv_splits"] == splits
 
 
-def test_dense_calls_split_automatically_before_the_runtime_is_configured(mha_v4_kernel, monkeypatch):
+def test_dense_calls_run_unsplit_before_the_runtime_is_configured(mha_v4_kernel, monkeypatch):
     calls = []
     monkeypatch.setattr(mha_v4_kernel, "mha_v4", _fake_mha_v4(calls))
     monkeypatch.setattr("xfuser.core.distributed.runtime_state._RUNTIME", None)
@@ -82,7 +82,7 @@ def test_dense_calls_split_automatically_before_the_runtime_is_configured(mha_v4
     query = torch.zeros(FEW_HEADS[:2] + (512, 128), device="cuda", dtype=torch.bfloat16)
     _spec("AITER_BF16").run(query, query, query, AttnCall())
 
-    assert calls[0]["kv_splits"] == "auto"
+    assert calls[0]["kv_splits"] == 1
 
 
 def test_sparge_calls_never_split(mha_v4_kernel, kv_splits, monkeypatch):

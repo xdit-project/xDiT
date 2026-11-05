@@ -64,7 +64,7 @@ class RuntimeConfig:
     use_fbcache: bool = False
     attention_backend: Optional[str] = None
     cross_attention_backend: Optional[str] = None
-    mha_v4_kv_splits: Union[str, int] = "auto"
+    mha_v4_kv_splits: Union[str, int] = 1
     spargeattn_reorder_sequence: bool = True
     use_spargeattn_static_block_mask: bool = True
     spargeattn_simthreshold: float = 0.3

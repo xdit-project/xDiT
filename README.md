@@ -125,6 +125,7 @@ The following open-sourced DiT Models are released with xDiT in day 1.
 | [🎬 LTX-Video 0.9.7](https://huggingface.co/Lightricks/LTX-Video-0.9.7-dev) | ✔️ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers) | ✔️ | ✔️ | ✔️ | ❎ | ❎ | [Report](./docs/performance/hunyuandit.md) |
 | [🟡 Lumina-Image-2.0](https://huggingface.co/Alpha-VLLM/Lumina-Image-2.0) | ✔️ | ✔️ | ❎ | ❎ | ❎ | NA |
+| [🟡 MOSS-Image](https://huggingface.co/OpenMOSS-Team/MOSS-Image-Base) | ✔️ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🔴 Z-Image Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🟠 Flux 2 klein](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🟠 Flux 2](https://huggingface.co/black-forest-labs/FLUX.2-dev) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
@@ -351,6 +352,7 @@ Below is a list of validated diffusers version requirements. If the model is not
 | --- | --- |
 | [HunyuanVideo-1.5](https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5) | >= 0.36.0 |
 | [Z-Image Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | >= 0.36.0 |
+| [MOSS-Image](https://huggingface.co/OpenMOSS-Team/MOSS-Image-Base) | >= 0.38.0 (transformers with Qwen3.5) |
 | [Flux 2](https://huggingface.co/black-forest-labs/FLUX.2-dev) | >= 0.36.0 |
 | [Ideogram 4](https://huggingface.co/ideogram-ai/ideogram-4-fp8) | >= 0.39.0 |
 | [Flux 3 Image klein](https://huggingface.co/black-forest-labs/flux-3-image-klein) (and klein base) | from source (main; tested at `d42ebf9`) |

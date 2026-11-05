@@ -45,10 +45,36 @@ def _build_calibrator_config(enable_encoder_calibrator: Optional[bool] = None) -
         return None
 
 
-def _build_scm_mask(policy: Optional[str], num_steps: int) -> Optional[Any]:
+def _build_alternating_mask(
+    num_steps: int,
+    max_warmup_steps: int,
+) -> list[int]:
+    """Build isolated reuse steps after warmup with two final corrections."""
+    mask = [1] * num_steps
+    first_cache_step = min(max(max_warmup_steps, 0), num_steps)
+    final_compute_steps = 2
+    for step in range(
+        first_cache_step,
+        max(num_steps - final_compute_steps, first_cache_step),
+        2,
+    ):
+        mask[step] = 0
+    return mask
+
+
+def _build_scm_mask(
+    policy: Optional[str],
+    num_steps: int,
+    max_warmup_steps: int = 0,
+) -> Optional[Any]:
     """Build a computation mask from the SCM policy."""
     if not policy:
         return None
+    if policy == "alternating":
+        return _build_alternating_mask(
+            num_steps,
+            max_warmup_steps,
+        )
     try:
         import cache_dit as cd
 
@@ -100,14 +126,20 @@ def _build_config(
         }
         if preset.enable_separate_cfg is not None:
             enable_separate_cfg = preset.enable_separate_cfg
-        scm_mask = _build_scm_mask(preset.scm_policy, num_steps)
+        scm_mask = _build_scm_mask(
+            preset.scm_policy,
+            num_steps,
+            preset.max_warmup_steps,
+        )
         calibrator_config = (
             None if preset.enable_taylorseer is False else _build_calibrator_config(preset.enable_encoder_calibrator)
         )
+        share_pipefusion_decisions = preset.share_pipefusion_decisions
     else:
         config_kwargs = dict(preset_kwargs or {})
         scm_mask = None
         calibrator_config = _build_calibrator_config()
+        share_pipefusion_decisions = False
 
     config_kwargs["num_inference_steps"] = num_steps
     config_kwargs.update(overrides)
@@ -130,4 +162,6 @@ def _build_config(
         raise ValueError(f"Unknown --cache_config keys for DBCacheConfig: {sorted(unknown)}")
 
     config_kwargs = {key: value for key, value in config_kwargs.items() if key in valid_fields}
-    return DBCacheConfig(**config_kwargs), calibrator_config
+    config = DBCacheConfig(**config_kwargs)
+    config._xdit_share_pipefusion_decisions = share_pipefusion_decisions
+    return config, calibrator_config

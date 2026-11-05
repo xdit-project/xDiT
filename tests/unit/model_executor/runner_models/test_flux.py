@@ -65,11 +65,18 @@ def single_process(monkeypatch):
         (flux.xFuserFlux2Klein4BModel, "FLUX.2-klein-4B"),
     ],
 )
-def test_flux2_pipefusion_refuses_parallel_vae_at_construction(single_process, tmp_path, model_cls, model):
-    # The FLUX.2 PipeFusion pipeline decodes on its last stage only, so a decoder
-    # sharded across every stage would wait forever for the other stages.
-    args = {"model": model, "pipefusion_parallel_degree": 2, "output_directory": str(tmp_path)}
-    model_cls(xFuserArgs(**args))
+def test_flux2_pipefusion_accepts_parallel_vae(single_process, tmp_path, model_cls, model):
+    # With --use_parallel_vae the wrapper broadcasts the latents and decodes on every
+    # pipeline stage, the same path FLUX.1 PipeFusion already uses. Last-stage-only
+    # decode is the non-parallel branch.
+    runner = model_cls(
+        xFuserArgs(
+            model=model,
+            pipefusion_parallel_degree=2,
+            use_parallel_vae=True,
+            output_directory=str(tmp_path),
+        )
+    )
 
-    with pytest.raises(ValueError, match="--use_parallel_vae is not supported with --pipefusion_parallel_degree"):
-        model_cls(xFuserArgs(**args, use_parallel_vae=True))
+    assert runner.config.pipefusion_parallel_degree == 2
+    assert runner.config.use_parallel_vae is True

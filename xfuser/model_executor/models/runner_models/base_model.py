@@ -29,6 +29,7 @@ from xfuser.core.utils.runner_utils import (
     rgetattr,
 )
 from xfuser.model_executor.models.runner_models.image_postprocess import enable_fast_pil_postprocess
+from xfuser.model_executor.layers import usp_sdma
 from xfuser.model_executor.pipelines.base_pipeline import xFuserPipelineBaseWrapper
 from xfuser.model_executor.models.runner_models.vae_manager import (
     VAEManager,
@@ -50,6 +51,7 @@ from xfuser.core.distributed import (
     get_classifier_free_guidance_rank,
     get_pipeline_parallel_world_size,
     get_pp_group,
+    get_ulysses_parallel_world_size,
     is_pipeline_first_stage,
     initialize_runtime_state,
     get_runtime_state,
@@ -366,6 +368,8 @@ class xFuserModel(abc.ABC):
     # torch.compile modes that run the graph under CUDA Graphs, whose outputs live in a fixed
     # buffer pool and are therefore only valid until the next replay.
     CUDAGRAPH_COMPILE_MODES = frozenset({"reduce-overhead", "max-autotune"})
+    # The same compilation without CUDA graphs.
+    _WITHOUT_CUDAGRAPHS = {"reduce-overhead": "default", "max-autotune": "max-autotune-no-cudagraphs"}
 
     # Head dimensions this model's attention runs at, checked against what a backend serves.
     # Left empty where the value is only known from the loaded checkpoint; empty means no claim.
@@ -543,6 +547,10 @@ class xFuserModel(abc.ABC):
             else:
                 group.pipeline_recv(idx=0, name="_xfuser_compile_prime")
                 group.pipeline_send(token, name="_xfuser_compile_prime", segment_idx=0)
+
+        # Before compilation sees the modules.
+        if usp_sdma.overlap_qkv():
+            self._prepare_grouped_qkv()
 
         # Compile and warm the original blocks before cache adapters replace or
         # patch them, keeping stateful cross-step cache logic out of traced graphs.
@@ -956,6 +964,36 @@ class xFuserModel(abc.ABC):
         # CUDA graphs are slow on RDNA4.
         return "default"  # TODO: Configurable
 
+    def _prepare_grouped_qkv(self) -> None:
+        """Copy each attention module's Q/K/V weight rows per head group for --ulysses_sdma_overlap_qkv.
+
+        Not with CPU offload: the offload hooks, already set up, would not move the copies, and
+        offloading is for the memory the copies would spend. Q/K/V are then projected for all
+        heads at once, as without the option."""
+        ulysses = get_ulysses_parallel_world_size()
+        if not usp_sdma.overlap_qkv() or ulysses <= 1:
+            return
+        config = self.config
+        if config.enable_group_cpu_offload or config.enable_sequential_cpu_offload or config.enable_model_cpu_offload:
+            log("--ulysses_sdma_overlap_qkv is ignored with CPU offload: Q/K/V are projected for all heads at once.")
+            return
+        for name in self._get_compiled_pipe_components():
+            component = getattr(self.pipe, name, None)
+            if isinstance(component, torch.nn.Module):
+                prepared = usp_sdma.prepare_grouped_qkv(component, ulysses)
+                log(f"{name}: {prepared} attention modules project Q/K/V one head group at a time.")
+
+    def _compile_mode(self) -> str:
+        """The runner's compile mode, without CUDA graphs when Ulysses attention runs its
+        all-to-alls on SDMA engines (--ulysses_a2a sdma): those copies are issued from the
+        host, so a captured graph would replay RCCL instead."""
+        requested = self._get_compile_mode()
+        if requested in self.CUDAGRAPH_COMPILE_MODES and usp_sdma.uses_sdma() and get_ulysses_parallel_world_size() > 1:
+            mode = self._WITHOUT_CUDAGRAPHS[requested]
+            warn_once(logger, f"--ulysses_a2a sdma: compiling with mode {mode!r} instead of {requested!r}.")
+            return mode
+        return requested
+
     def _get_compile_dynamic(self, input_args=None) -> Optional[bool]:
         return None  # torch default (auto)
 
@@ -1066,7 +1104,7 @@ class xFuserModel(abc.ABC):
         returns ``None``.
         """
         self._enable_compute_comm_overlap()
-        compile_kwargs = {"mode": self._get_compile_mode()}
+        compile_kwargs = {"mode": self._compile_mode()}
         pp_degree = getattr(self.config, "pipefusion_parallel_degree", 1)
         compile_kwargs["dynamic"] = (
             self._get_compile_dynamic(input_args) if pp_degree > 1 else self._get_compile_dynamic()
@@ -1327,7 +1365,7 @@ class xFuserModel(abc.ABC):
             return False
         if self.config.warmup_calls:
             return False
-        if self._get_compile_mode() not in self.CUDAGRAPH_COMPILE_MODES:
+        if self._compile_mode() not in self.CUDAGRAPH_COMPILE_MODES:
             return False
 
         capture_args = copy.deepcopy(input_args)
@@ -1479,7 +1517,7 @@ class xFuserModel(abc.ABC):
         """Run compilation warmup, optionally profiling the CUDA graph recording phase."""
         enable_capture = (
             self.config.profile_capture_phase
-            and self._get_compile_mode() == "reduce-overhead"
+            and self._compile_mode() == "reduce-overhead"
             and not self.pipe.scheduler.config.shift_terminal
         )
         if not enable_capture:

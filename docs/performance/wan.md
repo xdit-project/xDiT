@@ -57,28 +57,54 @@ are excluded; this is not process startup-to-exit wall time.
 
 ## MI350X Measurements
 
-Eight MI350X GPUs, Ulysses 8, pretrained Wan2.2-T2V-A14B, AITER_FP8 attention
-with BF16 weights and communication, using the protocol above:
+Eight MI350X GPUs, Ulysses 8, pretrained Wan2.2-T2V-A14B, BF16 weights and
+communication, using the protocol above:
 
-| Process order | RCCL (s) | Parent SDMA (s) | Q/K overlap (s) | Reduction vs parent |
+| Attention and process order | RCCL (s) | Parent SDMA (s) | Q/K overlap (s) | Reduction vs parent |
 | --- | ---: | ---: | ---: | ---: |
-| Q/K overlap, parent SDMA, RCCL | 54.1393 | 53.8827 | 52.8472 | 1.92% |
-| RCCL, parent SDMA, Q/K overlap | 54.0796 | 53.7790 | 52.4190 | 2.53% |
+| FP8: Q/K overlap, parent SDMA, RCCL | 54.1393 | 53.8827 | 52.8472 | 1.92% |
+| FP8: RCCL, parent SDMA, Q/K overlap | 54.0796 | 53.7790 | 52.4190 | 2.53% |
+| BF16: RCCL, parent SDMA, Q/K overlap | 81.6193 | 80.7359 | 80.0860 | 0.80% |
 
 Each value is the median of three measured generations in a fresh process.
 The second comparison reverses process order; it reduces latency by 3.07%
 against RCCL. Each optimized generation executed 3200 split-QK calls. These
 are measurements on one node and one prompt/seed, not a general speedup or
-quality guarantee.
+quality guarantee. The BF16 samples overlap substantially (parent 80.48-82.19 s,
+optimized 79.85-81.49 s); its three-sample gain is not a tight significance claim.
 
 Runtime: `amdsiloai/pytorch-xdit:v26.10.1`, torch `2.13.0+git3369fa2`, HIP
 `7.16.26323`, RCCL `2.30.4`, diffusers `0.41.0.dev0`, AITER
 `e2d019f15599b73360ae027b73b8d72961903bd2` with the image's existing functional
 varlen patch.
 
+## Two-Block Comparisons
+
+These are full-shape random-weight two-block Wan forwards, not pretrained
+generation: 75,600 tokens, Ulysses 8, compilation enabled, eight warmups and
+80 deterministically shuffled measurements per variant. The reported metric
+is the maximum across ranks of each rank's median whole-forward GPU-event time.
+Both SDMA variants match the same-layout packed control exactly.
+
+| GPUs | Attention | RCCL (ms) | Parent SDMA (ms) | Q/K overlap (ms) | Reduction vs parent |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 8x MI350X | BF16 | 49.28 | 49.27 | 48.58 | 1.40% |
+| 8x MI350X | FP8 | 32.99 | 33.12 | 32.26 | 2.59% |
+| 8x MI355X | BF16 | 43.47-43.49 | 43.65-43.66 | 42.68-42.71 | 2.16-2.21% |
+| 8x MI355X | FP8 | 28.93-28.98 | 29.42-29.49 | 28.39-28.46 | 3.44-3.50% |
+
+MI350X rows are one final production confirmation per backend; MI355X ranges
+cover three fresh processes per backend. On MI355X, improvement over RCCL is
+1.75-1.81% BF16 and 1.81-1.86% FP8. Duplicate RCCL controls differ by less than
+0.04% in every MI355X run. The two nodes have matching Torch/HIP/RCCL/Diffusers
+and AITER revisions, with byte-identical existing AITER functional-varlen patches,
+but different container image IDs. Wan weights were absent on MI355X, so no
+pretrained end-to-end gain is claimed there.
+
 ## Focused Validation
 
-The complete SDMA integration module passed all 17 tests on eight MI350X GPUs.
+The complete SDMA integration module passed all 17 tests on both eight MI350X
+and eight MI355X GPUs.
 The new cases cover alternating original/split exchanges, compiled tensor
 lifetimes, exact producer layouts for 2/4/8 peers, actual two-rank transfers,
 BF16 and FP8 processor equality, external graph capture/replay, and fallback

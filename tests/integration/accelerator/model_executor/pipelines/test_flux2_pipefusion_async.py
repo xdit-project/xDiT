@@ -6,7 +6,7 @@ import torch
 from PIL import Image
 
 from xfuser.config.args import xFuserArgs
-from xfuser.core.distributed import init_distributed_environment, is_pipeline_last_stage
+from xfuser.core.distributed import init_distributed_environment
 from xfuser.core.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
 
 
@@ -102,7 +102,7 @@ def _worker(rank, world_size, init_method, parallel_vae=False, reference_image=F
     )
     output = run(image)
 
-    if is_pipeline_last_stage():
+    if pipeline.is_dp_last_group():
         expected_shape = (1, 16, 16, 3) if parallel_vae else (1, 64, 4)
         assert output.images.shape == expected_shape
         assert torch.isfinite(torch.as_tensor(output.images)).all()

@@ -1,5 +1,6 @@
 """Cache-dit adapter construction and cache application."""
 
+import dataclasses
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -11,8 +12,10 @@ from xfuser.model_executor.cache.adapters.cache_dit.config import (
     _is_rank0,
 )
 from xfuser.model_executor.cache.adapters.cache_dit.context import (
-    _install_sp_can_cache_sync,
-    _is_parallelized_flag,
+    install_cache_decision_sync,
+    install_pipefusion_patch_contexts,
+    install_pipefusion_static_fn_bypass,
+    is_parallelized_flag,
 )
 from xfuser.model_executor.cache.presets import CacheDitAdapterConfig, DBCachePreset
 
@@ -34,7 +37,7 @@ def _build_adapter(transformer, pipe, adapter_cfg, BlockAdapter, ForwardPattern)
     found = [
         (attribute, getattr(ForwardPattern, pattern))
         for attribute, pattern in adapter_cfg.blocks
-        if getattr(transformer, attribute, None) is not None
+        if (getattr(transformer, attribute, None) is not None and len(getattr(transformer, attribute)) > 0)
     ]
     if not found:
         raise RuntimeError(
@@ -70,11 +73,13 @@ def apply_cache_dit_cache(
     adapter_config: Optional[CacheDitAdapterConfig] = None,
 ) -> torch.nn.Module:
     """Apply DBCache to one transformer with cache-dit's enable_cache."""
+    from xfuser.core.distributed import get_pipeline_parallel_world_size
+
     enable_cache, DBCacheConfig, BlockAdapter, ForwardPattern = _import_cache_dit()
-    _install_sp_can_cache_sync()
+    pipefusion = get_pipeline_parallel_world_size() > 1
 
     routing_transformer = _unwrap_fsdp(transformer)
-    routing_transformer._is_parallelized = _is_parallelized_flag()
+    routing_transformer._is_parallelized = is_parallelized_flag()
 
     if adapter_config is not None:
         enable_separate_cfg = adapter_config.enable_separate_cfg
@@ -101,17 +106,65 @@ def apply_cache_dit_cache(
         enable_separate_cfg=enable_separate_cfg,
         DBCacheConfig=DBCacheConfig,
     )
+    static_pipefusion = (
+        pipefusion
+        and getattr(db_config, "steps_computation_policy", None) == "static"
+        and bool(getattr(db_config, "steps_computation_mask", None))
+    )
+    if static_pipefusion:
+        # A predetermined schedule does not consume adaptive TaylorSeer
+        # decisions. The stage-level fast path installed below caches the full
+        # local residual and skips Fn on reuse steps.
+        calibrator_config = None
+    share_pipefusion_decisions = bool(getattr(db_config, "_xdit_share_pipefusion_decisions", False))
+    if pipefusion and adapter_config is not None:
+        local_block_counts = [
+            len(getattr(routing_transformer, attribute))
+            for attribute, _pattern in adapter_config.blocks
+            if (
+                getattr(routing_transformer, attribute, None) is not None
+                and len(getattr(routing_transformer, attribute)) > 0
+            )
+        ]
+        local_fn_blocks = min(
+            db_config.Fn_compute_blocks,
+            min(local_block_counts),
+        )
+        local_bn_blocks = min(
+            db_config.Bn_compute_blocks,
+            min(max(block_count - local_fn_blocks, 0) for block_count in local_block_counts),
+        )
+        db_config = dataclasses.replace(
+            db_config,
+            Fn_compute_blocks=local_fn_blocks,
+            Bn_compute_blocks=local_bn_blocks,
+        )
+        db_config._xdit_share_pipefusion_decisions = share_pipefusion_decisions
 
     enable_cache_kwargs: Dict[str, Any] = {"cache_config": db_config}
     if calibrator_config is not None:
         enable_cache_kwargs["calibrator_config"] = calibrator_config
     enable_cache(adapter, **enable_cache_kwargs)
+    static_fn_bypass = False
+    if static_pipefusion:
+        static_fn_bypass = install_pipefusion_static_fn_bypass(
+            routing_transformer,
+            db_config,
+        )
+    routing_transformer._xdit_share_pipefusion_decisions = bool(
+        getattr(db_config, "_xdit_share_pipefusion_decisions", False)
+    )
+    install_cache_decision_sync(routing_transformer)
+
+    if pipefusion:
+        install_pipefusion_patch_contexts(routing_transformer)
 
     if _is_rank0():
         calibrator_name = type(calibrator_config).__name__ if calibrator_config else "none"
         logger.info(
             f"Applied dbcache to {type(routing_transformer).__name__}: "
-            f"F{db_config.Fn_compute_blocks}B{db_config.Bn_compute_blocks} "
+            f"F{0 if static_fn_bypass else db_config.Fn_compute_blocks}"
+            f"B{db_config.Bn_compute_blocks} "
             f"threshold={db_config.residual_diff_threshold} "
             f"calibrator={calibrator_name} "
             f"enable_separate_cfg={getattr(db_config, 'enable_separate_cfg', False)}"
@@ -127,8 +180,12 @@ def apply_cache_dit_cache_multi(
     cache_config: Optional[str] = None,
 ) -> None:
     """Apply DBCache to multiple transformers in one coordinated call."""
+    from xfuser.core.distributed import get_pipeline_parallel_world_size
+
+    if get_pipeline_parallel_world_size() > 1:
+        raise ValueError("PipeFusion step caching does not yet support multi-transformer DBCache adapters.")
+
     enable_cache, DBCacheConfig, BlockAdapter, ForwardPattern = _import_cache_dit()
-    _install_sp_can_cache_sync()
 
     from cache_dit import ParamsModifier
 
@@ -143,7 +200,7 @@ def apply_cache_dit_cache_multi(
         transformers.append(transformer)
 
     routing_transformers = [_unwrap_fsdp(transformer) for transformer in transformers]
-    parallelized = _is_parallelized_flag()
+    parallelized = is_parallelized_flag()
     for transformer in routing_transformers:
         transformer._is_parallelized = parallelized
 
@@ -203,6 +260,9 @@ def apply_cache_dit_cache_multi(
     if calibrator_config is not None:
         enable_cache_kwargs["calibrator_config"] = calibrator_config
     enable_cache(adapter, **enable_cache_kwargs)
+    for transformer, config in zip(routing_transformers, configs):
+        transformer._xdit_share_pipefusion_decisions = bool(getattr(config, "_xdit_share_pipefusion_decisions", False))
+        install_cache_decision_sync(transformer)
 
     if _is_rank0():
         calibrator_name = type(calibrator_config).__name__ if calibrator_config else "none"

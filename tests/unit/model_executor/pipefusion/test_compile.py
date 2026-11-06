@@ -6,6 +6,8 @@ import torch
 from xfuser.model_executor.pipefusion.compile import (
     PipeFusionCompileCapture,
     PipeFusionRuntimeSnapshot,
+    pipefusion_recompile_limit,
+    record_pipefusion_stage_calls,
 )
 
 
@@ -172,3 +174,42 @@ def test_runtime_snapshot_restores_temporary_layout():
     assert state.pipeline_patch_idx == 0
     assert state.pp_patches_token_num == [4, 4]
     assert not hasattr(state, "_xdit_pipefusion_layout_fingerprint")
+
+
+def test_record_runs_one_synchronous_step_then_a_patch_step_and_restores_warmup():
+    state = _state()
+    state.runtime_config = SimpleNamespace(warmup_steps=4)
+    component = _Recorder(state)
+    seen = {}
+
+    def run_pipe(num_inference_steps):
+        seen["steps"] = num_inference_steps
+        seen["warmup_steps"] = state.runtime_config.warmup_steps
+        component(torch.ones(1, 8, 4))
+        state.patch_mode = True
+        component(torch.ones(1, 4, 4))
+
+    capture = record_pipefusion_stage_calls({"transformer": component}, state, run_pipe)
+
+    assert seen == {"steps": 2, "warmup_steps": 1}
+    assert len(capture.calls) == 2
+    assert state.runtime_config.warmup_steps == 4
+
+
+def test_record_restores_warmup_when_the_pass_fails():
+    state = _state()
+    state.runtime_config = SimpleNamespace(warmup_steps=4)
+
+    def run_pipe(_num_inference_steps):
+        raise RuntimeError("stop")
+
+    with pytest.raises(RuntimeError, match="stop"):
+        record_pipefusion_stage_calls({"transformer": _Recorder(state)}, state, run_pipe)
+
+    assert state.runtime_config.warmup_steps == 4
+
+
+def test_recompile_limit_falls_back_to_one_patch_per_stage():
+    assert pipefusion_recompile_limit(pp_degree=2, num_patches=None, local_blocks=3) == pipefusion_recompile_limit(
+        pp_degree=2, num_patches=2, local_blocks=3
+    )

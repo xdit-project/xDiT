@@ -27,6 +27,7 @@ from xfuser.core.attention.sparsity.sparge import (
     restore_sparge_output,
 )
 from xfuser.core.attention.spec import AttnCall
+from xfuser.core.distributed.runtime_state import get_runtime_state, runtime_state_is_initialized
 
 from .spec import Fmt, MhaV4Format, Scale
 
@@ -65,13 +66,31 @@ KV_TILE = _read_kv_tile()
 # here, because the kernel module is imported at backend selection -- evaluating
 # it per call would put a signature probe inside the traced region.
 HAS_SEQLENS_K = PARAM("aiter.ops.mha_v4:mha_v4", "seqlens_k").satisfied()
+HAS_KV_SPLITS = PARAM("aiter.ops.mha_v4:mha_v4", "kv_splits").satisfied()
 
 
-def _launch(q, k, v, fmt: MhaV4Format, block_mask=None, seqlens_k=None, return_lse=False):
+def kv_splits_kwargs():
+    """``kv_splits`` for a dense mha_v4 call, from --mha_v4_kv_splits.
+
+    Omitted on an AITER that predates split-KV, where "auto" means unsplit anyway.
+    """
+    splits = 1
+    if runtime_state_is_initialized():
+        splits = get_runtime_state().runtime_config.mha_v4_kv_splits
+    if HAS_KV_SPLITS:
+        return {"kv_splits": splits}
+    if splits not in ("auto", 1):
+        raise NotImplementedError(
+            f"--mha_v4_kv_splits {splits} needs an AITER whose mha_v4 takes kv_splits; please update AITER"
+        )
+    return {}
+
+
+def _launch(q, k, v, fmt: MhaV4Format, block_mask=None, seqlens_k=None, return_lse=False, split_kv=False):
     """One MHA v4 launch. Tensors are BSHD. Returns (output, lse-or-None)."""
-    kwargs = {}
+    kwargs = kv_splits_kwargs() if split_kv else {}
     if fmt.qk_scale is not None:
-        kwargs = {
+        kwargs |= {
             "q_scale_mode": SCALE[fmt.qk_scale],
             "k_scale_mode": SCALE[fmt.qk_scale],
             "v_scale_mode": SCALE[fmt.v_scale],
@@ -233,6 +252,7 @@ def mha_v4_dense(query, key, value, call: AttnCall, *, fmt: MhaV4Format):
         fmt,
         seqlens_k=seqlens_k,
         return_lse=call.ring_world_size > 1,
+        split_kv=True,
     )
     # The kernel writes LSE as [batch, heads, Sq], already the layout the ring
     # merge expects, so only O is permuted back.

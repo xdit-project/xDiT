@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Dict, Iterator, Mapping, Tuple
+from typing import Any, Callable, Dict, Iterator, Mapping, Optional, Tuple
 
 import torch
 
@@ -251,3 +251,78 @@ class PipeFusionCompileCapture:
     def clear(self) -> None:
         self.calls.clear()
         self._signatures.clear()
+
+
+def pipefusion_recompile_limit(pp_degree: int, num_patches: Optional[int], local_blocks: int) -> int:
+    """Return the Dynamo recompile limit one PipeFusion rank's compiled graphs need.
+
+    Dynamo keeps compiled graphs in a cache attached to the Python code object it traces, not
+    to a module instance. ``torch._dynamo.config.recompile_limit`` (8 by default) caps how many
+    entries that cache may hold for one frame. Once the cap is reached, a call whose guards
+    match no entry is not compiled and runs eagerly. Each block in a declared block list gets
+    its own ``torch.compile`` wrapper, but blocks of one class execute the same code, so their
+    specializations all count against one limit.
+
+    Outside PipeFusion each block sees one input shape, and the default limit is enough. A
+    PipeFusion stage calls each local block with the full latent during the synchronous warmup
+    steps, then once per patch. Patch heights can differ, and the KV cache reads the patch mode
+    and patch index from runtime state, so Dynamo specializes every patch separately. One rank
+    can therefore need an entry per local block for the full latent and for each patch, plus a
+    small margin:
+
+        max(2 * num_patches + 4, local_blocks * (num_patches + 1) + 4)
+
+    ``local_blocks`` counts the declared blocks of the compiled components on this rank. The
+    first term is the floor for a stage with no declared block list, where only the bound stage
+    ``forward`` is compiled. An unset patch count falls back to one patch per stage, as
+    ``PipeFusionParallelConfig`` does.
+    """
+    num_patches = num_patches or pp_degree
+    return max(2 * num_patches + 4, max(local_blocks, 1) * (num_patches + 1) + 4)
+
+
+def record_pipefusion_stage_calls(
+    stages: Mapping[str, torch.nn.Module],
+    runtime_state,
+    run_pipe: Callable[[int], None],
+) -> PipeFusionCompileCapture:
+    """Record each stage's eager calls from one short pipeline pass, before any wrapping.
+
+    Replay needs each call signature once: a full-latent call from a synchronous step, then
+    the per-patch calls from an asynchronous step. More synchronous steps would only repeat
+    the full-latent call, so ``runtime_state.runtime_config.warmup_steps`` is capped at one for
+    the pass and restored afterwards. ``run_pipe`` receives the step count to run.
+    """
+    runtime_config = runtime_state.runtime_config
+    configured_warmup_steps = runtime_config.warmup_steps
+    capture_warmup_steps = min(configured_warmup_steps, 1)
+    capture = PipeFusionCompileCapture(stages, runtime_state)
+    runtime_config.warmup_steps = capture_warmup_steps
+    try:
+        with capture.hooks():
+            run_pipe(max(2, capture_warmup_steps + 1))
+    finally:
+        runtime_config.warmup_steps = configured_warmup_steps
+    return capture
+
+
+def replay_pipefusion_stage_calls(capture: PipeFusionCompileCapture, device: torch.device, replica_group) -> None:
+    """Replay the recorded calls on every rank of the replica, then agree on the result.
+
+    Replay is rank-local, so one rank can fail while the others succeed. Every rank gathers
+    the status before continuing, and all of them raise if any failed. The recorded calls are
+    dropped either way.
+    """
+    replica_group.barrier()
+    local_error = None
+    try:
+        capture.replay(device)
+        torch.cuda.synchronize()
+    except Exception as error:
+        local_error = f"{type(error).__name__}: {error}"
+    finally:
+        capture.clear()
+    failures = replica_group.all_gather_object(local_error)
+    if any(failure is not None for failure in failures):
+        details = "; ".join(f"rank {rank}: {failure}" for rank, failure in enumerate(failures) if failure is not None)
+        raise RuntimeError(f"PipeFusion rank-local compile replay failed collectively: {details}")

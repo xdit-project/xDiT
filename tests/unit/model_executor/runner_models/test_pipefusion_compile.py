@@ -4,7 +4,22 @@ import pytest
 import torch
 
 import xfuser.model_executor.models.runner_models.base_model as base_model_module
+import xfuser.model_executor.pipefusion.compile as pipefusion_compile
+from xfuser.core import distributed
+from xfuser.model_executor.cache import (
+    CacheDitAdapterConfig,
+    DBCachePreset,
+    DBCacheSettings,
+)
 from xfuser.model_executor.models.runner_models.base_model import xFuserModel
+
+
+@pytest.fixture(autouse=True)
+def _restore_recompile_limit():
+    # Assigned directly: monkeypatch.setattr deletes this config key on teardown in torch 2.15.
+    original = torch._dynamo.config.recompile_limit
+    yield
+    torch._dynamo.config.recompile_limit = original
 
 
 class _Runner(xFuserModel):
@@ -13,6 +28,11 @@ class _Runner(xFuserModel):
 
     def _run_pipe(self, input_args):
         raise NotImplementedError
+
+
+def _engine_config(num_patches):
+    """The normalized engine config that _compile_model and _enable_compute_comm_overlap read."""
+    return SimpleNamespace(parallel_config=SimpleNamespace(pp_config=SimpleNamespace(num_pipeline_patch=num_patches)))
 
 
 class _Stage(torch.nn.Module):
@@ -28,6 +48,65 @@ class _Stage(torch.nn.Module):
         return hidden_states
 
 
+def test_pipefusion_cache_uses_stage_local_residual_engine(monkeypatch):
+    applied = []
+    settings = DBCacheSettings(
+        adapter=CacheDitAdapterConfig(blocks=(("transformer_blocks", "Pattern_1"),)),
+        preset=DBCachePreset(),
+    )
+    model = object.__new__(_Runner)
+    model.config = SimpleNamespace(
+        cache_method="pipefusion",
+        cache_config=None,
+        num_inference_steps=25,
+    )
+    model.settings = SimpleNamespace(
+        step_cache_config={"dbcache": settings},
+        transformer_attr_names=["transformer"],
+    )
+    model.pipe = SimpleNamespace(transformer=object())
+    monkeypatch.setattr(base_model_module, "get_pipeline_parallel_world_size", lambda: 4)
+    monkeypatch.setattr(base_model_module, "get_data_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(distributed, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(
+        "xfuser.model_executor.cache.adapters.apply_cache",
+        lambda **kwargs: applied.append(kwargs),
+    )
+    monkeypatch.setattr(base_model_module, "log", lambda _message: None)
+
+    model._apply_step_cache()
+
+    assert len(applied) == 1
+    assert applied[0]["cache_method"] == "dbcache"
+    assert applied[0]["preset_kwargs"] is not settings.preset
+    assert applied[0]["preset_kwargs"].share_pipefusion_decisions is True
+    assert settings.preset.share_pipefusion_decisions is False
+    assert applied[0]["adapter_config"] is settings.adapter
+
+
+def test_pipefusion_cache_rejects_multi_transformer_adapter():
+    settings = DBCacheSettings(
+        adapter=[
+            CacheDitAdapterConfig(blocks=(("transformer_blocks", "Pattern_1"),)),
+            CacheDitAdapterConfig(blocks=(("transformer_blocks", "Pattern_1"),)),
+        ],
+        preset=DBCachePreset(),
+    )
+    model = object.__new__(_Runner)
+    model.config = SimpleNamespace(
+        cache_method="pipefusion",
+        cache_config=None,
+        num_inference_steps=25,
+    )
+    model.settings = SimpleNamespace(
+        step_cache_config={"dbcache": settings},
+        transformer_attr_names=["transformer", "transformer_2"],
+    )
+
+    with pytest.raises(ValueError, match="does not yet support multi-transformer"):
+        model._apply_step_cache()
+
+
 def test_pipefusion_compiles_the_bound_stage_forward(monkeypatch):
     transformer = torch.nn.Linear(4, 4)
 
@@ -35,6 +114,7 @@ def test_pipefusion_compiles_the_bound_stage_forward(monkeypatch):
         return value
 
     model = object.__new__(_Runner)
+    model.engine_config = _engine_config(2)
     model.config = SimpleNamespace(
         pipefusion_parallel_degree=2,
         fully_shard_degree=1,
@@ -63,6 +143,7 @@ def test_pipefusion_compiles_stage_local_blocks_when_declared(monkeypatch):
     original_forward = transformer.forward
     original_blocks = list(transformer.transformer_blocks)
     model = object.__new__(_Runner)
+    model.engine_config = _engine_config(2)
     model.config = SimpleNamespace(
         pipefusion_parallel_degree=2,
         fully_shard_degree=1,
@@ -92,6 +173,51 @@ def test_pipefusion_compiles_stage_local_blocks_when_declared(monkeypatch):
     assert transformer.forward == original_forward
 
 
+def test_step_cache_only_forces_target_transformer_blockwise(monkeypatch):
+    transformer = torch.nn.Module()
+    transformer.transformer_blocks = torch.nn.ModuleList([torch.nn.Linear(4, 4)])
+    text_encoder = torch.nn.Linear(4, 4)
+    block = transformer.transformer_blocks[0]
+    model = object.__new__(_Runner)
+    model.config = SimpleNamespace(
+        pipefusion_parallel_degree=1,
+        fully_shard_degree=1,
+        fully_shard_components=None,
+        cache_method="dbcache",
+    )
+    model.pipe = SimpleNamespace(
+        transformer=transformer,
+        text_encoder=text_encoder,
+    )
+    model.settings = SimpleNamespace(
+        transformer_attr_names=["transformer"],
+        fsdp_strategy={
+            "transformer": {"wrap_attrs": ["transformer_blocks"]},
+        },
+    )
+    model._enable_compute_comm_overlap = lambda: None
+    model._get_compile_mode = lambda: "default"
+    model._get_compile_dynamic = lambda: False
+    model._get_compiled_pipe_components = lambda: [
+        "transformer",
+        "text_encoder",
+    ]
+    model._get_compile_warmup_steps = lambda _input_args: None
+    model._prefer_blockwise_compile = lambda: False
+    model._run_compile_warmup = lambda _input_args: None
+    compiled = []
+
+    def compile_candidate(candidate, **_kwargs):
+        compiled.append(candidate)
+        return candidate
+
+    monkeypatch.setattr(torch, "compile", compile_candidate)
+
+    model._compile_model({"num_inference_steps": 4})
+
+    assert compiled == [block, text_encoder]
+
+
 def test_pipefusion_captures_before_wrap_and_replays_before_validation(monkeypatch):
     events = []
     state = SimpleNamespace(
@@ -103,9 +229,11 @@ def test_pipefusion_captures_before_wrap_and_replays_before_validation(monkeypat
         pp_patches_token_num=[1],
         pp_patches_token_start_idx_local=[0, 1],
         pp_patches_token_start_end_idx_global=[[0, 1]],
+        runtime_config=SimpleNamespace(warmup_steps=1),
     )
     transformer = _Stage(events)
     model = object.__new__(_Runner)
+    model.engine_config = _engine_config(2)
     model.config = SimpleNamespace(
         pipefusion_parallel_degree=2,
         fully_shard_degree=1,
@@ -114,7 +242,6 @@ def test_pipefusion_captures_before_wrap_and_replays_before_validation(monkeypat
     )
     model.pipe = SimpleNamespace(transformer=transformer)
     model.settings = SimpleNamespace(fsdp_strategy={"transformer": {"wrap_attrs": ["transformer_blocks"]}})
-    model.engine_config = SimpleNamespace(runtime_config=SimpleNamespace(warmup_steps=1))
     model._enable_compute_comm_overlap = lambda: None
     model._get_compile_mode = lambda: "default"
     model._get_compile_dynamic = lambda _input_args=None: False
@@ -171,9 +298,11 @@ def test_pipefusion_compile_replay_failure_is_raised_collectively(monkeypatch):
         pp_patches_token_num=[1],
         pp_patches_token_start_idx_local=[0, 1],
         pp_patches_token_start_end_idx_global=[[0, 1]],
+        runtime_config=SimpleNamespace(warmup_steps=1),
     )
     transformer = _Stage(events)
     model = object.__new__(_Runner)
+    model.engine_config = _engine_config(2)
     model.config = SimpleNamespace(
         pipefusion_parallel_degree=2,
         fully_shard_degree=1,
@@ -182,7 +311,6 @@ def test_pipefusion_compile_replay_failure_is_raised_collectively(monkeypatch):
     )
     model.pipe = SimpleNamespace(transformer=transformer)
     model.settings = SimpleNamespace(fsdp_strategy={"transformer": {"wrap_attrs": ["transformer_blocks"]}})
-    model.engine_config = SimpleNamespace(runtime_config=SimpleNamespace(warmup_steps=1))
     model._enable_compute_comm_overlap = lambda: None
     model._get_compile_mode = lambda: "default"
     model._get_compile_dynamic = lambda _input_args=None: False
@@ -214,7 +342,7 @@ def test_pipefusion_compile_replay_failure_is_raised_collectively(monkeypatch):
         lambda candidate, **_kwargs: candidate,
     )
     monkeypatch.setattr(
-        base_model_module.PipeFusionCompileCapture,
+        pipefusion_compile.PipeFusionCompileCapture,
         "replay",
         lambda *_args, **_kwargs: None,
     )
@@ -226,12 +354,64 @@ def test_pipefusion_compile_replay_failure_is_raised_collectively(monkeypatch):
     assert events == ["stage", "reset", "reset"]
 
 
+def _blocks_only_runner(pp_degree, num_patches, num_blocks):
+    model = object.__new__(_Runner)
+    model.config = SimpleNamespace(
+        pipefusion_parallel_degree=pp_degree,
+        num_pipeline_patch=num_patches,
+        fully_shard_degree=1,
+        fully_shard_components=None,
+        cache_method=None,
+    )
+    model.engine_config = _engine_config(num_patches)
+    model.pipe = SimpleNamespace(transformer=SimpleNamespace(transformer_blocks=[object() for _ in range(num_blocks)]))
+    model.settings = SimpleNamespace(fsdp_strategy={"transformer": {"wrap_attrs": ["transformer_blocks"]}})
+    model._enable_compute_comm_overlap = lambda: None
+    model._get_compile_mode = lambda: "default"
+    model._get_compile_dynamic = lambda _input_args=None: False
+    model._get_compiled_pipe_components = lambda: ["transformer"]
+    model._get_compile_warmup_steps = lambda _input_args: None
+    model._run_compile_warmup = lambda _input_args: None
+    return model
+
+
+def test_pipefusion_compile_leaves_recompile_limit_raised_for_every_local_block(monkeypatch):
+    model = _blocks_only_runner(pp_degree=4, num_patches=4, num_blocks=15)
+    monkeypatch.setattr(base_model_module, "runtime_state_is_initialized", lambda: False)
+    monkeypatch.setattr(torch, "compile", lambda candidate, **_kwargs: candidate)
+    torch._dynamo.config.recompile_limit = 8
+
+    model._compile_model({})
+
+    # Step-cache adapters are installed after compile and trace their graphs during run().
+    assert torch._dynamo.config.recompile_limit > 8
+
+
+def test_pipefusion_compile_keeps_a_higher_recompile_limit(monkeypatch):
+    model = _blocks_only_runner(pp_degree=4, num_patches=4, num_blocks=15)
+    monkeypatch.setattr(base_model_module, "runtime_state_is_initialized", lambda: False)
+    monkeypatch.setattr(torch, "compile", lambda candidate, **_kwargs: candidate)
+    torch._dynamo.config.recompile_limit = 1000
+
+    model._compile_model({})
+
+    assert torch._dynamo.config.recompile_limit == 1000
+
+
+def test_compile_without_pipefusion_leaves_recompile_limit_alone(monkeypatch):
+    model = _blocks_only_runner(pp_degree=1, num_patches=1, num_blocks=15)
+    monkeypatch.setattr(torch, "compile", lambda candidate, **_kwargs: candidate)
+    torch._dynamo.config.recompile_limit = 8
+
+    model._compile_model({})
+
+    assert torch._dynamo.config.recompile_limit == 8
+
+
 def test_pipefusion_raises_recompile_limit_for_patch_specializations(monkeypatch):
     model = object.__new__(_Runner)
     model.config = SimpleNamespace(num_pipeline_patch=8)
-    model.engine_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(pp_config=SimpleNamespace(num_pipeline_patch=8))
-    )
+    model.engine_config = _engine_config(8)
     monkeypatch.setattr(base_model_module, "get_pipeline_parallel_world_size", lambda: 8)
     # Assign directly. monkeypatch.setattr deletes a torch config on undo because
     # the value is not stored in the module ``__dict__``, and that hides
@@ -248,9 +428,7 @@ def test_pipefusion_raises_recompile_limit_for_patch_specializations(monkeypatch
 def test_pipefusion_uses_normalized_engine_patch_count_when_cli_value_is_none(monkeypatch):
     model = object.__new__(_Runner)
     model.config = SimpleNamespace(num_pipeline_patch=None)
-    model.engine_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(pp_config=SimpleNamespace(num_pipeline_patch=4))
-    )
+    model.engine_config = _engine_config(4)
     monkeypatch.setattr(base_model_module, "get_pipeline_parallel_world_size", lambda: 4)
     previous_recompile_limit = torch._dynamo.config.recompile_limit
     torch._dynamo.config.recompile_limit = 8

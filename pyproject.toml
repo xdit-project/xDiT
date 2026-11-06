@@ -54,6 +54,7 @@ test = [
     "pytest-timeout",
     "imageio",
     "imageio-ffmpeg",
+    "xfuser[cache-dit]",  # NOTE: unit tests drive Cache-DiT's context manager
 ]
 
 [project.scripts]

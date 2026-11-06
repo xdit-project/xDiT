@@ -44,3 +44,23 @@ def test_wan21_t2v_1_3b_rejects_ulysses_degree_that_splits_a_head():
 
 def test_wan21_t2v_14b_keeps_accepting_ulysses_degree_8():
     _build("Wan2.1-T2V", ulysses_degree=8)
+
+
+@pytest.mark.parametrize("model_name", ["Wan2.2-T2V", "Wan2.1-I2V", "Wan2.2-I2V"])
+def test_attention_a2a_is_enabled_for_validated_wan_runners(model_name):
+    _build(
+        model_name,
+        ulysses_degree=8,
+        attention_backend="aiter_fp8",
+        attention_a2a="auto",
+    )
+
+
+def test_attention_a2a_is_rejected_for_unvalidated_wan_runners():
+    with pytest.raises(ValueError, match="does not support --attention_a2a"):
+        _build(
+            "Wan2.1-T2V",
+            ulysses_degree=8,
+            attention_backend="aiter_fp8",
+            attention_a2a="auto",
+        )

@@ -30,7 +30,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # used in distributed environment to determine the master address
     "MASTER_ADDR": lambda: os.getenv("MASTER_ADDR", ""),
     # used in distributed environment to manually set the communication port
-    "MASTER_PORT": lambda: (int(os.getenv("MASTER_PORT", "0")) if "MASTER_PORT" in os.environ else None),
+    "MASTER_PORT": lambda: int(os.getenv("MASTER_PORT", "0")) if "MASTER_PORT" in os.environ else None,
     # path to cudatoolkit home directory, under which should be bin, include,
     # and lib directories.
     "CUDA_HOME": lambda: os.environ.get("CUDA_HOME", None),
@@ -220,7 +220,7 @@ class PackagesEnvChecker:
         """
         if not torch.cuda.is_available():
             return False
-        if not self._on_mi3xx() and not self._on_rdna4():
+        if not self._on_mi3xx() and not self._on_rdna4() and not self._on_gfx1250():
             return False
         try:
             import aiter
@@ -388,6 +388,11 @@ class PackagesEnvChecker:
         device = torch.cuda.current_device()
         gcn_arch_name = torch.cuda.get_device_properties(device).gcnArchName
         return any(arch in gcn_arch_name for arch in ["gfx1200", "gfx1201"])
+
+    def _on_gfx1250(self):
+        device = torch.cuda.current_device()
+        gcn_arch_name = torch.cuda.get_device_properties(device).gcnArchName
+        return "gfx1250" in gcn_arch_name
 
 
 PACKAGES_CHECKER = PackagesEnvChecker()

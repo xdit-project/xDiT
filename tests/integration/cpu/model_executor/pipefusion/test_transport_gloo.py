@@ -31,15 +31,17 @@ def _worker(rank, init_method, result_queue):
         group_coordinator.synchronize = lambda: None
         group = group_coordinator.PipelineGroupCoordinator([[0, 1]], rank, "gloo")
         group.set_config(torch.float32)
+        group.set_pipeline_tensor_chunk_bytes("latent", 4)
         seen = []
 
         def prepare(work, _timestep, received):
             if rank == 0 and received is None:
-                return torch.tensor(float(work.patch_index + 1))
+                value = float(work.patch_index + 1)
+                return torch.tensor([value, value])
             return received
 
         def forward(work, _timestep, prepared):
-            seen.append((work.step_index, work.patch_index, prepared.item()))
+            seen.append((work.step_index, work.patch_index, prepared.tolist()))
             return prepared + (10 if rank == 0 else 100)
 
         def commit(work, _timestep, output):
@@ -103,14 +105,14 @@ def test_circular_transport_completes_without_hanging(tmp_path):
     assert all(result[0] == "ok" for result in results), results
     seen = {rank: values for _, rank, values in results}
     assert seen[0] == (
-        (0, 0, 1.0),
-        (0, 1, 2.0),
-        (1, 0, 111.0),
-        (1, 1, 112.0),
+        (0, 0, [1.0, 1.0]),
+        (0, 1, [2.0, 2.0]),
+        (1, 0, [111.0, 111.0]),
+        (1, 1, [112.0, 112.0]),
     )
     assert seen[1] == (
-        (0, 0, 11.0),
-        (0, 1, 12.0),
-        (1, 0, 121.0),
-        (1, 1, 122.0),
+        (0, 0, [11.0, 11.0]),
+        (0, 1, [12.0, 12.0]),
+        (1, 0, [121.0, 121.0]),
+        (1, 1, [122.0, 122.0]),
     )

@@ -79,3 +79,43 @@ def test_nonzero_churn_honors_sigma_bounds(monkeypatch):
     out_of_bounds = step_with_bounds(float("inf"))
 
     assert not torch.allclose(in_bounds, out_of_bounds)
+
+
+def test_patch_steps_match_full_flow_match_step(monkeypatch):
+    state = SimpleNamespace(
+        patch_mode=True,
+        pipeline_patch_idx=0,
+        num_pipeline_patch=2,
+    )
+    monkeypatch.setattr(flow_match, "get_runtime_state", lambda: state)
+    reference = FlowMatchEulerDiscreteScheduler()
+    wrapped = xFuserFlowMatchEulerDiscreteSchedulerWrapper(FlowMatchEulerDiscreteScheduler())
+    reference.set_timesteps(4)
+    wrapped.set_timesteps(4)
+    generator = torch.Generator().manual_seed(7)
+    full_sample = torch.randn((1, 4, 4, 2), generator=generator)
+    patch_samples = list(full_sample.chunk(2, dim=2))
+
+    for timestep in reference.timesteps:
+        model_output = torch.randn(full_sample.shape, generator=generator)
+        expected = reference.step(
+            model_output,
+            timestep,
+            full_sample,
+        ).prev_sample
+        patch_outputs = model_output.chunk(2, dim=2)
+        updated_patches = []
+        for patch_index, (patch_output, patch_sample) in enumerate(zip(patch_outputs, patch_samples)):
+            state.pipeline_patch_idx = patch_index
+            updated_patches.append(
+                wrapped.step.__wrapped__(
+                    wrapped,
+                    patch_output,
+                    timestep,
+                    patch_sample,
+                ).prev_sample
+            )
+        full_sample = expected
+        patch_samples = updated_patches
+        torch.testing.assert_close(torch.cat(patch_samples, dim=2), full_sample)
+        assert wrapped.step_index == reference.step_index

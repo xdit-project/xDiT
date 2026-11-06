@@ -44,3 +44,22 @@ def test_short_request_does_not_shrink_warmup_of_later_requests(state, request_f
         warmup_seen.append(state.runtime_config.warmup_steps)
 
     assert warmup_seen == [4, 4, 4]
+
+
+def test_z_image_pipeline_uses_scalar_patch_size():
+    pipeline_type = type("xFuserZImagePipeFusionPipeline", (), {})
+    pipeline = pipeline_type()
+    pipeline.vae_scale_factor = 8
+    pipeline.transformer = SimpleNamespace(
+        config=SimpleNamespace(
+            all_patch_size=(2,),
+            in_channels=16,
+            n_heads=30,
+            axes_dims=(32, 48, 48),
+        )
+    )
+    state = DiTRuntimeState.__new__(DiTRuntimeState)
+
+    state._check_pipeline_class_name(pipeline, config=None)
+
+    assert state.backbone_patch_size == 2

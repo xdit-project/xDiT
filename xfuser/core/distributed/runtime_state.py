@@ -137,6 +137,10 @@ class RuntimeState(metaclass=ABCMeta):
     def __init__(self, config: EngineConfig):
         self.parallel_config = config.parallel_config
         self.runtime_config = config.runtime_config
+        # Imported here: the USP layer imports this module.
+        from xfuser.model_executor.layers import usp_sdma
+
+        usp_sdma.configure_from(self.runtime_config)
         self.input_config = InputConfig()
         self.num_pipeline_patch = self.parallel_config.pp_config.num_pipeline_patch
         self.ready = False

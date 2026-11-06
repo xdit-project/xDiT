@@ -92,3 +92,53 @@ def test_marking_a_component_twice_leaves_one_marker():
     model._mark_cudagraph_steps(transformer)
 
     assert len(transformer._forward_pre_hooks) == 1
+
+
+@pytest.mark.parametrize(
+    "requested,ulysses_degree,expected",
+    [
+        ("reduce-overhead", 8, "default"),
+        ("max-autotune", 8, "max-autotune-no-cudagraphs"),
+        ("reduce-overhead", 1, "reduce-overhead"),
+    ],
+)
+def test_sdma_ulysses_compiles_without_cuda_graphs(monkeypatch, requested, ulysses_degree, expected):
+    """SDMA copies are issued from the host, so a captured graph would replay RCCL instead."""
+    from xfuser.model_executor.layers import usp_sdma
+    from xfuser.model_executor.models.runner_models import base_model
+
+    monkeypatch.setattr(base_model, "get_ulysses_parallel_world_size", lambda: ulysses_degree)
+    previous = usp_sdma.configure("sdma", 2)
+    try:
+        model, transformer = _model(requested, fully_shard_degree=8)
+        assert model._compile_mode() == expected
+        if requested == "reduce-overhead":
+            model._compile_model({"num_inference_steps": 4})
+            assert getattr(transformer, "_xfuser_marks_cudagraph_steps", False) == (expected == "reduce-overhead")
+    finally:
+        usp_sdma.configure(*previous)
+
+
+@pytest.mark.parametrize(
+    "offload,prepared",
+    [(None, True), ("enable_model_cpu_offload", False), ("enable_group_cpu_offload", False)],
+)
+def test_grouped_qkv_weights_are_not_made_under_cpu_offload(monkeypatch, offload, prepared):
+    """Offload hooks set up before the copies would never move them to the device."""
+    from xfuser.model_executor.layers import usp_sdma
+    from xfuser.model_executor.models.runner_models import base_model
+
+    monkeypatch.setattr(base_model, "get_ulysses_parallel_world_size", lambda: 8)
+    calls, logged = [], []
+    monkeypatch.setattr(usp_sdma, "prepare_grouped_qkv", lambda component, world: calls.append(world) or 1)
+    monkeypatch.setattr(base_model, "log", lambda message, **kwargs: logged.append(message))
+    previous = usp_sdma.configure("sdma", 2, overlap_qkv=True)
+    try:
+        model, _ = _model("default", fully_shard_degree=1)
+        for flag in ("enable_model_cpu_offload", "enable_sequential_cpu_offload", "enable_group_cpu_offload"):
+            setattr(model.config, flag, flag == offload)
+        model._prepare_grouped_qkv()
+        assert calls == ([8] if prepared else [])
+        assert any("ignored with CPU offload" in m for m in logged) == (not prepared)
+    finally:
+        usp_sdma.configure(*previous)

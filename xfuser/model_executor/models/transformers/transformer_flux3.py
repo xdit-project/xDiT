@@ -16,7 +16,8 @@ from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
 )
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
-from xfuser.model_executor.layers.usp import USP, attention
+from xfuser.model_executor.layers import usp_sdma
+from xfuser.model_executor.layers.usp import PROCESS_GROUP, USP, attention
 from xfuser.model_executor.models.transformers.transformers_utils import (
     chunk_and_pad_sequence,
     gather_and_unpad,
@@ -33,6 +34,10 @@ class xFuserFlux3AttnProcessor:
     every rank holds the whole stream, so attention runs without collectives.
     """
 
+    # Q/K/V may be projected one head group at a time (usp_sdma.grouped_qkv_attention): the QK
+    # norm and RoPE act per head.
+    grouped_qkv = True
+
     def __init__(self):
         self.valid_kv_len: Optional[int] = None
         self.local = False
@@ -47,20 +52,36 @@ class xFuserFlux3AttnProcessor:
         if attention_mask is not None:
             raise NotImplementedError("FLUX.3 attention takes no mask.")
 
+        def norm_rope(query, key, value):
+            # QK norm and RoPE in fp32 with one cast back, as upstream.
+            query = attn.norm_q(query.float())
+            key = attn.norm_k(key.float())
+            if image_rotary_emb is not None:
+                query = apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
+                key = apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
+            return query.to(value.dtype), key.to(value.dtype), value
+
+        attention_kwargs = None if self.valid_kv_len is None else {"valid_kv_len": self.valid_kv_len}
+        if not self.local and usp_sdma.overlap_qkv():
+            grouped = usp_sdma.grouped_qkv_attention(
+                attn,
+                hidden_states,
+                norm_rope,
+                backend=None,
+                attention_kwargs=attention_kwargs,
+                group=PROCESS_GROUP.ULYSSES_PG,
+            )
+            if grouped is not None:
+                hidden_states = grouped.transpose(1, 2).flatten(2, 3).to(hidden_states.dtype)
+                hidden_states = attn.to_out[0](hidden_states)
+                return attn.to_out[1](hidden_states)
+
         query, key, value = _get_qkv_projections(attn, hidden_states)
 
         query = query.unflatten(-1, (attn.heads, -1))
         key = key.unflatten(-1, (attn.heads, -1))
         value = value.unflatten(-1, (attn.heads, -1))
-
-        # QK norm and RoPE in fp32 with one cast back, as upstream.
-        query = attn.norm_q(query.float())
-        key = attn.norm_k(key.float())
-
-        if image_rotary_emb is not None:
-            query = apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
-            key = apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
-        query, key = query.to(value.dtype), key.to(value.dtype)
+        query, key, value = norm_rope(query, key, value)
 
         query = query.transpose(1, 2)
         key = key.transpose(1, 2)
@@ -69,7 +90,6 @@ class xFuserFlux3AttnProcessor:
         if self.local:
             hidden_states = attention(query, key, value)
         else:
-            attention_kwargs = None if self.valid_kv_len is None else {"valid_kv_len": self.valid_kv_len}
             hidden_states = USP(
                 query, key, value, attn_layer=attn, attention_kwargs=attention_kwargs, combine_qkv_a2a=True
             )

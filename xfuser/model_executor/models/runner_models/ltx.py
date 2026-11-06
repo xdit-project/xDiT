@@ -229,7 +229,7 @@ class xFuserLTX23VideoModel(xFuserModel):
 
     def _compile_model(self, input_args: dict) -> None:
         super()._enable_compute_comm_overlap()
-        self.pipe.transformer.compile_repeated_blocks(mode=self._get_compile_mode())
+        self.pipe.transformer.compile_repeated_blocks(mode=self._compile_mode())
 
         # two steps to warmup the torch compiler
         compile_args = copy.deepcopy(input_args)
@@ -399,7 +399,7 @@ class xFuserLTX2VideoModel(xFuserModel):
 
     def _compile_model(self, input_args: dict) -> None:
         super()._enable_compute_comm_overlap()
-        self.pipe.transformer.compile_repeated_blocks(mode=self._get_compile_mode())
+        self.pipe.transformer.compile_repeated_blocks(mode=self._compile_mode())
 
         # two steps to warmup the torch compiler
         compile_args = copy.deepcopy(input_args)
@@ -714,7 +714,7 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
         if hasattr(self.pipe.transformer, "compile_repeated_blocks"):
             # xFuser wrapper: compiles each block; the wrapper forward adds
             # .clone() between calls to prevent pytorch#152887 CUDAGraph aliasing.
-            self.pipe.transformer.compile_repeated_blocks(mode=self._get_compile_mode())
+            self.pipe.transformer.compile_repeated_blocks(mode=self._compile_mode())
             # Register a pre-hook so the CUDAGraph system gets a step-boundary
             # signal before EVERY transformer forward (not just before the pipe
             # call).  The denoising loop calls the transformer once per step

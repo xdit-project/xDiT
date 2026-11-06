@@ -789,7 +789,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
             raise ValueError("MiniMax-H3 is guidance-distilled and does not accept a negative prompt.")
 
     def _compile_model(self, input_args: dict) -> None:
-        mode = self._get_compile_mode()
+        mode = self._compile_mode()
         vae = getattr(self.pipe, "vae", None)
         if vae is not None:
             vae.compile_repeated_blocks(mode=mode, fullgraph=False)
@@ -1195,7 +1195,7 @@ class xFuserVDNMiniMaxH3Model(xFuserMiniMaxH3Model):
         # The blocks do no device-value reads, so each repeated block compiles as
         # one full graph. Compiling transformer.forward instead puts all blocks in
         # one graph, which compiled 2.3x slower and ran slower on 8x MI355X.
-        mode = self._get_compile_mode()
+        mode = self._compile_mode()
         vae = getattr(self.pipe, "vae", None)
         if vae is not None:
             vae.compile_repeated_blocks(mode=mode, fullgraph=False)

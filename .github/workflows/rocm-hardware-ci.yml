@@ -17,6 +17,11 @@ on:
         description: 'AMD-AGI branch or release tag used as the image build context'
         required: false
         default: 'main'
+      downstream_configs:
+        description: 'Use downstream benchmark configurations'
+        type: boolean
+        required: false
+        default: false
       original_run_id:
         description: 'Automatic retry only; leave empty'
         required: false
@@ -38,6 +43,7 @@ permissions:
   contents: read
   actions: write
   issues: write
+  pull-requests: write
 
 jobs:
   wait:
@@ -57,6 +63,7 @@ jobs:
       BENCHMARKS: ${{ inputs.benchmarks }}
       ARCHITECTURES: ${{ inputs.architectures }}
       AMD_REF: ${{ inputs.amd_ref }}
+      DOWNSTREAM_CONFIGS: ${{ inputs.downstream_configs && 'true' || 'false' }}
       PR_NUMBER: ${{ github.event.issue.number || inputs.pr_number }}
     steps:
       - name: Checkout trusted comment parser
@@ -119,6 +126,10 @@ jobs:
             echo "::error::Invalid AMD ref: '${AMD_REF}'"
             exit 1
           fi
+          if [[ "$DOWNSTREAM_CONFIGS" != true && "$DOWNSTREAM_CONFIGS" != false ]]; then
+            echo "::error::downstream_configs must be true or false."
+            exit 1
+          fi
 
           echo "WAIT_DEADLINE=$(( $(date +%s) + 21000 ))" >> "$GITHUB_ENV"
           echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
@@ -141,7 +152,8 @@ jobs:
             --arg architectures "$ARCHITECTURES" \
             --arg amd_ref "$AMD_REF" \
             --arg xdit_sha "${XDIT_SHA:-$GITHUB_SHA}" \
-            '{benchmarks: $benchmarks, architectures: $architectures, amd_ref: $amd_ref, xdit_sha: $xdit_sha}' > request/request.json
+            --argjson downstream_configs "$DOWNSTREAM_CONFIGS" \
+            '{benchmarks: $benchmarks, architectures: $architectures, amd_ref: $amd_ref, xdit_sha: $xdit_sha, use_xdit_configs: ($downstream_configs | not)}' > request/request.json
 
       - name: Upload request metadata
         if: github.event_name == 'issue_comment' || inputs.original_run_id == ''
@@ -211,6 +223,7 @@ jobs:
             -f 'inputs[benchmarks]='"$BENCHMARKS" \
             -f 'inputs[architectures]='"$ARCHITECTURES" \
             -f 'inputs[amd_ref]='"$AMD_REF" \
+            -F 'inputs[downstream_configs]='"$DOWNSTREAM_CONFIGS" \
             -f 'inputs[original_run_id]='"$ORIGINAL_RUN_ID" \
             -f 'inputs[continuation_count]='"$next_continuation" \
             -f 'inputs[pr_number]='"$PR_NUMBER"

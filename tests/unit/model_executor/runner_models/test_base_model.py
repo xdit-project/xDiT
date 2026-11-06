@@ -1,5 +1,6 @@
 import json
 import logging
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -197,6 +198,44 @@ def test_the_head_dim_refusal_names_fallback_or_a_hard_stop():
 
     with pytest.raises(ValueError, match="would be refused"):
         base_model._validate_attention_head_dims(model, _HeadDimConfig("AITER_FP8_SPARGE"))
+
+
+def _block_size_config(**kwargs):
+    return xFuserArgs(model="m", sparseattn_block_size=(64, 64), **kwargs)
+
+
+@pytest.fixture
+def checked_tiles(monkeypatch):
+    """Stand in for the AITER kernel module, which reads the GPU's manifest, and record its checks."""
+    checked = []
+    kernel = SimpleNamespace(check_sparse_block_size=lambda fmt, block_size: checked.append((fmt.name, block_size)))
+    monkeypatch.setitem(sys.modules, "xfuser.core.attention.backends.aiter_mha_v4.kernel", kernel)
+    return checked
+
+
+def test_a_block_size_is_checked_against_each_mha_v4_sparge_row_the_run_can_reach(checked_tiles):
+    config = _block_size_config(
+        use_hybrid_attn_schedule=True,
+        hybrid_attn_schedule="AITER_FP8_SPARGE,AITER_BF16,AITER_BF16_SPARGE",
+    )
+
+    base_model._validate_sparseattn_block_size(config)
+
+    assert checked_tiles == [("FP8", (64, 64)), ("BF16", (64, 64))]
+
+
+def test_a_block_size_leaves_a_dense_cross_attention_backend_alone(checked_tiles):
+    config = _block_size_config(attention_backend="AITER_BF16_SPARGE", cross_attention_backend="AITER_BF16")
+
+    base_model._validate_sparseattn_block_size(config)
+
+    assert checked_tiles == [("BF16", (64, 64))]
+
+
+@pytest.mark.parametrize("backend", ["AITER_BF16", "FLEX_BLOCK_SPARGE"])
+def test_a_block_size_without_an_mha_v4_sparge_backend_is_refused(checked_tiles, backend):
+    with pytest.raises(ValueError, match="applies only to the AITER MHA v4 Sparge"):
+        base_model._validate_sparseattn_block_size(_block_size_config(attention_backend=backend))
 
 
 def _gather_dp_outputs(monkeypatch, *, dp_degree, legacy_pipe, rank=0, sp_rank=0):

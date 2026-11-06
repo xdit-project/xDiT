@@ -412,7 +412,10 @@ class xFuserFlux2PipelineBase(xFuserPipelineBaseWrapper):
                 latents = process_latents(latents)
                 image_out = self.vae.decode(latents, return_dict=False)[0]
 
-        if is_dp_last_group():
+        # The wrapper method, not the distributed helper. With a parallel VAE the
+        # helper stays on the last pipeline stage, while the runner gathers the image
+        # from the rank this method names (rank 0).
+        if self.is_dp_last_group():
             if output_type == "latent":
                 image_out = latents
             elif image_out is not None:

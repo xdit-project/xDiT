@@ -409,11 +409,10 @@ class xFuserArgs:
                     stacklevel=2,
                 )
                 self.cache_method = "teacache"
-        if self.pipefusion_parallel_degree > 1 and self.cache_method is not None:
-            raise ValueError(
-                "Step caching is not supported with PipeFusion yet; it requires per-patch histories "
-                "and synchronized cache decisions."
-            )
+        if self.pipefusion_parallel_degree > 1 and self.cache_method is not None and self.cache_method != "pipefusion":
+            raise ValueError(f"PipeFusion step caching requires --cache_method pipefusion; got {self.cache_method!r}.")
+        if self.cache_method == "pipefusion" and self.pipefusion_parallel_degree <= 1:
+            raise ValueError("--cache_method pipefusion requires --pipefusion_parallel_degree greater than 1.")
 
     def _resolve_attention_a2a(self) -> None:
         config = AttentionA2AConfig(
@@ -640,7 +639,7 @@ class xFuserArgs:
             "--cache_method",
             type=str,
             default=None,
-            choices=["teacache", "fbcache", "dbcache"],
+            choices=["teacache", "fbcache", "dbcache", "pipefusion"],
             help="Step caching method.",
         )
         runtime_group.add_argument(
@@ -1556,7 +1555,7 @@ class xFuserArgs:
             "--cache_method",
             type=str,
             default=None,
-            choices=["teacache", "fbcache", "dbcache"],
+            choices=["teacache", "fbcache", "dbcache", "pipefusion"],
             help="Step caching method.",
         )
         parser.add_argument(

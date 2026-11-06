@@ -193,6 +193,7 @@ class xFuserWan21I2VModel(xFuserWanModel):
         enable_tiling=True,
         enable_slicing=True,
         supports_step_caching=True,
+        supports_attention_a2a=True,
     )
     default_input_values = DefaultInputValues(
         height=720,

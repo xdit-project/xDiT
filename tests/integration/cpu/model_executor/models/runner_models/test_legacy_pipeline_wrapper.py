@@ -20,7 +20,9 @@ _PROMPTS = ["a", "b", "c", "d"]
 def _tiny_vae():
     import torch
     from diffusers import AutoencoderKL
+    from xfuser import envs
 
+    envs.restore_torch_group_norm_for_distvae()
     torch.manual_seed(0)
     return AutoencoderKL(
         block_out_channels=(32,),

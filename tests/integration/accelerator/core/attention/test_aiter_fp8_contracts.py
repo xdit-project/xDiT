@@ -106,7 +106,7 @@ def test_a_declared_trailing_pad_is_sliced_onto_mha_v4(fp8_kernel, monkeypatch):
     attention on the much faster dense MHA v4 one."""
     calls = {}
 
-    def mha_v4(query, key, value, *formats):
+    def mha_v4(query, key, value, *formats, **kwargs):
         calls.update(query=query, key=key, value=value)
         return query
 
@@ -195,7 +195,7 @@ def test_mha_v4_path_hands_over_unrotated_qk(fp8_kernel, monkeypatch):
     would apply the rotation twice."""
     calls = {}
 
-    def mha_v4(query, key, value, *formats):
+    def mha_v4(query, key, value, *formats, **kwargs):
         calls.update(query=query, key=key, formats=formats)
         return query
 

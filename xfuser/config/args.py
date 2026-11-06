@@ -145,6 +145,21 @@ def _normalize_determinism_check_report_ranks(value: str) -> frozenset[int]:
     return ranks
 
 
+def _normalize_mha_v4_kv_splits(value: Union[str, int]) -> Union[str, int]:
+    """Resolve ``auto`` or a positive split count, given as text or an int."""
+    if value == "auto":
+        return value
+    if isinstance(value, str) and value.isdecimal():
+        splits = int(value)
+    elif isinstance(value, int) and not isinstance(value, bool):
+        splits = value
+    else:
+        splits = 0
+    if splits < 1:
+        raise ValueError(f"--mha_v4_kv_splits must be 'auto' or a positive integer, got {value!r}")
+    return splits
+
+
 def _add_gemm_profile_args(parser) -> None:
     parser.add_argument(
         "--gemm_quantization",
@@ -269,6 +284,7 @@ class xFuserArgs:
     shard_t5_encoder: bool = False
     attention_backend: Optional[str] = None
     cross_attention_backend: Optional[str] = None
+    mha_v4_kv_splits: Union[str, int] = 1
     gemm_quantization: Union[GemmQuantizationSpec, str, None] = None
     gemm_config: Optional[str] = None
     use_int8_gemms: bool = False
@@ -365,6 +381,7 @@ class xFuserArgs:
             self.determinism_check_report_ranks
         )
         self._resolve_attention_a2a()
+        self.mha_v4_kv_splits = _normalize_mha_v4_kv_splits(self.mha_v4_kv_splits)
         if self.warmup_steps < 0:
             raise ValueError("--warmup_steps must be greater than or equal to 0")
         if self.pipefusion_parallel_degree > 1 and self.warmup_steps < 1:
@@ -983,6 +1000,19 @@ class xFuserArgs:
             type=str,
             default=None,
             help="Attention backend to use for cross-attention. If not specified, falls back to --attention_backend.",
+        )
+        parser.add_argument(
+            "--mha_v4_kv_splits",
+            type=str,
+            default="1",
+            help=(
+                "Key ranges a dense AITER MHA v4 call is split into and merged by their LSE, which fills "
+                "the GPU when few heads per rank leave it idle (e.g. high Ulysses degrees). 1 (default) "
+                "never splits. 'auto' lets AITER pick per shape and runs unsplit wherever it cannot split "
+                "(MX formats, packed keys, gfx942); each split costs host time, so it pays off with "
+                "--use_torch_compile and slows eager runs. A larger count is passed as is and AITER "
+                "refuses calls it cannot serve."
+            ),
         )
         _add_attention_a2a_args(parser)
         parser.add_argument(
@@ -1702,6 +1732,7 @@ class xFuserArgs:
             use_fp8_t5_encoder=self.use_fp8_t5_encoder,
             attention_backend=self.attention_backend,
             cross_attention_backend=self.cross_attention_backend,
+            mha_v4_kv_splits=self.mha_v4_kv_splits,
             spargeattn_reorder_sequence=self.spargeattn_reorder_sequence,
             use_spargeattn_static_block_mask=self.use_spargeattn_static_block_mask,
             spargeattn_simthreshold=self.spargeattn_simthreshold,

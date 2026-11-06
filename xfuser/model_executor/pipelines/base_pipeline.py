@@ -652,6 +652,19 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             self._validate_pipefusion_async_callback(callback_on_step_end)
         return run_async
 
+    def _pipefusion_handoff_sync_latents(self, latents):
+        """Broadcast the final synchronous latent before entering patch mode."""
+        pp_world_size = get_pipeline_parallel_world_size()
+        if pp_world_size == 1:
+            return latents
+        group = get_pp_group()
+        source = pp_world_size - 1
+        metadata = (tuple(latents.shape), latents.dtype) if is_pipeline_last_stage() else None
+        shape, dtype = group.broadcast_object(metadata, src=source)
+        if not is_pipeline_last_stage():
+            latents = torch.empty(shape, dtype=dtype, device=latents.device)
+        return group.broadcast(latents, src=source)
+
     def _pipefusion_update_patch(self, _work, timestep, noise_pred, previous):
         """Apply a scheduler step while preserving the model output dtype."""
         output_dtype = noise_pred.dtype

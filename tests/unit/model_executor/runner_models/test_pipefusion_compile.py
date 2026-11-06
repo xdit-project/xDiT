@@ -220,7 +220,9 @@ def test_step_cache_only_forces_target_transformer_blockwise(monkeypatch):
 
 def test_pipefusion_captures_before_wrap_and_replays_before_validation(monkeypatch):
     events = []
+    runtime_config = SimpleNamespace(warmup_steps=4)
     state = SimpleNamespace(
+        runtime_config=runtime_config,
         patch_mode=False,
         pipeline_patch_idx=0,
         pp_patches_height=[1],
@@ -229,7 +231,6 @@ def test_pipefusion_captures_before_wrap_and_replays_before_validation(monkeypat
         pp_patches_token_num=[1],
         pp_patches_token_start_idx_local=[0, 1],
         pp_patches_token_start_end_idx_global=[[0, 1]],
-        runtime_config=SimpleNamespace(warmup_steps=1),
     )
     transformer = _Stage(events)
     model = object.__new__(_Runner)
@@ -242,6 +243,7 @@ def test_pipefusion_captures_before_wrap_and_replays_before_validation(monkeypat
     )
     model.pipe = SimpleNamespace(transformer=transformer)
     model.settings = SimpleNamespace(fsdp_strategy={"transformer": {"wrap_attrs": ["transformer_blocks"]}})
+    model.engine_config.runtime_config = runtime_config
     model._enable_compute_comm_overlap = lambda: None
     model._get_compile_mode = lambda: "default"
     model._get_compile_dynamic = lambda _input_args=None: False
@@ -250,8 +252,11 @@ def test_pipefusion_captures_before_wrap_and_replays_before_validation(monkeypat
     model._local_onload_device = lambda: torch.device("cpu")
     model._reset_pipefusion_compile_state = lambda _components: events.append("reset")
 
-    def eager_capture(_input_args):
+    capture_inputs = []
+
+    def eager_capture(input_args):
         events.append("capture")
+        capture_inputs.append((input_args["num_inference_steps"], runtime_config.warmup_steps))
         state.patch_mode = False
         state.pipeline_patch_idx = 0
         transformer(torch.ones(1, 2))
@@ -285,6 +290,8 @@ def test_pipefusion_captures_before_wrap_and_replays_before_validation(monkeypat
     assert events.index("compile") < events.index("synchronize")
     assert events.index("synchronize") < events.index("validation")
     assert events.count("stage") == 4  # two eager captures and two local replays
+    assert capture_inputs == [(2, 1)]
+    assert runtime_config.warmup_steps == 4
 
 
 def test_pipefusion_compile_replay_failure_is_raised_collectively(monkeypatch):

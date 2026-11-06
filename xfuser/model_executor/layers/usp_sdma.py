@@ -286,6 +286,28 @@ def _group(name: str) -> dist.ProcessGroup:
     return dist.distributed_c10d._resolve_process_group(name)
 
 
+@torch.library.custom_op("xfuser::sdma_ulysses_begin_qk", mutates_args=())
+def _sdma_ulysses_begin_qk(ref: torch.Tensor, spec: List[int], group_name: str) -> torch.Tensor:
+    ulysses.begin_qk(_group(group_name), ulysses.Exchange.decode(spec, ref.dtype))
+    return ref.new_empty(0)
+
+
+@_sdma_ulysses_begin_qk.register_fake
+def _sdma_ulysses_begin_qk_fake(ref, spec, group_name):
+    return ref.new_empty(0)
+
+
+@torch.library.custom_op("xfuser::sdma_ulysses_send_qk", mutates_args=("packed",))
+def _sdma_ulysses_send_qk(token: torch.Tensor, packed: torch.Tensor, value: bool, group_name: str) -> torch.Tensor:
+    ulysses.send_qk(_group(group_name), packed, value=value)
+    return token.new_empty(0)
+
+
+@_sdma_ulysses_send_qk.register_fake
+def _sdma_ulysses_send_qk_fake(token, packed, value, group_name):
+    return token.new_empty(0)
+
+
 @torch.library.custom_op("xfuser::sdma_ulysses_begin", mutates_args=())
 def _sdma_ulysses_begin(ref: torch.Tensor, spec: List[int], group_name: str, mode: str) -> torch.Tensor:
     ulysses.begin(_group(group_name), ulysses.Exchange.decode(spec, ref.dtype), rccl=mode == "packed")
@@ -423,6 +445,61 @@ def _qkv_parts(attn):
     if len({m.weight.shape for m in linears}) != 1:
         return None
     return [(m.weight, m.bias) for m in linears]
+
+
+def wan_qk_attention(attn, hidden_states, rotary_emb, *, attention_kwargs, group: dist.ProcessGroup):
+    """Send full-width-normalized Wan Q/K before projecting V, or decline unsupported calls."""
+    if not uses_sdma() or not overlap_qkv() or _head_groups != 1 or torch.is_grad_enabled():
+        return None
+    if getattr(attn, "fused_projections", False) or _qkv_parts(attn) is None:
+        return None
+    if hidden_states.device.type != "cuda" or hidden_states.dtype != torch.bfloat16 or hidden_states.shape[0] != 1:
+        return None
+    linears = (attn.to_q, attn.to_k, attn.to_v)
+    if any(
+        module.weight.device != hidden_states.device or module.weight.dtype != hidden_states.dtype
+        or module._forward_hooks or module._forward_pre_hooks or hasattr(module, "_hf_hook")
+        for module in linears
+    ):
+        return None
+    if any(
+        not isinstance(norm, torch.nn.RMSNorm) or norm.weight is None or norm.weight.dtype != hidden_states.dtype
+        for norm in (attn.norm_q, attn.norm_k)
+    ):
+        return None
+    world = dist.get_world_size(group)
+    if world <= 1 or attn.heads % world or attn.to_q.weight.shape[0] % attn.heads:
+        return None
+    from xfuser.core.distributed import get_ring_parallel_world_size, get_runtime_state
+    from xfuser.model_executor.layers.fused_qk_norm_rope_wan_flydsl import fused_qk_norm_rope_packed
+
+    runtime = get_runtime_state()
+    backend = runtime.attention_backend
+    reason = call_reason(
+        backend=backend, ring_world_size=get_ring_parallel_world_size(), joint_strategy=None,
+        fp8_comms=runtime.fp8_comms, has_kv_cache=False,
+        head_balanced=runtime.runtime_config.use_spargeattn_head_balance,
+        attention_kwargs=attention_kwargs,
+    )
+    if reason is not None:
+        warn_fallback(reason)
+        return None
+    query = attn.to_q(hidden_states)
+    key = attn.to_k(hidden_states)
+    batch, rows, width = query.shape
+    spec = ulysses.encode(world, batch, width // attn.heads, [rows] * 3, [attn.heads // world] * 3, [(0, 0)] * 3, 1)
+    token = torch.ops.xfuser.sdma_ulysses_begin_qk(query, spec, group.group_name)
+    query_key = fused_qk_norm_rope_packed(query, key, attn.norm_q, attn.norm_k, *rotary_emb, attn.heads, world)
+    token = torch.ops.xfuser.sdma_ulysses_send_qk(token, query_key, False, group.group_name)
+    value = torch.ops.xfuser.sdma_ulysses_linear(token, hidden_states, attn.to_v.weight, attn.to_v.bias)
+    value = value.unflatten(2, (attn.heads, -1)).transpose(1, 2)
+    packed_value = ulysses.pack_group([ulysses.pieces_from_heads(value, world, 0, attn.heads // world)])
+    token = torch.ops.xfuser.sdma_ulysses_send_qk(token, packed_value, True, group.group_name)
+    return finish(
+        token, [query_key, packed_value], spec, joint_key=None, joint_value=None, extra_names=(),
+        backend=backend, dropout_p=0.0, is_causal=False, attention_kwargs=attention_kwargs,
+        kv_head_repeat=1, group=group,
+    )
 
 
 def prepare_grouped_qkv(model: torch.nn.Module, world: int) -> int:

@@ -41,7 +41,7 @@ def _bhsd(generator, device, batch, seq, heads):
     return x.transpose(1, 2)
 
 
-def exchange_mismatches(group, case, seed, rccl=False):
+def exchange_mismatches(group, case, seed, rccl=False, early=False):
     """Run one exchange and count wrong elements, over every view attention sees and the output.
 
     Each rank all-gathers the inputs to know what each head group's views must hold, joint rows
@@ -86,7 +86,16 @@ def exchange_mismatches(group, case, seed, rccl=False):
     kv = (joint_rows, 0) if front else (0, joint_rows)
     reserved = [(0, 0), kv, kv] + [(0, 0)] * extras
     local = [None, *joint] + [None] * extras if joint else None
-    out = ulysses.attention(tensors, attend, group, groups, concurrent, reserved, local, rccl)
+    if early:
+        exchange = ulysses.Exchange.make(world, batch, HEAD_DIM, q.dtype, [s_q, s_kv, s_kv], heads, reserved, 1)
+        ulysses.begin_qk(group, exchange)
+        packed_qk = ulysses.pack_group([ulysses.pieces_from_heads(tensor, world, 0, hq) for tensor in (q, k)])
+        ulysses.send_qk(group, packed_qk)
+        packed_value = ulysses.pack_group([ulysses.pieces_from_heads(v, world, 0, hkv)])
+        ulysses.send_qk(group, packed_value, value=True)
+        out = ulysses.finish(group, attend)
+    else:
+        out = ulysses.attention(tensors, attend, group, groups, concurrent, reserved, local, rccl)
     wrong = (out != q.transpose(1, 2) * 2 + 1).sum() + sum(counts)
     return int(wrong.item())
 
@@ -138,6 +147,203 @@ def _exchange_worker(rank, world_size, init_method, cfg, rccl):
 @pytest.mark.parametrize("world_size", [2, 4, 8])
 def test_sdma_exchange(accelerator_ranks, world_size):
     accelerator_ranks(_exchange_worker, world_size=world_size, timeout=600, args=(1, False))
+
+
+def _wan_early_worker(rank, world_size, init_method):
+    from yunchang.globals import PROCESS_GROUP
+    from xfuser.core.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
+
+    try:
+        _setup(rank, world_size, init_method, world_size)
+        for call in range(12):
+            case = (1, 96 if call % 3 else 1024, 96 if call % 3 else 1024, 5, 5, 0, 0, True, 1, False)
+            for early in (False, True):
+                wrong = exchange_mismatches(PROCESS_GROUP.ULYSSES_PG, case, call, early=early)
+                assert wrong == 0, f"early={early}, call={call}: {wrong} wrong elements"
+    finally:
+        destroy_model_parallel()
+        destroy_distributed_environment()
+
+
+def test_wan_early_qk_exchange(accelerator_ranks):
+    accelerator_ranks(_wan_early_worker, world_size=2, timeout=300)
+
+
+def _wan_early_compiled_worker(rank, world_size, init_method):
+    import torch
+    from yunchang.globals import PROCESS_GROUP
+    from xfuser.core.distributed.sdma import ulysses
+    from xfuser.model_executor.layers import usp_sdma
+    from xfuser.core.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
+    from xfuser.model_executor.layers.usp import USP
+
+    try:
+        device = _setup(rank, world_size, init_method, world_size)
+        group = PROCESS_GROUP.ULYSSES_PG
+
+        @torch.compile(fullgraph=True)
+        def layer(hidden, weight, early):
+            query = torch.nn.functional.linear(hidden, weight).unflatten(-1, (-1, HEAD_DIM)).transpose(1, 2)
+            key = query * 2
+            if early:
+                spec = ulysses.encode(world_size, 1, HEAD_DIM, [hidden.shape[1]] * 3, [5] * 3, [(0, 0)] * 3, 1)
+                token = torch.ops.xfuser.sdma_ulysses_begin_qk(query, spec, group.group_name)
+                packed_qk = ulysses.pack_group([
+                    ulysses.pieces_from_heads(tensor, world_size, 0, 5) for tensor in (query, key)
+                ])
+                token = torch.ops.xfuser.sdma_ulysses_send_qk(token, packed_qk, False, group.group_name)
+                value = torch.ops.xfuser.sdma_ulysses_linear(token, hidden, weight, None) * 3
+                value = value.unflatten(-1, (-1, HEAD_DIM)).transpose(1, 2)
+                packed_value = ulysses.pack_group([ulysses.pieces_from_heads(value, world_size, 0, 5)])
+                token = torch.ops.xfuser.sdma_ulysses_send_qk(token, packed_value, True, group.group_name)
+                return usp_sdma.finish(
+                    token, [packed_qk, packed_value], spec, joint_key=None, joint_value=None, extra_names=(),
+                    backend=BACKEND, dropout_p=0.0, is_causal=False, attention_kwargs={}, kv_head_repeat=1, group=group,
+                )
+            value = (torch.nn.functional.linear(hidden, weight) * 3).unflatten(-1, (-1, HEAD_DIM)).transpose(1, 2)
+            return USP(query, key, value)
+
+        generator = torch.Generator(device=device).manual_seed(rank)
+        weight = torch.randn(5 * world_size * HEAD_DIM, 128, generator=generator, device=device, dtype=torch.bfloat16) * 0.05
+        for call in range(8):
+            hidden = torch.randn(1, 256, 128, generator=generator, device=device, dtype=torch.bfloat16)
+            expected = _usp_call(lambda inputs, weights: layer(inputs, weights, False), hidden, weight, "packed", 1)
+            actual = layer(hidden, weight, True)
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0, msg=lambda message: f"call {call}: {message}")
+    finally:
+        destroy_model_parallel()
+        destroy_distributed_environment()
+
+
+def test_wan_early_compiled_matches_packed(accelerator_ranks):
+    accelerator_ranks(_wan_early_compiled_worker, world_size=2, timeout=600)
+
+
+def _wan_packed_qk_worker(rank, world_size, init_method):
+    import torch
+    from yunchang.globals import PROCESS_GROUP
+    from xfuser.core.distributed.sdma import ulysses
+    from xfuser.core.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
+    from xfuser.model_executor.layers.fused_qk_norm_rope_wan_flydsl import fused_qk_norm_rope, fused_qk_norm_rope_packed
+
+    try:
+        device = _setup(rank, world_size, init_method, world_size)
+        generator = torch.Generator(device=device).manual_seed(rank)
+        norm = torch.nn.RMSNorm(5120, eps=1e-6, device=device, dtype=torch.bfloat16)
+        with torch.no_grad():
+            norm.weight.copy_(torch.randn(5120, generator=generator, device=device, dtype=torch.bfloat16))
+            for rows in (257, 1024, 257):
+                query, key = [torch.randn(1, rows, 5120, generator=generator, device=device, dtype=torch.bfloat16) for _ in range(2)]
+                angle = torch.randn(1, rows, 1, 128, generator=generator, device=device)
+                rotary = angle.cos(), angle.sin()
+                expected_q, expected_k = fused_qk_norm_rope(query, key, norm, norm, *rotary, 40)
+                for peers in (2, 4, 8):
+                    expected = ulysses.pack_group([
+                        ulysses.pieces_from_heads(tensor.transpose(1, 2), peers, 0, 40 // peers)
+                        for tensor in (expected_q, expected_k)
+                    ])
+                    actual = fused_qk_norm_rope_packed(query, key, norm, norm, *rotary, 40, peers)
+                    torch.testing.assert_close(actual.reshape(-1), expected, rtol=0, atol=0)
+                group = PROCESS_GROUP.ULYSSES_PG
+                exchange = ulysses.Exchange.make(world_size, 1, 128, query.dtype, [rows] * 3, [40 // world_size] * 3, [(0, 0)] * 3, 1)
+                ulysses.begin_qk(group, exchange)
+                packed_qk = fused_qk_norm_rope_packed(query, key, norm, norm, *rotary, 40, world_size)
+                ulysses.send_qk(group, packed_qk)
+                packed_value = ulysses.pack_group([
+                    ulysses.pieces_from_heads(expected_k.transpose(1, 2), world_size, 0, 40 // world_size)
+                ])
+                ulysses.send_qk(group, packed_value, value=True)
+                output = ulysses.finish(group, lambda query, key, value: query * 2 + 1)
+                torch.testing.assert_close(output, expected_q * 2 + 1, rtol=0, atol=0)
+            norm.float()
+            expected_q, expected_k = fused_qk_norm_rope(query, key, norm, norm, *rotary, 40)
+            expected = ulysses.pack_group([
+                ulysses.pieces_from_heads(tensor.transpose(1, 2), world_size, 0, 40 // world_size)
+                for tensor in (expected_q, expected_k)
+            ])
+            actual = fused_qk_norm_rope_packed(query, key, norm, norm, *rotary, 40, world_size)
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    finally:
+        destroy_model_parallel()
+        destroy_distributed_environment()
+
+
+def test_wan_packed_qk_matches_original_norm_and_pack(accelerator_ranks):
+    accelerator_ranks(_wan_packed_qk_worker, world_size=2, timeout=600)
+
+
+def _wan_processor_worker(rank, world_size, init_method, backend):
+    import torch
+    from diffusers.models.transformers.transformer_wan import WanAttention
+    from xfuser.core.distributed import get_runtime_state
+    from xfuser.core.distributed.sdma import ulysses
+    from xfuser.core.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
+    from xfuser.model_executor.layers import usp_sdma
+    from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanAttnProcessor
+
+    graph = None
+    original_begin = ulysses.begin_qk
+    calls = 0
+
+    def counted_begin(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_begin(*args, **kwargs)
+
+    try:
+        device = _setup(rank, world_size, init_method, world_size)
+        get_runtime_state().set_attention_backend(backend)
+        torch.manual_seed(0)
+        attn = WanAttention(256, heads=40, dim_head=128, processor=xFuserWanAttnProcessor()).to(device, torch.bfloat16)
+        attn.eval()
+        generator = torch.Generator(device=device).manual_seed(rank)
+        hidden = torch.randn(1, 257, 256, generator=generator, device=device, dtype=torch.bfloat16)
+        angle = torch.randn(1, 257, 1, 128, generator=generator, device=device)
+        rotary = angle.cos(), angle.sin()
+        ulysses.begin_qk = counted_begin
+        compiled = torch.compile(attn, fullgraph=True)
+        with torch.no_grad():
+            for run in (attn, compiled):
+                usp_sdma.configure("packed", 1)
+                expected = run(hidden, rotary_emb=rotary)
+                usp_sdma.configure("sdma", 1, overlap_qkv=True)
+                before = calls
+                actual = run(hidden, rotary_emb=rotary)
+                assert calls == before + 1, "production split-QK path did not execute"
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            usp_sdma.configure("sdma", 1, overlap_qkv=True)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                captured = attn(hidden, rotary_emb=rotary)
+            for repeat in range(3):
+                hidden.copy_(torch.randn(hidden.shape, generator=generator, device=device, dtype=hidden.dtype))
+                graph.replay()
+                usp_sdma.configure("packed", 1)
+                expected = attn(hidden, rotary_emb=rotary)
+                torch.testing.assert_close(captured, expected, rtol=0, atol=0)
+            for groups, norm_dtype in ((2, torch.bfloat16), (1, torch.float32)):
+                attn.norm_q.to(norm_dtype)
+                attn.norm_k.to(norm_dtype)
+                usp_sdma.configure("sdma", groups, overlap_qkv=True)
+                before = calls
+                actual = attn(hidden, rotary_emb=rotary)
+                assert calls == before, "unsupported settings must not split Q/K"
+                usp_sdma.configure("sdma", groups)
+                expected = attn(hidden, rotary_emb=rotary)
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    finally:
+        graph = None
+        ulysses.begin_qk = original_begin
+        usp_sdma.configure("default", 2)
+        torch.compiler.reset()
+        torch.cuda.synchronize()
+        destroy_model_parallel()
+        destroy_distributed_environment()
+
+
+@pytest.mark.parametrize("backend", ["AITER_BF16", "AITER_FP8"])
+def test_wan_processor_split_qk_matches_packed(accelerator_ranks, backend):
+    accelerator_ranks(_wan_processor_worker, world_size=2, timeout=900, args=(backend,))
 
 
 @pytest.mark.parametrize("world_size", [4, 8])

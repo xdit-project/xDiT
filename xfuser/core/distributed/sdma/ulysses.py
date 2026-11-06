@@ -222,6 +222,8 @@ class _Call:
 
     def __init__(self, exchange, slot, call, rccl):
         self.exchange, self.slot, self.call, self.rccl = exchange, slot, call, rccl
+        self.split_qk = False
+        self.qk_packed: Optional[torch.Tensor] = None
         # The packed tensors sent, held until `finish` returns: the engines read them until every
         # peer has the data, which this rank knows only once the peers' outputs are back.
         self.packed: List[torch.Tensor] = []
@@ -287,9 +289,9 @@ def _out_flag(ex, g, p, world):
     return ((MAX_HEAD_GROUPS + g) * world + p) * 4
 
 
-def _plan(state, g, ex, direction, gi, inbox, outbox, flags, elt) -> transport.Plan:
+def _plan(state, g, ex, direction, gi, inbox, outbox, flags, elt, roles=None) -> transport.Plan:
     """The plan for group gi's input ("in") or output ("out") push, made for the current buffers."""
-    key = (ex, direction, gi)
+    key = (ex, direction, gi, roles)
     generations = (inbox.generation, outbox.generation, flags.generation)
     cached = state.plans.get(key)
     if cached is not None and cached[0] == generations:
@@ -303,12 +305,14 @@ def _plan(state, g, ex, direction, gi, inbox, outbox, flags, elt) -> transport.P
         if direction == "in":
             offsets = ex.inbox_offsets[gi]
             start = 0
-            for t in range(ex.tensors):
+            input_roles = range(ex.tensors) if roles is None else roles
+            peer_elements = sum(ex.piece_elems(gi, role) for role in input_roles)
+            for t in input_roles:
                 h, s, R = ex.sizes[gi][t], ex.rows[t], ex.inbox_rows(t)
                 block = s * h * d
                 before = ex.reserved[t][0]
                 for bi in range(b):
-                    src = (p * ex.peer_elems(gi) + start + bi * block) * elt
+                    src = (p * peer_elements + start + bi * block) * elt
                     dst = inbox.peer_bases[i] + (offsets[t] + (bi * R + before + r * s) * h * d) * elt
                     mine.append((src, dst, block * elt))
                 start += ex.piece_elems(gi, t)
@@ -355,11 +359,81 @@ def begin(process_group: dist.ProcessGroup, exchange: Exchange, rccl: bool = Fal
     state.open = _Call(ex, slot, call, False)
 
 
+def _qk_plans(state, peers, exchange):
+    inbox, outbox, flags, element_size = _buffers(peers, exchange)
+    qk_flags = peers.buffer("ulysses_qk_flags", peers.world * 4, memory="uncached")
+    query_key = _plan(state, peers, exchange, "in", 0, inbox, outbox, qk_flags, element_size, roles=(0, 1))
+    value = _plan(state, peers, exchange, "in", 0, inbox, outbox, flags, element_size, roles=(2,))
+    return inbox, outbox, flags, element_size, query_key, value
+
+
+def begin_qk(process_group: dist.ProcessGroup, exchange: Exchange) -> None:
+    """Open one head group whose Q/K are sent before V; graph capture uses packed RCCL."""
+    if exchange.groups != 1 or exchange.tensors != 3 or any(before or after for before, after in exchange.reserved):
+        raise ValueError("split Q/K sends require one group and three tensors without joint rows")
+    if exchange.world != dist.get_world_size(process_group):
+        raise ValueError("split Q/K exchange world size does not match the process group")
+    state = _state(process_group)
+    if state.open is not None:
+        raise RuntimeError("an SDMA Ulysses call is already open on this group")
+    if torch.cuda.is_current_stream_capturing():
+        state.open = _Call(exchange, None, None, True)
+    else:
+        peers = transport.group_for(process_group)
+        inbox, outbox, flags, element_size, query_key, value = _qk_plans(state, peers, exchange)
+        output = _plan(state, peers, exchange, "out", 0, inbox, outbox, flags, element_size)
+        slot, call = transport.start(query_key.copies + value.copies + output.copies, 3 * (peers.world - 1))
+        flags.local.view(torch.int32).view(2, MAX_HEAD_GROUPS, peers.world)[:, 0, peers.rank].fill_(1)
+        state.open = _Call(exchange, slot, call, False)
+    state.open.split_qk = True
+
+
+def send_qk(process_group: dist.ProcessGroup, packed: torch.Tensor, *, value: bool = False) -> None:
+    """Send packed Q/K, then V. Only V signals that all three roles are ready."""
+    state = _state(process_group)
+    call = state.open
+    if call is None or not call.split_qk or call.sent or (call.qk_packed is None) == value:
+        raise RuntimeError("Q/K and V sends must alternate within a split Q/K call")
+    exchange = call.exchange
+    if not value:
+        call.qk_packed = packed
+    if call.rccl:
+        if value:
+            call.packed.append(torch.cat(
+                [call.qk_packed.view(exchange.world, -1), packed.view(exchange.world, -1)], dim=1,
+            ).reshape(-1))
+        return
+    peers = transport.group_for(process_group)
+    inbox, _, _, _, query_key, value_plan = _qk_plans(state, peers, exchange)
+    if value:
+        plan, trigger, first_data, first_flag = value_plan, 1, query_key.copies, 0
+        roles = (2,)
+        call.packed.append(packed)
+    else:
+        plan, trigger, first_data, first_flag = query_key, 0, 0, 2 * (peers.world - 1)
+        roles = (0, 1)
+    plan.issue(call.slot, trigger, first_data, first_flag, packed.data_ptr())
+    transport.release(call.slot, trigger, torch.cuda.current_stream())
+    own = packed.view(peers.world, -1)[peers.rank]
+    offset = 0
+    for role in roles:
+        heads, rows = exchange.sizes[0][role], exchange.rows[role]
+        elements = exchange.piece_elems(0, role)
+        view = _inbox(
+            inbox, exchange.inbox_offsets[0][role], exchange.batch,
+            exchange.inbox_rows(role), heads, exchange.head_dim, exchange.dtype,
+        )
+        view[:, peers.rank * rows : (peers.rank + 1) * rows].copy_(
+            own[offset : offset + elements].view(exchange.batch, rows, heads, exchange.head_dim)
+        )
+        offset += elements
+
+
 def send(process_group: dist.ProcessGroup, gi: int, packed: torch.Tensor) -> None:
     """Push head group `gi`'s packed tensor (`pack_group`) once the stream has produced it."""
     state = _state(process_group)
     c = state.open
-    if c is None or gi != c.sent:
+    if c is None or c.split_qk or gi != c.sent:
         raise RuntimeError(f"SDMA Ulysses send of group {gi} out of order")
     c.packed.append(packed)
     if c.rccl:

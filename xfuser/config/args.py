@@ -926,7 +926,9 @@ class xFuserArgs:
             action="store_true",
             help="With --ulysses_a2a sdma: in models that support it (MiniMax-H3, FLUX.3), project Q/K/V "
             "one head group at a time so each group's exchange overlaps the next group's projection. "
-            "Keeps a second copy of each layer's Q/K/V weights; ignored under CPU offload.",
+            "Those models keep a second weight copy; ignored under CPU offload. "
+            "Wan with --ulysses_sdma_head_groups 1 instead sends full-width-normalized Q/K before V projection "
+            "and fuses Q/K packing, without duplicating weights.",
         )
         runtime_group.add_argument(
             "--use_fp8_comms",
@@ -1335,7 +1337,9 @@ class xFuserArgs:
             action="store_true",
             help="With --ulysses_a2a sdma: in models that support it (MiniMax-H3, FLUX.3), project Q/K/V "
             "one head group at a time so each group's exchange overlaps the next group's projection. "
-            "Keeps a second copy of each layer's Q/K/V weights; ignored under CPU offload.",
+            "Those models keep a second weight copy; ignored under CPU offload. "
+            "Wan with --ulysses_sdma_head_groups 1 instead sends full-width-normalized Q/K before V projection "
+            "and fuses Q/K packing, without duplicating weights.",
         )
         parser.add_argument(
             "--use_fp8_comms",

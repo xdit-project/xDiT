@@ -98,8 +98,8 @@ cover three fresh processes per backend. On MI355X, improvement over RCCL is
 1.75-1.81% BF16 and 1.81-1.86% FP8. Duplicate RCCL controls differ by less than
 0.04% in every MI355X run. The two nodes have matching Torch/HIP/RCCL/Diffusers
 and AITER revisions, with byte-identical existing AITER functional-varlen patches,
-but different container image IDs. Wan weights were absent on MI355X, so no
-pretrained end-to-end gain is claimed there.
+but different container image IDs. No complete pretrained end-to-end comparison
+was performed on MI355X, so no generation gain is claimed there.
 
 ## Focused Validation
 

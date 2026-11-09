@@ -188,23 +188,35 @@ def _wan_early_compiled_worker(rank, world_size, init_method):
             if early:
                 spec = ulysses.encode(world_size, 1, HEAD_DIM, [hidden.shape[1]] * 3, [5] * 3, [(0, 0)] * 3, 1)
                 token = torch.ops.xfuser.sdma_ulysses_begin_qk(query, spec, group.group_name)
-                packed_qk = ulysses.pack_group([
-                    ulysses.pieces_from_heads(tensor, world_size, 0, 5) for tensor in (query, key)
-                ])
+                packed_qk = ulysses.pack_group(
+                    [ulysses.pieces_from_heads(tensor, world_size, 0, 5) for tensor in (query, key)]
+                )
                 token = torch.ops.xfuser.sdma_ulysses_send_qk(token, packed_qk, False, group.group_name)
                 value = torch.ops.xfuser.sdma_ulysses_linear(token, hidden, weight, None) * 3
                 value = value.unflatten(-1, (-1, HEAD_DIM)).transpose(1, 2)
                 packed_value = ulysses.pack_group([ulysses.pieces_from_heads(value, world_size, 0, 5)])
                 token = torch.ops.xfuser.sdma_ulysses_send_qk(token, packed_value, True, group.group_name)
                 return usp_sdma.finish(
-                    token, [packed_qk, packed_value], spec, joint_key=None, joint_value=None, extra_names=(),
-                    backend=BACKEND, dropout_p=0.0, is_causal=False, attention_kwargs={}, kv_head_repeat=1, group=group,
+                    token,
+                    [packed_qk, packed_value],
+                    spec,
+                    joint_key=None,
+                    joint_value=None,
+                    extra_names=(),
+                    backend=BACKEND,
+                    dropout_p=0.0,
+                    is_causal=False,
+                    attention_kwargs={},
+                    kv_head_repeat=1,
+                    group=group,
                 )
             value = (torch.nn.functional.linear(hidden, weight) * 3).unflatten(-1, (-1, HEAD_DIM)).transpose(1, 2)
             return USP(query, key, value)
 
         generator = torch.Generator(device=device).manual_seed(rank)
-        weight = torch.randn(5 * world_size * HEAD_DIM, 128, generator=generator, device=device, dtype=torch.bfloat16) * 0.05
+        weight = (
+            torch.randn(5 * world_size * HEAD_DIM, 128, generator=generator, device=device, dtype=torch.bfloat16) * 0.05
+        )
         for call in range(8):
             hidden = torch.randn(1, 256, 128, generator=generator, device=device, dtype=torch.bfloat16)
             expected = _usp_call(lambda inputs, weights: layer(inputs, weights, False), hidden, weight, "packed", 1)
@@ -233,34 +245,43 @@ def _wan_packed_qk_worker(rank, world_size, init_method):
         with torch.no_grad():
             norm.weight.copy_(torch.randn(5120, generator=generator, device=device, dtype=torch.bfloat16))
             for rows in (257, 1024, 257):
-                query, key = [torch.randn(1, rows, 5120, generator=generator, device=device, dtype=torch.bfloat16) for _ in range(2)]
+                query, key = [
+                    torch.randn(1, rows, 5120, generator=generator, device=device, dtype=torch.bfloat16)
+                    for _ in range(2)
+                ]
                 angle = torch.randn(1, rows, 1, 128, generator=generator, device=device)
                 rotary = angle.cos(), angle.sin()
                 expected_q, expected_k = fused_qk_norm_rope(query, key, norm, norm, *rotary, 40)
                 for peers in (2, 4, 8):
-                    expected = ulysses.pack_group([
-                        ulysses.pieces_from_heads(tensor.transpose(1, 2), peers, 0, 40 // peers)
-                        for tensor in (expected_q, expected_k)
-                    ])
+                    expected = ulysses.pack_group(
+                        [
+                            ulysses.pieces_from_heads(tensor.transpose(1, 2), peers, 0, 40 // peers)
+                            for tensor in (expected_q, expected_k)
+                        ]
+                    )
                     actual = fused_qk_norm_rope_packed(query, key, norm, norm, *rotary, 40, peers)
                     torch.testing.assert_close(actual.reshape(-1), expected, rtol=0, atol=0)
                 group = PROCESS_GROUP.ULYSSES_PG
-                exchange = ulysses.Exchange.make(world_size, 1, 128, query.dtype, [rows] * 3, [40 // world_size] * 3, [(0, 0)] * 3, 1)
+                exchange = ulysses.Exchange.make(
+                    world_size, 1, 128, query.dtype, [rows] * 3, [40 // world_size] * 3, [(0, 0)] * 3, 1
+                )
                 ulysses.begin_qk(group, exchange)
                 packed_qk = fused_qk_norm_rope_packed(query, key, norm, norm, *rotary, 40, world_size)
                 ulysses.send_qk(group, packed_qk)
-                packed_value = ulysses.pack_group([
-                    ulysses.pieces_from_heads(expected_k.transpose(1, 2), world_size, 0, 40 // world_size)
-                ])
+                packed_value = ulysses.pack_group(
+                    [ulysses.pieces_from_heads(expected_k.transpose(1, 2), world_size, 0, 40 // world_size)]
+                )
                 ulysses.send_qk(group, packed_value, value=True)
                 output = ulysses.finish(group, lambda query, key, value: query * 2 + 1)
                 torch.testing.assert_close(output, expected_q * 2 + 1, rtol=0, atol=0)
             norm.float()
             expected_q, expected_k = fused_qk_norm_rope(query, key, norm, norm, *rotary, 40)
-            expected = ulysses.pack_group([
-                ulysses.pieces_from_heads(tensor.transpose(1, 2), world_size, 0, 40 // world_size)
-                for tensor in (expected_q, expected_k)
-            ])
+            expected = ulysses.pack_group(
+                [
+                    ulysses.pieces_from_heads(tensor.transpose(1, 2), world_size, 0, 40 // world_size)
+                    for tensor in (expected_q, expected_k)
+                ]
+            )
             actual = fused_qk_norm_rope_packed(query, key, norm, norm, *rotary, 40, world_size)
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     finally:

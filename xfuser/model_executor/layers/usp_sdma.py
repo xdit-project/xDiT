@@ -457,8 +457,11 @@ def wan_qk_attention(attn, hidden_states, rotary_emb, *, attention_kwargs, group
         return None
     linears = (attn.to_q, attn.to_k, attn.to_v)
     if any(
-        module.weight.device != hidden_states.device or module.weight.dtype != hidden_states.dtype
-        or module._forward_hooks or module._forward_pre_hooks or hasattr(module, "_hf_hook")
+        module.weight.device != hidden_states.device
+        or module.weight.dtype != hidden_states.dtype
+        or module._forward_hooks
+        or module._forward_pre_hooks
+        or hasattr(module, "_hf_hook")
         for module in linears
     ):
         return None
@@ -476,8 +479,11 @@ def wan_qk_attention(attn, hidden_states, rotary_emb, *, attention_kwargs, group
     runtime = get_runtime_state()
     backend = runtime.attention_backend
     reason = call_reason(
-        backend=backend, ring_world_size=get_ring_parallel_world_size(), joint_strategy=None,
-        fp8_comms=runtime.fp8_comms, has_kv_cache=False,
+        backend=backend,
+        ring_world_size=get_ring_parallel_world_size(),
+        joint_strategy=None,
+        fp8_comms=runtime.fp8_comms,
+        has_kv_cache=False,
         head_balanced=runtime.runtime_config.use_spargeattn_head_balance,
         attention_kwargs=attention_kwargs,
     )
@@ -496,9 +502,18 @@ def wan_qk_attention(attn, hidden_states, rotary_emb, *, attention_kwargs, group
     packed_value = ulysses.pack_group([ulysses.pieces_from_heads(value, world, 0, attn.heads // world)])
     token = torch.ops.xfuser.sdma_ulysses_send_qk(token, packed_value, True, group.group_name)
     return finish(
-        token, [query_key, packed_value], spec, joint_key=None, joint_value=None, extra_names=(),
-        backend=backend, dropout_p=0.0, is_causal=False, attention_kwargs=attention_kwargs,
-        kv_head_repeat=1, group=group,
+        token,
+        [query_key, packed_value],
+        spec,
+        joint_key=None,
+        joint_value=None,
+        extra_names=(),
+        backend=backend,
+        dropout_p=0.0,
+        is_causal=False,
+        attention_kwargs=attention_kwargs,
+        kv_head_repeat=1,
+        group=group,
     )
 
 

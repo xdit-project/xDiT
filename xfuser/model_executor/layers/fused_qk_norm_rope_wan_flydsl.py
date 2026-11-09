@@ -393,7 +393,9 @@ if _HAS_FLYDSL:
         return out
 
     @_wan_flydsl_qk_norm_rope_launch.register_fake
-    def _wan_flydsl_qk_norm_rope_launch_fake(q, k, wq, wk, cos, sin, heads, eps, single_role, apply_hadamard, pack_world=1):
+    def _wan_flydsl_qk_norm_rope_launch_fake(
+        q, k, wq, wk, cos, sin, heads, eps, single_role, apply_hadamard, pack_world=1
+    ):
         S, HD = q.shape
         D = HD // heads
         shape = (pack_world, 2, S, heads // pack_world, D) if pack_world > 1 else (1 if single_role else 2, S, heads, D)
@@ -554,10 +556,13 @@ def _fused_qk_norm_rope(
         query_out, key_out = _reference(query, key, norm_q, norm_k, freqs_cos, freqs_sin, heads)
         if pack_world:
             batch, rows, _, head_dim = query_out.shape
-            return torch.stack([
-                tensor.reshape(batch, rows, pack_world, heads // pack_world, head_dim).permute(2, 0, 1, 3, 4)
-                for tensor in (query_out, key_out)
-            ], dim=1).reshape(-1)
+            return torch.stack(
+                [
+                    tensor.reshape(batch, rows, pack_world, heads // pack_world, head_dim).permute(2, 0, 1, 3, 4)
+                    for tensor in (query_out, key_out)
+                ],
+                dim=1,
+            ).reshape(-1)
         return query_out, key_out
 
     if not _HAS_FLYDSL:
@@ -656,20 +661,40 @@ def _fused_qk_norm_rope(
 
 
 def fused_qk_norm_rope(
-    query: torch.Tensor, key: torch.Tensor, norm_q: torch.nn.Module, norm_k: torch.nn.Module,
-    freqs_cos: torch.Tensor, freqs_sin: torch.Tensor, heads: int,
-    *, single_role: bool = False, apply_hadamard: bool = False,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    norm_q: torch.nn.Module,
+    norm_k: torch.nn.Module,
+    freqs_cos: torch.Tensor,
+    freqs_sin: torch.Tensor,
+    heads: int,
+    *,
+    single_role: bool = False,
+    apply_hadamard: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Normalize and rotate Q/K, returning [B, S, H, D] with reference fallback."""
     return _fused_qk_norm_rope(
-        query, key, norm_q, norm_k, freqs_cos, freqs_sin, heads,
-        single_role=single_role, apply_hadamard=apply_hadamard,
+        query,
+        key,
+        norm_q,
+        norm_k,
+        freqs_cos,
+        freqs_sin,
+        heads,
+        single_role=single_role,
+        apply_hadamard=apply_hadamard,
     )
 
 
 def fused_qk_norm_rope_packed(
-    query: torch.Tensor, key: torch.Tensor, norm_q: torch.nn.Module, norm_k: torch.nn.Module,
-    freqs_cos: torch.Tensor, freqs_sin: torch.Tensor, heads: int, world: int,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    norm_q: torch.nn.Module,
+    norm_k: torch.nn.Module,
+    freqs_cos: torch.Tensor,
+    freqs_sin: torch.Tensor,
+    heads: int,
+    world: int,
 ) -> torch.Tensor:
     """Return flattened peer-major Q/K, fusing packing into eligible norm/RoPE stores."""
     if world < 1 or heads % world:

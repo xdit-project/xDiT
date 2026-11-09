@@ -120,15 +120,21 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
         rotary_emb: Optional[tuple[torch.Tensor, torch.Tensor]],
     ) -> torch.Tensor:
         if (
-            not self.is_cross_attention and self.attention_function is USP
-            and encoder_hidden_states is None and attn.add_k_proj is None and rotary_emb is not None
+            not self.is_cross_attention
+            and self.attention_function is USP
+            and encoder_hidden_states is None
+            and attn.add_k_proj is None
+            and rotary_emb is not None
         ):
             from yunchang.globals import PROCESS_GROUP
             from xfuser.model_executor.layers import usp_sdma
 
             output = usp_sdma.wan_qk_attention(
-                attn, hidden_states, rotary_emb,
-                attention_kwargs=self.attention_kwargs, group=PROCESS_GROUP.ULYSSES_PG,
+                attn,
+                hidden_states,
+                rotary_emb,
+                attention_kwargs=self.attention_kwargs,
+                group=PROCESS_GROUP.ULYSSES_PG,
             )
             if output is not None:
                 return self._finish_attention(attn, output.transpose(1, 2), hidden_states.dtype, None)

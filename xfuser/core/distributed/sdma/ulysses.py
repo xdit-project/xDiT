@@ -399,9 +399,12 @@ def send_qk(process_group: dist.ProcessGroup, packed: torch.Tensor, *, value: bo
         call.qk_packed = packed
     if call.rccl:
         if value:
-            call.packed.append(torch.cat(
-                [call.qk_packed.view(exchange.world, -1), packed.view(exchange.world, -1)], dim=1,
-            ).reshape(-1))
+            call.packed.append(
+                torch.cat(
+                    [call.qk_packed.view(exchange.world, -1), packed.view(exchange.world, -1)],
+                    dim=1,
+                ).reshape(-1)
+            )
         return
     peers = transport.group_for(process_group)
     inbox, _, _, _, query_key, value_plan = _qk_plans(state, peers, exchange)
@@ -420,8 +423,13 @@ def send_qk(process_group: dist.ProcessGroup, packed: torch.Tensor, *, value: bo
         heads, rows = exchange.sizes[0][role], exchange.rows[role]
         elements = exchange.piece_elems(0, role)
         view = _inbox(
-            inbox, exchange.inbox_offsets[0][role], exchange.batch,
-            exchange.inbox_rows(role), heads, exchange.head_dim, exchange.dtype,
+            inbox,
+            exchange.inbox_offsets[0][role],
+            exchange.batch,
+            exchange.inbox_rows(role),
+            heads,
+            exchange.head_dim,
+            exchange.dtype,
         )
         view[:, peers.rank * rows : (peers.rank + 1) * rows].copy_(
             own[offset : offset + elements].view(exchange.batch, rows, heads, exchange.head_dim)

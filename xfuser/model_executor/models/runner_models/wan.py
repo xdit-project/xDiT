@@ -210,16 +210,16 @@ class xFuserWan21I2VModel(xFuserWanModel):
         mod_value=16,  # vae_scale_factor_spatial * patch_size[1] = 8
         fps=16,
         gemm_targets=GemmTargets(
-            transformer=Select(modules=("transformer.blocks",)),
-            text_encoder=Select(modules=("text_encoder.encoder.block",)),
+            transformer=Select(roots=("transformer.blocks",)),
+            text_encoder=Select(roots=("text_encoder.encoder.block",)),
             # The first and last ten blocks carry more of the output quality
             # than the middle ones, and the text encoder is quantized to save
             # host RAM rather than to chase the smallest format; a tiered run
             # holds all of them at the better one. Absolute paths, matched on
             # segment boundaries, so blocks.3 cannot take blocks.30 with it.
             keep_high=Select(
-                modules=("text_encoder.encoder.block",),
-                prefixes=tuple(f"transformer.blocks.{index}" for index in (*range(10), *range(30, 40))),
+                roots=("text_encoder.encoder.block",)
+                + tuple(f"transformer.blocks.{index}" for index in (*range(10), *range(30, 40))),
             ),
         ),
         fsdp_strategy=COMMON_FSDP_STRATEGY,
@@ -334,10 +334,10 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
         # outright, endpoint blocks and all -- this model splits by denoiser,
         # not by block depth.
         self.settings.gemm_targets = GemmTargets(
-            transformer=Select(modules=("transformer.blocks", "transformer_2.blocks")),
-            text_encoder=Select(modules=("text_encoder.encoder.block",)),
+            transformer=Select(roots=("transformer.blocks", "transformer_2.blocks")),
+            text_encoder=Select(roots=("text_encoder.encoder.block",)),
             keep_high=Select(
-                modules=(
+                roots=(
                     "transformer_2.blocks",
                     "text_encoder.encoder.block",
                 )
@@ -638,7 +638,7 @@ class xFuserWan21T2VModel(xFuserWanModel):
         model_name="Wan-AI/Wan2.1-T2V-14B-Diffusers",
         output_name="wan2.1_t2v",
         gemm_targets=GemmTargets(
-            transformer=Select(modules=("transformer.blocks",)),
+            transformer=Select(roots=("transformer.blocks",)),
             # No text-encoder target: this runner does not declare the
             # quantize_text_encoder capability, so the flag is refused and a
             # declared encoder target could never be reached.
@@ -647,7 +647,7 @@ class xFuserWan21T2VModel(xFuserWanModel):
             # format. Absolute paths, matched on segment boundaries, so
             # blocks.3 cannot take blocks.30 with it.
             keep_high=Select(
-                prefixes=tuple(f"transformer.blocks.{index}" for index in (*range(10), *range(30, 40))),
+                roots=tuple(f"transformer.blocks.{index}" for index in (*range(10), *range(30, 40))),
             ),
         ),
         fsdp_strategy=COMMON_FSDP_STRATEGY,
@@ -738,7 +738,7 @@ class xFuserWan21T2V1_3BModel(xFuserWan21T2VModel):
         # selections it inherits are unchanged.
         self.settings.gemm_targets = replace(
             self.settings.gemm_targets,
-            keep_high=Select(prefixes=tuple(f"transformer.blocks.{index}" for index in (*range(10), *range(20, 30)))),
+            keep_high=Select(roots=tuple(f"transformer.blocks.{index}" for index in (*range(10), *range(20, 30)))),
         )
 
 
@@ -769,9 +769,9 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
         # outright, endpoint blocks and all -- this model splits by denoiser,
         # not by block depth.
         self.settings.gemm_targets = GemmTargets(
-            transformer=Select(modules=("transformer.blocks", "transformer_2.blocks")),
+            transformer=Select(roots=("transformer.blocks", "transformer_2.blocks")),
             # No text-encoder target: see xFuserWan21T2VModel.
-            keep_high=Select(modules=("transformer_2.blocks",)),
+            keep_high=Select(roots=("transformer_2.blocks",)),
         )
         self.settings.transformer_attr_names = ["transformer", "transformer_2"]
         self.settings.step_cache_config = {
@@ -907,14 +907,14 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         model_name="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
         output_name="wan2.2_ti2v",
         gemm_targets=GemmTargets(
-            transformer=Select(modules=("transformer.blocks",)),
-            text_encoder=Select(modules=("text_encoder.encoder.block",)),
+            transformer=Select(roots=("transformer.blocks",)),
+            text_encoder=Select(roots=("text_encoder.encoder.block",)),
             # Endpoint blocks and the text encoder as elsewhere in the family,
             # and additionally the two feed-forward projections in every block,
             # wherever they occur -- a suffix belongs to no subtree of its own.
             keep_high=Select(
-                modules=("text_encoder.encoder.block",),
-                prefixes=tuple(f"transformer.blocks.{index}" for index in (0, 1, 28, 29)),
+                roots=("text_encoder.encoder.block",)
+                + tuple(f"transformer.blocks.{index}" for index in (0, 1, 28, 29)),
                 suffixes=("net.0.proj", "net.2"),
             ),
         ),
@@ -1059,12 +1059,12 @@ class xFuserWan21VACEModel(xFuserWanModel):
         model_output_type="video",
         gemm_targets=GemmTargets(
             transformer=Select(
-                modules=(
+                roots=(
                     "transformer.blocks",
                     "transformer.vace_blocks",
                 )
             ),
-            text_encoder=Select(modules=("text_encoder.encoder.block",)),
+            text_encoder=Select(roots=("text_encoder.encoder.block",)),
         ),
         fsdp_strategy={
             "transformer": {

@@ -68,8 +68,8 @@ class xFuserStableDiffusionModel(xFuserModel):
             },
         },
         gemm_targets=GemmTargets(
-            transformer=Select(modules=("transformer.transformer_blocks",)),
-            text_encoder=Select(modules=("text_encoder_3.encoder.block",)),
+            transformer=Select(roots=("transformer.transformer_blocks",)),
+            text_encoder=Select(roots=("text_encoder_3.encoder.block",)),
         ),
         step_cache_config={
             "dbcache": DBCacheSettings(

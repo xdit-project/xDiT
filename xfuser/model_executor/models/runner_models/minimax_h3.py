@@ -351,7 +351,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
         resolution_divisor=32,
         gemm_targets=GemmTargets(
             transformer=Select(
-                modules=("transformer.transformer_blocks",),
+                roots=("transformer.transformer_blocks",),
                 only=("attn.to_qkv", "ff.net.0.proj"),
             ),
         ),
@@ -854,7 +854,7 @@ class xFuserMiniMaxH3Ref2VAModel(xFuserMiniMaxH3Model):
         resolution_divisor=32,
         gemm_targets=GemmTargets(
             transformer=Select(
-                modules=("transformer_ref.transformer_blocks",),
+                roots=("transformer_ref.transformer_blocks",),
                 only=("attn.to_qkv", "ff.net.0.proj"),
             ),
         ),

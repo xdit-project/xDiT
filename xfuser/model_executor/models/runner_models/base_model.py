@@ -420,7 +420,7 @@ class xFuserModel(abc.ABC):
     def _update_model_settings(self, config: xFuserArgs) -> None:
         targets = self.settings.gemm_targets
 
-        te_targets = targets.text_encoder.roots() if targets is not None else ()
+        te_targets = targets.text_encoder.roots if targets is not None else ()
         spec = getattr(config, "gemm_quantization_spec", None)
         quantizing = spec is not None and not spec.is_pure("none")
         if te_targets and quantizing and not config.quantize_text_encoder:

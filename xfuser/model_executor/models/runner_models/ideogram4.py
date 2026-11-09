@@ -310,7 +310,7 @@ class xFuserIdeogram4Model(xFuserModel):
         resolution_divisor=16,
         gemm_targets=GemmTargets(
             transformer=Select(
-                modules=(
+                roots=(
                     "transformer.layers",
                     "unconditional_transformer.layers",
                 )

@@ -26,9 +26,9 @@ BLOCKS = ("transformer.transformer_blocks", "transformer.single_transformer_bloc
 TEXT_ENCODER = "text_encoder.model.language_model.layers"
 
 TARGETS = GemmTargets(
-    transformer=Select(modules=BLOCKS),
-    text_encoder=Select(modules=(TEXT_ENCODER,)),
-    keep_high=Select(modules=(TEXT_ENCODER,)),
+    transformer=Select(roots=BLOCKS),
+    text_encoder=Select(roots=(TEXT_ENCODER,)),
+    keep_high=Select(roots=(TEXT_ENCODER,)),
 )
 
 
@@ -240,7 +240,7 @@ def test_a_suffix_carve_out_reaches_the_placement_walk():
     quietly take the low format instead of the high one.
     """
     scattered = GemmTargets(
-        transformer=Select(modules=("transformer.transformer_blocks",)),
+        transformer=Select(roots=("transformer.transformer_blocks",)),
         keep_high=Select(suffixes=("ff.net.2",)),
     )
     loader = _loader("low=fp4,high=fp8", targets=scattered, text_encoder=False)
@@ -255,8 +255,8 @@ def test_a_suffix_carve_out_reaches_the_placement_walk():
 def test_a_block_prefix_carve_out_reaches_the_placement_walk():
     """Segment-aware, so naming block 3 must not take block 30 with it."""
     endpoints = GemmTargets(
-        transformer=Select(modules=("transformer.transformer_blocks",)),
-        keep_high=Select(prefixes=("transformer.transformer_blocks.3",)),
+        transformer=Select(roots=("transformer.transformer_blocks",)),
+        keep_high=Select(roots=("transformer.transformer_blocks.3",)),
     )
     loader = _loader("low=fp4,high=fp8", targets=endpoints, text_encoder=False)
     _run(loader, before_device_move=True)
@@ -321,8 +321,8 @@ def test_a_whole_block_goes_to_one_converter():
 def test_a_block_split_by_keep_high_stays_disjoint():
     """The case target arithmetic got wrong: block low, one submodule high."""
     split = GemmTargets(
-        transformer=Select(modules=("transformer.transformer_blocks",)),
-        keep_high=Select(modules=("transformer.transformer_blocks.3.attn",)),
+        transformer=Select(roots=("transformer.transformer_blocks",)),
+        keep_high=Select(roots=("transformer.transformer_blocks.3.attn",)),
     )
     loader = _shard_loader("low=fp4,high=fp8", targets=split, text_encoder=False)
     fn = shard.build_block_quantize_fn(loader, "transformer", ["transformer_blocks"], local_rank=0)
@@ -341,7 +341,7 @@ def test_a_block_split_by_keep_high_stays_disjoint():
 def test_a_suffix_carve_out_survives_sharding():
     """The same declaration the placement walk honours, per wrapped block."""
     scattered = GemmTargets(
-        transformer=Select(modules=("transformer.transformer_blocks",)),
+        transformer=Select(roots=("transformer.transformer_blocks",)),
         keep_high=Select(suffixes=("ff.net.2",)),
     )
     loader = _shard_loader("low=fp4,high=fp8", targets=scattered, text_encoder=False)
@@ -417,7 +417,7 @@ def test_a_narrowed_declaration_filters_inside_the_subtree():
     from xfuser.model_executor.quant.targets import GemmTargets, Select
 
     narrowed = GemmTargets(
-        transformer=Select(modules=BLOCKS, only=("attn.to_qkv",)),
+        transformer=Select(roots=BLOCKS, only=("attn.to_qkv",)),
     )
     # fp4 so the primary converter owns it; fp8 would route to blockwise.
     loader = _loader("fp4", text_encoder=False, targets=narrowed)

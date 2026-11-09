@@ -92,12 +92,12 @@ class xFuserCosmos3SuperModel(xFuserModel):
         fps=24,
         mod_value=16,
         gemm_targets=GemmTargets(
-            transformer=Select(modules=("transformer.layers",)),
+            transformer=Select(roots=("transformer.layers",)),
             # The first and last ten layers carry more of the output quality
             # than the middle ones, so a tiered run holds them at the better
             # format. Absolute paths, matched on segment boundaries, so
             # layers.5 cannot take layers.54 with it.
-            keep_high=Select(prefixes=tuple(f"transformer.layers.{index}" for index in (*range(10), *range(54, 64)))),
+            keep_high=Select(roots=tuple(f"transformer.layers.{index}" for index in (*range(10), *range(54, 64)))),
         ),
         fsdp_strategy=COSMOS3_FSDP_STRATEGY,
     )
@@ -209,7 +209,7 @@ class xFuserCosmos3NanoModel(xFuserCosmos3SuperModel):
         fps=24,
         mod_value=16,
         gemm_targets=GemmTargets(
-            transformer=Select(modules=("transformer.layers",)),
+            transformer=Select(roots=("transformer.layers",)),
         ),
         fsdp_strategy=COSMOS3_FSDP_STRATEGY,
     )

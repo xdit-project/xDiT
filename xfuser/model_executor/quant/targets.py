@@ -31,33 +31,35 @@ def _ends_with(path: str, suffix: str) -> bool:
 
 @dataclass(frozen=True)
 class Select:
-    """A set of module paths, named three ways.
+    """A set of module paths, named two ways.
 
-    ``modules``, ``prefixes`` and ``suffixes`` union: a path in any of them is
-    selected. They match the module's full path on segment boundaries, and
-    ``prefixes`` is absolute like the others -- writing a bare block index
-    would require knowing what it is relative to, and a trailing dot to stop
-    "3." matching "30.", which is a trap rather than a feature.
+    ``roots`` names subtrees: a path is selected when it is a named root or
+    sits under one. ``suffixes`` names path endings, which belong to no subtree
+    of their own, so a consumer that walks a subtree can start from a root and
+    cannot start from a suffix. The two union: a path in either is selected.
+
+    Both match the module's full path on segment boundaries, and both are
+    absolute -- writing a bare block index would require knowing what it is
+    relative to, and a trailing dot to stop "3." matching "30.", which is a
+    trap rather than a feature.
 
     ``only`` narrows instead of widening. Models that quantize part of a block
     -- the projections but not the output layer, say -- name the leaves they
     want, and everything else in the selected subtree is left alone.
     """
 
-    modules: Tuple[str, ...] = ()
-    prefixes: Tuple[str, ...] = ()
+    roots: Tuple[str, ...] = ()
     suffixes: Tuple[str, ...] = ()
     only: Tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "roots", tuple(dict.fromkeys(self.roots)))
+
     def __bool__(self) -> bool:
-        return bool(self.modules or self.prefixes or self.suffixes)
+        return bool(self.roots or self.suffixes)
 
     def _selected(self, path: str) -> bool:
-        return (
-            any(_is_under(path, m) for m in self.modules)
-            or any(_is_under(path, p) for p in self.prefixes)
-            or any(_ends_with(path, s) for s in self.suffixes)
-        )
+        return any(_is_under(path, r) for r in self.roots) or any(_ends_with(path, s) for s in self.suffixes)
 
     def matches(self, path: str) -> bool:
         if not self._selected(path):
@@ -65,11 +67,6 @@ class Select:
         if not self.only:
             return True
         return any(_ends_with(path, leaf) for leaf in self.only)
-
-    def roots(self) -> Tuple[str, ...]:
-        """The paths that can be named up front, for consumers that walk a
-        subtree rather than test one module. Suffixes have no root."""
-        return tuple(dict.fromkeys(self.modules + self.prefixes))
 
 
 #: The components a model can target. Adding one -- "vae", say -- means adding
@@ -108,8 +105,8 @@ class GemmTargets:
         return {name: select for name, select in found if select}
 
     def __post_init__(self) -> None:
-        targeted = [root for select in self.components.values() for root in select.roots()]
-        stray = [root for root in self.keep_high.roots() if not any(_is_under(root, t) for t in targeted)]
+        targeted = [root for select in self.components.values() for root in select.roots]
+        stray = [root for root in self.keep_high.roots if not any(_is_under(root, t) for t in targeted)]
         if stray:
             raise ValueError(
                 f"keep_high selects modules outside the target set: {stray}. "
@@ -119,11 +116,11 @@ class GemmTargets:
 
         if self.short_sequence.suffixes or self.short_sequence.only:
             raise ValueError(
-                "short_sequence names whole targets, so it takes modules or "
-                "prefixes; a suffix or a leaf list would have to be carved "
-                "inside a target, which is not what it means."
+                "short_sequence names whole targets, so it takes roots; a "
+                "suffix or a leaf list would have to be carved inside a "
+                "target, which is not what it means."
             )
-        outside = [root for root in self.short_sequence.roots() if root not in targeted]
+        outside = [root for root in self.short_sequence.roots if root not in targeted]
         if outside:
             raise ValueError(
                 f"short_sequence selects modules that are not declared "
@@ -179,7 +176,7 @@ class GemmPlan:
             selects = list(self.targeted.values())
         else:
             selects = [self.targeted[component]] if component in self.targeted else []
-        return tuple(dict.fromkeys(r for select in selects for r in select.roots()))
+        return tuple(dict.fromkeys(r for select in selects for r in select.roots))
 
     def relative_to(self, component_name: str, roots: Iterable[str]) -> Tuple[str, ...]:
         """`roots` rewritten as paths under `component_name`, others dropped.
@@ -241,9 +238,7 @@ class GemmPlan:
         if self.keep_high.suffixes:
             return True
         declared = self.declared_roots()
-        return any(
-            root not in declared and any(_is_under(root, d) for d in declared) for root in self.keep_high.roots()
-        )
+        return any(root not in declared and any(_is_under(root, d) for d in declared) for root in self.keep_high.roots)
 
     def format_for(self, path: str) -> Optional[str]:
         """The format this module is quantized to, or None to leave it alone.
@@ -287,11 +282,11 @@ class GemmPlan:
                 # A pinned component takes one format whole, so it belongs to
                 # that format's walk and to no other -- keep_high included.
                 if pin == format_name:
-                    found.extend(select.roots())
+                    found.extend(select.roots)
                 continue
             if format_name not in (self.low, self.high):
                 continue
-            declared = list(select.roots())
+            declared = list(select.roots)
             for root in declared:
                 whole = self.high is not None and self.keep_high.matches(root)
                 if (format_name == self.high) == whole:
@@ -300,7 +295,7 @@ class GemmPlan:
                 # carve-outs named below a target root rather than at it
                 found += [
                     root
-                    for root in self.keep_high.roots()
+                    for root in self.keep_high.roots
                     if root not in found and any(_is_under(root, d) for d in declared)
                 ]
         return tuple(dict.fromkeys(found))
@@ -317,8 +312,7 @@ def _format_at(path: str, keep_high: Select, low: Optional[str], high: Optional[
 
 def _without(select: Select, dropped: Tuple[str, ...]) -> Select:
     return Select(
-        modules=tuple(m for m in select.modules if m not in dropped),
-        prefixes=tuple(p for p in select.prefixes if p not in dropped),
+        roots=tuple(root for root in select.roots if root not in dropped),
         suffixes=select.suffixes,
         only=select.only,
     )
@@ -332,7 +326,7 @@ def _component_format(select: Select, keep_high: Select, low: Optional[str], hig
     declaration that holds only part of a component high is left to
     ``format_for``, which decides per leaf.
     """
-    roots = select.roots()
+    roots = select.roots
     if high is not None and roots and all(keep_high.matches(root) for root in roots):
         return high
     return low
@@ -407,7 +401,7 @@ def resolve(
         # kernels mind. Neither had to know about the other.
         dropped = tuple(
             root
-            for root in targets.short_sequence.roots()
+            for root in targets.short_sequence.roots
             if _format_at(root, targets.keep_high, low, high) in MIN_M_FORMATS
         )
         if dropped:

@@ -201,7 +201,7 @@ class xFuserKrea2RawModel(_Krea2BaseModel):
         model_output_type="image",
         mod_value=16,
         gemm_targets=GemmTargets(
-            transformer=Select(modules=_QUANT_GEMM_MODULES),
+            transformer=Select(roots=_QUANT_GEMM_MODULES),
         ),
         fsdp_strategy={
             "transformer": {
@@ -249,7 +249,7 @@ class xFuserKrea2TurboModel(_Krea2BaseModel):
         model_output_type="image",
         mod_value=16,
         gemm_targets=GemmTargets(
-            transformer=Select(modules=_QUANT_GEMM_MODULES),
+            transformer=Select(roots=_QUANT_GEMM_MODULES),
         ),
         fsdp_strategy={
             "transformer": {

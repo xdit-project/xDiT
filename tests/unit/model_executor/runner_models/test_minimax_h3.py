@@ -609,7 +609,7 @@ def test_minimax_h3_quantization_policy():
     ):
         select = cls.settings.gemm_targets.transformer
         assert select.only == expected
-        assert select.roots() == (root,)
+        assert select.roots == (root,)
         # Nothing is held at a better precision: a tier has nothing to carve.
         assert not cls.settings.gemm_targets.keep_high
 

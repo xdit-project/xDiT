@@ -139,7 +139,7 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
         model_output_type="video",
         fps=24,
         gemm_targets=GemmTargets(
-            transformer=Select(modules=("transformer.blocks",)),
+            transformer=Select(roots=("transformer.blocks",)),
         ),
         fsdp_strategy=LINGBOT_FSDP_STRATEGY,
     )
@@ -519,7 +519,7 @@ class xFuserLingBotVideoDenseModel(xFuserLingBotVideoMoEModel):
         model_output_type="video",
         fps=24,
         gemm_targets=GemmTargets(
-            transformer=Select(modules=("transformer.blocks",)),
+            transformer=Select(roots=("transformer.blocks",)),
         ),
         fsdp_strategy=LINGBOT_FSDP_STRATEGY,
     )

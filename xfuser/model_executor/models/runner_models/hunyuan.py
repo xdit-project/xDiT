@@ -79,12 +79,12 @@ class xFuserHunyuanvideoModel(xFuserModel):
         fps=24,
         gemm_targets=GemmTargets(
             transformer=Select(
-                modules=(
+                roots=(
                     "transformer.transformer_blocks",
                     "transformer.single_transformer_blocks",
                 )
             ),
-            text_encoder=Select(modules=("text_encoder.layers",)),
+            text_encoder=Select(roots=("text_encoder.layers",)),
         ),
         # guidance embedded into timestep conditioning (1 forward pass per step, no separate cfg).
         step_cache_config={
@@ -222,7 +222,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         model_output_type="video",
         fps=24,
         gemm_targets=GemmTargets(
-            transformer=Select(modules=("transformer.transformer_blocks",)),
+            transformer=Select(roots=("transformer.transformer_blocks",)),
         ),
         mod_value=16,
         # Blocks that _compile_model compiles one by one under a step cache.

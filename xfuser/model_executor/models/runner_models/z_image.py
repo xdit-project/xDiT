@@ -148,19 +148,19 @@ class xFuserZImageModel(xFuserModel):
         },
         gemm_targets=GemmTargets(
             transformer=Select(
-                modules=(
+                roots=(
                     "transformer.layers",
                     "transformer.noise_refiner",
                     "transformer.context_refiner",
                 )
             ),
-            text_encoder=Select(modules=("text_encoder.layers",)),
+            text_encoder=Select(roots=("text_encoder.layers",)),
             # context_refiner refines the caption embeddings, and sequence
             # parallelism chunks that sequence before those layers run, so
             # their GEMMs can see an M of a handful of tokens. A format whose
             # kernel refuses a small M leaves them alone; the rest are
             # unaffected, and so is a run on one rank.
-            short_sequence=Select(modules=("transformer.context_refiner",)),
+            short_sequence=Select(roots=("transformer.context_refiner",)),
         ),
         step_cache_config={
             "dbcache": DBCacheSettings(
@@ -249,19 +249,19 @@ class xFuserZImageTurboModel(xFuserModel):
         },
         gemm_targets=GemmTargets(
             transformer=Select(
-                modules=(
+                roots=(
                     "transformer.layers",
                     "transformer.noise_refiner",
                     "transformer.context_refiner",
                 )
             ),
-            text_encoder=Select(modules=("text_encoder.layers",)),
+            text_encoder=Select(roots=("text_encoder.layers",)),
             # context_refiner refines the caption embeddings, and sequence
             # parallelism chunks that sequence before those layers run, so
             # their GEMMs can see an M of a handful of tokens. A format whose
             # kernel refuses a small M leaves them alone; the rest are
             # unaffected, and so is a run on one rank.
-            short_sequence=Select(modules=("transformer.context_refiner",)),
+            short_sequence=Select(roots=("transformer.context_refiner",)),
         ),
     )
 

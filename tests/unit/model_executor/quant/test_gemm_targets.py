@@ -16,9 +16,9 @@ BLOCKS = "transformer.blocks"
 EDGE = tuple(f"{BLOCKS}.{i}" for i in (0, 1, 38, 39))
 
 TARGETS = GemmTargets(
-    transformer=Select(modules=(BLOCKS,)),
-    keep_high=Select(prefixes=EDGE),
-    text_encoder=Select(modules=("text_encoder.encoder.block",)),
+    transformer=Select(roots=(BLOCKS,)),
+    keep_high=Select(roots=EDGE),
+    text_encoder=Select(roots=("text_encoder.encoder.block",)),
 )
 
 
@@ -28,7 +28,7 @@ TARGETS = GemmTargets(
 
 
 def test_a_module_matches_itself_and_its_descendants():
-    select = Select(modules=(BLOCKS,))
+    select = Select(roots=(BLOCKS,))
     assert select.matches(BLOCKS)
     assert select.matches(f"{BLOCKS}.7.attn.to_qkv")
 
@@ -36,7 +36,7 @@ def test_a_module_matches_itself_and_its_descendants():
 def test_matching_respects_segment_boundaries():
     """A bare startswith would take "transformer.blocks_extra" too, quantizing
     a module the model never named."""
-    select = Select(modules=(BLOCKS,))
+    select = Select(roots=(BLOCKS,))
     assert not select.matches("transformer.blocks_extra")
     assert not select.matches("transformer.blocks_extra.0")
 
@@ -49,7 +49,7 @@ def test_suffixes_match_whole_segments():
 
 def test_prefixes_do_not_need_a_trailing_dot_to_be_exact():
     """ "3." vs "30." is the trap absolute segment matching removes."""
-    select = Select(prefixes=(f"{BLOCKS}.3",))
+    select = Select(roots=(f"{BLOCKS}.3",))
     assert select.matches(f"{BLOCKS}.3.attn.to_qkv")
     assert not select.matches(f"{BLOCKS}.30.attn.to_qkv")
 
@@ -57,16 +57,16 @@ def test_prefixes_do_not_need_a_trailing_dot_to_be_exact():
 def test_keep_high_must_select_within_the_targets():
     with pytest.raises(ValueError, match="outside the target set"):
         GemmTargets(
-            transformer=Select(modules=(BLOCKS,)),
-            keep_high=Select(modules=("text_encoder.layers",)),
+            transformer=Select(roots=(BLOCKS,)),
+            keep_high=Select(roots=("text_encoder.layers",)),
         )
 
 
 def test_keep_high_may_name_any_targeted_component():
     targets = GemmTargets(
-        transformer=Select(modules=(BLOCKS,)),
-        text_encoder=Select(modules=("text_encoder.layers",)),
-        keep_high=Select(modules=("text_encoder.layers",)),
+        transformer=Select(roots=(BLOCKS,)),
+        text_encoder=Select(roots=("text_encoder.layers",)),
+        keep_high=Select(roots=("text_encoder.layers",)),
     )
     assert targets.keep_high.matches("text_encoder.layers.3.mlp")
 
@@ -131,7 +131,7 @@ def test_the_text_encoder_follows_the_same_rule_as_everything_else():
     held = GemmTargets(
         transformer=TARGETS.transformer,
         text_encoder=TARGETS.text_encoder,
-        keep_high=Select(modules=("text_encoder.encoder.block",)),
+        keep_high=Select(roots=("text_encoder.encoder.block",)),
     )
     plan = resolve(held, tiered, enable=("transformer", "text_encoder"))
     assert plan.format_for(path) == "fp8"
@@ -142,7 +142,7 @@ def test_keep_high_is_inert_while_a_component_is_not_enabled():
     held = GemmTargets(
         transformer=TARGETS.transformer,
         text_encoder=TARGETS.text_encoder,
-        keep_high=Select(modules=("text_encoder.encoder.block",)),
+        keep_high=Select(roots=("text_encoder.encoder.block",)),
     )
     plan = resolve(held, GemmQuantizationSpec.parse("low=fp4,high=fp8"))
     assert plan.format_for("text_encoder.encoder.block.3.mlp") is None
@@ -194,10 +194,10 @@ def test_roots_narrow_to_one_component_for_loaders_that_split_them():
 # ---------------------------------------------------------------------------
 
 RULES_TARGETS = GemmTargets(
-    transformer=Select(modules=("transformer.blocks",)),
-    text_encoder=Select(modules=("text_encoder.layers",)),
+    transformer=Select(roots=("transformer.blocks",)),
+    text_encoder=Select(roots=("text_encoder.layers",)),
     keep_high=Select(
-        modules=("transformer.blocks.0", "text_encoder.layers.0"),
+        roots=("transformer.blocks.0", "text_encoder.layers.0"),
     ),
 )
 BOTH = ("transformer", "text_encoder")
@@ -271,7 +271,7 @@ def test_a_nonsense_pair_is_still_refused(raw, message):
 
 PARTIAL = GemmTargets(
     transformer=Select(
-        modules=("transformer.blocks",),
+        roots=("transformer.blocks",),
         only=("attn.to_qkv", "ff.net.0.proj"),
     ),
 )
@@ -300,10 +300,10 @@ def test_only_leaves_the_declared_roots_intact():
 def test_only_composes_with_keep_high():
     targets = GemmTargets(
         transformer=Select(
-            modules=("transformer.blocks",),
+            roots=("transformer.blocks",),
             only=("attn.to_qkv", "ff.net.0.proj"),
         ),
-        keep_high=Select(modules=("transformer.blocks.0",)),
+        keep_high=Select(roots=("transformer.blocks.0",)),
     )
     plan = resolve(targets, GemmQuantizationSpec.parse("low=fp4,high=fp8"))
     assert plan.format_for("transformer.blocks.0.attn.to_qkv") == "fp8"
@@ -319,13 +319,13 @@ def test_only_composes_with_keep_high():
 
 REFINERS = GemmTargets(
     transformer=Select(
-        modules=(
+        roots=(
             "transformer.layers",
             "transformer.noise_refiner",
             "transformer.context_refiner",
         )
     ),
-    short_sequence=Select(modules=("transformer.context_refiner",)),
+    short_sequence=Select(roots=("transformer.context_refiner",)),
 )
 
 
@@ -363,9 +363,9 @@ def test_the_dropped_module_is_gone_from_every_consumer():
 def test_a_tiered_run_asks_the_format_the_module_would_have_taken():
     """Held high at fp8, the floor never applies however low the run goes."""
     targets = GemmTargets(
-        transformer=Select(modules=("transformer.layers", "transformer.context_refiner")),
-        keep_high=Select(modules=("transformer.context_refiner",)),
-        short_sequence=Select(modules=("transformer.context_refiner",)),
+        transformer=Select(roots=("transformer.layers", "transformer.context_refiner")),
+        keep_high=Select(roots=("transformer.context_refiner",)),
+        short_sequence=Select(roots=("transformer.context_refiner",)),
     )
     plan = _resolved("low=int8,high=fp8", sp_world_size=8, targets=targets)
     assert plan.format_for("transformer.context_refiner.0.attn.to_q") == "fp8"
@@ -375,15 +375,15 @@ def test_a_tiered_run_asks_the_format_the_module_would_have_taken():
 def test_short_sequence_must_name_a_declared_target():
     with pytest.raises(ValueError, match="not declared targets"):
         GemmTargets(
-            transformer=Select(modules=("transformer.layers",)),
-            short_sequence=Select(modules=("transformer.context_refiner",)),
+            transformer=Select(roots=("transformer.layers",)),
+            short_sequence=Select(roots=("transformer.context_refiner",)),
         )
 
 
 def test_short_sequence_refuses_to_carve_inside_a_target():
     with pytest.raises(ValueError, match="names whole targets"):
         GemmTargets(
-            transformer=Select(modules=("transformer.layers",)),
+            transformer=Select(roots=("transformer.layers",)),
             short_sequence=Select(suffixes=("attn.to_q",)),
         )
 
@@ -395,7 +395,7 @@ def test_only_narrows_every_format_the_same_way(raw):
     other walk applied it; the plan has one answer for all of them."""
     targets = GemmTargets(
         transformer=Select(
-            modules=("transformer.transformer_blocks",),
+            roots=("transformer.transformer_blocks",),
             only=("attn.to_qkv", "ff.net.0.proj"),
         ),
     )
@@ -415,8 +415,8 @@ def test_the_log_names_a_suffix_carve_out():
     from xfuser.model_executor.models.runner_models.loading import quantization_plan
 
     targets = GemmTargets(
-        transformer=Select(modules=("transformer.blocks",)),
-        keep_high=Select(prefixes=("transformer.blocks.0",), suffixes=("net.0.proj", "net.2")),
+        transformer=Select(roots=("transformer.blocks",)),
+        keep_high=Select(roots=("transformer.blocks.0",), suffixes=("net.0.proj", "net.2")),
     )
     plan = resolve(targets, GemmQuantizationSpec.parse("low=fp4,high=fp8"))
 
@@ -482,9 +482,9 @@ def test_a_pin_leaves_the_rest_of_the_plan_alone(profile):
 #: An encoder carved into `keep_high`, the way several runners declare theirs
 #: so a tiered run leaves it at the better format.
 CARVED = GemmTargets(
-    transformer=Select(modules=(BLOCKS,)),
-    text_encoder=Select(modules=("text_encoder.encoder.block",)),
-    keep_high=Select(modules=("text_encoder.encoder.block",)),
+    transformer=Select(roots=(BLOCKS,)),
+    text_encoder=Select(roots=("text_encoder.encoder.block",)),
+    keep_high=Select(roots=("text_encoder.encoder.block",)),
 )
 
 

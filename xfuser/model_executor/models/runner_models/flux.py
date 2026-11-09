@@ -69,12 +69,12 @@ class xFuserFluxModel(xFuserModel):
         model_output_type="image",
         gemm_targets=GemmTargets(
             transformer=Select(
-                modules=(
+                roots=(
                     "transformer.transformer_blocks",
                     "transformer.single_transformer_blocks",
                 )
             ),
-            text_encoder=Select(modules=("text_encoder_2.encoder.block",)),
+            text_encoder=Select(roots=("text_encoder_2.encoder.block",)),
         ),
         fsdp_strategy={
             "transformer": {
@@ -197,12 +197,12 @@ class xFuserFluxKontextModel(xFuserModel):
         mod_value=16,
         gemm_targets=GemmTargets(
             transformer=Select(
-                modules=(
+                roots=(
                     "transformer.transformer_blocks",
                     "transformer.single_transformer_blocks",
                 )
             ),
-            text_encoder=Select(modules=("text_encoder_2.encoder.block",)),
+            text_encoder=Select(roots=("text_encoder_2.encoder.block",)),
         ),
         fsdp_strategy={
             "transformer": {
@@ -333,16 +333,16 @@ class xFuserFlux2Model(xFuserModel):
         mod_value=16,
         gemm_targets=GemmTargets(
             transformer=Select(
-                modules=(
+                roots=(
                     "transformer.transformer_blocks",
                     "transformer.single_transformer_blocks",
                 )
             ),
-            text_encoder=Select(modules=("text_encoder.model.language_model.layers",)),
+            text_encoder=Select(roots=("text_encoder.model.language_model.layers",)),
             # The text encoder is held at the better precision: it is
             # quantized to save host RAM at load, not to chase the smallest
             # format, and a tiered run should not drag it down with the DiT.
-            keep_high=Select(modules=("text_encoder.model.language_model.layers",)),
+            keep_high=Select(roots=("text_encoder.model.language_model.layers",)),
         ),
         fsdp_strategy={
             "transformer": {
@@ -483,12 +483,12 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         mod_value=16,
         gemm_targets=GemmTargets(
             transformer=Select(
-                modules=(
+                roots=(
                     "transformer.transformer_blocks",
                     "transformer.single_transformer_blocks",
                 )
             ),
-            text_encoder=Select(modules=("text_encoder.model.layers",)),
+            text_encoder=Select(roots=("text_encoder.model.layers",)),
         ),
         fsdp_strategy={
             "transformer": {
@@ -592,12 +592,12 @@ class xFuserFlux2Klein4BModel(xFuserFlux2Klein9BModel):
         mod_value=16,
         gemm_targets=GemmTargets(
             transformer=Select(
-                modules=(
+                roots=(
                     "transformer.transformer_blocks",
                     "transformer.single_transformer_blocks",
                 )
             ),
-            text_encoder=Select(modules=("text_encoder.model.layers",)),
+            text_encoder=Select(roots=("text_encoder.model.layers",)),
         ),
         fsdp_strategy={
             "transformer": {

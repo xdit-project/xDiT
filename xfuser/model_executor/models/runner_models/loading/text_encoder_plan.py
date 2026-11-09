@@ -27,7 +27,7 @@ def _declared_components(model):
     """
 
     targets = model.settings.gemm_targets
-    entries = targets.text_encoder.roots() if targets is not None else ()
+    entries = targets.text_encoder.roots if targets is not None else ()
     # No "only dotted paths" filter: a declaration naming a whole component is
     # legal -- `relative_to` turns it into "", which every consumer reads as
     # all of it -- and filtering those out dropped the encoder silently.

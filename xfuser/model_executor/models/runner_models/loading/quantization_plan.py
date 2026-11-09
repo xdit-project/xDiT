@@ -19,11 +19,15 @@ def _with_config_overrides(targets, config):
     """Apply an advanced GEMM config file to the model's declaration.
 
     The file says which modules to hold at the better format, which is exactly
-    what `keep_high` means -- and its three pattern kinds are Select's three
-    fields. So it overrides that one field and nothing else.
+    what `keep_high` means, so it edits that one field and nothing else. Its
+    module and prefix keys both name subtrees, so both land in `roots`; they
+    stay two keys because the file has readers that write them that way.
 
-    Unlike the legacy mechanism its prefixes are absolute paths, matching the
-    rest of Select, rather than block-relative indices.
+    The patterns add to the declaration. `gemm_high_precision_targets: none`
+    empties it first, which is how a file replaces the declaration instead.
+
+    The patterns are absolute pipeline paths, matching the rest of Select,
+    rather than paths relative to a target root.
     """
     if not getattr(config, "_gemm_config_loaded", False):
         return targets
@@ -32,20 +36,24 @@ def _with_config_overrides(targets, config):
     if getattr(config, "gemm_high_precision_targets", "model") == "none":
         keep = Select()
 
-    modules = _csv(getattr(config, "gemm_high_precision_module_patterns", None))
-    prefixes = _csv(getattr(config, "gemm_high_precision_prefix_patterns", None))
-    suffixes = _csv(getattr(config, "gemm_high_precision_suffix_patterns", None))
-    if modules or prefixes or suffixes:
-        keep = Select(
-            modules=keep.modules + modules,
-            prefixes=keep.prefixes + prefixes,
-            suffixes=keep.suffixes + suffixes,
-        )
+    added_roots = _csv(getattr(config, "gemm_high_precision_module_patterns", None)) + _csv(
+        getattr(config, "gemm_high_precision_prefix_patterns", None)
+    )
+    added_suffixes = _csv(getattr(config, "gemm_high_precision_suffix_patterns", None))
+    if added_roots or added_suffixes:
+        keep = Select(roots=keep.roots + added_roots, suffixes=keep.suffixes + added_suffixes)
     if keep == targets.keep_high:
         return targets
     # GemmTargets validates that keep_high stays inside the target set, so a
     # pattern naming something undeclared is refused here rather than ignored.
-    return replace(targets, keep_high=keep)
+    try:
+        return replace(targets, keep_high=keep)
+    except ValueError as exc:
+        raise ValueError(
+            f"{exc} A GEMM config pattern names an absolute pipeline path, "
+            "such as transformer.blocks.3, not a path relative to a target "
+            "root."
+        ) from exc
 
 
 class QuantizationPlan:

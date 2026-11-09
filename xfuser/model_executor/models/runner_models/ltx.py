@@ -290,7 +290,7 @@ class xFuserLTX2VideoModel(xFuserModel):
         output_name="ltx_2_video",
         model_output_type="video",
         gemm_targets=GemmTargets(
-            transformer=Select(modules=("transformer.transformer_blocks",)),
+            transformer=Select(roots=("transformer.transformer_blocks",)),
         ),
         fps=24,
         resolution_divisor=64,
@@ -796,7 +796,7 @@ class xFuserLTX25DistilledVideoModel(_xFuserLTX25VideoModelBase):
         resolution_divisor=64,
         valid_tasks=["t2v", "i2v"],
         gemm_targets=GemmTargets(
-            transformer=Select(modules=("transformer.transformer_blocks",)),
+            transformer=Select(roots=("transformer.transformer_blocks",)),
         ),
     )
 
@@ -847,6 +847,6 @@ class xFuserLTX25FullVideoModel(_xFuserLTX25VideoModelBase):
         resolution_divisor=64,
         valid_tasks=["t2v", "i2v"],
         gemm_targets=GemmTargets(
-            transformer=Select(modules=("transformer.transformer_blocks",)),
+            transformer=Select(roots=("transformer.transformer_blocks",)),
         ),
     )

@@ -76,8 +76,8 @@ def test_wan22_logs_an_explicit_fp4_and_fp6_mapping(monkeypatch):
         ),
         settings=SimpleNamespace(
             gemm_targets=GemmTargets(
-                transformer=Select(modules=("transformer.blocks", "transformer_2.blocks")),
-                keep_high=Select(modules=("transformer_2.blocks",)),
+                transformer=Select(roots=("transformer.blocks", "transformer_2.blocks")),
+                keep_high=Select(roots=("transformer_2.blocks",)),
             ),
         ),
     )
@@ -126,8 +126,8 @@ def test_wan22_mixed_mode_routes_primary_to_fp4_and_second_transformer_to_fp6(
         ),
         settings=SimpleNamespace(
             gemm_targets=GemmTargets(
-                transformer=Select(modules=("transformer.blocks", "transformer_2.blocks")),
-                keep_high=Select(modules=("transformer_2.blocks",)),
+                transformer=Select(roots=("transformer.blocks", "transformer_2.blocks")),
+                keep_high=Select(roots=("transformer_2.blocks",)),
             ),
         ),
         pipe=SimpleNamespace(

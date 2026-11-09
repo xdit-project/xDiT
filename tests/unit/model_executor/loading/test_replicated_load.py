@@ -24,14 +24,14 @@ from xfuser.model_executor.quant.targets import GemmTargets, Select, resolve
 #: Two transformer targets, both held at the better format, so an FP4 block
 #: fill is handed them as its remainder.
 _REMAINDER = GemmTargets(
-    transformer=Select(modules=("transformer.blocks", "transformer.encoder")),
-    keep_high=Select(modules=("transformer.blocks", "transformer.encoder")),
+    transformer=Select(roots=("transformer.blocks", "transformer.encoder")),
+    keep_high=Select(roots=("transformer.blocks", "transformer.encoder")),
 )
 
 #: One block-local leaf held at the better format, the rest streamed.
 _CARVED = GemmTargets(
-    transformer=Select(modules=("transformer.blocks",)),
-    keep_high=Select(prefixes=("transformer.blocks.0.override",)),
+    transformer=Select(roots=("transformer.blocks",)),
+    keep_high=Select(roots=("transformer.blocks.0.override",)),
 )
 from xfuser.model_executor.models.runner_models.loading import (
     quant_adapter,
@@ -1249,7 +1249,7 @@ def test_a_declared_encoder_with_no_targets_never_resolves_an_adapter():
     declares encoder targets. So the lookup has to sit after the no-targets
     guard, and an encoder with nothing to place must not reach it at all.
     """
-    declared = GemmTargets(text_encoder=Select(modules=("text_encoder.encoder.block",)))
+    declared = GemmTargets(text_encoder=Select(roots=("text_encoder.encoder.block",)))
     runner = SimpleNamespace(
         _replicated_broadcast_load=lambda: False,
         _memory_efficient_fsdp_load=lambda: False,
@@ -1286,7 +1286,7 @@ def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
         settings=SimpleNamespace(
             gemm_targets=GemmTargets(
                 text_encoder=Select(
-                    modules=(
+                    roots=(
                         "text_encoder.encoder.block",
                         "text_encoder_2.model.layers",
                     )
@@ -1385,7 +1385,7 @@ def test_a_non_fp8_run_still_stores_the_encoder_at_fp8(monkeypatch):
     from xfuser.config.gemm import GemmQuantizationSpec
 
     logs = []
-    targets = GemmTargets(text_encoder=Select(modules=("text_encoder.encoder.block",)))
+    targets = GemmTargets(text_encoder=Select(roots=("text_encoder.encoder.block",)))
     runner = SimpleNamespace(
         load_contract=SimpleNamespace(requested_format=SimpleNamespace(value="fp4")),
         fp8_backend=_fp8_adapter("aiter"),
@@ -1437,9 +1437,7 @@ def test_hybrid_meta_te_uses_the_fp8_adapter(monkeypatch):
         _replicated_broadcast_load=lambda: False,
         _memory_efficient_fsdp_load=lambda: True,
         fp8=SimpleNamespace(component_targets=lambda name: ["encoder.block"]),
-        settings=SimpleNamespace(
-            gemm_targets=GemmTargets(text_encoder=Select(modules=("text_encoder.encoder.block",)))
-        ),
+        settings=SimpleNamespace(gemm_targets=GemmTargets(text_encoder=Select(roots=("text_encoder.encoder.block",)))),
         _loader=SimpleNamespace(
             meta_te_kwargs=lambda: ({"text_encoder": "meta"}, None),
             build_meta_component=lambda name, fp8=False: object(),
@@ -1480,9 +1478,7 @@ def test_meta_te_placement_disables_torchao_native_pipeline_streaming(
         _memory_efficient_fsdp_load=lambda: True,
         fp8_backend=_fp8_adapter("torchao"),
         fp8=SimpleNamespace(component_targets=lambda name: ["encoder.block"]),
-        settings=SimpleNamespace(
-            gemm_targets=GemmTargets(text_encoder=Select(modules=("text_encoder.encoder.block",)))
-        ),
+        settings=SimpleNamespace(gemm_targets=GemmTargets(text_encoder=Select(roots=("text_encoder.encoder.block",)))),
         _loader=SimpleNamespace(
             meta_te_kwargs=lambda: ({"text_encoder": "meta"}, None),
             build_meta_component=lambda name, fp8=False: object(),
@@ -1541,7 +1537,7 @@ def test_a_blockwise_filled_text_encoder_needs_no_post_load_fallback(monkeypatch
         fp8_backend=adapter,
         fp8=SimpleNamespace(component_targets=lambda name: ["encoder.block"]),
         settings=SimpleNamespace(
-            gemm_targets=GemmTargets(text_encoder=Select(modules=("text_encoder.encoder.block",))),
+            gemm_targets=GemmTargets(text_encoder=Select(roots=("text_encoder.encoder.block",))),
             fsdp_strategy={"text_encoder": {"wrap_attrs": ["encoder.block"]}},
         ),
         _loader=SimpleNamespace(
@@ -1573,9 +1569,7 @@ def test_meta_fsdp_rejects_text_encoder_post_load_fallback(monkeypatch):
         _memory_efficient_fsdp_load=lambda: True,
         fp8_backend=_fp8_adapter("aiter"),
         fp8=SimpleNamespace(component_targets=lambda name: ["encoder.block"]),
-        settings=SimpleNamespace(
-            gemm_targets=GemmTargets(text_encoder=Select(modules=("text_encoder.encoder.block",)))
-        ),
+        settings=SimpleNamespace(gemm_targets=GemmTargets(text_encoder=Select(roots=("text_encoder.encoder.block",)))),
         _loader=SimpleNamespace(
             build_meta_component=lambda name, fp8=False: object(),
             will_fill_blockwise=lambda name: False,

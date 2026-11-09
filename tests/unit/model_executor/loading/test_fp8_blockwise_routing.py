@@ -101,7 +101,7 @@ class _StubPlan:
         suffixes = tuple(
             entry.lstrip(".") for entry in (getattr(settings, "fp8_precision_override_suffixes", None) or ())
         )
-        keep_high = Select(modules=tuple(held), prefixes=prefixes, suffixes=suffixes)
+        keep_high = Select(roots=tuple(held) + prefixes, suffixes=suffixes)
 
         high_name = None
         if low_name != "fp8" and (held or prefixes or suffixes):
@@ -110,7 +110,7 @@ class _StubPlan:
 
         targets = GemmTargets(
             transformer=Select(
-                modules=tuple(dict.fromkeys(low + fp8)),
+                roots=tuple(dict.fromkeys(low + fp8)),
                 only=tuple(getattr(settings, "fp8_gemm_include_suffixes", None) or ()),
             ),
             keep_high=keep_high if high_name else Select(),
@@ -277,7 +277,7 @@ def test_native_fp8_streaming_is_disabled_for_suffix_restricted_targets(
     from xfuser.model_executor.quant.targets import GemmTargets, Select, resolve
 
     narrowed = resolve(
-        GemmTargets(transformer=Select(modules=("transformer.blocks",), only=("attn.to_qkv",))),
+        GemmTargets(transformer=Select(roots=("transformer.blocks",), only=("attn.to_qkv",))),
         GemmQuantizationSpec.parse("fp8"),
     )
 
@@ -684,7 +684,7 @@ def test_preflight_resolves_every_format_the_run_names(monkeypatch, profile, exp
     selected._select = lambda name: observed.append(name)
     plan = resolve(
         GemmTargets(
-            transformer=Select(modules=("transformer.blocks",)),
+            transformer=Select(roots=("transformer.blocks",)),
             keep_high=Select(suffixes=("ff.net.2",)),
         ),
         GemmQuantizationSpec.parse(profile),
@@ -1031,7 +1031,7 @@ def test_any_pair_of_implementations_can_drive_a_per_step_schedule(profile):
     )
     selected.loader.quantization_plan = SimpleNamespace(
         gemm_plan=resolve(
-            GemmTargets(transformer=Select(modules=("transformer.blocks",))),
+            GemmTargets(transformer=Select(roots=("transformer.blocks",))),
             GemmQuantizationSpec.parse(profile),
         )
     )

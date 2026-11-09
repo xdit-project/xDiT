@@ -147,8 +147,8 @@ def test_supported_runner_logs_when_text_encoder_targets_remain_bf16(runtime, mo
 
     model.settings = SimpleNamespace(
         gemm_targets=GemmTargets(
-            transformer=Select(modules=("transformer.blocks",)),
-            text_encoder=Select(modules=("text_encoder.layers",)),
+            transformer=Select(roots=("transformer.blocks",)),
+            text_encoder=Select(roots=("text_encoder.layers",)),
         ),
     )
     config = _args(runtime, gemm_quantization="fp8")

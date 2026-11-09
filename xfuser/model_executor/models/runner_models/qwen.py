@@ -73,8 +73,8 @@ class xFuserQwenImageEditModel(xFuserModel):
             },
         },
         gemm_targets=GemmTargets(
-            transformer=Select(modules=("transformer.transformer_blocks",)),
-            text_encoder=Select(modules=("text_encoder.model.language_model.layers",)),
+            transformer=Select(roots=("transformer.transformer_blocks",)),
+            text_encoder=Select(roots=("text_encoder.model.language_model.layers",)),
         ),
         step_cache_config={
             "dbcache": DBCacheSettings(
@@ -192,8 +192,8 @@ class xFuserQwenImageModel(xFuserModel):
         output_name="qwen_image",
         model_output_type="image",
         gemm_targets=GemmTargets(
-            transformer=Select(modules=("transformer.transformer_blocks",)),
-            text_encoder=Select(modules=("text_encoder.model.language_model.layers",)),
+            transformer=Select(roots=("transformer.transformer_blocks",)),
+            text_encoder=Select(roots=("text_encoder.model.language_model.layers",)),
         ),
         fsdp_strategy={
             "transformer": {
@@ -298,7 +298,7 @@ class xFuserQwenImage21Model(xFuserModel):
             # No text-encoder target: this runner does not declare the
             # quantize_text_encoder capability, so the flag is refused and a
             # declared encoder target could never be reached.
-            transformer=Select(modules=("transformer.transformer_blocks",)),
+            transformer=Select(roots=("transformer.transformer_blocks",)),
         ),
         fsdp_strategy={
             "transformer": {

@@ -181,8 +181,8 @@ def test_keep_high_on_a_transformer_module_survives_the_subtraction():
 
     holder = _plan_for("low=fp4,high=fp8", text_encoder=False)
     holder.model.settings.gemm_targets = GemmTargets(
-        transformer=Select(modules=TRANSFORMER),
-        keep_high=Select(modules=(TRANSFORMER[1],)),
+        transformer=Select(roots=TRANSFORMER),
+        keep_high=Select(roots=(TRANSFORMER[1],)),
     )
     plan = holder.gemm_plan
     assert set(plan.roots(plan.low)) == {TRANSFORMER[0]}
@@ -317,7 +317,7 @@ def test_declared_components_is_empty_without_text_encoder_targets():
     from xfuser.model_executor.quant.targets import GemmTargets, Select
 
     settings = copy.deepcopy(xFuserFlux2Model.settings)
-    settings.gemm_targets = GemmTargets(transformer=Select(modules=TRANSFORMER))
+    settings.gemm_targets = GemmTargets(transformer=Select(roots=TRANSFORMER))
     settings.fp8_text_encoder_module_list = None
     assert _declared_components(SimpleNamespace(settings=settings)) == ()
 

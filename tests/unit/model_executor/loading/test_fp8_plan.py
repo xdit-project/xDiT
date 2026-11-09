@@ -30,8 +30,8 @@ def make_plan(
     model = SimpleNamespace(
         settings=SimpleNamespace(
             gemm_targets=GemmTargets(
-                transformer=Select(modules=tuple(transformer_targets or ())),
-                text_encoder=Select(modules=tuple(te_targets or ())),
+                transformer=Select(roots=tuple(transformer_targets or ())),
+                text_encoder=Select(roots=tuple(te_targets or ())),
             ),
         ),
         config=SimpleNamespace(
@@ -52,7 +52,7 @@ def make_plan(
 def _targeted(plan):
     """The components this run quantizes, and what it quantizes in each."""
     gemm_plan = plan.gemm_plan
-    return {name: sorted(select.roots()) for name, select in gemm_plan.targeted.items()}
+    return {name: sorted(select.roots) for name, select in gemm_plan.targeted.items()}
 
 
 def test_text_encoder_targets_excluded_by_default(monkeypatch):
@@ -160,7 +160,7 @@ def test_registered_runner_text_encoder_capability_matches_declared_targets():
     def declared(cls):
         """This runner's text-encoder targets."""
         targets = cls.settings.gemm_targets
-        return list(targets.text_encoder.roots()) if targets is not None else []
+        return list(targets.text_encoder.roots) if targets is not None else []
 
     mismatches = {
         cls.__name__: {
@@ -190,7 +190,7 @@ def test_no_runner_hides_a_text_encoder_in_the_always_on_list():
         targets = cls.settings.gemm_targets
         if targets is None:
             continue
-        stray = [entry for entry in targets.transformer.roots() if "text_encoder" in entry.partition(".")[0]]
+        stray = [entry for entry in targets.transformer.roots if "text_encoder" in entry.partition(".")[0]]
         if stray:
             leaks[cls.__name__] = stray
 

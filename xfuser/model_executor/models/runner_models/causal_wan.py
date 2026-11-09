@@ -70,7 +70,7 @@ class xFuserCausalWanModel(xFuserModel):
         model_name="FastVideo/CausalWan2.2-I2V-A14B-Preview-Diffusers",
         output_name="causal_wan_i2v",
         gemm_targets=GemmTargets(
-            transformer=Select(modules=("transformer.blocks",)),
+            transformer=Select(roots=("transformer.blocks",)),
         ),
         valid_tasks=["t2v", "i2v"],
         fsdp_strategy={

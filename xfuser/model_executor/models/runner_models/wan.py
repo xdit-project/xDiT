@@ -607,19 +607,6 @@ class xFuserWan21T2VModel(xFuserWanModel):
         replicated_meta=True,
         routes=STANDARD_LOAD_ROUTES,
     )
-    capabilities = ModelCapabilities(
-        ulysses_degree=True,
-        ring_degree=True,
-        fully_shard_degree=True,
-        gemm_formats=frozenset({"fp8", "fp4"}),
-        quantize_text_encoder=True,
-        use_hybrid_attn_schedule=True,
-        use_parallel_vae=True,
-        cross_attention_backend=True,
-        supports_sparge_attention_backends=True,
-        enable_tiling=True,
-        enable_slicing=True,
-    )
     default_input_values = DefaultInputValues(
         height=720,
         width=1280,

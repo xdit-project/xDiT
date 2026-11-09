@@ -142,3 +142,27 @@ def test_grouped_qkv_weights_are_not_made_under_cpu_offload(monkeypatch, offload
         assert any("ignored with CPU offload" in m for m in logged) == (not prepared)
     finally:
         usp_sdma.configure(*previous)
+
+
+def test_q_k_first_modules_are_reported_with_their_one_head_group(monkeypatch):
+    """Their self-attention ignores --ulysses_sdma_head_groups; the runner says so once."""
+    from xfuser.model_executor.layers import usp_sdma
+    from xfuser.model_executor.models.runner_models import base_model
+
+    monkeypatch.setattr(base_model, "get_ulysses_parallel_world_size", lambda: 8)
+    monkeypatch.setattr(usp_sdma, "prepare_grouped_qkv", lambda component, world: 0)
+    logged = []
+    monkeypatch.setattr(base_model, "log", lambda message, **kwargs: logged.append(message))
+    previous = usp_sdma.configure("sdma", 2, overlap_qkv=True)
+    try:
+        model, transformer = _model("default", fully_shard_degree=1)
+        for flag in ("enable_model_cpu_offload", "enable_sequential_cpu_offload", "enable_group_cpu_offload"):
+            setattr(model.config, flag, False)
+        for name, qk_first in (("self_attn", True), ("cross_attn", False)):
+            module = torch.nn.Module()
+            module.processor = SimpleNamespace(qk_first=qk_first)
+            transformer.add_module(name, module)
+        model._prepare_grouped_qkv()
+        assert any("1 attention modules send Q/K before projecting V" in m for m in logged), logged
+    finally:
+        usp_sdma.configure(*previous)

@@ -157,7 +157,7 @@ For startup adapter fusion on FLUX.1-dev and MiniMax-H3 Turbo, see [LoRA support
 | `--ulysses_a2a` | Ulysses all-to-all transport: `default` (the process group's collective, NCCL or RCCL) or `sdma` (the GPUs' SDMA copy engines, ROCm; see [Ulysses All-to-All on SDMA Engines](#ulysses-all-to-all-on-sdma-engines)) | `default` |
 | `--ulysses_sdma_head_groups` | With `--ulysses_a2a sdma`: head groups per rank whose exchanges overlap the other groups' attention | 2 |
 | `--ulysses_sdma_group_streams` | With `--ulysses_a2a sdma`: attend each head group on a stream of its own | False |
-| `--ulysses_sdma_overlap_qkv` | With `--ulysses_a2a sdma`: project Q/K/V one head group at a time (MiniMax-H3, FLUX.3), overlapping each group's exchange with the next projection; keeps a second copy of the Q/K/V weights | False |
+| `--ulysses_sdma_overlap_qkv` | With `--ulysses_a2a sdma`: overlap the Q/K/V projection with the exchange, one head group at a time (MiniMax-H3, FLUX.3; keeps a second copy of the Q/K/V weights), or by sending Q/K before V is projected (Wan) | False |
 | `--ring_degree` | Ring sequence parallel degree | 1 |
 | `--pipefusion_parallel_degree` | PipeFusion pipeline stages | 1 |
 | `--tensor_parallel_degree` | Tensor parallel degree | 1 |
@@ -281,10 +281,13 @@ xdit \
   `--ulysses_sdma_group_streams` gives each group's attention a stream of its own.
 - Under `torch.compile` Inductor fuses the packing into the kernels that
   produce Q/K/V.
-- `--ulysses_sdma_overlap_qkv` projects Q/K/V one head group at a time in models
-  whose QK norm and RoPE work per head (MiniMax-H3, FLUX.3), so each group's
-  exchange overlaps the next group's projection. It keeps a second copy of each
-  layer's Q/K/V weights and is ignored under CPU offload.
+- `--ulysses_sdma_overlap_qkv` overlaps the Q/K/V projection with the exchange.
+  In models whose QK norm and RoPE work per head (MiniMax-H3, FLUX.3) it projects
+  Q/K/V one head group at a time, so each group's exchange overlaps the next
+  group's projection; this keeps a second copy of each layer's Q/K/V weights.
+  In models whose QK norm spans all heads (Wan) it sends Q and K, normed,
+  rotated and packed by one kernel, before V is projected, in one head group.
+  It is ignored under CPU offload.
 
 The exchange covers joint text in front of or behind the sequence,
 grouped-query K/V and extra per-head inputs. Calls it does not cover stay on
@@ -296,10 +299,11 @@ The `--ulysses_sdma_*` options need `--ulysses_a2a sdma`, and `--ulysses_a2a sdm
 excludes `--attention_a2a`.
 
 The gain is the part of the exchange RCCL leaves exposed. Where RCCL already
-hides nearly all of it, as for Wan2.2, the SDMA path does not help: under
+hides most of it, as for Wan2.2, the transport alone gains little: under
 `torch.compile` Inductor moves independent work next to RCCL's output
 all-to-all, while the SDMA output wait sits inside a custom op it cannot
-reorder around.
+reorder around. For Wan, `--ulysses_sdma_overlap_qkv` hides the input exchange
+behind the V projection instead.
 
 ROCm only, one node, validated on gfx942 (MI300X) and gfx950 (MI350X/MI355X). Settings:
 

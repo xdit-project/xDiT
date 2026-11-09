@@ -924,11 +924,10 @@ class xFuserArgs:
         runtime_group.add_argument(
             "--ulysses_sdma_overlap_qkv",
             action="store_true",
-            help="With --ulysses_a2a sdma: in models that support it (MiniMax-H3, FLUX.3), project Q/K/V "
-            "one head group at a time so each group's exchange overlaps the next group's projection. "
-            "Those models keep a second weight copy; ignored under CPU offload. "
-            "Wan with --ulysses_sdma_head_groups 1 instead sends full-width-normalized Q/K before V projection "
-            "and fuses Q/K packing, without duplicating weights.",
+            help="With --ulysses_a2a sdma: overlap the Q/K/V projection with the exchange, in models that "
+            "support it. Where the QK norm works per head (MiniMax-H3, FLUX.3), Q/K/V are projected one head "
+            "group at a time, from a second copy of the Q/K/V weights; where it spans all heads (Wan), Q/K "
+            "are sent before V is projected, in one head group. Ignored under CPU offload.",
         )
         runtime_group.add_argument(
             "--use_fp8_comms",
@@ -1335,11 +1334,10 @@ class xFuserArgs:
         parser.add_argument(
             "--ulysses_sdma_overlap_qkv",
             action="store_true",
-            help="With --ulysses_a2a sdma: in models that support it (MiniMax-H3, FLUX.3), project Q/K/V "
-            "one head group at a time so each group's exchange overlaps the next group's projection. "
-            "Those models keep a second weight copy; ignored under CPU offload. "
-            "Wan with --ulysses_sdma_head_groups 1 instead sends full-width-normalized Q/K before V projection "
-            "and fuses Q/K packing, without duplicating weights.",
+            help="With --ulysses_a2a sdma: overlap the Q/K/V projection with the exchange, in models that "
+            "support it. Where the QK norm works per head (MiniMax-H3, FLUX.3), Q/K/V are projected one head "
+            "group at a time, from a second copy of the Q/K/V weights; where it spans all heads (Wan), Q/K "
+            "are sent before V is projected, in one head group. Ignored under CPU offload.",
         )
         parser.add_argument(
             "--use_fp8_comms",

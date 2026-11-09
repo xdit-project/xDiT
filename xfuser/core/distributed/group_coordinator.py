@@ -33,6 +33,18 @@ logger = init_logger(__name__)
 
 TensorMetadata = namedtuple("TensorMetadata", ["device", "dtype", "size"])
 
+
+class _CompositeWork:
+    def __init__(self, works):
+        self.works = works
+
+    def wait(self, *args, **kwargs):
+        result = None
+        for work in self.works:
+            result = work.wait(*args, **kwargs)
+        return result
+
+
 env_info = envs.PACKAGES_CHECKER.get_packages_info()
 HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
 
@@ -683,6 +695,7 @@ class PipelineGroupCoordinator(GroupCoordinator):
         self.recv_shape: Dict[str, Dict[int, torch.Size]] = {}
         self.send_shape: Dict[str, Dict[int, torch.Size]] = {}
         self.recv_buffer: Dict[str, Dict[int, torch.Size]] = {}
+        self.pipeline_chunk_bytes: Dict[str, int] = {}
 
         self.skip_tensor_recv_buffer_set: bool = False
         self.recv_skip_tasks_queue: List[Union[int, Tuple[str, int]]] = []
@@ -754,6 +767,12 @@ class PipelineGroupCoordinator(GroupCoordinator):
             index: torch.zeros(shape, device=self.device, dtype=self.dtype)
             for index, shape in self.recv_shape[name].items()
         }
+
+    def set_pipeline_tensor_chunk_bytes(self, name: str, chunk_bytes: int) -> None:
+        """Bound P2P message size for one named pipeline payload."""
+        if chunk_bytes < 1:
+            raise ValueError("Pipeline P2P chunk size must be positive.")
+        self.pipeline_chunk_bytes[name] = chunk_bytes
 
     def _check_shape_and_buffer(
         self,
@@ -881,19 +900,19 @@ class PipelineGroupCoordinator(GroupCoordinator):
     def pipeline_send(self, tensor: torch.Tensor, name: str = "latent", segment_idx: int = -1) -> None:
         tensor = tensor.contiguous()
         self._check_shape_and_buffer(tensor_send_to_next=tensor, name=name, segment_idx=segment_idx)
-        self._pipeline_isend(tensor).wait()
+        self._pipeline_isend(tensor, name=name).wait()
 
     def pipeline_isend(
         self, tensor: torch.Tensor, name: str = "latent", segment_idx: int = -1
     ) -> torch.distributed.Work:
         tensor = tensor.contiguous()
         self._check_shape_and_buffer(tensor_send_to_next=tensor, name=name, segment_idx=segment_idx)
-        return self._pipeline_isend(tensor)
+        return self._pipeline_isend(tensor, name=name)
 
     def pipeline_recv(self, idx: int = -1, name: str = "latent") -> torch.Tensor:
         name = name or "latent"
         self._check_shape_and_buffer(recv_prev=True, name=name, segment_idx=idx)
-        self._pipeline_irecv(self.recv_buffer[name][idx]).wait()
+        self._pipeline_irecv(self.recv_buffer[name][idx], name=name).wait()
         return self.recv_buffer[name][idx]
 
     def add_pipeline_recv_task(self, idx: int = -1, name: str = "latent"):
@@ -906,7 +925,7 @@ class PipelineGroupCoordinator(GroupCoordinator):
         elif len(self.recv_tasks_queue) > 0:
             name, idx = self.recv_tasks_queue.pop(0)
             self._check_shape_and_buffer(recv_prev=True, name=name, segment_idx=idx)
-            self.receiving_tasks.append((self._pipeline_irecv(self.recv_buffer[name][idx]), name, idx))
+            self.receiving_tasks.append((self._pipeline_irecv(self.recv_buffer[name][idx], name=name), name, idx))
 
     def get_pipeline_recv_data(self, idx: int = -1, name: str = "latent") -> torch.Tensor:
         assert len(self.receiving_tasks) > 0, "No tasks to receive, call add_pipeline_recv_task first"
@@ -915,19 +934,21 @@ class PipelineGroupCoordinator(GroupCoordinator):
         assert receiving_task[1] == name and receiving_task[2] == idx, "Received tensor does not match the requested"
         return self.recv_buffer[name][idx]
 
-    def _pipeline_irecv(self, tensor: torch.tensor):
-        return torch.distributed.irecv(
-            tensor,
-            src=self.prev_rank,
-            group=(self.device_groups[(self.rank_in_group + 1) % 2] if self.world_size == 2 else self.device_group),
-        )
+    def _pipeline_irecv(self, tensor: torch.tensor, name: str = "latent"):
+        group = self.device_groups[(self.rank_in_group + 1) % 2] if self.world_size == 2 else self.device_group
+        chunk_bytes = self.pipeline_chunk_bytes.get(name)
+        if chunk_bytes is None:
+            return torch.distributed.irecv(tensor, src=self.prev_rank, group=group)
+        chunks = tensor.flatten().split(max(1, chunk_bytes // tensor.element_size()))
+        return _CompositeWork([torch.distributed.irecv(chunk, src=self.prev_rank, group=group) for chunk in chunks])
 
-    def _pipeline_isend(self, tensor: torch.tensor):
-        return torch.distributed.isend(
-            tensor,
-            dst=self.next_rank,
-            group=(self.device_groups[self.rank_in_group % 2] if self.world_size == 2 else self.device_group),
-        )
+    def _pipeline_isend(self, tensor: torch.tensor, name: str = "latent"):
+        group = self.device_groups[self.rank_in_group % 2] if self.world_size == 2 else self.device_group
+        chunk_bytes = self.pipeline_chunk_bytes.get(name)
+        if chunk_bytes is None:
+            return torch.distributed.isend(tensor, dst=self.next_rank, group=group)
+        chunks = tensor.flatten().split(max(1, chunk_bytes // tensor.element_size()))
+        return _CompositeWork([torch.distributed.isend(chunk, dst=self.next_rank, group=group) for chunk in chunks])
 
     def set_skip_tensor_recv_buffer(
         self,

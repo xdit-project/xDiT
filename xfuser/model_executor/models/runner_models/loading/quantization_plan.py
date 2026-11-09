@@ -1,5 +1,6 @@
 """Backend-neutral quantization target planning for one model run."""
 
+import functools
 from dataclasses import replace
 from typing import Optional
 
@@ -57,18 +58,29 @@ def _with_config_overrides(targets, config):
 
 
 class QuantizationPlan:
-    """Resolve one runner's declared GEMM targets against this run."""
+    """Resolve one runner's declared GEMM targets against this run.
+
+    One instance per `ModelLoader`, so the plan below is resolved once and
+    then read. Everything it binds is fixed before the loader exists: a runner
+    that edits its own `gemm_targets` does so in `_customize_settings`, which
+    runs while the model is built.
+    """
 
     def __init__(self, model) -> None:
         self.model = model
 
-    @property
+    @functools.cached_property
     def gemm_plan(self):
         """This run's resolved GEMM plan, or None for an unmigrated model.
 
         The formats come from the run, the modules from the model, the
         components from whichever switch enables them, and the per-component
         format restrictions from which loading code exists.
+
+        Resolved once. Every walk asks this, and a plan rebuilt per call could
+        answer one walk differently from the next if anything it reads moved
+        -- and it probes the registry for what the encoder's route can place,
+        which is not free.
         """
         targets = getattr(self.model.settings, "gemm_targets", None)
         if targets is None:

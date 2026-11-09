@@ -198,3 +198,28 @@ def test_no_runner_hides_a_text_encoder_in_the_always_on_list():
         "these runners declare a text encoder among their transformer targets; "
         f"move it to gemm_targets.text_encoder so --quantize_text_encoder gates it: {leaks}"
     )
+
+
+def test_the_resolved_plan_is_built_once(monkeypatch):
+    """Every walk asks for this plan, and two of them must not be able to get
+    different answers. Resolving it once also keeps the registry probe that
+    decides what the encoder's route can place off the per-walk path."""
+    plan = make_plan(monkeypatch, transformer_targets=["transformer.blocks"])
+
+    first = plan.gemm_plan
+    assert plan.gemm_plan is first
+
+
+def test_a_later_edit_to_the_declaration_does_not_move_a_resolved_plan(
+    monkeypatch,
+):
+    """Runners that rewrite their own targets do it while the model is built,
+    before a loader exists. An edit after that is a bug, and the plan holding
+    still is what makes it one rather than a difference between walks."""
+    plan = make_plan(monkeypatch, transformer_targets=["transformer.blocks"])
+    resolved = plan.gemm_plan
+
+    plan.model.settings.gemm_targets = GemmTargets(transformer=Select(roots=("transformer.other",)))
+
+    assert plan.gemm_plan is resolved
+    assert resolved.declared_roots() == ("transformer.blocks",)

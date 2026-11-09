@@ -285,22 +285,6 @@ class GemmPlan:
             found += [root for root in self.declared_roots() if root not in found]
         return tuple(found)
 
-    @property
-    def splits_a_target(self) -> bool:
-        """Whether the high format lands inside a target rather than at it.
-
-        A consumer reasoning in whole subtrees -- "will this FSDP block hold the
-        high format?" -- cannot answer from `roots` alone when the carve-out is
-        a block prefix or a leaf suffix, because those sit below a target root
-        rather than at one. This says when that is so.
-        """
-        if self.high is None or not self.keep_high:
-            return False
-        if self.keep_high.suffixes:
-            return True
-        declared = self.declared_roots()
-        return any(root not in declared and any(_is_under(root, d) for d in declared) for root in self.keep_high.roots)
-
     def format_for(self, path: str) -> Optional[str]:
         """The format this module is quantized to, or None to leave it alone.
 

@@ -287,7 +287,7 @@ xdit \
   group's projection; this keeps a second copy of each layer's Q/K/V weights.
   In models whose QK norm spans all heads (Wan) it sends Q and K, normed,
   rotated and packed by one kernel, before V is projected, in one head group.
-  It is ignored under CPU offload.
+  Under CPU offload only the latter applies: the weight copies would not be offloaded.
 
 The exchange covers joint text in front of or behind the sequence,
 grouped-query K/V and extra per-head inputs. Calls it does not cover stay on

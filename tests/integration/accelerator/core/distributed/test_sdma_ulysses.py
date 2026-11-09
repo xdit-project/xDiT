@@ -313,12 +313,18 @@ def test_wan_packed_qk_matches_original_norm_and_pack(accelerator_ranks):
 
 
 def _wan_processor_worker(rank, world_size, init_method, backend):
+    from types import SimpleNamespace
+
     import torch
     from diffusers.models.transformers.transformer_wan import WanAttention
     from xfuser.core.distributed import get_runtime_state
     from xfuser.core.distributed.sdma import ulysses
     from xfuser.core.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
-    from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanAttnProcessor
+    from xfuser.model_executor.layers import usp_sdma
+    from xfuser.model_executor.models.transformers.transformer_wan import (
+        xFuserWanAttnProcessor,
+        xFuserWanSdmaAttnProcessor,
+    )
 
     graph = None
     original_send = ulysses.send
@@ -336,6 +342,10 @@ def _wan_processor_worker(rank, world_size, init_method, backend):
         torch.manual_seed(0)
         attn = WanAttention(256, heads=40, dim_head=128, processor=xFuserWanAttnProcessor()).to(device, torch.bfloat16)
         attn.eval()
+        # As the runner prepares the transformer: the SDMA processor replaces the standard one.
+        _configure("sdma", 1, overlap_qkv=True)
+        usp_sdma.prepare(SimpleNamespace(attn=attn), ["attn"], cpu_offload=False)
+        assert type(attn.processor) is xFuserWanSdmaAttnProcessor
         generator = torch.Generator(device=device).manual_seed(rank)
         hidden = torch.randn(1, 257, 256, generator=generator, device=device, dtype=torch.bfloat16)
         angle = torch.randn(1, 257, 1, 128, generator=generator, device=device)
@@ -609,6 +619,8 @@ def test_usp_on_sdma_matches_rccl(accelerator_ranks):
 
 
 def _grouped_qkv_worker(rank, world_size, init_method):
+    from types import SimpleNamespace
+
     import torch
     import torch.distributed as dist
     from yunchang.globals import PROCESS_GROUP
@@ -618,7 +630,7 @@ def _grouped_qkv_worker(rank, world_size, init_method):
     from xfuser.model_executor.layers.usp import USP
 
     class Processor:
-        grouped_qkv = True
+        sdma_grouped_qkv = True
 
     class Attention(torch.nn.Module):
         def __init__(self, dim, heads):
@@ -650,7 +662,8 @@ def _grouped_qkv_worker(rank, world_size, init_method):
         for groups in (2, 3):
             previous = _configure("sdma", groups, overlap_qkv=True)
             try:
-                assert usp_sdma.prepare_grouped_qkv(attn, world_size) == 1
+                usp_sdma.prepare(SimpleNamespace(attn=attn), ["attn"], cpu_offload=False)
+                assert attn._xfuser_sdma_qkv_layout[0] == world_size
                 for compiled in (False, True):
                     fn = torch.compile(grouped) if compiled else grouped
                     for call in range(3):

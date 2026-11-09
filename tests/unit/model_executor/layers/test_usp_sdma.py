@@ -1,5 +1,7 @@
 """Which USP calls the SDMA Ulysses all-to-all takes, and how it lays out an exchange."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -201,57 +203,92 @@ def test_attention_a2a_and_the_sdma_transport_exclude_each_other():
 
 def _ulysses_a2a(monkeypatch, mode, head_groups, overlap_qkv=False, world=8):
     """A runtime state holding only the Ulysses all-to-all options, on `world` Ulysses ranks."""
-    from types import SimpleNamespace
-
     from xfuser.config.ulysses_a2a import UlyssesA2AConfig
     from xfuser.core.distributed import runtime_state
 
     config = UlyssesA2AConfig(mode, head_groups, overlap_qkv=overlap_qkv)
     monkeypatch.setattr(runtime_state, "_RUNTIME", SimpleNamespace(runtime_config=SimpleNamespace(ulysses_a2a=config)))
     monkeypatch.setattr(usp_sdma, "get_ulysses_parallel_world_size", lambda: world)
+    monkeypatch.setattr(usp_sdma, "log", lambda message, **kwargs: None)
 
 
-def _pipe_with_attention(*qk_first):
-    from types import SimpleNamespace
+class _Processor:
+    def __init__(self, stage):
+        self.stage = stage
 
+
+class _SdmaProcessor(_Processor):
+    sdma_grouped_qkv = True
+
+    def sdma_qk_first(self, attn):
+        return attn.qk_first
+
+
+@pytest.fixture
+def registered(monkeypatch):
+    monkeypatch.setattr(usp_sdma, "_PROCESSORS", {})
+    usp_sdma.sdma_processor(_Processor)(_SdmaProcessor)
+
+
+def _pipe(*modules):
     transformer = torch.nn.Module()
-    for index, flag in enumerate(qk_first):
+    for index, (processor, qk_first) in enumerate(modules):
         module = torch.nn.Module()
-        module.processor = SimpleNamespace(qk_first=flag)
+        module.processor, module.qk_first = processor, qk_first
         transformer.add_module(f"attn{index}", module)
     return SimpleNamespace(transformer=transformer)
 
 
+def test_prepare_swaps_registered_processors_in_place(monkeypatch, registered):
+    # One processor instance shared by two modules keeps its identity and its state.
+    _ulysses_a2a(monkeypatch, "sdma", 2, overlap_qkv=True)
+    monkeypatch.setattr(usp_sdma, "_prepare_grouped_qkv", lambda attn, world: True)
+    shared, other = _Processor("joint"), SimpleNamespace()
+    pipe = _pipe((shared, False), (shared, False), (other, False))
+    usp_sdma.prepare(pipe, ["transformer"], cpu_offload=False)
+    assert type(shared) is _SdmaProcessor and shared.stage == "joint"
+    assert pipe.transformer.attn0.processor is shared
+    assert type(other) is SimpleNamespace
+
+
+def test_sdma_processors_add_no_state():
+    class WithState(_Processor):
+        def __init__(self):
+            super().__init__("x")
+
+    with pytest.raises(TypeError):
+        usp_sdma.sdma_processor(_Processor)(WithState)
+
+
 @pytest.mark.parametrize("cpu_offload", [False, True])
-def test_grouped_qkv_weights_are_not_made_under_cpu_offload(monkeypatch, cpu_offload):
+def test_grouped_qkv_weights_are_not_made_under_cpu_offload(monkeypatch, registered, cpu_offload):
     """Offload hooks set up before the copies would never move them to the device."""
     _ulysses_a2a(monkeypatch, "sdma", 2, overlap_qkv=True)
     calls, logged = [], []
-    monkeypatch.setattr(usp_sdma, "prepare_grouped_qkv", lambda component, world: calls.append(world) or 1)
+    monkeypatch.setattr(usp_sdma, "_prepare_grouped_qkv", lambda attn, world: calls.append(world) or True)
     monkeypatch.setattr(usp_sdma, "log", lambda message, **kwargs: logged.append(message))
-    usp_sdma.prepare(_pipe_with_attention(), ["transformer", "vae"], cpu_offload=cpu_offload)
+    usp_sdma.prepare(_pipe((_Processor("a"), False)), ["transformer", "vae"], cpu_offload=cpu_offload)
     assert calls == ([] if cpu_offload else [8])
-    assert any("ignored with CPU offload" in m for m in logged) == cpu_offload
+    assert any("for all heads at once under CPU offload" in m for m in logged) == cpu_offload
 
 
 @pytest.mark.parametrize(
     ("mode", "overlap_qkv", "world"), [("sdma", False, 8), ("default", True, 8), ("sdma", True, 1)]
 )
-def test_nothing_is_prepared_without_the_overlap(monkeypatch, mode, overlap_qkv, world):
+def test_nothing_is_prepared_without_the_overlap(monkeypatch, registered, mode, overlap_qkv, world):
     _ulysses_a2a(monkeypatch, mode, 2, overlap_qkv=overlap_qkv, world=world)
-    calls = []
-    monkeypatch.setattr(usp_sdma, "prepare_grouped_qkv", lambda component, world: calls.append(world) or 1)
-    usp_sdma.prepare(_pipe_with_attention(), ["transformer"], cpu_offload=False)
-    assert calls == []
+    processor = _Processor("a")
+    usp_sdma.prepare(_pipe((processor, True)), ["transformer"], cpu_offload=False)
+    assert type(processor) is _Processor
 
 
-def test_q_k_first_modules_are_reported_with_their_one_head_group(monkeypatch):
+def test_q_k_first_modules_are_reported_with_their_one_head_group(monkeypatch, registered):
     """Their self-attention ignores --ulysses_sdma_head_groups; the runner says so once."""
     _ulysses_a2a(monkeypatch, "sdma", 2, overlap_qkv=True)
-    monkeypatch.setattr(usp_sdma, "prepare_grouped_qkv", lambda component, world: 0)
+    monkeypatch.setattr(usp_sdma, "_prepare_grouped_qkv", lambda attn, world: False)
     logged = []
     monkeypatch.setattr(usp_sdma, "log", lambda message, **kwargs: logged.append(message))
-    usp_sdma.prepare(_pipe_with_attention(True, False), ["transformer"], cpu_offload=False)
+    usp_sdma.prepare(_pipe((_Processor("a"), True), (_Processor("b"), False)), ["transformer"], cpu_offload=True)
     assert any("1 attention modules send Q/K before projecting V" in m for m in logged), logged
 
 

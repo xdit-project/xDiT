@@ -57,9 +57,6 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
         self.attention_kwargs = attention_kwargs
         self.backend = backend
         self.use_vsa_h3 = use_fasth3_vsa and backend in VSA_H3_BACKENDS
-        # Q/K/V may be projected one head group at a time (usp_sdma.grouped_qkv_attention): the
-        # QK norm and RoPE act per head.
-        self.grouped_qkv = use_ulysses_parallel_attention and not self.use_vsa_h3
 
     def __call__(
         self,
@@ -73,21 +70,6 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
                 "MiniMax-H3 xDiT attention expects padding to be represented by "
                 "the varlen metadata prepared by the transformer wrapper."
             )
-
-        use_ulysses = self.use_ulysses_parallel_attention and get_ulysses_parallel_world_size() > 1
-        if use_ulysses and self.grouped_qkv:
-            grouped = usp_sdma.grouped_qkv_attention(
-                attn,
-                hidden_states,
-                lambda q, k, v: (*self._norm_rope(attn, q, k, rotary_emb), v),
-                backend=self.backend,
-                attention_kwargs=self.attention_kwargs,
-                group=PROCESS_GROUP.ULYSSES_PG,
-            )
-            if grouped is not None:
-                hidden_states = grouped.transpose(1, 2).flatten(2, 3).type_as(hidden_states)
-                hidden_states = attn.to_out[0](hidden_states)
-                return attn.to_out[1](hidden_states)
 
         if attn.fused_projections:
             query, key, value = attn.to_qkv(hidden_states).chunk(3, dim=-1)
@@ -114,6 +96,7 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
             # the Ulysses exchange before the VSA-H3 backend consumes it.
             self.attention_kwargs[ULYSSES_EXTRA_INPUTS_KEY] = ("vsa_h3_gate",)
 
+        use_ulysses = self.use_ulysses_parallel_attention and get_ulysses_parallel_world_size() > 1
         attention_function = USP if use_ulysses else attention
         attention_args = {
             "dropout_p": 0.0,
@@ -173,6 +156,43 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
                 key = _apply_rotary_emb(key, rotary_emb[0], rotary_emb[1])
 
         return query, key
+
+
+@usp_sdma.sdma_processor(xFuserMiniMaxH3AttnProcessor)
+class xFuserMiniMaxH3SdmaAttnProcessor(xFuserMiniMaxH3AttnProcessor):
+    """xFuserMiniMaxH3AttnProcessor under --ulysses_a2a sdma --ulysses_sdma_overlap_qkv.
+
+    The QK norm and RoPE act per head, so Ulysses self-attention projects Q/K/V one head
+    group at a time and each group's exchange overlaps the next group's projection
+    (usp_sdma.grouped_qkv_attention). VSA-H3 attention and calls that path does not cover
+    take the base path.
+    """
+
+    @property
+    def sdma_grouped_qkv(self) -> bool:
+        return self.use_ulysses_parallel_attention and not self.use_vsa_h3
+
+    def __call__(
+        self,
+        attn,
+        hidden_states: torch.Tensor,
+        rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
+        attention_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if self.sdma_grouped_qkv and attention_mask is None and get_ulysses_parallel_world_size() > 1:
+            grouped = usp_sdma.grouped_qkv_attention(
+                attn,
+                hidden_states,
+                lambda q, k, v: (*self._norm_rope(attn, q, k, rotary_emb), v),
+                backend=self.backend,
+                attention_kwargs=self.attention_kwargs,
+                group=PROCESS_GROUP.ULYSSES_PG,
+            )
+            if grouped is not None:
+                hidden_states = grouped.transpose(1, 2).flatten(2, 3).type_as(hidden_states)
+                hidden_states = attn.to_out[0](hidden_states)
+                return attn.to_out[1](hidden_states)
+        return super().__call__(attn, hidden_states, rotary_emb, attention_mask)
 
 
 class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):

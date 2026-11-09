@@ -9,7 +9,10 @@ internal mode "packed" runs the same layout and head groups over the default all
 which tells the transport's share of a gain from the layout's.
 
 USP hands its Ulysses calls to `run`, and the runner calls `prepare` once before
-compiling. A call is three custom ops, opaque to torch.compile and chained by a token:
+compiling. With --ulysses_sdma_overlap_qkv, `prepare` also swaps in the SDMA attention
+processors that models register with `sdma_processor`: subclasses of their usual
+processors that overlap the Q/K/V projection with the exchange, so the usual processors
+carry no SDMA code. A call is three custom ops, opaque to torch.compile and chained by a token:
 begin, one send per head group, and finish, which attends group by group with the
 selected backend and returns the output. The packing of each group runs in traced code
 between them, so Inductor writes it straight from the kernels producing Q/K/V; a model
@@ -29,7 +32,7 @@ CUDA graph is being captured anyway (by torch.cuda.graph, or a torch without gra
 partitioning) exchanges the packed tensors over the default all-to-all.
 """
 
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 import torch
 import torch.distributed as dist
@@ -465,19 +468,86 @@ def _(
     return token.new_empty(batch, rows, world * heads, head_dim)
 
 
+# --- SDMA attention processors -----------------------------------------------------------------
+#
+# A model registers, for an attention processor class of its, a subclass that overlaps the
+# Q/K/V projection with the exchange and otherwise runs the base class's path. Two kinds:
+# - `sdma_grouped_qkv` (an attribute or property, true for the processors that use it):
+#   Q/K/V are projected one head group at a time (`grouped_qkv_attention`), for models whose
+#   QK norm and RoPE act per head. `prepare` copies each module's weight rows per group.
+# - `sdma_qk_first(attn)` (a static check of the module): Q/K are sent before V is projected,
+#   in one head group (`qk_first_attention`), for models whose QK norm spans every head.
+
+_PROCESSORS: Dict[type, type] = {}
+
+
+def sdma_processor(base: type):
+    """Class decorator registering an SDMA attention processor for `base`, its base class.
+
+    `prepare` turns `base` instances into the subclass in place (models may share one
+    processor instance across blocks and set its state per stage), so the subclass may add
+    behaviour but no state of its own: no __init__."""
+
+    def register(cls):
+        if not issubclass(cls, base) or "__init__" in vars(cls):
+            raise TypeError(f"{cls.__name__} must subclass {base.__name__} and add no __init__")
+        _PROCESSORS[base] = cls
+        return cls
+
+    return register
+
+
+def prepare(pipe, components, *, cpu_offload: bool) -> None:
+    """Set up the attention modules of `pipe`'s `components` for --ulysses_sdma_overlap_qkv,
+    before compilation sees them: swap in the registered SDMA processors, and copy the Q/K/V
+    weight rows per head group for those that project one group at a time.
+
+    Not the copies under CPU offload: the offload hooks, already set up, would not move them,
+    and offloading is for the memory they would spend. Those modules then project Q/K/V for
+    all heads at once, as without the option. Sending Q/K first copies nothing and still
+    applies."""
+    world = get_ulysses_parallel_world_size()
+    if not overlap_qkv() or world <= 1:
+        return
+    for name in components:
+        component = getattr(pipe, name, None)
+        if not isinstance(component, torch.nn.Module):
+            continue
+        grouped = offloaded = qk_first = 0
+        for attn in component.modules():
+            processor = getattr(attn, "processor", None)
+            sdma = _PROCESSORS.get(type(processor))
+            if sdma is not None:
+                processor.__class__ = sdma
+            if getattr(processor, "sdma_grouped_qkv", False):
+                if cpu_offload:
+                    offloaded += 1
+                else:
+                    grouped += _prepare_grouped_qkv(attn, world)
+            check = getattr(processor, "sdma_qk_first", None)
+            qk_first += check is not None and check(attn)
+        if grouped:
+            log(f"{name}: {grouped} attention modules project Q/K/V one head group at a time.")
+        if offloaded:
+            log(f"{name}: {offloaded} attention modules project Q/K/V for all heads at once under CPU offload.")
+        if qk_first:
+            log(
+                f"{name}: {qk_first} attention modules send Q/K before projecting V, in one head group "
+                "(--ulysses_sdma_head_groups does not apply to them)."
+            )
+
+
 # --- Q/K/V projected one head group at a time -----------------------------------------------
 #
-# An attention processor that sets `grouped_qkv = True` can call `grouped_qkv_attention` in
-# place of its projections and USP: each head group's Q/K/V come out of a GEMM over that
-# group's weight rows, go through the model's per-head norm and RoPE, and are sent before the
-# next group is projected, so the group's exchange overlaps the next projection. The weight
-# rows are copied once per attention module by `prepare_grouped_qkv`, before compilation;
-# models whose QK norm spans every head (Wan) cannot do this.
+# Each head group's Q/K/V come out of a GEMM over that group's weight rows, go through the
+# model's per-head norm and RoPE, and are sent before the next group is projected, so the
+# group's exchange overlaps the next projection. The weight rows are copied once per
+# attention module by `prepare`, before compilation.
 
 _GROUPED = "_xfuser_sdma_qkv"
 
 
-def _plain_linear(module) -> bool:
+def plain_linear(module) -> bool:
     # Quantized GEMMs replace the module; sharded (FSDP) weights are DTensors with placements.
     return type(module) is torch.nn.Linear and not hasattr(module.weight, "placements")
 
@@ -485,13 +555,13 @@ def _plain_linear(module) -> bool:
 def _qkv_parts(attn):
     """(weight, bias) of Q, K and V, or None unless they are plain nn.Linear layers of one shape."""
     if getattr(attn, "fused_projections", False) and hasattr(attn, "to_qkv"):
-        if not _plain_linear(attn.to_qkv):
+        if not plain_linear(attn.to_qkv):
             return None
         weight, bias = attn.to_qkv.weight, attn.to_qkv.bias
         n = weight.shape[0] // 3
         return [(weight[i * n : (i + 1) * n], None if bias is None else bias[i * n : (i + 1) * n]) for i in range(3)]
     linears = [getattr(attn, name, None) for name in ("to_q", "to_k", "to_v")]
-    if not all(m is not None and _plain_linear(m) for m in linears):
+    if not all(m is not None and plain_linear(m) for m in linears):
         return None
     if len({m.weight.shape for m in linears}) != 1:
         return None
@@ -502,7 +572,7 @@ def _qkv_parts(attn):
 #
 # A model whose QK norm spans every head (Wan) cannot project one head group at a time, but it
 # can send Q and K, with all heads, as soon as they are normed and rotated, and project V while
-# they move. Its attention processor sets `qk_first = True` and calls `qk_first_attention`.
+# they move.
 
 
 def qk_first_attention(
@@ -562,66 +632,35 @@ def qk_first_attention(
     )
 
 
-def prepare(pipe, components, *, cpu_offload: bool) -> None:
-    """Set up the attention modules of `pipe`'s `components` for --ulysses_sdma_overlap_qkv,
-    before compilation sees them: copy their Q/K/V weight rows per head group.
-
-    Not with CPU offload: the offload hooks, already set up, would not move the copies, and
-    offloading is for the memory the copies would spend. Q/K/V are then projected for all
-    heads at once, as without the option."""
-    world = get_ulysses_parallel_world_size()
-    if not overlap_qkv() or world <= 1:
-        return
-    if cpu_offload:
-        log("--ulysses_sdma_overlap_qkv is ignored with CPU offload: Q/K/V are projected for all heads at once.")
-        return
-    for name in components:
-        component = getattr(pipe, name, None)
-        if isinstance(component, torch.nn.Module):
-            prepared = prepare_grouped_qkv(component, world)
-            log(f"{name}: {prepared} attention modules project Q/K/V one head group at a time.")
-            qk_first = sum(getattr(getattr(m, "processor", None), "qk_first", False) for m in component.modules())
-            if qk_first:
-                log(
-                    f"{name}: {qk_first} attention modules send Q/K before projecting V, in one head group "
-                    "(--ulysses_sdma_head_groups does not apply to them)."
-                )
-
-
-def prepare_grouped_qkv(model: torch.nn.Module, world: int) -> int:
-    """Copy each grouped-projection attention module's Q/K/V weight rows per head group, for
-    `world` Ulysses ranks and the configured head groups. Returns how many modules got them."""
-    prepared = 0
-    for attn in model.modules():
-        if not getattr(getattr(attn, "processor", None), "grouped_qkv", False):
-            continue
-        parts = _qkv_parts(attn)
-        heads = getattr(attn, "heads", None)
-        if parts is None or not heads or heads % world:
-            continue
-        head_dim = parts[0][0].shape[0] // heads
-        per_rank = heads // world
-        sizes = ulysses.head_split((per_rank,), _config().head_groups)
-        offset = 0
-        with torch.no_grad():
-            for g, (h,) in enumerate(sizes):
-                rows = torch.tensor(
-                    [
-                        (p * per_rank + offset + j) * head_dim + e
-                        for p in range(world)
-                        for j in range(h)
-                        for e in range(head_dim)
-                    ],
-                    device=parts[0][0].device,
-                )
-                weight = torch.cat([w.index_select(0, rows) for w, _ in parts])
-                bias = None if parts[0][1] is None else torch.cat([b.index_select(0, rows) for _, b in parts])
-                attn.register_buffer(f"{_GROUPED}_w{g}", weight, persistent=False)
-                attn.register_buffer(f"{_GROUPED}_b{g}", bias, persistent=False)
-                offset += h
-        attn._xfuser_sdma_qkv_layout = (world, sizes, head_dim)
-        prepared += 1
-    return prepared
+def _prepare_grouped_qkv(attn: torch.nn.Module, world: int) -> bool:
+    """Copy the attention module's Q/K/V weight rows per head group, for `world` Ulysses ranks
+    and the configured head groups; False if its projections cannot be split."""
+    parts = _qkv_parts(attn)
+    heads = getattr(attn, "heads", None)
+    if parts is None or not heads or heads % world:
+        return False
+    head_dim = parts[0][0].shape[0] // heads
+    per_rank = heads // world
+    sizes = ulysses.head_split((per_rank,), _config().head_groups)
+    offset = 0
+    with torch.no_grad():
+        for g, (h,) in enumerate(sizes):
+            rows = torch.tensor(
+                [
+                    (p * per_rank + offset + j) * head_dim + e
+                    for p in range(world)
+                    for j in range(h)
+                    for e in range(head_dim)
+                ],
+                device=parts[0][0].device,
+            )
+            weight = torch.cat([w.index_select(0, rows) for w, _ in parts])
+            bias = None if parts[0][1] is None else torch.cat([b.index_select(0, rows) for _, b in parts])
+            attn.register_buffer(f"{_GROUPED}_w{g}", weight, persistent=False)
+            attn.register_buffer(f"{_GROUPED}_b{g}", bias, persistent=False)
+            offset += h
+    attn._xfuser_sdma_qkv_layout = (world, sizes, head_dim)
+    return True
 
 
 def grouped_qkv_attention(attn, hidden_states, norm_rope, *, backend, attention_kwargs, group: dist.ProcessGroup):

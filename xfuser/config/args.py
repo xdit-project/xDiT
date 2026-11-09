@@ -928,7 +928,7 @@ class xFuserArgs:
             help="With --ulysses_a2a sdma: overlap the Q/K/V projection with the exchange, in models that "
             "support it. Where the QK norm works per head (MiniMax-H3, FLUX.3), Q/K/V are projected one head "
             "group at a time, from a second copy of the Q/K/V weights; where it spans all heads (Wan), Q/K "
-            "are sent before V is projected, in one head group. Ignored under CPU offload.",
+            "are sent before V is projected, in one head group. Under CPU offload only the latter applies.",
         )
         runtime_group.add_argument(
             "--use_fp8_comms",
@@ -1338,7 +1338,7 @@ class xFuserArgs:
             help="With --ulysses_a2a sdma: overlap the Q/K/V projection with the exchange, in models that "
             "support it. Where the QK norm works per head (MiniMax-H3, FLUX.3), Q/K/V are projected one head "
             "group at a time, from a second copy of the Q/K/V weights; where it spans all heads (Wan), Q/K "
-            "are sent before V is projected, in one head group. Ignored under CPU offload.",
+            "are sent before V is projected, in one head group. Under CPU offload only the latter applies.",
         )
         parser.add_argument(
             "--use_fp8_comms",

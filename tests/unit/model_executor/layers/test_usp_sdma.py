@@ -147,20 +147,6 @@ def test_cuda_builds_stay_on_rccl(monkeypatch):
     assert _reason() is not None
 
 
-def test_configure_returns_the_previous_selection():
-    previous = usp_sdma.configure("sdma", 3, True, True)
-    try:
-        assert usp_sdma.selected() and usp_sdma.uses_sdma() and usp_sdma.overlap_qkv()
-        assert usp_sdma.configure("packed", 1) == ("sdma", 3, True, True)
-        assert usp_sdma.selected() and not usp_sdma.uses_sdma()
-        usp_sdma.configure("default", 1, overlap_qkv=True)
-        assert not usp_sdma.selected() and not usp_sdma.overlap_qkv()
-    finally:
-        usp_sdma.configure(*previous)
-    with pytest.raises(ValueError):
-        usp_sdma.configure("rccl", 1)
-
-
 def test_runner_options_select_the_transport():
     from xfuser.config.args import FlexibleArgumentParser, xFuserArgs
 
@@ -184,14 +170,13 @@ def test_runner_options_select_the_transport():
     ) == ("sdma", 3, True, False)
     assert parser.parse_args(["--model", "Wan2.2-T2V"]).ulysses_a2a == "default"
 
-    from xfuser.config.config import RuntimeConfig
 
-    previous = usp_sdma.configure("default", 1)
-    try:
-        usp_sdma.configure_from(RuntimeConfig(ulysses_a2a="sdma", ulysses_sdma_overlap_qkv=True))
-        assert usp_sdma.configure("default", 1) == ("sdma", 2, False, True)
-    finally:
-        usp_sdma.configure(*previous)
+@pytest.mark.parametrize(("mode", "head_groups"), [("rccl", 1), ("sdma", 0)])
+def test_ulysses_a2a_config_rejects_unknown_modes_and_empty_groups(mode, head_groups):
+    from xfuser.config.ulysses_a2a import UlyssesA2AConfig
+
+    with pytest.raises(ValueError):
+        UlyssesA2AConfig(mode, head_groups)
 
 
 @pytest.mark.parametrize(

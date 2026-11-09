@@ -17,6 +17,7 @@ from xfuser.config.attention_a2a import (
     ATTENTION_A2A_PROFILES,
     AttentionA2AConfig,
 )
+from xfuser.config.ulysses_a2a import UlyssesA2AConfig
 from xfuser.config.gemm import (
     GemmQuantizationSpec,
     load_gemm_config,
@@ -1837,10 +1838,12 @@ class xFuserArgs:
                 profile=self.attention_a2a,
                 hadamard=self.attention_a2a_hadamard,
             ),
-            ulysses_a2a=self.ulysses_a2a,
-            ulysses_sdma_head_groups=self.ulysses_sdma_head_groups or 2,
-            ulysses_sdma_group_streams=self.ulysses_sdma_group_streams,
-            ulysses_sdma_overlap_qkv=self.ulysses_sdma_overlap_qkv,
+            ulysses_a2a=UlyssesA2AConfig(
+                mode=self.ulysses_a2a,
+                head_groups=self.ulysses_sdma_head_groups or 2,
+                group_streams=self.ulysses_sdma_group_streams,
+                overlap_qkv=self.ulysses_sdma_overlap_qkv,
+            ),
         )
 
         parallel_config = ParallelConfig(

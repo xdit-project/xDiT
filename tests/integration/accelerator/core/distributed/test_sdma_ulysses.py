@@ -33,6 +33,21 @@ def _setup(rank, world_size, init_method, ulysses, cfg=1):
     return torch.device("cuda", rank)
 
 
+def _set_config(config):
+    """Make `config` the runtime's Ulysses all-to-all options; returns the previous ones."""
+    from xfuser.core.distributed import get_runtime_state
+
+    runtime_config = get_runtime_state().runtime_config
+    previous, runtime_config.ulysses_a2a = runtime_config.ulysses_a2a, config
+    return previous
+
+
+def _configure(mode, head_groups, **options):
+    from xfuser.config.ulysses_a2a import UlyssesA2AConfig
+
+    return _set_config(UlyssesA2AConfig(mode, head_groups, **options))
+
+
 def _bhsd(generator, device, batch, seq, heads):
     """A [b, H, s, d] view of a [b, s, H, d] tensor, as models hand Q/K/V to USP."""
     import torch
@@ -303,7 +318,6 @@ def _wan_processor_worker(rank, world_size, init_method, backend):
     from xfuser.core.distributed import get_runtime_state
     from xfuser.core.distributed.sdma import ulysses
     from xfuser.core.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
-    from xfuser.model_executor.layers import usp_sdma
     from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanAttnProcessor
 
     graph = None
@@ -330,43 +344,43 @@ def _wan_processor_worker(rank, world_size, init_method, backend):
         compiled = torch.compile(attn, fullgraph=True)
         with torch.no_grad():
             for run in (attn, compiled):
-                usp_sdma.configure("packed", 1)
+                _configure("packed", 1)
                 expected = run(hidden, rotary_emb=rotary)
-                usp_sdma.configure("sdma", 1, overlap_qkv=True)
+                _configure("sdma", 1, overlap_qkv=True)
                 before = calls
                 actual = run(hidden, rotary_emb=rotary)
                 assert calls == before + 1, "production split-QK path did not execute"
                 torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-            usp_sdma.configure("sdma", 1, overlap_qkv=True)
+            _configure("sdma", 1, overlap_qkv=True)
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 captured = attn(hidden, rotary_emb=rotary)
             for repeat in range(3):
                 hidden.copy_(torch.randn(hidden.shape, generator=generator, device=device, dtype=hidden.dtype))
                 graph.replay()
-                usp_sdma.configure("packed", 1)
+                _configure("packed", 1)
                 expected = attn(hidden, rotary_emb=rotary)
                 torch.testing.assert_close(captured, expected, rtol=0, atol=0)
             # The head-group count does not apply: Wan self-attention splits Q/K in one group.
-            usp_sdma.configure("sdma", 2, overlap_qkv=True)
+            _configure("sdma", 2, overlap_qkv=True)
             before = calls
             actual = attn(hidden, rotary_emb=rotary)
             assert calls == before + 1, "the split-QK path must run with --ulysses_sdma_head_groups 2"
-            usp_sdma.configure("packed", 1)
+            _configure("packed", 1)
             torch.testing.assert_close(actual, attn(hidden, rotary_emb=rotary), rtol=0, atol=0)
             # Unsupported: FP32 QK norms keep the usual path.
             attn.norm_q.to(torch.float32)
             attn.norm_k.to(torch.float32)
-            usp_sdma.configure("sdma", 1, overlap_qkv=True)
+            _configure("sdma", 1, overlap_qkv=True)
             before = calls
             actual = attn(hidden, rotary_emb=rotary)
             assert calls == before, "unsupported settings must not split Q/K"
-            usp_sdma.configure("sdma", 1)
+            _configure("sdma", 1)
             torch.testing.assert_close(actual, attn(hidden, rotary_emb=rotary), rtol=0, atol=0)
     finally:
         graph = None
         ulysses.send = original_send
-        usp_sdma.configure("default", 2)
+        _configure("default", 2)
         torch.compiler.reset()
         torch.cuda.synchronize()
         destroy_model_parallel()
@@ -464,13 +478,12 @@ def _compiled_worker(rank, world_size, init_method):
 
 
 def _usp_call(fn, x, w, mode, head_groups):
-    from xfuser.model_executor.layers import usp_sdma
 
-    previous = usp_sdma.configure(mode, head_groups)
+    previous = _configure(mode, head_groups)
     try:
         return fn(x, w)
     finally:
-        usp_sdma.configure(*previous)
+        _set_config(previous)
 
 
 def test_compiled_sdma_matches_its_layout_over_rccl(accelerator_ranks):
@@ -518,14 +531,13 @@ def test_packed_layout_runs_under_cuda_graphs(accelerator_ranks):
 
 
 def _usp(q, k, v, mode, head_groups, **kwargs):
-    from xfuser.model_executor.layers import usp_sdma
     from xfuser.model_executor.layers.usp import USP
 
-    previous = usp_sdma.configure(mode, head_groups)
+    previous = _configure(mode, head_groups)
     try:
         return USP(q, k, v, **kwargs)
     finally:
-        usp_sdma.configure(*previous)
+        _set_config(previous)
 
 
 def _usp_worker(rank, world_size, init_method):
@@ -621,7 +633,7 @@ def _grouped_qkv_worker(rank, world_size, init_method):
         attn = Attention(256, 6 * world_size).to(device, torch.bfloat16)
         generator = torch.Generator(device=device).manual_seed(rank)
         for groups in (2, 3):
-            previous = usp_sdma.configure("sdma", groups, overlap_qkv=True)
+            previous = _configure("sdma", groups, overlap_qkv=True)
             try:
                 assert usp_sdma.prepare_grouped_qkv(attn, world_size) == 1
                 for compiled in (False, True):
@@ -630,9 +642,9 @@ def _grouped_qkv_worker(rank, world_size, init_method):
                         x = torch.randn(1, 192, 256, generator=generator, device=device, dtype=torch.bfloat16)
                         actual = fn(attn, x)
                         assert actual is not None, "the grouped path declined the call"
-                        usp_sdma.configure("default", 1)
+                        _configure("default", 1)
                         expected = plain(attn, x)
-                        usp_sdma.configure("sdma", groups, overlap_qkv=True)
+                        _configure("sdma", groups, overlap_qkv=True)
                         # Compiled, the norm stays in fp32 where the eager reference rounds to
                         # bf16 in between: differences of a bf16 step.
                         torch.testing.assert_close(
@@ -643,7 +655,7 @@ def _grouped_qkv_worker(rank, world_size, init_method):
                             msg=lambda m: f"{groups} groups, compiled {compiled}, call {call}: {m}",
                         )
             finally:
-                usp_sdma.configure(*previous)
+                _set_config(previous)
         dist.barrier()
     finally:
         destroy_model_parallel()

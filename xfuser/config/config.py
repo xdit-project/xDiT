@@ -6,6 +6,7 @@ from packaging import version
 
 from xfuser.compat import declared_floor, version_at_least
 from xfuser.config.attention_a2a import AttentionA2AConfig
+from xfuser.config.ulysses_a2a import UlyssesA2AConfig
 from xfuser.envs import CUDA_VERSION, PACKAGES_CHECKER, TORCH_VERSION
 from xfuser.logger import init_logger
 
@@ -90,11 +91,7 @@ class RuntimeConfig:
     fp8_comms_scale: Optional[float] = None
     fp8_comms_safety_factor: float = DEFAULT_FP8_COMMS_SAFETY_FACTOR
     attention_a2a: AttentionA2AConfig = field(default_factory=AttentionA2AConfig)
-    # Ulysses all-to-all transport and its SDMA options (see usp_sdma.configure_from).
-    ulysses_a2a: str = "default"
-    ulysses_sdma_head_groups: int = 2
-    ulysses_sdma_group_streams: bool = False
-    ulysses_sdma_overlap_qkv: bool = False
+    ulysses_a2a: UlyssesA2AConfig = field(default_factory=UlyssesA2AConfig)
 
     def __post_init__(self):
         if self.warmup_steps < 0:

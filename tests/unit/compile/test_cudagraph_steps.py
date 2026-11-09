@@ -45,6 +45,15 @@ def _model(mode: str, *, fully_shard_degree: int):
     return model, transformer
 
 
+def _ulysses_a2a(monkeypatch, mode, head_groups, overlap_qkv=False):
+    """A runtime state holding only the Ulysses all-to-all options."""
+    from xfuser.config.ulysses_a2a import UlyssesA2AConfig
+    from xfuser.core.distributed import runtime_state
+
+    config = UlyssesA2AConfig(mode, head_groups, overlap_qkv=overlap_qkv)
+    monkeypatch.setattr(runtime_state, "_RUNTIME", SimpleNamespace(runtime_config=SimpleNamespace(ulysses_a2a=config)))
+
+
 def test_blockwise_compilation_under_cuda_graphs_marks_step_boundaries():
     model, transformer = _model("reduce-overhead", fully_shard_degree=8)
 
@@ -104,19 +113,15 @@ def test_marking_a_component_twice_leaves_one_marker():
 )
 def test_sdma_ulysses_compiles_without_cuda_graphs(monkeypatch, requested, ulysses_degree, expected):
     """SDMA copies are issued from the host, so a captured graph would replay RCCL instead."""
-    from xfuser.model_executor.layers import usp_sdma
     from xfuser.model_executor.models.runner_models import base_model
 
     monkeypatch.setattr(base_model, "get_ulysses_parallel_world_size", lambda: ulysses_degree)
-    previous = usp_sdma.configure("sdma", 2)
-    try:
-        model, transformer = _model(requested, fully_shard_degree=8)
-        assert model._compile_mode() == expected
-        if requested == "reduce-overhead":
-            model._compile_model({"num_inference_steps": 4})
-            assert getattr(transformer, "_xfuser_marks_cudagraph_steps", False) == (expected == "reduce-overhead")
-    finally:
-        usp_sdma.configure(*previous)
+    _ulysses_a2a(monkeypatch, "sdma", 2)
+    model, transformer = _model(requested, fully_shard_degree=8)
+    assert model._compile_mode() == expected
+    if requested == "reduce-overhead":
+        model._compile_model({"num_inference_steps": 4})
+        assert getattr(transformer, "_xfuser_marks_cudagraph_steps", False) == (expected == "reduce-overhead")
 
 
 @pytest.mark.parametrize(
@@ -132,16 +137,13 @@ def test_grouped_qkv_weights_are_not_made_under_cpu_offload(monkeypatch, offload
     calls, logged = [], []
     monkeypatch.setattr(usp_sdma, "prepare_grouped_qkv", lambda component, world: calls.append(world) or 1)
     monkeypatch.setattr(base_model, "log", lambda message, **kwargs: logged.append(message))
-    previous = usp_sdma.configure("sdma", 2, overlap_qkv=True)
-    try:
-        model, _ = _model("default", fully_shard_degree=1)
-        for flag in ("enable_model_cpu_offload", "enable_sequential_cpu_offload", "enable_group_cpu_offload"):
-            setattr(model.config, flag, flag == offload)
-        model._prepare_grouped_qkv()
-        assert calls == ([8] if prepared else [])
-        assert any("ignored with CPU offload" in m for m in logged) == (not prepared)
-    finally:
-        usp_sdma.configure(*previous)
+    _ulysses_a2a(monkeypatch, "sdma", 2, overlap_qkv=True)
+    model, _ = _model("default", fully_shard_degree=1)
+    for flag in ("enable_model_cpu_offload", "enable_sequential_cpu_offload", "enable_group_cpu_offload"):
+        setattr(model.config, flag, flag == offload)
+    model._prepare_grouped_qkv()
+    assert calls == ([8] if prepared else [])
+    assert any("ignored with CPU offload" in m for m in logged) == (not prepared)
 
 
 def test_q_k_first_modules_are_reported_with_their_one_head_group(monkeypatch):
@@ -153,16 +155,13 @@ def test_q_k_first_modules_are_reported_with_their_one_head_group(monkeypatch):
     monkeypatch.setattr(usp_sdma, "prepare_grouped_qkv", lambda component, world: 0)
     logged = []
     monkeypatch.setattr(base_model, "log", lambda message, **kwargs: logged.append(message))
-    previous = usp_sdma.configure("sdma", 2, overlap_qkv=True)
-    try:
-        model, transformer = _model("default", fully_shard_degree=1)
-        for flag in ("enable_model_cpu_offload", "enable_sequential_cpu_offload", "enable_group_cpu_offload"):
-            setattr(model.config, flag, False)
-        for name, qk_first in (("self_attn", True), ("cross_attn", False)):
-            module = torch.nn.Module()
-            module.processor = SimpleNamespace(qk_first=qk_first)
-            transformer.add_module(name, module)
-        model._prepare_grouped_qkv()
-        assert any("1 attention modules send Q/K before projecting V" in m for m in logged), logged
-    finally:
-        usp_sdma.configure(*previous)
+    _ulysses_a2a(monkeypatch, "sdma", 2, overlap_qkv=True)
+    model, transformer = _model("default", fully_shard_degree=1)
+    for flag in ("enable_model_cpu_offload", "enable_sequential_cpu_offload", "enable_group_cpu_offload"):
+        setattr(model.config, flag, False)
+    for name, qk_first in (("self_attn", True), ("cross_attn", False)):
+        module = torch.nn.Module()
+        module.processor = SimpleNamespace(qk_first=qk_first)
+        transformer.add_module(name, module)
+    model._prepare_grouped_qkv()
+    assert any("1 attention modules send Q/K before projecting V" in m for m in logged), logged

@@ -4,8 +4,9 @@ Selected with --ulysses_a2a sdma (the default is `default`: the process group's
 all-to-all). --ulysses_sdma_head_groups (default 2) splits each rank's heads into groups
 whose exchanges overlap the other groups' attention, and --ulysses_sdma_group_streams runs
 each group's attention on a stream of its own; see xfuser/core/distributed/sdma/ulysses.py.
-The internal mode "packed" (`configure("packed", ...)`) runs the same layout and head groups
-over the default all-to-all, which tells the transport's share of a gain from the layout's.
+The options are the runtime config's `ulysses_a2a` (xfuser/config/ulysses_a2a.py); its
+internal mode "packed" runs the same layout and head groups over the default all-to-all,
+which tells the transport's share of a gain from the layout's.
 
 A call is three custom ops, opaque to torch.compile and chained by a token: begin, one
 send per head group, and finish, which attends group by group with the selected backend
@@ -27,61 +28,44 @@ from typing import List, Optional, Sequence
 import torch
 import torch.distributed as dist
 
+from xfuser.config.ulysses_a2a import UlyssesA2AConfig
 from xfuser.core.attention import registry as attention_registry
 from xfuser.core.attention.spec import AttentionBackendType
+from xfuser.core.distributed.runtime_state import get_runtime_state, runtime_state_is_initialized
 from xfuser.core.distributed.sdma import ulysses
 from xfuser.logger import init_logger
 
 logger = init_logger(__name__)
 
-# default: the process group's all-to-all (NCCL / RCCL); sdma: the copy engines; packed: the
-# SDMA path's layout over the default all-to-all (internal: tests and diagnostics).
-MODES = ("default", "sdma", "packed")
 # Keys of attention_kwargs that dense backends read and the ops do not carry to them
 # (they carry valid_kv_len and the varlen key packing): a call that sets one stays on
 # the default all-to-all. Every other key configures sparse backends, which never take this path.
 _UNFORWARDED_KWARGS = ("attn_mask", "pre_quantized", "q_descale", "k_descale", "v_descale", "seqlens_k", "return_lse")
 
 
-_mode, _head_groups, _concurrent, _overlap_qkv = "default", 2, False, False
+_DEFAULT = UlyssesA2AConfig()
 _warned = set()
 
 
-def configure(mode: str, head_groups: int, concurrent: bool = False, overlap_qkv: bool = False):
-    """Select the Ulysses all-to-all for later calls; returns the previous
-    (mode, head_groups, concurrent, overlap_qkv)."""
-    global _mode, _head_groups, _concurrent, _overlap_qkv
-    if mode not in MODES:
-        raise ValueError(f"mode must be one of {MODES}; got {mode!r}")
-    if head_groups < 1:
-        raise ValueError(f"head_groups must be at least 1; got {head_groups}")
-    previous = (_mode, _head_groups, _concurrent, _overlap_qkv)
-    _mode, _head_groups, _concurrent, _overlap_qkv = mode, head_groups, concurrent, overlap_qkv
-    return previous
-
-
-def configure_from(runtime_config) -> None:
-    """Apply the --ulysses_a2a / --ulysses_sdma_* options of a RuntimeConfig."""
-    configure(
-        getattr(runtime_config, "ulysses_a2a", "default"),
-        getattr(runtime_config, "ulysses_sdma_head_groups", 2),
-        getattr(runtime_config, "ulysses_sdma_group_streams", False),
-        getattr(runtime_config, "ulysses_sdma_overlap_qkv", False),
-    )
+def _config() -> UlyssesA2AConfig:
+    """The runtime config's Ulysses all-to-all options (the defaults before, or without, one)."""
+    if not runtime_state_is_initialized():
+        return _DEFAULT
+    return getattr(get_runtime_state().runtime_config, "ulysses_a2a", _DEFAULT)
 
 
 def selected() -> bool:
     """Whether Ulysses calls take this path (SDMA, or its layout over the default all-to-all)."""
-    return _mode != "default"
+    return _config().mode != "default"
 
 
 def uses_sdma() -> bool:
-    """Whether Ulysses calls move their data with host-issued SDMA copies."""
-    return _mode == "sdma"
+    """Whether Ulysses calls move their data with SDMA copies."""
+    return _config().mode == "sdma"
 
 
 def overlap_qkv() -> bool:
-    return selected() and _overlap_qkv
+    return selected() and _config().overlap_qkv
 
 
 def call_reason(
@@ -139,7 +123,7 @@ def unsupported_reason(query, key, value, *, extra_inputs, **settings) -> Option
 def warn_fallback(reason: str) -> None:
     if reason not in _warned:
         _warned.add(reason)
-        logger.warning(f"Ulysses all-to-all {_mode}: this attention uses the default all-to-all ({reason})")
+        logger.warning(f"Ulysses all-to-all {_config().mode}: this attention uses the default all-to-all ({reason})")
 
 
 # Dynamo drops a logging call traced inside a compiled region; registered here, the call
@@ -162,9 +146,10 @@ def _reserved(joint_rows: int, joint_strategy, tensors: int):
 def begin(query, rows, heads, reserved, group: dist.ProcessGroup):
     """Open a call: returns (token, the exchange's integer spec, per group per tensor heads)."""
     world = dist.get_world_size(group)
-    spec = ulysses.encode(world, query.shape[0], query.shape[3], rows, heads, reserved, _head_groups)
-    token = torch.ops.xfuser.sdma_ulysses_begin(query, spec, group.group_name, _mode)
-    return token, spec, ulysses.head_split(heads, _head_groups)
+    config = _config()
+    spec = ulysses.encode(world, query.shape[0], query.shape[3], rows, heads, reserved, config.head_groups)
+    token = torch.ops.xfuser.sdma_ulysses_begin(query, spec, group.group_name, config.mode)
+    return token, spec, ulysses.head_split(heads, config.head_groups)
 
 
 def finish(
@@ -199,7 +184,7 @@ def finish(
         kwargs.get("valid_kv_len"),
         kwargs.get("max_seqlen_k"),
         int(kv_head_repeat),
-        _concurrent,
+        _config().group_streams,
         group.group_name,
     )
     return out.transpose(1, 2)
@@ -473,7 +458,7 @@ def qk_first_attention(
     spec = ulysses.encode(world, ref.shape[0], head_dim, [ref.shape[1]] * 3, [per_rank] * 3, [(0, 0)] * 3, 1)
     packed_qk = project_qk()
     # Opened on the packed Q/K: under torch.compile the call is armed once Q/K exist.
-    token = torch.ops.xfuser.sdma_ulysses_begin(packed_qk, spec, group.group_name, _mode)
+    token = torch.ops.xfuser.sdma_ulysses_begin(packed_qk, spec, group.group_name, _config().mode)
     token = torch.ops.xfuser.sdma_ulysses_send(token, packed_qk, 0, [0, 1], group.group_name)
     value = project_v(token)
     packed_v = ulysses.pack_group([ulysses.pieces_from_heads(value, world, 0, per_rank)])
@@ -507,7 +492,7 @@ def prepare_grouped_qkv(model: torch.nn.Module, world: int) -> int:
             continue
         head_dim = parts[0][0].shape[0] // heads
         per_rank = heads // world
-        sizes = ulysses.head_split((per_rank,), _head_groups)
+        sizes = ulysses.head_split((per_rank,), _config().head_groups)
         offset = 0
         with torch.no_grad():
             for g, (h,) in enumerate(sizes):
@@ -561,7 +546,7 @@ def grouped_qkv_attention(attn, hidden_states, norm_rope, *, backend, attention_
         warn_fallback(reason)
         return None
     _, sizes, head_dim = layout
-    if sizes != ulysses.head_split((sum(h for (h,) in sizes),), _head_groups):
+    if sizes != ulysses.head_split((sum(h for (h,) in sizes),), _config().head_groups):
         return None
     per_rank = sum(h for (h,) in sizes)
     first = getattr(attn, f"{_GROUPED}_w0")

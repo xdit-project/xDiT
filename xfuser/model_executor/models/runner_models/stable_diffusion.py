@@ -1,6 +1,6 @@
 import torch
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from xfuser import xFuserStableDiffusion3Pipeline
+from xfuser import xFuserArgs, xFuserStableDiffusion3Pipeline
 from xfuser.model_executor.cache import (
     DBCachePreset,
     CacheDitAdapterConfig,
@@ -85,6 +85,15 @@ class xFuserStableDiffusionModel(xFuserModel):
             ),
         },
     )
+
+    def _validate_config(self, config: xFuserArgs) -> None:
+        super()._validate_config(config)
+        if config.pipefusion_parallel_degree > 1 and config.memory_efficient_replicated_load:
+            raise ValueError(
+                "SD3.5 PipeFusion does not support "
+                "--memory_efficient_replicated_load because its composition "
+                "wrapper cannot construct a stage-local transformer on meta."
+            )
 
     def _load_model(self) -> DiffusionPipeline:
         # SD3's wrapper is composition-style (wraps a transformer instance) and lacks

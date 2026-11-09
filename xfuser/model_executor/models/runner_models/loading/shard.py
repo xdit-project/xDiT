@@ -37,6 +37,16 @@ def shard_pipeline_components(loader) -> None:
             f"strategy: {sorted(unknown)}. Available components: "
             f"{sorted(strategy_components)}"
         )
+    stage_local = {
+        name for name, component in model.pipe.components.items() if loader.is_pipeline_stage_blockwise(component)
+    }
+    invalid_stage_shards = sharded_components & stage_local
+    if invalid_stage_shards:
+        raise ValueError(
+            "PipeFusion stage-local components cannot also be FSDP-wrapped: "
+            f"{sorted(invalid_stage_shards)}. Use --fully_shard_components "
+            "to select only replicated components."
+        )
     if requested is None:
         loader.fill_eager_transformers()
     else:
@@ -156,7 +166,13 @@ def _give_cpu_offloaded_components_an_exec_device_hook(model, local_rank: int, s
 def _wrapped_block_paths(component, component_name, wrap_attrs):
     paths = []
     for attr in wrap_attrs:
-        paths.extend(f"{component_name}.{attr}.{index}" for index, _ in enumerate(rgetattr(component, attr)))
+        for index, block in enumerate(rgetattr(component, attr)):
+            checkpoint_fqn = getattr(
+                block,
+                "_xfuser_checkpoint_fqn",
+                f"{attr}.{index}",
+            )
+            paths.append(f"{component_name}.{checkpoint_fqn}")
     return tuple(paths)
 
 
@@ -218,9 +234,14 @@ def build_block_quantize_fn(
         raise ValueError("multiple wrap_attrs require the component to resolve flattened block indices")
 
     def quantize_fn(block, block_idx: int) -> None:
-        block_path = (
-            block_paths[block_idx] if block_paths is not None else f"{component_name}.{wrap_attrs[0]}.{block_idx}"
-        )
+        # Stage slicing renumbers a rank's retained blocks, so the format a
+        # block takes follows the checkpoint path it was built from rather than
+        # its position in this rank's list.
+        if block_paths is not None:
+            block_path = block_paths[block_idx]
+        else:
+            checkpoint_fqn = getattr(block, "_xfuser_checkpoint_fqn", f"{wrap_attrs[0]}.{block_idx}")
+            block_path = f"{component_name}.{checkpoint_fqn}"
         present = [
             format_name
             for format_name, adapter in adapters.items()

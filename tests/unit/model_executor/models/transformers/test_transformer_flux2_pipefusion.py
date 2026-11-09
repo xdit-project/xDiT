@@ -61,3 +61,35 @@ def test_single_stage_pipefusion_forward_matches_diffusers(monkeypatch):
 
     assert encoder_out is None
     torch.testing.assert_close(noise_pred, expected)
+
+
+def test_compile_capture_forward_propagates_stage_shapes(monkeypatch):
+    model = _tiny_model()
+    inputs = _inputs()
+
+    monkeypatch.setattr(transformer_flux2, "is_pipeline_first_stage", lambda: True)
+    monkeypatch.setattr(transformer_flux2, "is_pipeline_last_stage", lambda: False)
+    ((hidden_states, encoder_hidden_states),) = (
+        transformer_flux2.xFuserFlux2Transformer2DModelWrapper.pipefusion_compile_capture_forward(
+            model,
+            **inputs,
+            return_dict=False,
+        )
+    )
+    assert hidden_states.shape == (1, 6, 32)
+    assert encoder_hidden_states.shape == (1, 3, 32)
+    assert torch.count_nonzero(hidden_states) == 0
+    assert torch.count_nonzero(encoder_hidden_states) == 0
+
+    monkeypatch.setattr(transformer_flux2, "is_pipeline_first_stage", lambda: False)
+    monkeypatch.setattr(transformer_flux2, "is_pipeline_last_stage", lambda: True)
+    ((noise_pred, encoder_out),) = (
+        transformer_flux2.xFuserFlux2Transformer2DModelWrapper.pipefusion_compile_capture_forward(
+            model,
+            hidden_states,
+            encoder_hidden_states,
+            return_dict=False,
+        )
+    )
+    assert noise_pred.shape == (1, 6, 8)
+    assert encoder_out is None

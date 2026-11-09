@@ -401,6 +401,39 @@ def test_precision_overrides_are_owned_by_the_high_format(monkeypatch):
     assert not high(object(), "attn.to_q")
 
 
+def test_stage_local_block_uses_global_checkpoint_path_and_policy_index():
+    adapter = RecordingAdapter()
+    format_adapter = RecordingFormatAdapter()
+    model = _hybrid_model(
+        adapter=adapter,
+        format_adapter=format_adapter,
+        overrides=("0.wrong", "7.attn.proj"),
+    )
+    block = SimpleNamespace(
+        _xfuser_checkpoint_fqn="blocks.7",
+        _xfuser_checkpoint_block_index=7,
+    )
+    component = SimpleNamespace(blocks=[block])
+
+    quantize = shard.build_block_quantize_fn(
+        runtime(model),
+        "transformer",
+        ["blocks"],
+        local_rank=1,
+        component=component,
+    )
+    quantize(block, 0)
+
+    # Stage slicing made this global block 7 the rank's local block 0. The
+    # carve-out names block 7, so the format each leaf takes has to follow the
+    # checkpoint path rather than the position in this rank's list.
+    assert format_adapter.calls, "the low format converts this block"
+    assert format_adapter.calls[0][0] is block
+    low_filter = format_adapter.calls[0][1]["filter_fn"]
+    assert not low_filter(object(), "attn.proj"), "block 7's carve-out is not the low format's"
+    assert low_filter(object(), "other.proj")
+
+
 @pytest.mark.parametrize(
     ("format_name", "config_flags", "target_setting"),
     [

@@ -233,12 +233,25 @@ def _splits_weights(config) -> bool:
     return config.fully_shard_degree > 1 or config.pipefusion_parallel_degree > 1 or config.tensor_parallel_degree > 1
 
 
+def uses_pipeline_stage_meta(config) -> bool:
+    """Whether PipeFusion builds only its local transformer stage on meta."""
+    return bool(
+        config is not None
+        and getattr(config, "memory_efficient_replicated_load", False)
+        and getattr(config, "pipefusion_parallel_degree", 1) > 1
+    )
+
+
 def select_effective_materialization_mode(
     config,
     *,
     world_size: int,
 ) -> MaterializationMode:
-    """Apply the same runtime exclusions used by memory-efficient loading."""
+    """Select whole-component materialization.
+
+    Stage-local PipeFusion transformer loading is orthogonal; replicated
+    pipeline components remain eager.
+    """
 
     if config.memory_efficient_sharding and config.fully_shard_degree > 1:
         return MaterializationMode.FSDP_META
@@ -250,9 +263,10 @@ def select_effective_materialization_mode(
 def assert_requested_materialization_is_honoured(config, *, world_size: int) -> None:
     """Refuse a memory-efficient request that the mode selection would quietly drop.
 
-    Replicated meta loading holds one full copy per rank, so it is defined only when nothing else
-    splits the weights. Asking for it alongside a degree that does split them selects an eager
-    load, which without this refusal reads as the feature being enabled and doing nothing.
+    Replicated meta loading holds one full copy per rank. Tensor/FSDP sharding
+    requests are contradictory and refused. PipeFusion instead uses this option
+    for stage-local blockwise transformer loading while replicated components
+    remain eager.
 
     A single-rank run is not such a case and is left alone: there is no peer to fill, so an eager
     load is correct, and refusing would stop the same command line working on one GPU.
@@ -260,14 +274,19 @@ def assert_requested_materialization_is_honoured(config, *, world_size: int) -> 
     if not config.memory_efficient_replicated_load:
         return
     if config.fully_shard_degree > 1:
-        raise UnsupportedLoadContract(
-            "--memory_efficient_replicated_load conflicts with --fully_shard_degree "
-            f"{config.fully_shard_degree}: replicated loading keeps a whole copy per rank, "
-            "while sharding splits it. Use --memory_efficient_sharding to shard."
+        targeted_pipefusion = config.pipefusion_parallel_degree > 1 and bool(
+            getattr(config, "fully_shard_components", None)
         )
-    if _splits_weights(config):
+        if not targeted_pipefusion:
+            raise UnsupportedLoadContract(
+                "--memory_efficient_replicated_load conflicts with "
+                f"--fully_shard_degree {config.fully_shard_degree}: replicated "
+                "loading keeps a whole copy per rank, while sharding splits it. "
+                "Use --memory_efficient_sharding to shard, or select only "
+                "replicated PipeFusion components with --fully_shard_components."
+            )
+    if config.tensor_parallel_degree > 1:
         splitters = {
-            "--pipefusion_parallel_degree": config.pipefusion_parallel_degree,
             "--tensor_parallel_degree": config.tensor_parallel_degree,
         }
         named = ", ".join(f"{flag} {value}" for flag, value in splitters.items() if value > 1)
@@ -369,6 +388,8 @@ def select_load_contract(
         )
     if (requested_format is QuantizationFormat.NONE) != (selected_backend is QuantizationBackend.NONE):
         raise UnsupportedLoadContract(f"{runner_name} cannot pair {requested_format.name} with {selected_backend.name}")
+    if requested_format is QuantizationFormat.A6W4 and materialization_mode is not MaterializationMode.EAGER:
+        raise UnsupportedLoadContract(f"{requested_format.value} currently requires eager materialization")
     validate_materialization_contract(
         declaration,
         materialization_mode,

@@ -77,6 +77,8 @@ if _USE_MHA_V4:
         native_fp8_format,
     )
 
+    from xfuser.core.attention.backends.aiter_mha_v4.kernel import kv_splits_kwargs
+
 
 def _mha_v4_eligible(query, call: AttnCall) -> bool:
     return _USE_MHA_V4 and call.varlen is None and query.is_cuda and query.shape[-1] == 128 and not call.is_causal
@@ -131,7 +133,7 @@ def _mha_v4(query, key, value, call: AttnCall):
     """The raw MHA v4 API owns canonical Q/K rotation and quantisation."""
     q, k, v = to_bshd(query, key, value, contiguous=True)
     fp8 = native_fp8_format()
-    return from_bshd(mha_v4(q, k, v, fp8, fp8, fp8)), None
+    return from_bshd(mha_v4(q, k, v, fp8, fp8, fp8, **kv_splits_kwargs())), None
 
 
 # Quantisation and the kernel sit behind a custom op so Dynamo steps over them

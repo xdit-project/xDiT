@@ -3,13 +3,17 @@ present and its enums can be translated once here rather than per call."""
 
 import torch
 
+from aiter import dtypes
 from aiter.ops.mha_v4 import (
     AttentionFormat,
+    AttentionPack,
     AttentionScaleMode,
     mha_v4,
+    mha_v4_packed,
     native_fp8_format,
 )
 
+from xfuser.config.attention_a2a import AttentionA2AConfig
 from xfuser.core.attention.numerics.layout import (
     from_bshd,
     make_contiguous,
@@ -23,12 +27,26 @@ from xfuser.core.attention.sparsity.sparge import (
     restore_sparge_output,
 )
 from xfuser.core.attention.spec import AttnCall
+from xfuser.core.distributed.runtime_state import get_runtime_state, runtime_state_is_initialized
 
 from .spec import Fmt, MhaV4Format, Scale
 
 FORMAT = {f: getattr(AttentionFormat, f.name) for f in Fmt if f is not Fmt.NATIVE_FP8}
 FORMAT[Fmt.NATIVE_FP8] = native_fp8_format()
 SCALE = {s: getattr(AttentionScaleMode, s.name) for s in Scale}
+_PACKED_FORMAT = {
+    "bf16": Fmt.BF16,
+    "int8": Fmt.INT8,
+    "e4m3": Fmt.NATIVE_FP8,
+    "mxfp8": Fmt.NATIVE_FP8,
+    "mxfp4": Fmt.MXFP4,
+    "mxfp6": Fmt.MXFP6,
+}
+_PACKED_SCALE = {
+    "f32_per_tensor": Scale.F32_PER_TENSOR,
+    "f32_per_channel": Scale.F32_PER_CHANNEL,
+    "e8m0_per_1x32": Scale.E8M0_PER_1X32,
+}
 
 
 def _read_kv_tile() -> int:
@@ -48,13 +66,31 @@ KV_TILE = _read_kv_tile()
 # here, because the kernel module is imported at backend selection -- evaluating
 # it per call would put a signature probe inside the traced region.
 HAS_SEQLENS_K = PARAM("aiter.ops.mha_v4:mha_v4", "seqlens_k").satisfied()
+HAS_KV_SPLITS = PARAM("aiter.ops.mha_v4:mha_v4", "kv_splits").satisfied()
 
 
-def _launch(q, k, v, fmt: MhaV4Format, block_mask=None, seqlens_k=None, return_lse=False):
+def kv_splits_kwargs():
+    """``kv_splits`` for a dense mha_v4 call, from --mha_v4_kv_splits.
+
+    Omitted on an AITER that predates split-KV, where "auto" means unsplit anyway.
+    """
+    splits = 1
+    if runtime_state_is_initialized():
+        splits = get_runtime_state().runtime_config.mha_v4_kv_splits
+    if HAS_KV_SPLITS:
+        return {"kv_splits": splits}
+    if splits not in ("auto", 1):
+        raise NotImplementedError(
+            f"--mha_v4_kv_splits {splits} needs an AITER whose mha_v4 takes kv_splits; please update AITER"
+        )
+    return {}
+
+
+def _launch(q, k, v, fmt: MhaV4Format, block_mask=None, seqlens_k=None, return_lse=False, split_kv=False):
     """One MHA v4 launch. Tensors are BSHD. Returns (output, lse-or-None)."""
-    kwargs = {}
+    kwargs = kv_splits_kwargs() if split_kv else {}
     if fmt.qk_scale is not None:
-        kwargs = {
+        kwargs |= {
             "q_scale_mode": SCALE[fmt.qk_scale],
             "k_scale_mode": SCALE[fmt.qk_scale],
             "v_scale_mode": SCALE[fmt.v_scale],
@@ -66,6 +102,56 @@ def _launch(q, k, v, fmt: MhaV4Format, block_mask=None, seqlens_k=None, return_l
     qk = FORMAT[fmt.qk]
     result = mha_v4(q, k, v, qk, qk, FORMAT[fmt.v], block_mask=block_mask, **kwargs)
     return result if return_lse else (result, None)
+
+
+def mha_v4_attention_a2a_packed(
+    q,
+    k,
+    v,
+    q_scale,
+    k_scale,
+    v_scale,
+    profile: str,
+    softmax_scale: float,
+):
+    """Launch MHA v4 over Attention A2A's pre-quantized public buffers.
+
+    This deliberately remains a normal Python function. Inductor traces through
+    the static recipe selection and tensor views down to AITER's kernel custom
+    op, matching the pre-quantized path on main.
+    """
+    config = AttentionA2AConfig(profile=profile)
+    qk_codec, _, v_codec = config.consumer_codecs
+    qk_format = FORMAT[_PACKED_FORMAT[qk_codec]]
+    v_format = FORMAT[_PACKED_FORMAT[v_codec]]
+
+    if qk_codec == "int8":
+        q = q.view(torch.int8)
+        k = k.view(torch.int8)
+    elif qk_codec in ("e4m3", "mxfp8"):
+        q = q.view(dtypes.fp8)
+        k = k.view(dtypes.fp8)
+    if v_codec in ("e4m3", "mxfp8"):
+        v = v.view(dtypes.fp8)
+
+    q_scale_mode, k_scale_mode, v_scale_mode = tuple(SCALE[_PACKED_SCALE[mode]] for mode in config.scale_modes)
+    v_pack = AttentionPack.V_FOR_FP6_P if config.v_pack == "fp6_p" else AttentionPack.DEFAULT
+    return mha_v4_packed(
+        q,
+        k,
+        v,
+        q_scale,
+        k_scale,
+        v_scale,
+        qk_format,
+        qk_format,
+        v_format,
+        q_scale_mode,
+        k_scale_mode,
+        v_scale_mode,
+        v_pack=v_pack,
+        softmax_scale=softmax_scale,
+    )
 
 
 def _shorten_keys(key, value, call: AttnCall, fmt: MhaV4Format):
@@ -166,6 +252,7 @@ def mha_v4_dense(query, key, value, call: AttnCall, *, fmt: MhaV4Format):
         fmt,
         seqlens_k=seqlens_k,
         return_lse=call.ring_world_size > 1,
+        split_kv=True,
     )
     # The kernel writes LSE as [batch, heads, Sq], already the layout the ring
     # merge expects, so only O is permuted back.

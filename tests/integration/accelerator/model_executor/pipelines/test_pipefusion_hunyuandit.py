@@ -121,7 +121,44 @@ def _worker(rank, world_size, init_method, name):
     destroy_distributed_environment()
 
 
+def _async_worker(rank, world_size, init_method):
+    from xfuser.model_executor.pipelines.pipeline_hunyuandit import xFuserHunyuanDiTPipeline
+
+    torch.cuda.set_device(rank)
+    device = torch.device("cuda", rank)
+    init_distributed_environment(rank=rank, world_size=world_size, local_rank=rank, distributed_init_method=init_method)
+    args = xFuserArgs(
+        model="tiny",
+        pipefusion_parallel_degree=world_size,
+        num_pipeline_patch=2,
+        warmup_steps=1,
+        attention_backend="sdpa",
+    )
+    engine_config, _ = args.create_config()
+    engine_config.runtime_config.dtype = torch.float32
+    wrapper = xFuserHunyuanDiTPipeline(_tiny_hunyuandit().to(device), engine_config)
+    steps = []
+    kwargs = {
+        **_hunyuandit_kwargs(5.0, 1),
+        "num_inference_steps": 3,
+        "callback_on_step_end": lambda pipe, step, t, callback_kwargs: steps.append(step) or callback_kwargs,
+    }
+    kwargs = {key: value.to(device) if torch.is_tensor(value) else value for key, value in kwargs.items()}
+    output = wrapper(**kwargs)
+    if is_pipeline_last_stage():
+        assert output[0].shape == (1, 4, 16, 16)
+        assert torch.isfinite(output[0]).all()
+        assert steps == [0, 1, 2]
+    destroy_model_parallel()
+    destroy_distributed_environment()
+
+
 @pytest.mark.multi_gpu
 @pytest.mark.parametrize("name", sorted(CASES))
 def test_pipefusion_hunyuandit_matches_diffusers(accelerator_ranks, name):
     accelerator_ranks(_worker, world_size=2, timeout=300, init_filename=f"pipefusion-{name}", args=(name,))
+
+
+@pytest.mark.multi_gpu
+def test_pipefusion_hunyuandit_async_steps_report_each_step(accelerator_ranks):
+    accelerator_ranks(_async_worker, world_size=2, timeout=300, init_filename="pipefusion-hunyuandit-async")

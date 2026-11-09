@@ -25,6 +25,7 @@ from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
     get_ulysses_parallel_world_size,
 )
+from xfuser.model_executor.layers.fused_qk_rope_flydsl import _HAS_FLYDSL, flydsl_fused_qk_norm_rope
 from xfuser.model_executor.layers.usp import (
     _combined_qkv_all_to_all,
     _ft_c_output_all_to_all,
@@ -52,6 +53,25 @@ def _scatter_sequence_gather_heads(hidden_states, sp_pad):
     if sp_pad:
         hidden_states = F.pad(hidden_states, (0, 0, 0, 0, 0, sp_pad))
     return _ft_c_output_all_to_all(hidden_states.transpose(1, 2)).transpose(1, 2)
+
+
+def _rotary_table(freqs):
+    """``[S, D/2]`` complex rotary table -> ``[S, D]`` (cos, sin), each value repeated for its feature pair.
+
+    This is the interleaved (GPT-J) form ``flydsl_fused_qk_norm_rope`` takes.
+    """
+    return freqs.real.repeat_interleave(2, dim=-1), freqs.imag.repeat_interleave(2, dim=-1)
+
+
+def _qk_norm_rope(attn, query, key, rotary_emb):
+    """QK-norm then RoPE, as one FlyDSL kernel when available and as diffusers' ops otherwise."""
+    if _HAS_FLYDSL:
+        return flydsl_fused_qk_norm_rope(query, key, attn.norm_q, attn.norm_k, rotary_emb)
+    cos, sin = rotary_emb
+    freqs = torch.complex(cos[:, 0::2], sin[:, 0::2])
+    query = apply_rotary_emb_qwen(attn.norm_q(query).to(query.dtype), freqs, use_real=False)
+    key = apply_rotary_emb_qwen(attn.norm_k(key).to(key.dtype), freqs, use_real=False)
+    return query, key
 
 
 def _update_kv_cache(key, value, layer_cache, kv_cache_mode, cache_write_slice):
@@ -155,7 +175,7 @@ class _xFuserQwenImage21AttnMixin:
         attn,
         hidden_states: torch.Tensor,
         attention_mask: Any | None = None,
-        rotary_emb: torch.Tensor | None = None,
+        rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
         layer_cache: QwenImage21KVLayerCache | None = None,
         kv_cache_mode: str | None = None,
         cache_write_slice: slice | None = None,
@@ -166,11 +186,7 @@ class _xFuserQwenImage21AttnMixin:
         key = attn.to_k(hidden_states).unflatten(-1, (attn.heads, -1))
         value = attn.to_v(hidden_states).unflatten(-1, (attn.heads, -1))
 
-        query = attn.norm_q(query).to(value.dtype)
-        key = attn.norm_k(key).to(value.dtype)
-        if rotary_emb is not None:
-            query = apply_rotary_emb_qwen(query, rotary_emb, use_real=False)
-            key = apply_rotary_emb_qwen(key, rotary_emb, use_real=False)
+        query, key = _qk_norm_rope(attn, query, key, rotary_emb)
 
         query, key, value = _gather_sequence_scatter_heads(query, key, value, self.sp_pad)
         key, value = _update_kv_cache(key, value, layer_cache, kv_cache_mode, cache_write_slice)
@@ -217,8 +233,8 @@ class xFuserQwenImage21TransformerWrapper(QwenImage21Transformer2DModel):
     they are the same group only because the runner keeps Ring off.
 
     ``forward`` is a copy of ``QwenImage21Transformer2DModel.forward`` as of diffusers ``bdc2bea``; only the
-    sharding block before the block loop, ``target_token_mask=block_modulation_mask`` and the gather after
-    it differ.
+    (cos, sin) rotary table, the sharding block before the block loop, ``target_token_mask=block_modulation_mask``
+    and the gather after it differ.
     """
 
     @apply_lora_scale("attention_kwargs")
@@ -262,7 +278,7 @@ class xFuserQwenImage21TransformerWrapper(QwenImage21Transformer2DModel):
         joint_hidden_states = joint_hidden_states.repeat_interleave(repeats, dim=1)
         joint_hidden_states[:, image_pad_mask] = hidden_states
 
-        rotary_emb = self.pos_embed(img_shapes[0], image_pad_mask, device=hidden_states.device)
+        rotary_emb = _rotary_table(self.pos_embed(img_shapes[0], image_pad_mask, device=hidden_states.device))
         image_ids, target_token_mask = self.build_token_metadata(image_pad_mask, img_shapes[0])
 
         timestep = timestep.to(hidden_states.dtype)
@@ -287,7 +303,7 @@ class xFuserQwenImage21TransformerWrapper(QwenImage21Transformer2DModel):
 
         if kv_cache_mode == "cached":
             joint_hidden_states = joint_hidden_states[:, prefix_len:]
-            rotary_emb = rotary_emb[prefix_len:]
+            rotary_emb = tuple(table[prefix_len:] for table in rotary_emb)
             modulation_mask = modulation_mask[prefix_len:]
             attention_mask = None if joint_key_valid is None else joint_key_valid[:, None, None, :]
             cache_write_slice = None
@@ -314,7 +330,9 @@ class xFuserQwenImage21TransformerWrapper(QwenImage21Transformer2DModel):
         block_modulation_mask = modulation_mask
         if sp_world_size > 1:
             joint_hidden_states = chunk_and_pad_sequence(joint_hidden_states, sp_rank, sp_world_size, sp_pad, dim=1)
-            rotary_emb = chunk_and_pad_sequence(rotary_emb, sp_rank, sp_world_size, sp_pad, dim=0)
+            rotary_emb = tuple(
+                chunk_and_pad_sequence(table, sp_rank, sp_world_size, sp_pad, dim=0) for table in rotary_emb
+            )
             if modulation_mask is not None:
                 block_modulation_mask = chunk_and_pad_sequence(modulation_mask, sp_rank, sp_world_size, sp_pad, dim=0)
         for block in self.transformer_blocks:

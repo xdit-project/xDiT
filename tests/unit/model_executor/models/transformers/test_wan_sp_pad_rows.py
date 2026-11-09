@@ -9,12 +9,9 @@ across query rows). A forward hook zeroes them on the ranks that hold any.
 import pytest
 import torch
 
-from xfuser.model_executor.models.transformers.transformer_wan import (
-    _local_sp_pad_rows,
-    _zero_sp_pad_rows_hook,
-    xFuserWanTransformer3DWrapper,
-)
+from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanTransformer3DWrapper
 from xfuser.model_executor.models.transformers.transformer_wan_vace import xFuserWanVACETransformer3DWrapper
+from xfuser.model_executor.models.transformers.transformers_utils import local_sp_pad_rows, zero_sp_pad_rows_hook
 
 _TINY_CONFIG = dict(
     patch_size=(1, 2, 2),
@@ -43,25 +40,25 @@ def test_pad_rows_are_counted_on_the_ranks_whose_chunk_holds_them(seq_len, sp_si
     local_len = -(-seq_len // sp_size)
     for rank in range(sp_size):
         expected = sum(row >= seq_len for row in range(rank * local_len, (rank + 1) * local_len))
-        assert _local_sp_pad_rows(seq_len, local_len, rank) == expected
+        assert local_sp_pad_rows(seq_len, local_len, rank) == expected
 
 
 def test_the_hook_zeroes_the_pad_rows_and_nothing_else():
     output = torch.ones(1, 6, 4)
-    _zero_sp_pad_rows_hook({"local_rows": 2})(None, (), output)
+    zero_sp_pad_rows_hook({"local_rows": 2})(None, (), output)
     assert not output[:, -2:].any()
     assert output[:, :-2].eq(1).all()
 
 
 def test_the_hook_leaves_a_chunk_without_pad_alone():
     output = torch.ones(1, 6, 4)
-    _zero_sp_pad_rows_hook({"local_rows": 0})(None, (), output)
+    zero_sp_pad_rows_hook({"local_rows": 0})(None, (), output)
     assert output.eq(1).all()
 
 
 def test_the_hook_zeroes_both_tensors_a_vace_block_returns():
     conditioning, control = torch.ones(1, 6, 4), torch.ones(1, 6, 4)
-    hook = _zero_sp_pad_rows_hook({"local_rows": 1})
+    hook = zero_sp_pad_rows_hook({"local_rows": 1})
     hook(None, (), (conditioning, control))
     for tensor in (conditioning, control):
         assert not tensor[:, -1:].any()

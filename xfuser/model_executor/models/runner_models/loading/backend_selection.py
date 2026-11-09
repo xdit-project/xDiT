@@ -170,6 +170,24 @@ class QuantizationBackends:
         from .contracts import UnsupportedLoadContract
 
         config = self.model.config
+        offload_flags = tuple(
+            flag
+            for flag in (
+                "enable_model_cpu_offload",
+                "enable_sequential_cpu_offload",
+                "enable_group_cpu_offload",
+            )
+            if getattr(config, flag, False)
+        )
+        for format_name in self._required_formats():
+            adapter = self.adapter_for(format_name)
+            if offload_flags and getattr(adapter, "packs_from_device_resident_source", False):
+                raise UnsupportedLoadContract(
+                    f"{', '.join('--' + flag for flag in offload_flags)} cannot be "
+                    f"combined with {format_name} on the {adapter.impl} backend: "
+                    "packing reads each source weight on the device it will compute "
+                    "on, and offload leaves it on the host."
+                )
         if not getattr(config, "enable_group_cpu_offload", False):
             return
         leg = "pinned" if getattr(config, "group_offload_low_cpu_mem", False) else "unpinned"

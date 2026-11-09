@@ -344,6 +344,10 @@ class QuantAdapter:
     #: first. None means they do, or that nothing has measured otherwise --
     #: refusing on a guess would assert a claim no one has tested.
     group_offload_refusal = None
+    #: Whether packing reads the source weight on the device it will compute
+    #: on. An implementation that does cannot pack a host-resident parameter,
+    #: so every offload mode is refused rather than only the group hook.
+    packs_from_device_resident_source = False
     #: Filled in by ``stores`` at registration.
     format_name = ""
     impl = ""

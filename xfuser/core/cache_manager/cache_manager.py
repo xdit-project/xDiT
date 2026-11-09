@@ -70,8 +70,17 @@ class CacheManager:
         """Release cached activations while preserving layer registrations."""
         for (_, layer), entry in self.cache.items():
             entry.tensors = [None] * len(entry.tensors)
-            if isinstance(layer, torch.nn.Module) and "_xdit_kv_cache" in layer._buffers:
+            if isinstance(layer, torch.nn.Module) and hasattr(layer, "_xdit_kv_cache"):
                 layer._xdit_kv_cache = None
+
+    @torch.compiler.disable
+    def _cache_state(self, layer: Any, layer_type: str):
+        entry = self.cache[layer_type, layer]
+        return entry.cache_type, entry.tensors[0]
+
+    @torch.compiler.disable
+    def _store_cache(self, layer: Any, layer_type: str, tensor: torch.Tensor) -> None:
+        self.cache[layer_type, layer].tensors[0] = tensor
 
     def update_and_get_kv_cache(
         self,
@@ -90,19 +99,20 @@ class CacheManager:
         if custom_get_kv is not None:
             return custom_get_kv(self, new_kv, layer, slice_dim, layer_type, **kwargs)
 
-        module_cache = isinstance(layer, torch.nn.Module) and "_xdit_kv_cache" in layer._buffers
+        module_cache = hasattr(layer, "_xdit_kv_cache_type")
         if module_cache:
             cache_type = layer._xdit_kv_cache_type
-            kv_cache = layer._xdit_kv_cache
+            # Full-cache calls replace the tensor and must not guard on its
+            # initial None value. Patch calls load it only when they need it.
+            kv_cache = None
         else:
-            entry = self.cache[layer_type, layer]
-            cache_type = entry.cache_type
-            kv_cache = entry.tensors[0]
+            cache_type, kv_cache = self._cache_state(layer, layer_type)
 
         if cache_type == "naive_cache":
             kv_cache = self._naive_cache_update(
                 new_kv,
                 kv_cache=kv_cache,
+                module_cache=module_cache,
                 layer=layer,
                 slice_dim=slice_dim,
                 layer_type=layer_type,
@@ -112,6 +122,7 @@ class CacheManager:
             kv_cache = self._sequence_parallel_cache_update(
                 new_kv,
                 kv_cache=kv_cache,
+                module_cache=module_cache,
                 layer=layer,
                 slice_dim=slice_dim,
                 layer_type=layer_type,
@@ -119,9 +130,11 @@ class CacheManager:
             )
 
         if module_cache:
-            layer._xdit_kv_cache = kv_cache
+            # Module.__setattr__ guards on the buffer's previous None value
+            # under torch.compile. The buffer is already registered here.
+            layer._buffers["_xdit_kv_cache"] = kv_cache
         else:
-            entry.tensors[0] = kv_cache
+            self._store_cache(layer, layer_type, kv_cache)
 
         if return_list:
             return torch.chunk(kv_cache, 2, dim=-1)
@@ -131,6 +144,7 @@ class CacheManager:
         self,
         new_kv: Union[torch.Tensor, List[torch.Tensor]],
         kv_cache: Optional[torch.Tensor],
+        module_cache: bool,
         layer,
         slice_dim: int = 1,
         layer_type: str = "attn",
@@ -150,6 +164,8 @@ class CacheManager:
             end_token_idx = get_runtime_state().pp_patches_token_start_idx_local[
                 get_runtime_state().pipeline_patch_idx + 1
             ]
+            if module_cache:
+                kv_cache = layer._buffers["_xdit_kv_cache"]
             kv_cache = self._update_kv_in_dim(
                 kv_cache=kv_cache,
                 new_kv=new_kv,
@@ -157,7 +173,6 @@ class CacheManager:
                 start_idx=start_token_idx,
                 end_idx=end_token_idx,
             )
-            self.cache[layer_type, layer].tensors[0] = kv_cache
         return kv_cache
 
     # work inside ring attn
@@ -165,6 +180,7 @@ class CacheManager:
         self,
         new_kv: torch.Tensor,
         kv_cache: Optional[torch.Tensor],
+        module_cache: bool,
         layer,
         slice_dim: int = 1,
         layer_type: str = "attn",
@@ -199,6 +215,8 @@ class CacheManager:
             # pp_patches_token_num = get_runtime_state().pp_patches_token_num
             # start_token_idx = ulysses_world_size * sum(pp_patches_token_num[:get_runtime_state().pipeline_patch_idx])
             # end_token_idx = ulysses_world_size * sum(pp_patches_token_num[:get_runtime_state().pipeline_patch_idx + 1])
+            if module_cache:
+                kv_cache = layer._buffers["_xdit_kv_cache"]
             kv_cache = self._update_kv_in_dim(
                 kv_cache=kv_cache,
                 new_kv=new_kv,
@@ -206,7 +224,6 @@ class CacheManager:
                 start_idx=start_token_idx,
                 end_idx=end_token_idx,
             )
-            self.cache[layer_type, layer].tensors[0] = kv_cache
         return kv_cache
 
     def _update_kv_in_dim(

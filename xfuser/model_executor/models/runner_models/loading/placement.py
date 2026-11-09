@@ -42,6 +42,11 @@ def place_pipeline_components(loader) -> None:
     )
     if not offload_requested:
         model.pipe = model.pipe.to(f"cuda:{local_rank}")
+    else:
+        # The post-move walk quantizes a resident component where it lies, so
+        # anything offload keeps resident is placed before it runs.
+        for name in model._offload_resident_components():
+            getattr(model.pipe, name).to(f"cuda:{local_rank}")
     setup_gemm_quantization(
         loader,
         local_rank,

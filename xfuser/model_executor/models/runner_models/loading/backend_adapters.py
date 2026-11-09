@@ -231,6 +231,7 @@ class AiterA6W4BackendAdapter(QuantAdapter):
         "pinned": "mixed-MXFP packing requires GPU-resident source weights",
         "unpinned": "mixed-MXFP packing requires GPU-resident source weights",
     }
+    packs_from_device_resident_source = True
     storage_semantics = "aiter_a6w4_per_1x32"
     parameter_semantics = "packed_weight_parameter"
     auxiliary_state_semantics = "persistent_scale_buffer"

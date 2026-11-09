@@ -128,6 +128,8 @@ The following open-sourced DiT Models are released with xDiT in day 1.
 | [🔴 Z-Image Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🟠 Flux 2 klein](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🟠 Flux 2](https://huggingface.co/black-forest-labs/FLUX.2-dev) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
+| [🟠 Flux 3 Image klein](https://huggingface.co/black-forest-labs/flux-3-image-klein) | NA | ✔️ | ❎ | ❎ | ✔️ | NA |
+| [🟠 Flux 3 Image klein base](https://huggingface.co/black-forest-labs/flux-3-image-klein-base) | ✔️ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🟠 Flux](https://huggingface.co/black-forest-labs/FLUX.1-schnell) | NA | ✔️ | ✔️ | ❎ | ✔️ | [Report](./docs/performance/flux.md) |
 | [🟠 Flux Kontext](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) | ❎ | ✔️ |  ❎ | ❎ | ✔️ | NA |
 | [🟠 Chroma1-HD](https://huggingface.co/lodestones/Chroma1-HD) | ✔️ | ✔️ | ❎ | ❎ | ✔️ | NA |
@@ -137,6 +139,8 @@ The following open-sourced DiT Models are released with xDiT in day 1.
 | [🟢 Krea2-Turbo](https://huggingface.co/krea/Krea-2-Turbo) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🟢 Ideogram 4](https://huggingface.co/ideogram-ai/ideogram-4-fp8) | ✔️ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🎬 MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
+| [🎬 MiniMax-H3 Turbo](https://huggingface.co/lightx2v/Minimax-h3-Turbo) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
+| [🎬 VDN-H3](https://huggingface.co/OpenVDN/vdn-minimax-h3) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🎬 Prism (preview-alpha)](https://huggingface.co/FrancisRing/Prism) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🎬 FastH3 Preview v1](https://huggingface.co/FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🎬 FastH3 Preview v1 (Dense)](https://huggingface.co/FastVideo/FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
@@ -207,7 +211,7 @@ Note that we use two self-maintained packages:
 
 The [flash_attn](https://github.com/Dao-AILab/flash-attention) used for yunchang should be >= 2.7.0
 
-On Ascend NPU, ring attention needs `yunchang.ring.utils.update_npu_out`, which is not in any PyPI release of yunchang (checked up to 0.6.4). Install a yunchang commit that provides it:
+On Huawei Ascend NPU, ring attention needs `yunchang.ring.utils.update_npu_out`, which is not in any PyPI release of yunchang (checked up to 0.6.4). Install a yunchang commit that provides it:
 
 ```
 pip install "yunchang @ git+https://github.com/feifeibear/long-context-attention.git@56118e0"
@@ -349,6 +353,7 @@ Below is a list of validated diffusers version requirements. If the model is not
 | [Z-Image Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | >= 0.36.0 |
 | [Flux 2](https://huggingface.co/black-forest-labs/FLUX.2-dev) | >= 0.36.0 |
 | [Ideogram 4](https://huggingface.co/ideogram-ai/ideogram-4-fp8) | >= 0.39.0 |
+| [Flux 3 Image klein](https://huggingface.co/black-forest-labs/flux-3-image-klein) (and klein base) | from source (main; tested at `d42ebf9`) |
 | [Flux](https://huggingface.co/black-forest-labs/FLUX.1-dev) | >= 0.35.2 |
 | [Flux Kontext](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) | >= 0.35.2 |
 | [HunyuanVideo](https://github.com/Tencent/HunyuanVideo) | >= 0.35.2 |

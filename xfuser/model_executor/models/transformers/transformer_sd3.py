@@ -16,8 +16,11 @@ from diffusers.utils import (
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
 from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.logger import init_logger
-from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
-from xfuser.core.distributed import is_pipeline_first_stage, is_pipeline_last_stage
+from xfuser.core.distributed import (
+    get_pipeline_parallel_world_size,
+    is_pipeline_first_stage,
+    is_pipeline_last_stage,
+)
 from .register import xFuserTransformerWrappersRegister
 from .base_transformer import xFuserTransformerBaseWrapper
 
@@ -35,6 +38,32 @@ def sd3_attn_modules(transformer) -> list[nn.Module]:
     return modules
 
 
+class _PipeFusionTextInputBlock(nn.Module):
+    """Give one SD3 block patch 0's text input during PipeFusion patch steps.
+
+    Patch 0 records the text stream entering the block; later patches of the
+    same step receive that recorded input instead of their own running text.
+    The substitution lives on the block so that callers which run the blocks
+    themselves, such as Cache-DiT's cached-blocks module, still apply it.
+    """
+
+    def __init__(self, block: nn.Module):
+        super().__init__()
+        self.block = block
+        # Kept on the module rather than in an indexed list: torch.compile
+        # specializes on Python ints, so an index would compile every block.
+        self.text_input = None
+
+    def forward(self, hidden_states, encoder_hidden_states=None, *args, **kwargs):
+        state = get_runtime_state()
+        if state.patch_mode:
+            if state.pipeline_patch_idx == 0:
+                self.text_input = encoder_hidden_states
+            else:
+                encoder_hidden_states = self.text_input
+        return self.block(hidden_states, encoder_hidden_states, *args, **kwargs)
+
+
 @xFuserTransformerWrappersRegister.register(SD3Transformer2DModel)
 class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
     def __init__(
@@ -46,10 +75,20 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
             submodule_classes_to_wrap=[nn.Conv2d, PatchEmbed],
             submodule_name_to_wrap=["attn", "attn2"],
         )
-        self.encoder_hidden_states_cache = [
-            None for _ in range(len(self.transformer_blocks))
-        ]
         register_fp8_comms_eligible_modules(self, sd3_attn_modules(self))
+        # A plain list rather than a ModuleList: the blocks are already
+        # registered under transformer_blocks. Cache-DiT can later replace that
+        # attribute with one entry, so reset does not read it.
+        self._pipefusion_text_blocks = []
+        if get_pipeline_parallel_world_size() > 1:
+            for index, block in enumerate(self.transformer_blocks):
+                text_block = _PipeFusionTextInputBlock(block)
+                self.transformer_blocks[index] = text_block
+                self._pipefusion_text_blocks.append(text_block)
+
+    def reset_pipefusion_state(self) -> None:
+        for text_block in self._pipefusion_text_blocks:
+            text_block.text_input = None
 
     def forward(
         self,
@@ -104,9 +143,7 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
 
         # * only pp rank 0 needs pos_embed (patchify)
         if is_pipeline_first_stage():
-            hidden_states = self.pos_embed(
-                hidden_states
-            )  # takes care of adding positional embeddings too.
+            hidden_states = self.pos_embed(hidden_states)  # takes care of adding positional embeddings too.
 
         #! ORIGIN:
         # height, width = hidden_states.shape[-2:]
@@ -118,7 +155,7 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
             #! ---------------------------------------- ADD ABOVE ----------------------------------------
             encoder_hidden_states = self.context_embedder(encoder_hidden_states)
 
-        for i, block in enumerate(self.transformer_blocks):
+        for block in self.transformer_blocks:
             if self.training and self.gradient_checkpointing:
 
                 def create_custom_forward(module, return_dict=None):
@@ -130,9 +167,7 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
 
                     return custom_forward
 
-                ckpt_kwargs: Dict[str, Any] = (
-                    {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
-                )
+                ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
                 hidden_states = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(block),
                     hidden_states,
@@ -142,28 +177,11 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
                 )
 
             else:
-                if (
-                    get_runtime_state().patch_mode
-                    and get_runtime_state().pipeline_patch_idx == 0
-                ):
-                    self.encoder_hidden_states_cache[i] = encoder_hidden_states
-                    encoder_hidden_states, hidden_states = block(
-                        hidden_states=hidden_states,
-                        encoder_hidden_states=encoder_hidden_states,
-                        temb=temb,
-                    )
-                elif get_runtime_state().patch_mode:
-                    _, hidden_states = block(
-                        hidden_states=hidden_states,
-                        encoder_hidden_states=self.encoder_hidden_states_cache[i],
-                        temb=temb,
-                    )
-                else:
-                    encoder_hidden_states, hidden_states = block(
-                        hidden_states=hidden_states,
-                        encoder_hidden_states=encoder_hidden_states,
-                        temb=temb,
-                    )
+                encoder_hidden_states, hidden_states = block(
+                    hidden_states=hidden_states,
+                    encoder_hidden_states=encoder_hidden_states,
+                    temb=temb,
+                )
 
         # * only the last pp rank needs unpatchify
         #! ---------------------------------------- ADD BELOW ----------------------------------------

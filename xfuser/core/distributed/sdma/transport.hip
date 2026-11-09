@@ -1,7 +1,7 @@
 // ROCr SDMA transport for xDiT's Ulysses all-to-all (see transport.py), loaded with ctypes.
 //
-// Buffers that peers write into are allocated here with hipMalloc (or as fine-grained memory)
-// and shared with HIP IPC handles. A peer's buffer opened from its handle is mapped for the
+// Buffers that peers write into are allocated here with hipMalloc (flag words: uncached) and
+// shared with HIP IPC handles. A peer's buffer opened from its handle is mapped for the
 // local GPU only, so every copy names the local GPU on both sides.
 //
 // Copies are pushes: this rank's SDMA engines write its data into peers' buffers, one engine
@@ -13,7 +13,8 @@
 //
 // A call's copies are described once, as a plan: for each peer, a list of (source offset,
 // destination address, bytes) and the flag word to set after them. A plan is issued with the
-// source base of that call, so the per-call host work is one loop in C.
+// source base of that call, so the per-call host work is one loop in C. Each copy takes the next
+// completion signal of the call's slot, so the slot always knows how many its call used.
 //
 // The compute stream waits for flags with sx_wait_flags, a one-thread kernel whose wait is
 // bounded: a flag that never lands is recorded (sx_peek_error / sx_take_error), and the stream
@@ -52,8 +53,10 @@ struct Slot {
   volatile hsa_signal_value_t* trigger_value[kTriggers];
   std::vector<hsa_signal_t> data;  // one per data copy of a call
   std::vector<hsa_signal_t> flag;  // one per flag copy of a call
-  int armed_data = 0;              // what the last call on this slot used
-  int armed_flags = 0;
+  // Signals the slot's current (or last) call has taken: sx_plan_issue takes the next ones, and
+  // the next sx_arm of the slot waits for exactly these.
+  int used_data = 0;
+  int used_flags = 0;
 };
 
 std::vector<Gpu> g_gpus;
@@ -62,7 +65,7 @@ hsa_agent_t g_local;
 SxError* g_error = nullptr;  // host-mapped
 int* g_scratch = nullptr;    // device word that a dropped flag write goes to
 int g_drop_call = -1, g_drop_issue = -1, g_drop_index = -1;
-int g_calls = 0, g_issues = 0;  // calls armed so far; pushes and plans issued in the current call
+int g_calls = 0, g_issues = 0;  // calls armed so far; plans issued in the current call
 unsigned long long g_ticks_per_s = 0;
 
 hsa_status_t collect(hsa_agent_t agent, void*) {
@@ -116,18 +119,20 @@ __global__ void release_trigger(hsa_signal_value_t* value) {
   __hip_atomic_store(value, (hsa_signal_value_t)0, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_SYSTEM);
 }
 
-// Waits until all `count` words at `words` read 1 (acquire, system scope), then sets them back
-// to 0. Once `budget` wall-clock ticks have passed it records which words were missing; then
-// it returns, or with `block` keeps waiting, holding the stream so no work after it runs on
-// data that never came (the host's watchdog aborts the process).
-__global__ void wait_flags(int* words, int count, unsigned long long budget, SxError* err, int tag, int call,
-                           int block) {
+// Waits until all `count` words at `words` but word `skip` (the waiter's own, which no engine
+// writes) read 1 (acquire, system scope), then sets them back to 0. Once `budget` wall-clock
+// ticks have passed it records which words were missing; then it returns, or with `block` keeps
+// waiting, holding the stream so no work after it runs on data that never came (the host's
+// watchdog aborts the process).
+__global__ void wait_flags(int* words, int count, int skip, unsigned long long budget, SxError* err, int tag,
+                           int call, int block) {
   unsigned long long start = wall_clock64();
   bool recorded = false;
   while (true) {
     unsigned long long missing = 0;
     for (int i = 0; i < count; ++i)
-      if (__hip_atomic_load(words + i, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM) != 1) missing |= 1ull << i;
+      if (i != skip && __hip_atomic_load(words + i, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM) != 1)
+        missing |= 1ull << i;
     if (!missing) break;
     if (!recorded && wall_clock64() - start > budget) {
       if (__hip_atomic_fetch_add(&err->count, 1ull, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM) == 0) {
@@ -235,17 +240,14 @@ int sx_bus_of(int hip_dev) {
   return hipGetDeviceProperties(&prop, hip_dev) == hipSuccess ? prop.pciBusID : -1;
 }
 
-// Device memory for peers to write into, by `kind`: 0 hipMalloc, 1 fine-grained, 2 uncached.
-// Sizes are rounded up to 2 MiB: a smaller fine-grained or uncached allocation that is not a
-// whole number of pages cannot be exported with hipIpcGetMemHandle.
-int sx_malloc(uint64_t bytes, int kind, uint64_t* out) {
+// Device memory for peers to write into: hipMalloc, or `uncached` (flag words, which a kernel
+// polls). Sizes are rounded up to 2 MiB: a smaller uncached allocation that is not a whole
+// number of pages cannot be exported with hipIpcGetMemHandle.
+int sx_malloc(uint64_t bytes, int uncached, uint64_t* out) {
   constexpr uint64_t kGranule = 2ull << 20;
   bytes = (bytes + kGranule - 1) / kGranule * kGranule;
   void* p = nullptr;
-  hipError_t e = kind == 0   ? hipMalloc(&p, bytes)
-                 : kind == 1 ? hipExtMallocWithFlags(&p, bytes, hipDeviceMallocFinegrained)
-                 : kind == 2 ? hipExtMallocWithFlags(&p, bytes, hipDeviceMallocUncached)
-                             : hipErrorInvalidValue;
+  hipError_t e = uncached ? hipExtMallocWithFlags(&p, bytes, hipDeviceMallocUncached) : hipMalloc(&p, bytes);
   if (e != hipSuccess) return -1;
   *out = (uint64_t)p;
   return 0;
@@ -280,52 +282,30 @@ int sx_ipc_open(const void* handle, uint64_t* out) {
 
 int sx_ipc_close(uint64_t ptr) { return hipIpcCloseMemHandle((void*)ptr) == hipSuccess ? 0 : -1; }
 
-// ROCr's view of a pointer: hsa_amd_pointer_type_t (0 unknown, 1 HSA, 2 locked, 3 graphics,
-// 4 IPC, ...).
-int sx_pointer_type(uint64_t ptr, int* type) {
-  hsa_amd_pointer_info_t info{};
-  info.size = sizeof(info);
-  if (hsa_amd_pointer_info((void*)ptr, &info, nullptr, nullptr, nullptr) != HSA_STATUS_SUCCESS) return -1;
-  *type = (int)info.type;
-  return 0;
-}
-
-// Arms `slot` for a call of `n_data` data copies and `n_flags` flag copies: waits for the
-// copies of its previous use to finish and sets its triggers and the signals the call will use
-// to 1. Call before sx_release and sx_push.
-int sx_arm(int slot, int n_data, int n_flags) {
+// Arms `slot` for a call: waits for the copies of its previous use to finish (the signals that
+// call took) and sets its triggers to 1. The call's copies take their signals as they are issued
+// (sx_plan_issue), so the caller gives no counts. Call before sx_release and sx_plan_issue.
+int sx_arm(int slot) {
   Slot& s = g_slots[slot];
-  for (int i = 0; i < s.armed_data; ++i)
+  for (int i = 0; i < s.used_data; ++i)
     if (!wait_done(s.data[i])) return -1000 - i;  // data copy i never landed
-  for (int i = 0; i < s.armed_flags; ++i)
+  for (int i = 0; i < s.used_flags; ++i)
     if (!wait_done(s.flag[i])) return -2000 - i;  // flag copy i never landed
-  // The slot is idle now, so it can grow for a call larger than any before.
-  if (!grow(s.data, n_data) || !grow(s.flag, n_flags)) return -1;
   for (int k = 0; k < kTriggers; ++k) hsa_signal_store_relaxed(s.trigger[k], 1);
-  for (int i = 0; i < n_data; ++i) hsa_signal_store_relaxed(s.data[i], 1);
-  for (int i = 0; i < n_flags; ++i) hsa_signal_store_relaxed(s.flag[i], 1);
-  s.armed_data = n_data;
-  s.armed_flags = n_flags;
+  s.used_data = 0;
+  s.used_flags = 0;
   ++g_calls;
   g_issues = 0;
   return 0;
 }
 
 // Enqueues the release of `slot`'s trigger `k` on `stream`: copies gated on it start once the
-// stream reaches this point. Without it (host release), sx_open must be called instead.
+// stream reaches this point.
 int sx_release(int slot, int k, hipStream_t stream) {
   if (k < 0 || k >= kTriggers) return -2;
   hipLaunchKernelGGL(release_trigger, dim3(1), dim3(1), 0, stream,
                      const_cast<hsa_signal_value_t*>(g_slots[slot].trigger_value[k]));
   return hipGetLastError() == hipSuccess ? 0 : -1;
-}
-
-// Releases `slot`'s trigger `k` from the host, for copies issued after the host waited for the
-// work they depend on.
-int sx_open(int slot, int k) {
-  if (k < 0 || k >= kTriggers) return -2;
-  hsa_signal_store_screlease(g_slots[slot].trigger[k], 0);
-  return 0;
 }
 
 }  // extern "C"
@@ -367,35 +347,6 @@ std::vector<Plan> g_plans;
 
 extern "C" {
 
-// Push `items` copies of `bytes` to each of `n` peers on `slot`, once trigger `k` is released.
-// Copy j to peer i reads
-//     src_base + peer_ranks[i] * src_peer_stride + j * src_item_stride
-// and writes
-//     dst_bases[i] + dst_offset + j * dst_item_stride
-// on SDMA engine engines[i], using the slot's data signals first_data + i * items + j. Behind
-// them, on the same engine, the 4 bytes at `flag_src` go to flag_bases[i] + flag_offset, using
-// flag signal first_flag + i.
-int sx_push(int slot, int k, int first_data, int first_flag, int n, const int* peer_ranks, uint64_t src_base,
-            uint64_t src_peer_stride, uint64_t src_item_stride, const uint64_t* dst_bases, uint64_t dst_offset,
-            uint64_t dst_item_stride, uint64_t bytes, int items, const int* engines, const uint64_t* flag_bases,
-            uint64_t flag_offset, uint64_t flag_src) {
-  Slot& s = g_slots[slot];
-  if (first_data + n * items > s.armed_data || first_flag + n > s.armed_flags || k < 0 || k >= kTriggers) return -1;
-  int issue = g_issues++;
-  for (int i = 0; i < n; ++i) {
-    for (int j = 0; j < items; ++j) {
-      void* dst = (void*)(dst_bases[i] + dst_offset + (uint64_t)j * dst_item_stride);
-      const void* src = (const void*)(src_base + (uint64_t)peer_ranks[i] * src_peer_stride + (uint64_t)j * src_item_stride);
-      hsa_status_t st = copy_after_trigger(s, k, dst, src, bytes, s.data[first_data + i * items + j], engines[i]);
-      if (st != HSA_STATUS_SUCCESS) return -100 - (int)st;
-    }
-    hsa_status_t st = copy_after_trigger(s, k, flag_target(flag_bases[i] + flag_offset, issue, i), (const void*)flag_src,
-                                         4, s.flag[first_flag + i], engines[i]);
-    if (st != HSA_STATUS_SUCCESS) return -200 - (int)st;
-  }
-  return 0;
-}
-
 // Registers a plan for `n` peers: peer i's copies are the next counts[i] entries of
 // src_offsets / dsts / bytes, on SDMA engine engines[i], followed on that engine by a 4-byte
 // flag write to flag_dsts[i]. With flag_dsts null the plan writes no flags: its copies are
@@ -424,12 +375,6 @@ int sx_plan_create(int n, const int* engines, const int* counts, const uint64_t*
   return (int)g_plans.size() - 1;
 }
 
-// How many data copies (and so data signals) plan `id` issues; negative if there is no such plan.
-int sx_plan_copies(int id) {
-  if (id < 0 || id >= (int)g_plans.size() || !g_plans[id].live) return -1;
-  return g_plans[id].copies;
-}
-
 int sx_plan_free(int id) {
   if (id < 0 || id >= (int)g_plans.size()) return -1;
   g_plans[id] = Plan{};
@@ -437,38 +382,45 @@ int sx_plan_free(int id) {
 }
 
 // Issues plan `id` on `slot`, its sources at src_base + their offsets, once trigger `k` is
-// released: data copies use the slot's data signals from first_data on, in plan order, and
-// peer i's flag write (the 4 bytes at `flag_src`) flag signal first_flag + i.
-int sx_plan_issue(int slot, int k, int first_data, int first_flag, int id, uint64_t src_base, uint64_t flag_src) {
+// released. Each data copy, and each peer's flag write (the 4 bytes at `flag_src`), takes the
+// slot's next signal, set to 1 here: the slot counts what its call used, for its next sx_arm.
+int sx_plan_issue(int slot, int k, int id, uint64_t src_base, uint64_t flag_src) {
   if (id < 0 || id >= (int)g_plans.size() || !g_plans[id].live) return -2;
   const Plan& plan = g_plans[id];
   Slot& s = g_slots[slot];
   int n = (int)plan.peers.size(), n_flags = (int)plan.flags.size();
-  if (first_data + plan.copies > s.armed_data || first_flag + n_flags > s.armed_flags || k < 0 || k >= kTriggers)
-    return -1;
-  int issue = g_issues++, c = first_data;
+  if (k < 0 || k >= kTriggers) return -1;
+  // A call larger than any before on this slot grows it; signals are created at 0, idle.
+  if (!grow(s.data, s.used_data + plan.copies) || !grow(s.flag, s.used_flags + n_flags)) return -3;
+  int issue = g_issues++;
   for (int i = 0; i < n; ++i) {
     for (const PlanCopy& copy : plan.peers[i]) {
+      hsa_signal_t done = s.data[s.used_data++];
+      hsa_signal_store_relaxed(done, 1);
       hsa_status_t st = copy_after_trigger(s, k, (void*)copy.dst, (const void*)(src_base + copy.src_offset), copy.bytes,
-                                           s.data[c++], plan.engines[i]);
+                                           done, plan.engines[i]);
       if (st != HSA_STATUS_SUCCESS) return -100 - (int)st;
     }
     if (n_flags == 0) continue;
-    hsa_status_t st = copy_after_trigger(s, k, flag_target(plan.flags[i], issue, i), (const void*)flag_src, 4,
-                                         s.flag[first_flag + i], plan.engines[i]);
+    hsa_signal_t done = s.flag[s.used_flags++];
+    hsa_signal_store_relaxed(done, 1);
+    hsa_status_t st =
+        copy_after_trigger(s, k, flag_target(plan.flags[i], issue, i), (const void*)flag_src, 4, done, plan.engines[i]);
     if (st != HSA_STATUS_SUCCESS) return -200 - (int)st;
   }
   return 0;
 }
 
-// Enqueues on `stream` a wait until the `count` 32-bit flags at `words` all read 1, then resets
-// them to 0. After `seconds` a wait that is still missing flags is recorded (sx_peek_error,
-// sx_take_error); then the stream moves on, or with `block` stays held (for the host to abort
-// the process).
-int sx_wait_flags(hipStream_t stream, uint64_t words, int count, double seconds, int tag, int call, int block) {
+// Enqueues on `stream` a wait until the `count` 32-bit flags at `words`, all but word `skip`,
+// read 1, then resets them to 0. After `seconds` a wait that is still missing flags is recorded
+// (sx_peek_error, sx_take_error); then the stream moves on, or with `block` stays held (for the
+// host to abort the process).
+int sx_wait_flags(hipStream_t stream, uint64_t words, int count, int skip, double seconds, int tag, int call,
+                  int block) {
   if (count > 64) return -1;
   unsigned long long budget = (unsigned long long)(seconds * (double)g_ticks_per_s);
-  hipLaunchKernelGGL(wait_flags, dim3(1), dim3(1), 0, stream, (int*)words, count, budget, g_error, tag, call, block);
+  hipLaunchKernelGGL(wait_flags, dim3(1), dim3(1), 0, stream, (int*)words, count, skip, budget, g_error, tag, call,
+                     block);
   return hipGetLastError() == hipSuccess ? 0 : -2;
 }
 
@@ -499,8 +451,8 @@ int sx_take_error(int* tag, int* call, uint64_t* missing) {
 }
 
 // Test hook: in the `ahead`-th call armed from now (1 = the next), issue `issue` of that call
-// (pushes and plans count in the order they are issued) loses its flag write to peer index
-// `index`: it goes to a scratch word instead.
+// (plans count in the order they are issued) loses its flag write to peer index `index`: it
+// goes to a scratch word instead.
 int sx_debug_drop_flag(int ahead, int issue, int index) {
   g_drop_call = g_calls + ahead - 1;
   g_drop_issue = issue;

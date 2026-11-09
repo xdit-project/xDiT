@@ -6,25 +6,30 @@ data waits for all of it. This transport moves it with ROCr's
 buffers on one SDMA engine per peer, all peers at once, and uses no compute
 units, so compute that does not need the data runs alongside.
 
-A call's copies are described once as a `Plan` (per peer: source offsets,
-destinations, sizes and the flag to set after them) and issued per call with
-that call's source address, so the per-call host work is one loop in C.
+`PeerGroup` implements interface.PeerTransport. A route's copies are registered
+once as a `Plan` (per peer: source offsets, destination addresses, sizes and the
+flag to set after them) and issued per call with that call's source address, so
+the per-call host work is one loop in C.
 
 Buffers that peers write into (`SharedBuffer`) are allocated by the library
-with hipMalloc, or as fine-grained memory, and mapped into every peer with HIP
-IPC handles, exchanged over the group's device process group. Flag words are
-uncached memory, so a kernel polling them sees the engines' writes. Engines: see
-sx_engine_plan in transport.hip.
+with hipMalloc and mapped into every peer with HIP IPC handles, exchanged over
+the group's device process group. A signal is a flag word: channel c holds one
+word per sender at each rank, in uncached memory, so a kernel polling them sees
+the engines' writes. Engines: see sx_engine_plan in transport.hip.
 
 Ordering:
-- A copy waits for a trigger that the compute stream releases (`release`), so
-  it never reads data the stream has not written yet.
+- A copy waits for a trigger that the compute stream releases, so it never
+  reads data the stream has not written yet. Each send of a call has a trigger
+  of its own.
 - Behind a peer's copies, a 4-byte write on the same engine sets this rank's
   flag word at that peer; the engine runs them in order, and the flag lands
-  after the data (tests/integration/accelerator/core/distributed/test_sdma_ulysses.py checks
-  every element each call reads).
+  after the data, and after every earlier send's copies to that peer, flagged
+  or not (tests/integration/accelerator/core/distributed/test_sdma_ulysses.py
+  checks every element each call reads).
 - The receiving stream waits for its flag words with a one-thread kernel
-  (`wait`), which resets them for their next use.
+  (`Call.wait`), which resets them for their next use.
+- A call takes one of _SLOTS slots, whose completion signals its copies take
+  as they are issued; the slot's next call first waits for exactly those.
 
 Waits are bounded. After XDIT_SDMA_WAIT_S seconds (default 30) the wait kernel
 records which flags never landed. By default (`abort`) the kernel keeps the
@@ -51,7 +56,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Hashable, List, Tuple
 
 import torch
 import torch.distributed as dist
@@ -66,6 +71,8 @@ logger = init_logger(__name__)
 VALIDATED_ARCHS = ("gfx942", "gfx950")
 _SLOTS = 4
 _INITIAL_COPIES = 256  # signals per slot to start with; a slot grows when a call needs more
+_TRIGGERS = 32  # sends per call (kTriggers in transport.hip)
+_CHANNELS = 64
 MAX_FLAGS_PER_WAIT = 64
 
 _lib = None
@@ -76,7 +83,6 @@ _slot = 0
 _call = 0
 _watchdog = None
 _init_lock = threading.Lock()
-_generation = 0
 
 
 def _check(rc: int, what: str) -> None:
@@ -163,16 +169,12 @@ def load():
         "sx_ipc_get": [u64, vp],
         "sx_ipc_open": [vp, u64p],
         "sx_ipc_close": [u64],
-        "sx_pointer_type": [u64, ip],
-        "sx_arm": [i, i, i],
+        "sx_arm": [i],
         "sx_release": [i, i, vp],
-        "sx_open": [i, i],
-        "sx_push": [i, i, i, i, i, ip, u64, u64, u64, u64p, u64, u64, u64, i, ip, u64p, u64, u64],
         "sx_plan_create": [i, ip, ip, u64p, u64p, u64p, u64p],
-        "sx_plan_copies": [i],
         "sx_plan_free": [i],
-        "sx_plan_issue": [i, i, i, i, i, u64, u64],
-        "sx_wait_flags": [vp, u64, i, dbl, i, i, i],
+        "sx_plan_issue": [i, i, i, u64, u64],
+        "sx_wait_flags": [vp, u64, i, i, dbl, i, i, i],
         "sx_take_error": [ip, ip, u64p],
         "sx_peek_error": [ip, ip, u64p],
         "sx_debug_drop_flag": [i, i, i],
@@ -201,29 +203,24 @@ def device_bytes(ptr: int, nbytes: int, device: torch.device) -> torch.Tensor:
     return torch.as_tensor(_CudaArray(ptr, nbytes), device=device)
 
 
-# Memory kinds for SharedBuffer: hipMalloc, fine-grained, uncached.
-MEMORY_KINDS = {"coarse": 0, "fine": 1, "uncached": 2}
-
-
 class SharedBuffer:
-    """Device memory of the same size on every rank of a group, mapped into every peer.
+    """Device memory of the same size on every rank of a group, mapped into every peer
+    (interface.SymmetricBuffer).
 
     `local` is this rank's buffer as a uint8 tensor; `peer_bases` holds the
-    peers' base addresses in this process, in `PeerGroup.peers` order.
-    `memory` is a key of MEMORY_KINDS. Collective: every rank of the group
-    creates (and closes) it together.
+    peers' base addresses in this process, in `PeerGroup.peers` order. `uncached`
+    memory is for flag words. Collective: every rank of the group creates (and
+    closes) it together.
     """
 
-    def __init__(self, group: "PeerGroup", nbytes: int, memory: str):
+    def __init__(self, group: "PeerGroup", nbytes: int, uncached: bool = False):
         lib = load()
         self.nbytes = nbytes
-        self.memory = memory
+        self.uncached = uncached
+        # False once released: routes naming it are rebuilt.
+        self.live = True
         ptr = ctypes.c_uint64()
-        _check(lib.sx_malloc(nbytes, MEMORY_KINDS[memory], ctypes.byref(ptr)), f"sx_malloc({nbytes}, {memory})")
-        # Tells plans made for an earlier buffer of the same name from ones made for this one.
-        global _generation
-        _generation += 1
-        self.generation = _generation
+        _check(lib.sx_malloc(nbytes, int(uncached), ctypes.byref(ptr)), f"sx_malloc({nbytes}, uncached={uncached})")
         self.ptr = ptr.value
         _check(lib.sx_memset(self.ptr, 0, nbytes), "sx_memset")
         size = lib.sx_ipc_handle_size()
@@ -244,6 +241,7 @@ class SharedBuffer:
 
     def unmap(self) -> None:
         """Unmap the peers' buffers; every rank must be past its last use of them."""
+        self.live = False
         lib = load()
         for p in self._opened:
             lib.sx_ipc_close(p)
@@ -257,8 +255,12 @@ class SharedBuffer:
 
 
 class PeerGroup:
-    """Per process group: the peers in push order, one SDMA engine per peer, and named shared
-    buffers that grow on demand."""
+    """Per process group (interface.PeerTransport): the peers in push order, one SDMA engine per
+    peer, named shared buffers that grow on demand, and the routes registered on them."""
+
+    channels = _CHANNELS
+    # Copies are queued from the host: a CUDA graph capture would not replay them.
+    host_issued = True
 
     def __init__(self, process_group: dist.ProcessGroup):
         lib = load()
@@ -284,13 +286,15 @@ class PeerGroup:
         # Peers in step order from this rank, so at each step every rank sends to a different peer.
         self.peers = [(self.rank + step) % self.world for step in range(1, self.world)]
         n = len(self.peers)
-        self.peer_ranks = (ctypes.c_int * n)(*self.peers)
         peer_bus = (ctypes.c_int * n)(*[self.buses[p] for p in self.peers])
         self.engine_arr = (ctypes.c_int * n)()
         _check(lib.sx_engine_plan(self.device.index, peer_bus, n, 1, self.engine_arr), "sx_engine_plan")
         self.engines = list(self.engine_arr)
         self.one = torch.ones(1, dtype=torch.int32, device=self.device)
         self._buffers: Dict[str, SharedBuffer] = {}
+        self._routes: Dict[tuple, "Plan"] = {}
+        # Channel c's words at each rank: [c * world, (c + 1) * world), word p is rank p's.
+        self._flags = self._buffer("signals", self.channels * self.world * 4, uncached=True)
         _start_watchdog(lib)
         logger.info(
             f"SDMA transport for group ranks {dist.get_process_group_ranks(process_group)}: engines {self.engine_plan()}"
@@ -306,17 +310,52 @@ class PeerGroup:
         dist.barrier(group=self.process_group)
         torch.cuda.synchronize()
 
-    def buffer(self, name: str, nbytes: int, memory: str = "coarse") -> SharedBuffer:
+    def buffer(self, name: str, nbytes: int) -> SharedBuffer:
         """The shared buffer `name`, at least `nbytes`; collective when it must be (re)created."""
+        return self._buffer(name, nbytes)
+
+    def _buffer(self, name: str, nbytes: int, uncached: bool = False) -> SharedBuffer:
         buf = self._buffers.get(name)
-        if buf is not None and buf.nbytes >= nbytes and buf.memory == memory:
+        if buf is not None and buf.nbytes >= nbytes:
             return buf
         if buf is not None:
             self._release([buf])
-        buf = SharedBuffer(self, nbytes, memory)
+        buf = SharedBuffer(self, nbytes, uncached)
         self._buffers[name] = buf
         self.barrier()
         return buf
+
+    def route(self, key: Hashable, build, signal) -> "Plan":
+        """The route `key` (interface.PeerTransport.route) as a registered plan."""
+        cached = self._routes.get((key, signal))
+        if cached is not None and all(buf.live for buf in cached.buffers):
+            return cached
+        if cached is not None:
+            cached.free()
+        copies = build()
+        if len(copies) != len(self.peers):
+            raise ValueError(f"a route needs the copies of each of the {len(self.peers)} peers")
+        flags = None
+        if signal is not None:
+            if not 0 <= signal < self.channels:
+                raise ValueError(f"channel {signal} is not in [0, {self.channels})")
+            word = (signal * self.world + self.rank) * 4
+            flags = [self._flags.peer_bases[i] + word for i in range(len(self.peers))]
+        plan = Plan(
+            self,
+            [
+                [(src, dst.peer_bases[i] + offset, nbytes) for src, dst, offset, nbytes in peer]
+                for i, peer in enumerate(copies)
+            ],
+            flags,
+        )
+        plan.buffers = list({id(dst): dst for peer in copies for _, dst, _, _ in peer}.values())
+        self._routes[(key, signal)] = plan
+        return plan
+
+    def begin(self) -> "Call":
+        """Open a call (interface.PeerTransport.begin) on the next slot."""
+        return Call(self)
 
     def _release(self, buffers) -> None:
         # Peers may write into a buffer until every rank is past its last use, and its owner may
@@ -329,6 +368,9 @@ class PeerGroup:
             buf.free()
 
     def close(self) -> None:
+        for plan in self._routes.values():
+            plan.free()
+        self._routes = {}
         self._release(list(self._buffers.values()))
         self._buffers = {}
 
@@ -386,94 +428,63 @@ def raise_if_waits_gave_up() -> None:
         raise RuntimeError(_timeout_message(count, tag.value, call.value, missing.value))
 
 
-def start(n_data: int, n_flags: int) -> Tuple[int, int]:
-    """Begin a call of `n_data` data and `n_flags` flag copies: check earlier calls' waits, take
-    the next slot and arm it. Returns (slot, call id)."""
-    global _slot, _call
-    lib = load()
-    if on_timeout() == "raise":
-        raise_if_waits_gave_up()
-    slot, _slot = _slot, (_slot + 1) % _SLOTS
-    _call += 1
-    rc = lib.sx_arm(slot, n_data, n_flags)
-    if rc <= -2000:
-        raise RuntimeError(f"flag copy {-rc - 2000} of an earlier call on slot {slot} never landed")
-    if rc <= -1000:
-        raise RuntimeError(f"data copy {-rc - 1000} of an earlier call on slot {slot} never landed")
-    _check(rc, "sx_arm")
-    return slot, _call
+class Call:
+    """One call on a slot (interface.Call): each send takes the next trigger, and each wait is
+    tagged with its order in the call, for the timeout report."""
 
+    def __init__(self, g: PeerGroup):
+        global _slot, _call
+        lib = load()
+        if on_timeout() == "raise":
+            raise_if_waits_gave_up()
+        self._g = g
+        self.slot, _slot = _slot, (_slot + 1) % _SLOTS
+        _call += 1
+        self.id = _call
+        rc = lib.sx_arm(self.slot)
+        if rc <= -2000:
+            raise RuntimeError(f"flag copy {-rc - 2000} of an earlier call on slot {self.slot} never landed")
+        if rc <= -1000:
+            raise RuntimeError(f"data copy {-rc - 1000} of an earlier call on slot {self.slot} never landed")
+        _check(rc, "sx_arm")
+        self._sends = 0
+        self._waits = 0
 
-def release(slot: int, k: int, stream: torch.cuda.Stream) -> None:
-    """Let `slot`'s copies gated on trigger `k` start once `stream` reaches this point."""
-    _check(load().sx_release(slot, k, ctypes.c_void_p(stream.cuda_stream)), "sx_release")
+    def send(self, route: "Plan", src: torch.Tensor, stream: torch.cuda.Stream) -> None:
+        if self._sends >= _TRIGGERS:
+            raise ValueError(f"at most {_TRIGGERS} sends per call")
+        k = self._sends
+        lib = load()
+        # Queued before the trigger is released, so the host issues them while the stream finishes.
+        _check(lib.sx_plan_issue(self.slot, k, route.id, src.data_ptr(), self._g.one.data_ptr()), "sx_plan_issue")
+        _check(lib.sx_release(self.slot, k, ctypes.c_void_p(stream.cuda_stream)), "sx_release")
+        self._sends += 1
 
+    def wait(self, channel: int, stream: torch.cuda.Stream) -> None:
+        g = self._g
+        if g.world > MAX_FLAGS_PER_WAIT:
+            raise ValueError(f"at most {MAX_FLAGS_PER_WAIT} ranks per group; got {g.world}")
+        _check(
+            load().sx_wait_flags(
+                ctypes.c_void_p(stream.cuda_stream),
+                g._flags.ptr + channel * g.world * 4,
+                g.world,
+                g.rank,
+                wait_seconds(),
+                self._waits,
+                self.id,
+                int(on_timeout() == "abort"),
+            ),
+            "sx_wait_flags",
+        )
+        self._waits += 1
 
-def push(
-    g: PeerGroup,
-    slot: int,
-    k: int,
-    first_data: int,
-    first_flag: int,
-    src_base: int,
-    src_peer_stride: int,
-    src_item_stride: int,
-    dst: SharedBuffer,
-    dst_offset: int,
-    dst_item_stride: int,
-    nbytes: int,
-    items: int,
-    flags: SharedBuffer,
-    flag_offset: int,
-) -> None:
-    """Push `items` copies of `nbytes` to every peer (see sx_push in transport.hip), then set this
-    rank's flag word at `flag_offset` in each peer's `flags` buffer, behind the copies."""
-    _check(
-        load().sx_push(
-            slot,
-            k,
-            first_data,
-            first_flag,
-            len(g.peers),
-            g.peer_ranks,
-            src_base,
-            src_peer_stride,
-            src_item_stride,
-            dst.peer_bases,
-            dst_offset,
-            dst_item_stride,
-            nbytes,
-            items,
-            g.engine_arr,
-            flags.peer_bases,
-            flag_offset,
-            g.one.data_ptr(),
-        ),
-        "sx_push",
-    )
-
-
-def wait(stream: torch.cuda.Stream, words: int, count: int, tag: int, call: int) -> None:
-    """Make `stream` wait (bounded) until the `count` int32 words at device address `words` read 1,
-    then reset them to 0."""
-    if count > MAX_FLAGS_PER_WAIT:
-        raise ValueError(f"at most {MAX_FLAGS_PER_WAIT} flags per wait; got {count}")
-    _check(
-        load().sx_wait_flags(
-            ctypes.c_void_p(stream.cuda_stream),
-            words,
-            count,
-            wait_seconds(),
-            tag,
-            call,
-            int(on_timeout() == "abort"),
-        ),
-        "sx_wait_flags",
-    )
+    def end(self) -> None:
+        pass
 
 
 class Plan:
-    """The copies of one push, registered once and issued per call with that call's source.
+    """A route's copies, registered once and issued per call with that call's source.
 
     `copies[i]` lists peer `g.peers[i]`'s copies as (source offset, destination address,
     bytes); `flags[i]` is the address of the flag word set behind them. With `flags=None` the
@@ -498,13 +509,8 @@ class Plan:
         )
         if self.id < 0:
             raise RuntimeError(f"sx_plan_create failed with {self.id}")
-        self.copies = len(flat)
-        self.flags = 0 if flags is None else n
-        self._one = g.one.data_ptr()
-
-    def issue(self, slot: int, k: int, first_data: int, first_flag: int, src_base: int) -> None:
-        """Queue the copies of this call (sources at `src_base`), gated on `slot`'s trigger `k`."""
-        _check(load().sx_plan_issue(slot, k, first_data, first_flag, self.id, src_base, self._one), "sx_plan_issue")
+        # The buffers the copies write into (set by PeerGroup.route).
+        self.buffers: List[SharedBuffer] = []
 
     def free(self) -> None:
         if self.id >= 0:
@@ -513,12 +519,6 @@ class Plan:
 
 
 def debug_drop_flag(ahead: int, issue: int, peer_index: int) -> None:
-    """Test hook: in the `ahead`-th call started from now, the `issue`-th push or plan issued (from 0)
-    loses its flag write to peers[peer_index]."""
+    """Test hook: in the `ahead`-th call started from now, the `issue`-th send (from 0) loses its
+    flag write to peers[peer_index]."""
     load().sx_debug_drop_flag(ahead, issue, peer_index)
-
-
-def pointer_type(ptr: int) -> Optional[int]:
-    """ROCr's hsa_amd_pointer_type_t for `ptr` (4 = IPC), or None if ROCr does not know it."""
-    out = ctypes.c_int()
-    return out.value if load().sx_pointer_type(ptr, ctypes.byref(out)) == 0 else None

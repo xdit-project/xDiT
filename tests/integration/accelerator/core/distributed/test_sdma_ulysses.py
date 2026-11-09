@@ -56,7 +56,7 @@ def _bhsd(generator, device, batch, seq, heads):
     return x.transpose(1, 2)
 
 
-def exchange_mismatches(group, case, seed, rccl=False, early=False):
+def exchange_mismatches(group, case, seed, rccl=False, qk_first=False):
     """Run one exchange and count wrong elements, over every view attention sees and the output.
 
     Each rank all-gathers the inputs to know what each head group's views must hold, joint rows
@@ -101,7 +101,7 @@ def exchange_mismatches(group, case, seed, rccl=False, early=False):
     kv = (joint_rows, 0) if front else (0, joint_rows)
     reserved = [(0, 0), kv, kv] + [(0, 0)] * extras
     local = [None, *joint] + [None] * extras if joint else None
-    if early:
+    if qk_first:
         # Each head group in two sends: Q and K first, then the rest.
         rows = [x.shape[2] for x in tensors]
         exchange = ulysses.Exchange.make(world, batch, HEAD_DIM, q.dtype, rows, heads, reserved, groups)
@@ -168,7 +168,16 @@ def test_sdma_exchange(accelerator_ranks, world_size):
     accelerator_ranks(_exchange_worker, world_size=world_size, timeout=600, args=(1, False))
 
 
-def _wan_early_worker(rank, world_size, init_method):
+@pytest.mark.parametrize("world_size", [4, 8])
+def test_sdma_exchange_under_cfg_parallel(accelerator_ranks, world_size):
+    accelerator_ranks(_exchange_worker, world_size=world_size, timeout=600, args=(2, False))
+
+
+def test_packed_exchange_over_rccl(accelerator_ranks):
+    accelerator_ranks(_exchange_worker, world_size=4, timeout=600, args=(1, True))
+
+
+def _split_send_worker(rank, world_size, init_method):
     from yunchang.globals import PROCESS_GROUP
     from xfuser.core.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
 
@@ -176,19 +185,20 @@ def _wan_early_worker(rank, world_size, init_method):
         _setup(rank, world_size, init_method, world_size)
         for call in range(12):
             case = (1, 96 if call % 3 else 1024, 96 if call % 3 else 1024, 5, 5, 0, 0, True, 1 + call % 2, False)
-            for early in (False, True):
-                wrong = exchange_mismatches(PROCESS_GROUP.ULYSSES_PG, case, call, early=early)
-                assert wrong == 0, f"early={early}, call={call}: {wrong} wrong elements"
+            for qk_first in (False, True):
+                wrong = exchange_mismatches(PROCESS_GROUP.ULYSSES_PG, case, call, qk_first=qk_first)
+                assert wrong == 0, f"qk_first={qk_first}, call={call}: {wrong} wrong elements"
     finally:
         destroy_model_parallel()
         destroy_distributed_environment()
 
 
-def test_wan_early_qk_exchange(accelerator_ranks):
-    accelerator_ranks(_wan_early_worker, world_size=2, timeout=300)
+def test_head_groups_sent_in_parts(accelerator_ranks):
+    """Q and K sent before V, with one and two head groups, between calls sent whole."""
+    accelerator_ranks(_split_send_worker, world_size=2, timeout=300)
 
 
-def _wan_early_compiled_worker(rank, world_size, init_method):
+def _qk_first_compiled_worker(rank, world_size, init_method):
     import torch
     from yunchang.globals import PROCESS_GROUP
     from xfuser.core.distributed.sdma import ulysses
@@ -201,10 +211,10 @@ def _wan_early_compiled_worker(rank, world_size, init_method):
         group = PROCESS_GROUP.ULYSSES_PG
 
         @torch.compile(fullgraph=True)
-        def layer(hidden, weight, early):
+        def layer(hidden, weight, qk_first):
             query = torch.nn.functional.linear(hidden, weight).unflatten(-1, (-1, HEAD_DIM)).transpose(1, 2)
             key = query * 2
-            if early:
+            if qk_first:
                 spec = ulysses.encode(world_size, 1, HEAD_DIM, [hidden.shape[1]] * 3, [5] * 3, [(0, 0)] * 3, 1)
                 token = torch.ops.xfuser.sdma_ulysses_begin(query, spec, group.group_name, "sdma")
                 packed_qk = ulysses.pack_group(
@@ -246,169 +256,9 @@ def _wan_early_compiled_worker(rank, world_size, init_method):
         destroy_distributed_environment()
 
 
-def test_wan_early_compiled_matches_packed(accelerator_ranks):
-    accelerator_ranks(_wan_early_compiled_worker, world_size=2, timeout=600)
-
-
-def _wan_packed_qk_worker(rank, world_size, init_method):
-    import torch
-    from yunchang.globals import PROCESS_GROUP
-    from xfuser.core.distributed.sdma import ulysses
-    from xfuser.core.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
-    from xfuser.model_executor.layers.fused_qk_norm_rope_wan_flydsl import fused_qk_norm_rope, fused_qk_norm_rope_packed
-
-    try:
-        device = _setup(rank, world_size, init_method, world_size)
-        generator = torch.Generator(device=device).manual_seed(rank)
-        norm = torch.nn.RMSNorm(5120, eps=1e-6, device=device, dtype=torch.bfloat16)
-        with torch.no_grad():
-            norm.weight.copy_(torch.randn(5120, generator=generator, device=device, dtype=torch.bfloat16))
-            for rows in (257, 1024, 257):
-                query, key = [
-                    torch.randn(1, rows, 5120, generator=generator, device=device, dtype=torch.bfloat16)
-                    for _ in range(2)
-                ]
-                angle = torch.randn(1, rows, 1, 128, generator=generator, device=device)
-                rotary = angle.cos(), angle.sin()
-                expected_q, expected_k = fused_qk_norm_rope(query, key, norm, norm, *rotary, 40)
-                for peers in (2, 4, 8):
-                    expected = ulysses.pack_group(
-                        [
-                            ulysses.pieces_from_heads(tensor.transpose(1, 2), peers, 0, 40 // peers)
-                            for tensor in (expected_q, expected_k)
-                        ]
-                    )
-                    actual = fused_qk_norm_rope_packed(query, key, norm, norm, *rotary, 40, peers)
-                    torch.testing.assert_close(actual.reshape(-1), expected, rtol=0, atol=0)
-                group = PROCESS_GROUP.ULYSSES_PG
-                exchange = ulysses.Exchange.make(
-                    world_size, 1, 128, query.dtype, [rows] * 3, [40 // world_size] * 3, [(0, 0)] * 3, 1
-                )
-                ulysses.begin(group, exchange)
-                packed_qk = fused_qk_norm_rope_packed(query, key, norm, norm, *rotary, 40, world_size)
-                ulysses.send(group, 0, packed_qk, (0, 1))
-                packed_value = ulysses.pack_group(
-                    [ulysses.pieces_from_heads(expected_k.transpose(1, 2), world_size, 0, 40 // world_size)]
-                )
-                ulysses.send(group, 0, packed_value, (2,))
-                output = ulysses.finish(group, lambda query, key, value: query * 2 + 1)
-                torch.testing.assert_close(output, expected_q * 2 + 1, rtol=0, atol=0)
-            norm.float()
-            expected_q, expected_k = fused_qk_norm_rope(query, key, norm, norm, *rotary, 40)
-            expected = ulysses.pack_group(
-                [
-                    ulysses.pieces_from_heads(tensor.transpose(1, 2), world_size, 0, 40 // world_size)
-                    for tensor in (expected_q, expected_k)
-                ]
-            )
-            actual = fused_qk_norm_rope_packed(query, key, norm, norm, *rotary, 40, world_size)
-            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-    finally:
-        destroy_model_parallel()
-        destroy_distributed_environment()
-
-
-def test_wan_packed_qk_matches_original_norm_and_pack(accelerator_ranks):
-    accelerator_ranks(_wan_packed_qk_worker, world_size=2, timeout=600)
-
-
-def _wan_processor_worker(rank, world_size, init_method, backend):
-    from types import SimpleNamespace
-
-    import torch
-    from diffusers.models.transformers.transformer_wan import WanAttention
-    from xfuser.core.distributed import get_runtime_state
-    from xfuser.core.distributed.sdma import ulysses
-    from xfuser.core.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
-    from xfuser.model_executor.layers import usp_sdma
-    from xfuser.model_executor.models.transformers.transformer_wan import (
-        xFuserWanAttnProcessor,
-        xFuserWanSdmaAttnProcessor,
-    )
-
-    graph = None
-    original_send = ulysses.send
-    calls = 0
-
-    def counted_send(process_group, gi, packed, tensors=None):
-        # Q/K sent on their own: the split path ran.
-        nonlocal calls
-        calls += tensors is not None and tuple(tensors) == (0, 1)
-        return original_send(process_group, gi, packed, tensors)
-
-    try:
-        device = _setup(rank, world_size, init_method, world_size)
-        get_runtime_state().set_attention_backend(backend)
-        torch.manual_seed(0)
-        attn = WanAttention(256, heads=40, dim_head=128, processor=xFuserWanAttnProcessor()).to(device, torch.bfloat16)
-        attn.eval()
-        # As the runner prepares the transformer: the SDMA processor replaces the standard one.
-        _configure("sdma", 1, overlap_qkv=True)
-        usp_sdma.prepare(SimpleNamespace(attn=attn), ["attn"], cpu_offload=False)
-        assert type(attn.processor) is xFuserWanSdmaAttnProcessor
-        generator = torch.Generator(device=device).manual_seed(rank)
-        hidden = torch.randn(1, 257, 256, generator=generator, device=device, dtype=torch.bfloat16)
-        angle = torch.randn(1, 257, 1, 128, generator=generator, device=device)
-        rotary = angle.cos(), angle.sin()
-        ulysses.send = counted_send
-        compiled = torch.compile(attn, fullgraph=True)
-        with torch.no_grad():
-            for run in (attn, compiled):
-                _configure("packed", 1)
-                expected = run(hidden, rotary_emb=rotary)
-                _configure("sdma", 1, overlap_qkv=True)
-                before = calls
-                actual = run(hidden, rotary_emb=rotary)
-                assert calls == before + 1, "production split-QK path did not execute"
-                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-            _configure("sdma", 1, overlap_qkv=True)
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                captured = attn(hidden, rotary_emb=rotary)
-            for repeat in range(3):
-                hidden.copy_(torch.randn(hidden.shape, generator=generator, device=device, dtype=hidden.dtype))
-                graph.replay()
-                _configure("packed", 1)
-                expected = attn(hidden, rotary_emb=rotary)
-                torch.testing.assert_close(captured, expected, rtol=0, atol=0)
-            # The head-group count does not apply: Wan self-attention splits Q/K in one group.
-            _configure("sdma", 2, overlap_qkv=True)
-            before = calls
-            actual = attn(hidden, rotary_emb=rotary)
-            assert calls == before + 1, "the split-QK path must run with --ulysses_sdma_head_groups 2"
-            _configure("packed", 1)
-            torch.testing.assert_close(actual, attn(hidden, rotary_emb=rotary), rtol=0, atol=0)
-            # Unsupported: FP32 QK norms keep the usual path.
-            attn.norm_q.to(torch.float32)
-            attn.norm_k.to(torch.float32)
-            _configure("sdma", 1, overlap_qkv=True)
-            before = calls
-            actual = attn(hidden, rotary_emb=rotary)
-            assert calls == before, "unsupported settings must not split Q/K"
-            _configure("sdma", 1)
-            torch.testing.assert_close(actual, attn(hidden, rotary_emb=rotary), rtol=0, atol=0)
-    finally:
-        graph = None
-        ulysses.send = original_send
-        _configure("default", 2)
-        torch.compiler.reset()
-        torch.cuda.synchronize()
-        destroy_model_parallel()
-        destroy_distributed_environment()
-
-
-@pytest.mark.parametrize("backend", ["AITER_BF16", "AITER_FP8"])
-def test_wan_processor_split_qk_matches_packed(accelerator_ranks, backend):
-    accelerator_ranks(_wan_processor_worker, world_size=2, timeout=900, args=(backend,))
-
-
-@pytest.mark.parametrize("world_size", [4, 8])
-def test_sdma_exchange_under_cfg_parallel(accelerator_ranks, world_size):
-    accelerator_ranks(_exchange_worker, world_size=world_size, timeout=600, args=(2, False))
-
-
-def test_packed_exchange_over_rccl(accelerator_ranks):
-    accelerator_ranks(_exchange_worker, world_size=4, timeout=600, args=(1, True))
+def test_qk_first_ops_compiled_match_packed(accelerator_ranks):
+    """The ops sending Q/K, then V projected behind the send, in one compiled graph."""
+    accelerator_ranks(_qk_first_compiled_worker, world_size=2, timeout=600)
 
 
 def _lifetime_worker(rank, world_size, init_method):

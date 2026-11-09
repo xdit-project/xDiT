@@ -42,7 +42,7 @@ class QuantizationBackends:
         Before allocation, so "this cannot be sharded here" is a startup error
         rather than a failure at the first all-gather.
         """
-        for format_name in self._formats_in_play():
+        for format_name in self._required_formats():
             _ = self.adapter_for(format_name)
         self.assert_hybrid_schedule_is_implementable()
 
@@ -57,12 +57,10 @@ class QuantizationBackends:
 
         from .contracts import UnsupportedLoadContract
 
-        if not getattr(self.model.config, "use_hybrid_gemm_schedule", False):
-            return
         plan = self.loader.quantization_plan.gemm_plan
-        if plan is None or plan.high is None:
+        if plan is None or plan.hybrid_companion_format is None:
             return
-        companion = self.adapter_for(plan.high)
+        companion = self.adapter_for(plan.hybrid_companion_format)
         if companion is not None and not companion.builds_one_layer():
             raise UnsupportedLoadContract(
                 f"{companion.impl} {companion.format_name} cannot install one "
@@ -81,12 +79,10 @@ class QuantizationBackends:
         source weight happened to be resting.
         """
 
-        if not getattr(self.model.config, "use_hybrid_gemm_schedule", False):
-            return None
         plan = self.loader.quantization_plan.gemm_plan
-        if plan is None or plan.high is None or format_name != plan.low:
+        if plan is None or plan.hybrid_companion_format is None or format_name != plan.low:
             return None
-        companion = self.adapter_for(plan.high)
+        companion = self.adapter_for(plan.hybrid_companion_format)
         if companion is None:
             return None
         return companion.layer_factory(device=device)
@@ -146,7 +142,7 @@ class QuantizationBackends:
             capability=capability,
             # Only the format a step actually runs in bf16-vs-quantized pairs
             # can refuse the schedule; the companion never drives it.
-            hybrid=(plan is not None and format_name == plan.low and bool(self.model.config.use_hybrid_gemm_schedule)),
+            hybrid=(plan is not None and plan.hybrid_companion_format is not None and format_name == plan.low),
         )
         validate_fsdp_placement(
             adapter,
@@ -177,7 +173,7 @@ class QuantizationBackends:
         if not getattr(config, "enable_group_cpu_offload", False):
             return
         leg = "pinned" if getattr(config, "group_offload_low_cpu_mem", False) else "unpinned"
-        for format_name in self._formats_in_play():
+        for format_name in self._required_formats():
             adapter = self.adapter_for(format_name)
             refusal = getattr(adapter, "group_offload_refusal", None)
             if not refusal:
@@ -205,15 +201,16 @@ class QuantizationBackends:
             return frozenset()
         plan = self.loader.quantization_plan.gemm_plan
         if plan is not None:
-            # Every format the plan places, pins included: a component held at
-            # a format of its own still has to be storable here.
-            return frozenset(plan.formats_in_play)
+            # Every format the plan places, pins and the per-step companion
+            # included: a component held at a format of its own still has to
+            # be storable here.
+            return frozenset(plan.required_formats)
         return frozenset(spec.formats) - {"none"}
 
-    def _formats_in_play(self) -> tuple:
-        """The formats this run will place, low and high."""
+    def _required_formats(self) -> tuple:
+        """Every format this run has to be able to store, low first."""
         plan = self.loader.quantization_plan.gemm_plan
-        return () if plan is None else plan.formats_in_play
+        return () if plan is None else plan.required_formats
 
     def adapter_for(self, format_name: str):
         """The implementation that stores one format on this machine.
@@ -241,10 +238,10 @@ class QuantizationBackends:
     def places_under_fsdp2(self, format_name: str) -> bool:
         """Whether an FSDP2-wrapped block will hold this format's parameters.
 
-        One question for every format. `walk_roots` already covers a carve-out
-        named below a target rather than at it, and `paired` covers the hybrid
-        schedule, which puts both formats at every leaf. Whether landing there
-        is a *problem* is the adapter's answer, not this one's -- a plain packed
+        One question for every format. `reach` already covers a carve-out named
+        below a target rather than at it, and the per-step companion, which is
+        installed at every leaf the low pass reaches. Whether landing there is
+        a *problem* is the adapter's answer, not this one's -- a plain packed
         parameter shards, a tensor subclass may not.
         """
         fsdp_target_paths = self._fsdp_target_paths()
@@ -253,13 +250,7 @@ class QuantizationBackends:
         plan = self.loader.quantization_plan.gemm_plan
         if plan is None:
             return False
-        roots = plan.walk_roots(
-            format_name,
-            # Only the high format is installed everywhere the low walk goes.
-            # Asking for both widened the low format onto subtrees it never
-            # touches, which could refuse a placement that was always fine.
-            paired=(bool(self.model.config.use_hybrid_gemm_schedule) and format_name == plan.high),
-        )
+        roots = plan.reach(format_name)
         return any(module_paths_overlap(root, fsdp_path) for root in roots for fsdp_path in fsdp_target_paths)
 
     def transformer_adapter(self, component_name: str):
@@ -272,8 +263,8 @@ class QuantizationBackends:
         plan = self.loader.quantization_plan.gemm_plan
         if plan is None:
             return None, ()
-        for format_name in self._formats_in_play():
-            targets = plan.relative_to(component_name, plan.roots(format_name))
+        for conversion in plan.conversion_passes:
+            targets = plan.relative_to(component_name, plan.roots(conversion.format))
             if targets:
-                return self.adapter_for(format_name), targets
+                return self.adapter_for(conversion.format), targets
         return None, ()

@@ -531,8 +531,8 @@ def test_a_pin_puts_its_format_in_play():
     plan = _plan("fp4")
 
     assert plan.pinned == {"text_encoder": "fp8"}
-    assert set(plan.formats_in_play) == {"fp4", "fp8"}
-    assert plan.formats_in_play[0] == "fp4", "the low format still comes first"
+    assert set(plan.required_formats) == {"fp4", "fp8"}
+    assert plan.required_formats[0] == "fp4", "the low format still comes first"
 
 
 def test_a_pinned_component_belongs_to_exactly_one_walk():
@@ -540,7 +540,7 @@ def test_a_pinned_component_belongs_to_exactly_one_walk():
     plan = _plan("low=fp4,high=fp6")
     root = "text_encoder.encoder.block"
 
-    owners = [fmt for fmt in plan.formats_in_play if root in plan.roots(fmt)]
+    owners = [fmt for fmt in plan.required_formats if root in plan.roots(fmt)]
     assert owners == ["fp8"]
     assert plan.relative_to("text_encoder", plan.roots("fp8")) == ("encoder.block",)
 
@@ -561,7 +561,7 @@ def test_a_run_that_quantizes_nothing_pins_nothing():
     plan = _plan("none")
 
     assert dict(plan.pinned) == {}
-    assert plan.formats_in_play == ()
+    assert plan.required_formats == ()
     assert plan.format_for(ENCODER_LEAF) is None
 
 
@@ -624,4 +624,59 @@ def test_an_encoder_the_run_did_not_ask_for_is_left_alone(profile):
     assert dict(plan.pinned) == {}
     assert plan.format_for(ENCODER_LEAF) is None
     assert plan.declared_roots(component="text_encoder") == ()
-    assert "fp8" not in plan.formats_in_play
+    assert "fp8" not in plan.required_formats
+
+
+# ---------------------------------------------------------------------------
+# conversion passes
+# ---------------------------------------------------------------------------
+
+#: A model that quantizes its blocks and carves nothing out of them. Wan 2.2
+#: I2V and T2V declare exactly this.
+NO_CARVE_OUT = GemmTargets(transformer=Select(roots=(BLOCKS,)))
+
+
+def test_a_pass_names_the_format_and_where_its_walk_starts():
+    plan = resolve(TARGETS, GemmQuantizationSpec.parse("low=fp4,high=fp8"))
+    passes = {conversion.format: conversion.roots for conversion in plan.conversion_passes}
+
+    assert list(passes) == ["fp4", "fp8"], "the low format's pass comes first"
+    assert passes["fp4"] == (BLOCKS,)
+    assert set(passes["fp8"]) == set(EDGE)
+
+
+def test_a_high_format_nothing_takes_asks_for_no_converter():
+    """A tier is an offer, not a requirement. A model that carves nothing out
+    gives the high format no leaf, so the run must not refuse to start on a
+    machine that cannot store it."""
+    plan = resolve(NO_CARVE_OUT, GemmQuantizationSpec.parse("low=fp4,high=fp8"))
+
+    assert [conversion.format for conversion in plan.conversion_passes] == ["fp4"]
+    assert plan.required_formats == ("fp4",)
+    assert plan.format_for(f"{BLOCKS}.0.attn.to_q") == "fp4"
+
+
+def test_the_per_step_companion_is_required_without_a_pass_of_its_own():
+    """The schedule builds the high format beside the low one at every leaf the
+    low pass reaches, so it owns no subtree and still has to be storable."""
+    plan = resolve(NO_CARVE_OUT, GemmQuantizationSpec.parse("low=fp4,high=fp8"), hybrid=True)
+
+    assert plan.hybrid_companion_format == "fp8"
+    assert [conversion.format for conversion in plan.conversion_passes] == ["fp4"]
+    assert plan.required_formats == ("fp4", "fp8")
+
+
+def test_the_per_step_companion_reaches_every_leaf_the_low_pass_does():
+    """What the sharding question asks: a wrapped block the low format owns
+    holds the companion's parameters too."""
+    plan = resolve(NO_CARVE_OUT, GemmQuantizationSpec.parse("low=fp4,high=fp8"), hybrid=True)
+
+    assert plan.reach("fp8") == (BLOCKS,)
+    assert plan.roots("fp8") == (), "and it owns none of it"
+
+
+def test_a_run_without_a_schedule_has_no_companion():
+    plan = resolve(TARGETS, GemmQuantizationSpec.parse("low=fp4,high=fp8"))
+
+    assert plan.hybrid_companion_format is None
+    assert set(plan.reach("fp8")) == set(EDGE), "no widening onto the subtrees the low format owns"

@@ -761,7 +761,7 @@ def test_probing_is_narrowed_to_what_the_plan_will_place(modules, in_play, expec
     the probe told that one caller its format "was not requested" and the load
     was refused, on every run of a model with declared encoder targets.
 
-    That a pin reaches `formats_in_play` at all is pinned next door, in
+    That a pin reaches `required_formats` at all is pinned next door, in
     tests/quant/test_gemm_targets.py.
     """
     backends = modules.selection.QuantizationBackends.__new__(modules.selection.QuantizationBackends)
@@ -769,7 +769,7 @@ def test_probing_is_narrowed_to_what_the_plan_will_place(modules, in_play, expec
         config=SimpleNamespace(gemm_quantization_spec=modules.gemm.GemmQuantizationSpec.parse("fp4"))
     )
     backends.loader = SimpleNamespace(
-        quantization_plan=SimpleNamespace(gemm_plan=SimpleNamespace(formats_in_play=in_play))
+        quantization_plan=SimpleNamespace(gemm_plan=SimpleNamespace(required_formats=in_play))
     )
 
     assert sorted(backends._formats_requested()) == expected

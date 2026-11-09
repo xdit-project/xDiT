@@ -115,7 +115,8 @@ class _StubPlan:
             ),
             keep_high=keep_high if high_name else Select(),
         )
-        return resolve(targets, spec)
+        config = getattr(self.model, "config", None)
+        return resolve(targets, spec, hybrid=bool(getattr(config, "use_hybrid_gemm_schedule", False)))
 
     def module_list(self, format_name="fp8"):
         if format_name == "fp8":
@@ -304,6 +305,17 @@ def test_the_hybrid_schedule_only_blocks_streaming_where_it_must(monkeypatch):
         "prepare_native_load",
         prepare,
     )
+    from xfuser.config.gemm import GemmQuantizationSpec
+    from xfuser.model_executor.quant.targets import GemmTargets, Select, resolve
+
+    scheduled = resolve(
+        GemmTargets(
+            transformer=Select(roots=("transformer.blocks",)),
+            keep_high=Select(roots=("transformer.blocks",)),
+        ),
+        GemmQuantizationSpec.parse("low=int8,high=fp8"),
+        hybrid=True,
+    )
 
     transformer_load._prepare_native_load(
         SimpleNamespace(format=QuantizationFormat.INT8),
@@ -311,7 +323,7 @@ def test_the_hybrid_schedule_only_blocks_streaming_where_it_must(monkeypatch):
         targets=("blocks",),
         stream_quant=True,
         model_factory=lambda: object(),
-        hybrid=True,
+        plan=scheduled,
     )
 
     # Carve-out patterns are not a native-load argument at all any more. The
@@ -629,22 +641,18 @@ def test_format_fsdp_preflight_uses_boundary_safe_path_containment(
 def test_an_fp8_remainder_puts_a_second_format_in_play():
     model = _hybrid_model(adapter=RecordingAdapter())
 
-    assert backends(model)._formats_in_play() == ("fp4", "fp8")
+    assert backends(model)._required_formats() == ("fp4", "fp8")
 
 
-# `test_narrow_fp4_target_preserves_broad_fp8_remainder` lived here. It
-# described a narrow FP4 target inside a broader FP8 one, which a declaration
-# cannot express and no model ever used: `keep_high` carves the better format
-# out of the low one, never the reverse. The survey before the migration found
-# every model declaring identical lists or a clean superset.
-
-
-def test_narrow_fp4_target_under_broad_fp8_requires_backend_preflight():
-    model = _hybrid_model(adapter=RecordingAdapter())
-    model.settings.fp4_gemm_module_list = ["transformer.blocks.0.attn"]
-    model.fp8 = SimpleNamespace(module_list=lambda: ["transformer.blocks"])
-
-    assert backends(model)._formats_in_play() == ("fp4", "fp8")
+# `test_narrow_fp4_target_preserves_broad_fp8_remainder` and
+# `test_narrow_fp4_target_under_broad_fp8_requires_backend_preflight` lived
+# here. Both described a narrow FP4 target inside a broader FP8 one, which a
+# declaration cannot express and no model ever used: `keep_high` carves the
+# better format out of the low one, never the reverse. Translated, that shape
+# holds every leaf at FP8 and leaves FP4 owning nothing, so a run resolving one
+# converter is the right answer rather than a missing preflight. The survey
+# before the migration found every model declaring identical lists or a clean
+# superset.
 
 
 def test_eager_fp4_with_fp8_only_target_preflights_component_backend():
@@ -654,7 +662,7 @@ def test_eager_fp4_with_fp8_only_target_preflights_component_backend():
         materialization_mode=MaterializationMode.EAGER,
     )
 
-    assert backends(model)._formats_in_play() == ("fp4", "fp8")
+    assert backends(model)._required_formats() == ("fp4", "fp8")
 
 
 @pytest.mark.parametrize(
@@ -813,7 +821,7 @@ def test_fsdp_fp4_override_triggers_startup_backend_preflight():
         materialization_mode=MaterializationMode.FSDP_META,
     )
 
-    assert backends(model)._formats_in_play() == ("fp4", "fp8")
+    assert backends(model)._required_formats() == ("fp4", "fp8")
 
 
 def test_a_pure_fp8_run_under_fsdp_resolves_its_one_format():
@@ -830,7 +838,7 @@ def test_a_pure_fp8_run_under_fsdp_resolves_its_one_format():
 
     # A pure run names one format, and that one is still resolved before
     # allocation because its parameters land inside a wrapped block.
-    assert backends(model)._formats_in_play() == ("fp8",)
+    assert backends(model)._required_formats() == ("fp8",)
     assert backends(model).places_under_fsdp2("fp8")
 
 
@@ -848,7 +856,7 @@ def test_a_carve_out_outside_every_wrapped_block_needs_no_sharding():
     # A prefix carve-out is placed by the FP8 converter now rather than by the
     # FP4 owner, so FP8 is in play -- but its parameters land outside every
     # wrapped block, so nothing has to be shardable.
-    assert backends(model)._formats_in_play() == ("fp4", "fp8")
+    assert backends(model)._required_formats() == ("fp4", "fp8")
     assert not backends(model).places_under_fsdp2("fp8")
 
 

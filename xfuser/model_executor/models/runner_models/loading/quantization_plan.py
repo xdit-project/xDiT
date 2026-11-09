@@ -92,6 +92,7 @@ class QuantizationPlan:
             # afterwards -- that is what stops the answer depending on which
             # load route ran.
             component_formats={"text_encoder": text_encoder_formats()},
+            hybrid=bool(getattr(config, "use_hybrid_gemm_schedule", False)),
         )
 
     def component_format(self, component_name: str) -> Optional[str]:
@@ -131,9 +132,8 @@ class QuantizationPlan:
                 detail += f", leaves={tuple(high_leaves)} (suffix match)"
             log(detail)
 
-        hybrid = getattr(self.model.config, "use_hybrid_gemm_schedule", False)
         low_detail = plan.low.upper()
-        if hybrid and plan.high:
+        if plan.hybrid_companion_format:
             low_detail = f"{plan.high.upper()} endpoints / {plan.low.upper()} middle"
         for root in plan.roots(plan.low):
             detail = low_detail

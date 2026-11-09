@@ -130,12 +130,29 @@ class GemmTargets:
 
 
 @dataclass(frozen=True)
+class ConversionPass:
+    """One format, and where a converter for it starts walking.
+
+    What a caller needs to *run* the plan, as against reading it: the plan
+    says which format each module takes, and a pass says which converter has
+    to be built and where it begins. A format the run named but no module
+    takes gets no pass.
+    """
+
+    format: str
+    roots: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class GemmPlan:
     """What this run quantizes, and to what.
 
     Resolved once, from the model's targets and the run's spec. Every field is
     a decision: which components are in play, and which formats they take. No
     accessor re-reads a run option to find out.
+
+    Ownership is `format_for` and `roots`; what that takes to carry out is
+    `conversion_passes`, `hybrid_companion_format` and `required_formats`.
     """
 
     targeted: Mapping[str, Select]
@@ -150,6 +167,11 @@ class GemmPlan:
     #: the per-block fill and the post-load walk read `format_for` like
     #: everything else, so the answer cannot depend on which route ran.
     pinned: Mapping[str, str] = MappingProxyType({})
+    #: Whether the run drives a per-step GEMM schedule, which holds both
+    #: formats at every leaf the low format reaches and picks one per step.
+    #: A property of the run, so the plan carries it and every consumer reads
+    #: the companion off `hybrid_companion_format` rather than off a flag.
+    hybrid: bool = False
 
     @property
     def quantizes(self) -> bool:
@@ -193,35 +215,74 @@ class GemmPlan:
         )
 
     @property
-    def formats_in_play(self) -> Tuple[str, ...]:
-        """The formats this run places, low first.
+    def hybrid_companion_format(self) -> Optional[str]:
+        """The format built beside the low one at every leaf the low pass
+        reaches, or None when this run has no per-step schedule.
 
-        The one answer to "which converters does this run need". Each consumer
-        rebuilt it from `low` and `high`, which was the last place a tier was
-        visible below the resolver -- and three identical expressions to edit
-        if a run ever names more than two.
+        The schedule's second half. It is not a pass of its own: its layers
+        are installed by the low pass, which is why it can own no subtree and
+        still have to be storable here.
         """
-        found = [n for n in (self.low, self.high) if n]
+        if not self.hybrid or self.low is None:
+            return None
+        return self.high
+
+    @property
+    def conversion_passes(self) -> Tuple[ConversionPass, ...]:
+        """One pass per format this run converts something to, low first.
+
+        What placement and the per-block fill iterate. A format the run named
+        that nothing takes gets no pass, so a tiered run on a model that
+        carves nothing out asks for one converter rather than two.
+        """
+        found = []
+        for format_name in self._named_formats():
+            roots = self._walk_roots(format_name)
+            if roots:
+                found.append(ConversionPass(format=format_name, roots=roots))
+        return tuple(found)
+
+    @property
+    def required_formats(self) -> Tuple[str, ...]:
+        """Every format this run has to be able to store, low first.
+
+        The passes, plus the per-step companion, which the low pass installs
+        rather than walking for itself.
+        """
+        found = [conversion.format for conversion in self.conversion_passes]
+        companion = self.hybrid_companion_format
+        if companion is not None and companion not in found:
+            found.append(companion)
+        return tuple(found)
+
+    def reach(self, format_name: str) -> Tuple[str, ...]:
+        """Every subtree whose leaves can end up holding this format.
+
+        Wider than the format's pass for the per-step companion, which lands
+        at every leaf the low pass reaches rather than only where the plan
+        assigns it. This is what the sharding question asks: whether a wrapped
+        block will hold this format's parameters.
+        """
+        return self._walk_roots(format_name, paired=format_name == self.hybrid_companion_format)
+
+    def _named_formats(self) -> Tuple[str, ...]:
+        """Every format this run could give a module, low first."""
+        found = [name for name in (self.low, self.high) if name]
         found += [self.pinned[name] for name in self.targeted if name in self.pinned]
         return tuple(dict.fromkeys(found))
 
-    def walk_roots(self, format_name: str, *, paired: bool = False) -> Tuple[str, ...]:
-        """Where a converter for `format_name` should start walking.
+    def _walk_roots(self, format_name: str, *, paired: bool = False) -> Tuple[str, ...]:
+        """Where a converter for `format_name` starts walking.
 
         `roots` names the subtrees this format owns whole, which is enough
         except for a carve-out with no subtree of its own: a leaf suffix occurs
         inside targets the other format owns, so reaching it means walking
-        those too and letting `format_for` reject the rest.
-
-        `paired` says this format is the hybrid schedule's companion, built
-        at every leaf the low walk reaches rather than only where the plan
-        assigns it. The caller knows which format that is; the plan only knows
-        what it means for where a walk starts.
+        those too and letting `format_for` reject the rest. `paired` widens the
+        same way for the per-step companion.
         """
         found = list(self.roots(format_name))
-        widen = paired or (format_name == self.high and self.keep_high.suffixes)
-        if widen:
-            found += [r for r in self.declared_roots() if r not in found]
+        if paired or (format_name == self.high and self.keep_high.suffixes):
+            found += [root for root in self.declared_roots() if root not in found]
         return tuple(found)
 
     @property
@@ -370,6 +431,7 @@ def resolve(
     enable: Iterable[str] = ("transformer",),
     sp_world_size: int = 1,
     component_formats: Optional[Mapping[str, Iterable[str]]] = None,
+    hybrid: bool = False,
 ) -> GemmPlan:
     """Bind a model's targets to the formats and components this run asked for.
 
@@ -384,6 +446,9 @@ def resolve(
     place that component -- the caller knows, because it is a fact about which
     loading code exists. A component whose run format is not among them is
     pinned to one that is, in the plan, so every walk gets the same answer.
+
+    `hybrid` says the run drives a per-step schedule, which pairs the high
+    format with the low one at every leaf the low format reaches.
     """
     enable = tuple(enable)
     unknown = [name for name in enable if name not in COMPONENTS]
@@ -413,4 +478,5 @@ def resolve(
         low=low,
         high=high,
         pinned=MappingProxyType(_pins(targeted, targets.keep_high, low, high, component_formats or {})),
+        hybrid=hybrid,
     )

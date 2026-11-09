@@ -76,10 +76,10 @@ def setup_gemm_quantization(loader, local_rank, *, offload_requested, before_dev
         the move and once after; each call skips the adapters belonging to the other
         side.
 
-    Each walk starts where ``walk_roots`` says -- the subtrees that format owns,
-        widened only when it has a carve-out with no subtree of its own -- and asks
-        ``format_for`` per leaf, which is the rule the sharded path applies too. A
-        leaf belongs to exactly one format, so the walks cannot collide.
+    Each walk starts where its ``ConversionPass`` says -- the subtrees that format
+        owns, widened only when it has a carve-out with no subtree of its own -- and
+        asks ``format_for`` per leaf, which is the rule the sharded path applies too.
+        A leaf belongs to exactly one format, so the walks cannot collide.
     """
 
     plan = loader.quantization_plan.gemm_plan
@@ -88,10 +88,9 @@ def setup_gemm_quantization(loader, local_rank, *, offload_requested, before_dev
 
     model = loader.model
     ledger = loader.quantization_ledger
-    formats = plan.formats_in_play
 
-    for format_name in formats:
-        roots = plan.walk_roots(format_name)
+    for conversion in plan.conversion_passes:
+        format_name = conversion.format
         adapter = loader.backends.adapter_for(format_name)
         if adapter is None:
             continue
@@ -99,7 +98,7 @@ def setup_gemm_quantization(loader, local_rank, *, offload_requested, before_dev
         if converts_first != before_device_move:
             continue
 
-        for module_name in roots:
+        for module_name in conversion.roots:
             already = ledger.already_quantized()
             if any(module_path_is_covered(module_name, owner) for owner in already):
                 continue

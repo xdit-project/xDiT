@@ -198,8 +198,7 @@ def build_block_quantize_fn(
 
     device = f"cuda:{local_rank}"
 
-    formats = plan.formats_in_play
-    by_format = {name: plan.walk_roots(name) for name in formats}
+    by_format = {conversion.format: conversion.roots for conversion in plan.conversion_passes}
 
     paths = [f"{component_name}.{attr}" for attr in wrap_attrs]
     if not any(module_paths_overlap(path, root) for path in paths for roots in by_format.values() for root in roots):
@@ -208,9 +207,7 @@ def build_block_quantize_fn(
     # Resolved once rather than per block: a format this run named needs a
     # converter whether or not this particular block has leaves for it.
     adapters = {}
-    for format_name, roots in by_format.items():
-        if not roots:
-            continue
+    for format_name in by_format:
         adapter = loader.backends.adapter_for(format_name)
         if adapter is None:
             raise RuntimeError(f"{format_name.upper()} block conversion requested without a selected backend")

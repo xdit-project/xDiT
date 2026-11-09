@@ -388,7 +388,7 @@ def test_the_high_tier_is_what_the_primary_format_leaves():
 
 def test_a_pure_profile_holds_nothing_back():
     """Nothing is held back, so only one converter is ever resolved."""
-    assert _backends_for("fp4", text_encoder=False)._formats_in_play() == ("fp4",)
+    assert _backends_for("fp4", text_encoder=False)._required_formats() == ("fp4",)
 
 
 @pytest.mark.parametrize(
@@ -399,11 +399,11 @@ def test_a_pinned_component_resolves_its_own_converter(raw, expected):
     """A pure profile still resolves a second converter when a component is
     pinned: FLUX.2's encoder is loaded at FP8, so an FP4 run needs that one
     too -- and an FP8 run needs nothing extra, because the pin agrees."""
-    assert _backends_for(raw)._formats_in_play() == expected
+    assert _backends_for(raw)._required_formats() == expected
 
 
-def test_a_tier_puts_both_formats_in_play():
-    assert _backends_for("low=fp4,high=fp8")._formats_in_play() == ("fp4", "fp8")
+def test_a_tier_puts_both_required_formats():
+    assert _backends_for("low=fp4,high=fp8")._required_formats() == ("fp4", "fp8")
 
 
 def test_no_high_tier_without_the_component_enabled():

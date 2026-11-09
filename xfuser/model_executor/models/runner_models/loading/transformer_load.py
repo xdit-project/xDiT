@@ -95,7 +95,6 @@ def _prepare_native_load(
     stream_quant,
     model_factory,
     plan=None,
-    hybrid=False,
 ):
     """The quantization config an ordinary ``from_pretrained`` should carry, if any."""
 
@@ -123,7 +122,10 @@ def _prepare_native_load(
             if plan is not None and plan.high is not None
             else None
         ),
-        hybrid=hybrid,
+        # A streamed load quantizes every targeted leaf on the way in, and a
+        # per-step pair needs those leaves still in bf16 so both precisions can
+        # be built from them.
+        hybrid=plan is not None and plan.hybrid_companion_format is not None,
     )
 
 
@@ -213,7 +215,6 @@ def load_transformer(
             stream_quant=stream_quant,
             model_factory=lambda: build_transformer_structure(wrapper_cls, request, init_kwargs),
             plan=loader.quantization_plan.gemm_plan,
-            hybrid=model.config.use_hybrid_gemm_schedule,
         )
         local_plan = loader.plan_eager_blockwise_fallback(prepared, targets, wrap_attrs)
         if local_plan is not None and local_plan.enabled:

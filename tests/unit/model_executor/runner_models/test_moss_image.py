@@ -44,13 +44,13 @@ def test_pipefusion_and_tensor_parallel_are_refused():
         _model(tensor_parallel_degree=2)
 
 
-def test_generic_cli_defaults_become_the_reference_recipe():
+def test_omitted_sampling_args_use_the_model_defaults():
     args = _model().preprocess_args(
         {
             "prompt": "a cat",
-            "num_inference_steps": 20,
-            "guidance_scale": 3.5,
-            "max_sequence_length": 256,
+            "num_inference_steps": None,
+            "guidance_scale": None,
+            "max_sequence_length": None,
             "flow_shift": None,
             "height": None,
             "width": None,
@@ -63,6 +63,25 @@ def test_generic_cli_defaults_become_the_reference_recipe():
     assert args["flow_shift"] == 5.0
     assert args["height"] == 1024
     assert args["width"] == 1024
+
+
+def test_explicit_cli_defaults_are_kept():
+    args = _model().preprocess_args(
+        {
+            "prompt": "a cat",
+            "num_inference_steps": 20,
+            "guidance_scale": 3.5,
+            "max_sequence_length": 256,
+            "flow_shift": None,
+            "height": None,
+            "width": None,
+            "negative_prompt": "",
+        }
+    )
+    assert args["num_inference_steps"] == 20
+    assert args["guidance_scale"] == 3.5
+    assert args["max_sequence_length"] == 256
+    assert args["flow_shift"] == 5.0
 
 
 def test_explicit_sampling_choices_are_kept():

@@ -405,11 +405,16 @@ def _share_embeddings(embeds, mask):
 
 
 def _share_from_rank0(tensor):
+    """Give every sequence and CFG rank in one replica the same tensor.
+
+    The replica group is the ranks that share one sample. The world group would
+    replace every data-parallel replica's embeddings and noise with rank 0's.
+    """
     if tensor is None or not _parallel_ready():
         return None
-    from xfuser.core.distributed import get_world_group
+    from xfuser.core.distributed import get_model_replica_group
 
-    group = get_world_group()
+    group = get_model_replica_group()
     if group.world_size == 1:
         return None
     return _broadcast(group, tensor, src=0)

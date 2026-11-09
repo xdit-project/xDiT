@@ -13,8 +13,6 @@ the positive and negative passes on two ranks.
 import torch
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
-from xfuser.config import xFuserArgs
-from xfuser.core.utils.runner_utils import log
 from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
@@ -24,18 +22,6 @@ from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
 )
 from xfuser.model_executor.models.runner_models.loading.contracts import LoadRoute, LoadSupport
-
-# Generic CLI defaults that would otherwise sample a different recipe than the
-# reference. An explicit user value equal to one of these is indistinguishable
-# from "not passed" and is replaced the same way.
-_CLI_STEPS = xFuserArgs.num_inference_steps
-_CLI_GUIDANCE = xFuserArgs.guidance_scale
-_CLI_SEQUENCE_LENGTH = xFuserArgs.max_sequence_length
-_RECIPE = {
-    "num_inference_steps": 50,
-    "guidance_scale": 3.0,
-    "max_sequence_length": 4096,
-}
 
 
 @register_model("OpenMOSS-Team/MOSS-Image-Base")
@@ -65,10 +51,10 @@ class xFuserMOSSImageModel(xFuserModel):
     default_input_values = DefaultInputValues(
         height=1024,
         width=1024,
-        num_inference_steps=_RECIPE["num_inference_steps"],
-        guidance_scale=_RECIPE["guidance_scale"],
+        num_inference_steps=50,
+        guidance_scale=3.0,
         flow_shift=5.0,
-        max_sequence_length=_RECIPE["max_sequence_length"],
+        max_sequence_length=4096,
     )
     settings = ModelSettings(
         model_name="OpenMOSS-Team/MOSS-Image-Base",
@@ -76,19 +62,6 @@ class xFuserMOSSImageModel(xFuserModel):
         model_output_type="image",
         resolution_divisor=16,
     )
-
-    def preprocess_args(self, input_args: dict) -> dict:
-        args = super().preprocess_args(input_args)
-        generic = {
-            "num_inference_steps": _CLI_STEPS,
-            "guidance_scale": _CLI_GUIDANCE,
-            "max_sequence_length": _CLI_SEQUENCE_LENGTH,
-        }
-        for key, cli_default in generic.items():
-            if args.get(key) == cli_default:
-                args[key] = _RECIPE[key]
-                log(f"Parameter '{key}' left at the generic CLI default. Using the MOSS-Image recipe: {_RECIPE[key]}")
-        return args
 
     def _load_model(self) -> DiffusionPipeline:
         from xfuser.model_executor.pipelines.pipeline_moss_image import xFuserMOSSImagePipeline

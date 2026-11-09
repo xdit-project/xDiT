@@ -11,6 +11,7 @@ from xfuser.model_executor.models.transformers.transformer_moss_image import (  
     validate_skip_layers,
 )
 from xfuser.model_executor.pipelines.pipeline_moss_image import (  # noqa: E402
+    _share_from_rank0,
     combine_moss_guidance,
     skip_window_active,
     xFuserMOSSImagePipeline,
@@ -183,3 +184,37 @@ def test_pipeline_rejects_a_resolution_the_vae_cannot_pack():
     embeds = torch.randn(1, 2, 32)
     with pytest.raises(ValueError, match="multiples of 16"):
         pipe(prompt_embeds=embeds, height=24, width=32, output_type="latent")
+
+
+def test_shared_tensors_stay_inside_one_data_parallel_replica(monkeypatch):
+    sent = {}
+
+    class _Group:
+        def __init__(self, world_size):
+            self.world_size = world_size
+
+        def broadcast(self, tensor, src):
+            sent["src"] = src
+            return tensor + 1
+
+    monkeypatch.setattr(
+        "xfuser.model_executor.pipelines.pipeline_moss_image._parallel_ready",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "xfuser.core.distributed.get_model_replica_group",
+        lambda: _Group(4),
+    )
+
+    def _world_group():
+        raise AssertionError("world group")
+
+    monkeypatch.setattr("xfuser.core.distributed.get_world_group", _world_group)
+
+    shared = _share_from_rank0(torch.zeros(1))
+
+    assert sent == {"src": 0}
+    assert shared.item() == 1
+    assert _share_from_rank0(None) is None
+    monkeypatch.setattr("xfuser.core.distributed.get_model_replica_group", lambda: _Group(1))
+    assert _share_from_rank0(torch.zeros(1)) is None

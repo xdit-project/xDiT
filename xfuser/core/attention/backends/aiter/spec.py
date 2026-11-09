@@ -4,7 +4,7 @@ from xfuser.core.attention.constraints import ANY_CALL
 from xfuser.core.attention.requirements import ALWAYS, ARCH, SYMBOL
 from xfuser.core.attention.spec import AttentionBackendType, Impl, Spec
 
-AITER_ARCH = ARCH("gfx942", "gfx950", "gfx1200", "gfx1201")
+AITER_ARCH = ARCH("gfx942", "gfx950", "gfx1200", "gfx1201", "gfx1250")
 
 SPECS = [
     Spec(

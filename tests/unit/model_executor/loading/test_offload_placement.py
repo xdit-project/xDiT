@@ -15,7 +15,7 @@ from xfuser.model_executor.models.runner_models import base_model
 from xfuser.model_executor.models.runner_models.base_model import xFuserModel
 from xfuser.model_executor.models.runner_models.loading import transformer_load
 from xfuser.model_executor.models.runner_models.loading import (  # noqa: F401
-    backends,
+    backend_adapters,
 )
 from xfuser.model_executor.models.runner_models.loading.quant_adapter import (
     FormatCapability,

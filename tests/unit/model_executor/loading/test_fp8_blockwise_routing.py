@@ -343,7 +343,7 @@ def test_no_adapter_streams_under_the_hybrid_schedule():
     format streamed instead, and the schedule the run asked for was silently
     never built."""
     from xfuser.model_executor.models.runner_models.loading import quant_adapter
-    from xfuser.model_executor.models.runner_models.loading import backends  # noqa: F401
+    from xfuser.model_executor.models.runner_models.loading import backend_adapters  # noqa: F401
     from xfuser.model_executor.models.runner_models.loading.contracts import (
         QuantizationBackend,
         QuantizationFormat,

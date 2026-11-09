@@ -205,7 +205,7 @@ def test_wan_mxfp6_declaration_keeps_existing_load_modes():
 
 
 def test_aiter_mxfp6_probe_requires_gfx950(monkeypatch):
-    from xfuser.model_executor.models.runner_models.loading import backends
+    from xfuser.model_executor.models.runner_models.loading import backend_capabilities as backends
 
     api = SimpleNamespace(
         quant_mxfp6_gemm=lambda value: value,

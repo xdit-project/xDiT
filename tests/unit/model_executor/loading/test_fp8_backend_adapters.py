@@ -9,7 +9,9 @@ from types import SimpleNamespace
 import pytest
 
 ROOT = Path(__file__).resolve().parents[4]
-BACKENDS_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/backends.py"
+LOADING_DIR = ROOT / "xfuser/model_executor/models/runner_models/loading"
+CAPABILITIES_PATH = LOADING_DIR / "backend_capabilities.py"
+ADAPTERS_PATH = LOADING_DIR / "backend_adapters.py"
 CONTRACTS_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/contracts.py"
 ADAPTER_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/quant_adapter.py"
 
@@ -24,7 +26,7 @@ _PKG = "fp8_adapter_pkg"
 def _package():
     if _PKG not in sys.modules:
         package = importlib.util.module_from_spec(importlib.machinery.ModuleSpec(_PKG, None, is_package=True))
-        package.__path__ = [str(BACKENDS_PATH.parent)]
+        package.__path__ = [str(LOADING_DIR)]
         sys.modules[_PKG] = package
     return sys.modules[_PKG]
 
@@ -42,7 +44,10 @@ def _load_module(path, name):
 def modules():
     contracts = _load_module(CONTRACTS_PATH, "contracts")
     adapter = _load_module(ADAPTER_PATH, "quant_adapter")
-    backends = _load_module(BACKENDS_PATH, "fp8_adapter_backends")
+    backends = _load_module(CAPABILITIES_PATH, "backend_capabilities")
+    # Loaded for its registrations: `build_adapter` reads the registry the
+    # adapter classes fill as they are defined.
+    _load_module(ADAPTERS_PATH, "backend_adapters")
     return SimpleNamespace(contracts=contracts, backends=backends, adapter=adapter)
 
 
@@ -338,8 +343,6 @@ def test_derive_exclusions_preserves_only_declared_target_prefixes(modules):
 
 
 def test_missing_target_makes_native_mapping_unavailable(modules):
-    b = modules.backends
-
     class FakeModel:
         def named_modules(self):
             return [("", object()), ("input_proj", "linear")]
@@ -347,7 +350,7 @@ def test_missing_target_makes_native_mapping_unavailable(modules):
         def get_submodule(self, name):
             raise AttributeError(name)
 
-    with pytest.raises(b.TargetMappingUnavailable, match="missing"):
+    with pytest.raises(modules.adapter.TargetMappingUnavailable, match="missing"):
         modules.adapter.derive_linear_ownership(
             FakeModel(),
             ("missing",),

@@ -9,7 +9,9 @@ from types import SimpleNamespace
 import pytest
 
 ROOT = Path(__file__).resolve().parents[4]
-BACKENDS_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/backends.py"
+LOADING_DIR = ROOT / "xfuser/model_executor/models/runner_models/loading"
+CAPABILITIES_PATH = LOADING_DIR / "backend_capabilities.py"
+ADAPTERS_PATH = LOADING_DIR / "backend_adapters.py"
 CONTRACTS_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/contracts.py"
 ADAPTER_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/quant_adapter.py"
 SELECTION_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/backend_selection.py"
@@ -27,7 +29,7 @@ _PKG = "format_adapter_pkg"
 def _package():
     if _PKG not in sys.modules:
         package = importlib.util.module_from_spec(importlib.machinery.ModuleSpec(_PKG, None, is_package=True))
-        package.__path__ = [str(BACKENDS_PATH.parent)]
+        package.__path__ = [str(LOADING_DIR)]
         sys.modules[_PKG] = package
     return sys.modules[_PKG]
 
@@ -45,7 +47,8 @@ def _load_module(path, name):
 def modules():
     contracts = _load_module(CONTRACTS_PATH, "contracts")
     adapter = _load_module(ADAPTER_PATH, "quant_adapter")
-    backends = _load_module(BACKENDS_PATH, "format_adapter_backends")
+    backends = _load_module(CAPABILITIES_PATH, "backend_capabilities")
+    adapters = _load_module(ADAPTERS_PATH, "backend_adapters")
     selection = _load_module(SELECTION_PATH, "backend_selection")
     text_encoder = _load_module(TEXT_ENCODER_PATH, "text_encoder_adapter")
     # By path like the rest: importing xfuser.config.gemm would execute the
@@ -55,6 +58,7 @@ def modules():
     return SimpleNamespace(
         contracts=contracts,
         backends=backends,
+        adapters=adapters,
         adapter=adapter,
         fp8=backends,
         selection=selection,
@@ -158,7 +162,7 @@ def test_rocm_aiter_mxfp4_hybrid_remains_supported(modules):
 
     adapter = modules.adapter.build_adapter("fp4", "aiter", capability=capabilities.of("fp4", "aiter"), hybrid=True)
 
-    assert isinstance(adapter, b.AiterMxfp4BackendAdapter)
+    assert isinstance(adapter, modules.adapters.AiterMxfp4BackendAdapter)
 
     # The high half of a tiered FP4 profile arrives through the registry
     # rather than through a flag on the low one, so A6W4 is built like any
@@ -171,7 +175,7 @@ def test_rocm_aiter_mxfp4_hybrid_remains_supported(modules):
         a6w4_probe=lambda: (True, None),
     )
     companion = modules.adapter.build_adapter("a6w4", "aiter", capability=a6w4_capabilities.of("a6w4", "aiter"))
-    assert isinstance(companion, b.AiterA6W4BackendAdapter)
+    assert isinstance(companion, modules.adapters.AiterA6W4BackendAdapter)
     assert companion.builds_one_layer()
     # ...and cannot lead one: the kernel pairs a leaf's FP4 weight with its own
     # FP6 activation, leaving no seam to hang a second layer on.
@@ -310,8 +314,6 @@ def test_aiter_mxfp4_capability_preserves_symbol_probe_reason(modules):
 
 
 def test_int8_exclusions_preserve_targets_and_minimum_layer_size(modules):
-    b = modules.backends
-
     class Linear:
         def __init__(self, in_features, out_features):
             self.in_features = in_features
@@ -332,7 +334,7 @@ def test_int8_exclusions_preserve_targets_and_minimum_layer_size(modules):
                 return object()
             raise AttributeError(name)
 
-    exclusions = b.derive_linear_exclusions(
+    exclusions = modules.adapter.derive_linear_exclusions(
         FakeModel(),
         ("blocks",),
         min_layer_size=512,
@@ -362,8 +364,6 @@ def test_module_path_overlap_is_ancestor_aware_and_boundary_safe(
 
 
 def test_component_root_target_preserves_int8_minimum_size_exclusions(modules):
-    b = modules.backends
-
     class Linear:
         def __init__(self, in_features, out_features):
             self.in_features = in_features
@@ -382,7 +382,7 @@ def test_component_root_target_preserves_int8_minimum_size_exclusions(modules):
                 return self
             raise AttributeError(name)
 
-    exclusions = b.derive_linear_exclusions(
+    exclusions = modules.adapter.derive_linear_exclusions(
         FakeModel(),
         ("",),
         min_layer_size=512,
@@ -393,8 +393,7 @@ def test_component_root_target_preserves_int8_minimum_size_exclusions(modules):
 
 
 def test_component_root_target_aligns_with_blockwise_wrapped_paths(modules):
-    b = modules.backends
-    adapter = b.TorchaoInt8BackendAdapter(
+    adapter = modules.adapters.TorchaoInt8BackendAdapter(
         backend=modules.contracts.QuantizationBackend.TORCHAO,
         format_=modules.contracts.QuantizationFormat.INT8,
     )
@@ -411,10 +410,9 @@ def test_component_root_target_aligns_with_blockwise_wrapped_paths(modules):
 
 
 def test_eager_blockwise_fallback_accepts_owned_single_rank_target(modules):
-    b = modules.backends
     prepared = SimpleNamespace(descriptor=SimpleNamespace(materialization_mode="post_load", fills_blocks_locally=True))
 
-    plan = b.plan_eager_blockwise_fallback(
+    plan = modules.adapter.plan_eager_blockwise_fallback(
         prepared=prepared,
         targets=("blocks",),
         wrap_attrs=("blocks",),
@@ -446,7 +444,7 @@ def test_eager_blockwise_fallback_rejects_unsafe_plan(
     standard,
     offload,
 ):
-    plan = modules.backends.plan_eager_blockwise_fallback(
+    plan = modules.adapter.plan_eager_blockwise_fallback(
         prepared=SimpleNamespace(
             descriptor=SimpleNamespace(materialization_mode=prepared_mode, fills_blocks_locally=True)
         ),
@@ -462,8 +460,7 @@ def test_eager_blockwise_fallback_rejects_unsafe_plan(
 
 
 def test_nvfp4_native_streaming_excludes_only_precision_overrides(modules, monkeypatch):
-    b = modules.backends
-    adapter = b.TorchaoNvfp4BackendAdapter(
+    adapter = modules.adapters.TorchaoNvfp4BackendAdapter(
         backend=modules.contracts.QuantizationBackend.TORCHAO,
         format_=modules.contracts.QuantizationFormat.FP4,
         native_transformer_streaming=True,
@@ -545,8 +542,7 @@ def test_native_streaming_rejects_hybrid_ownership(modules, adapter_name, backen
     is format-specific, and while it was a per-adapter declaration the other
     low formats streamed and built no pair at all.
     """
-    b = modules.backends
-    adapter = getattr(b, adapter_name)(
+    adapter = getattr(modules.adapters, adapter_name)(
         backend=getattr(modules.contracts.QuantizationBackend, backend_name),
         format_=getattr(modules.contracts.QuantizationFormat, format_name),
         native_transformer_streaming=True,
@@ -566,11 +562,10 @@ def test_native_streaming_rejects_hybrid_ownership(modules, adapter_name, backen
 
 
 def test_mxfp4_never_claims_per_weight_streaming(modules):
-    b = modules.backends
-    adapter = b.AiterMxfp4BackendAdapter(
+    adapter = modules.adapters.AiterMxfp4BackendAdapter(
         backend=modules.contracts.QuantizationBackend.AITER,
         format_=modules.contracts.QuantizationFormat.FP4,
-        native_unavailable_reason=b.MXFP4_STREAMING_FALLBACK,
+        native_unavailable_reason=modules.adapters.MXFP4_STREAMING_FALLBACK,
     )
 
     prepared = modules.adapter.prepare_native_load(
@@ -587,8 +582,7 @@ def test_mxfp4_never_claims_per_weight_streaming(modules):
 
 
 def test_descriptor_declares_storage_sharding_and_trainability(modules):
-    b = modules.backends
-    adapter = b.AiterMxfp4BackendAdapter(
+    adapter = modules.adapters.AiterMxfp4BackendAdapter(
         backend=modules.contracts.QuantizationBackend.AITER,
         format_=modules.contracts.QuantizationFormat.FP4,
     )
@@ -695,8 +689,7 @@ def test_an_implementation_with_no_single_leaf_seam_is_still_refused(modules):
 
 def test_a_companion_reaches_the_converter_rather_than_being_dropped(modules):
     """A dropped companion would silently lose the run's second precision."""
-    b = modules.backends
-    adapter = b.TorchaoNvfp4BackendAdapter(
+    adapter = modules.adapters.TorchaoNvfp4BackendAdapter(
         backend=modules.contracts.QuantizationBackend.TORCHAO,
         format_=modules.contracts.QuantizationFormat.FP4,
     )

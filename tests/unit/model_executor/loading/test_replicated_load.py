@@ -35,7 +35,7 @@ _CARVED = GemmTargets(
 )
 from xfuser.model_executor.models.runner_models.loading import (
     quant_adapter,
-    backends,
+    backend_adapters,
     meta_load,
     text_encoder_plan,
     transformer_load,
@@ -977,7 +977,7 @@ def test_eager_post_load_fallback_builds_meta_for_local_block_fill(monkeypatch):
         QuantizationFormat,
     )
 
-    adapter = backends.AiterMxfp4BackendAdapter(
+    adapter = backend_adapters.AiterMxfp4BackendAdapter(
         backend=QuantizationBackend.AITER,
         format_=QuantizationFormat.FP4,
         native_unavailable_reason="requires full-precision block",
@@ -1067,10 +1067,10 @@ def test_build_transformer_streams_native_fp4_and_int8_configs(
         QuantizationFormat,
     )
     from xfuser.model_executor.models.runner_models.loading import (
-        backends,
+        backend_adapters,
     )
 
-    adapter = getattr(backends, adapter_name)(
+    adapter = getattr(backend_adapters, adapter_name)(
         backend=QuantizationBackend.TORCHAO,
         format_=getattr(QuantizationFormat, format_name),
         native_transformer_streaming=True,
@@ -1126,7 +1126,7 @@ def test_build_transformer_records_only_streamed_nvfp4_leaves(monkeypatch):
         QuantizationFormat,
     )
 
-    adapter = backends.TorchaoNvfp4BackendAdapter(
+    adapter = backend_adapters.TorchaoNvfp4BackendAdapter(
         backend=QuantizationBackend.TORCHAO,
         format_=QuantizationFormat.FP4,
         native_transformer_streaming=True,
@@ -1328,7 +1328,7 @@ def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
         return prepared[component_name]
 
     monkeypatch.setattr(
-        "xfuser.model_executor.models.runner_models.loading.backends.prepare_text_encoder_load",
+        "xfuser.model_executor.models.runner_models.loading.quant_adapter.prepare_text_encoder_load",
         prepare,
     )
     monkeypatch.setattr(
@@ -1395,7 +1395,7 @@ def test_a_non_fp8_run_still_stores_the_encoder_at_fp8(monkeypatch):
         _loader=SimpleNamespace(build_meta_component=lambda name, fp8=False: object()),
     )
     monkeypatch.setattr(
-        "xfuser.model_executor.models.runner_models.loading.backends.prepare_text_encoder_load",
+        "xfuser.model_executor.models.runner_models.loading.quant_adapter.prepare_text_encoder_load",
         lambda adapter, **kwargs: SimpleNamespace(
             descriptor=SimpleNamespace(
                 materialization_mode="post_load",
@@ -1457,7 +1457,7 @@ def test_hybrid_meta_te_uses_the_fp8_adapter(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "xfuser.model_executor.models.runner_models.loading.backends.prepare_text_encoder_load",
+        "xfuser.model_executor.models.runner_models.loading.quant_adapter.prepare_text_encoder_load",
         prepare,
     )
     monkeypatch.setattr(text_encoder_plan, "log", lambda message: None)
@@ -1498,7 +1498,7 @@ def test_meta_te_placement_disables_torchao_native_pipeline_streaming(
         )
 
     monkeypatch.setattr(
-        "xfuser.model_executor.models.runner_models.loading.backends.prepare_text_encoder_load",
+        "xfuser.model_executor.models.runner_models.loading.quant_adapter.prepare_text_encoder_load",
         prepare,
     )
     monkeypatch.setattr(text_encoder_plan, "log", lambda message: None)
@@ -1548,7 +1548,7 @@ def test_a_blockwise_filled_text_encoder_needs_no_post_load_fallback(monkeypatch
     )
 
     monkeypatch.setattr(
-        "xfuser.model_executor.models.runner_models.loading.backends.prepare_text_encoder_load",
+        "xfuser.model_executor.models.runner_models.loading.quant_adapter.prepare_text_encoder_load",
         lambda *a, **k: pytest.fail("a blockwise-filled encoder was routed to the whole-encoder rank0 load"),
     )
     monkeypatch.setattr(text_encoder_plan, "log", lambda message: None)
@@ -1582,7 +1582,7 @@ def test_meta_fsdp_rejects_text_encoder_post_load_fallback(monkeypatch):
         pytest.fail("memory-efficient FSDP incorrectly allowed post-load")
 
     monkeypatch.setattr(
-        "xfuser.model_executor.models.runner_models.loading.backends.prepare_text_encoder_load",
+        "xfuser.model_executor.models.runner_models.loading.quant_adapter.prepare_text_encoder_load",
         prepare,
     )
 

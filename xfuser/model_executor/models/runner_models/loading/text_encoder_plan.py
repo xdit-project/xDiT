@@ -60,7 +60,7 @@ def plan_text_encoders(loader, existing_quantization_config=None):
         )
         if not targets:
             continue
-        from .backends import prepare_text_encoder_load
+        from .quant_adapter import prepare_text_encoder_load
 
         # The plan's answer, not this route's own. The plan already knows the
         # encoder's loaders carry one format and has pinned it, so asking is

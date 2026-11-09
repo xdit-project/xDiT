@@ -298,7 +298,7 @@ def test_the_parser_knows_exactly_the_formats_the_registry_does():
 def test_every_known_format_has_a_registered_adapter():
     """And every name the registry offers is a pair something implements."""
     from xfuser.model_executor.models.runner_models.loading import (  # noqa: F401
-        backends,
+        backend_adapters,
     )
     from xfuser.model_executor.models.runner_models.loading.backend_selection import (
         _IMPL_PREFERENCE,

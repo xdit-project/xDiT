@@ -10,7 +10,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[4]
 ADAPTER_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/text_encoder_adapter.py"
-BACKENDS_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/backends.py"
+LOADING_DIR = ROOT / "xfuser/model_executor/models/runner_models/loading"
+ADAPTERS_PATH = LOADING_DIR / "backend_adapters.py"
 CONTRACTS_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/contracts.py"
 QUANT_ADAPTER_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/quant_adapter.py"
 
@@ -25,7 +26,7 @@ _PKG = "te_framework_pkg"
 def _package():
     if _PKG not in sys.modules:
         package = importlib.util.module_from_spec(importlib.machinery.ModuleSpec(_PKG, None, is_package=True))
-        package.__path__ = [str(BACKENDS_PATH.parent)]
+        package.__path__ = [str(LOADING_DIR)]
         sys.modules[_PKG] = package
     return sys.modules[_PKG]
 
@@ -42,10 +43,14 @@ def _load_module(path, name):
 
 @pytest.fixture(scope="module")
 def modules():
+    quant = _load_module(QUANT_ADAPTER_PATH, "quant_adapter")
+    # After `quant`, and for its registrations: `build_adapter` reads the
+    # registry the adapter classes fill as they are defined, and loading them
+    # first would fill a copy that loading `quant` then replaces.
+    _load_module(ADAPTERS_PATH, "backend_adapters")
     return SimpleNamespace(
-        quant=_load_module(QUANT_ADAPTER_PATH, "quant_adapter"),
+        quant=quant,
         adapter=_load_module(ADAPTER_PATH, "te_framework_adapter"),
-        backends=_load_module(BACKENDS_PATH, "te_framework_backends"),
         contracts=_load_module(CONTRACTS_PATH, "te_framework_contracts"),
     )
 
@@ -178,7 +183,7 @@ def test_combined_mapping_rejects_component_overwrite(modules):
 
 
 def test_torchao_te_native_plan_derives_safe_negative_mapping(modules, monkeypatch):
-    b = modules.backends
+    b = modules.quant
     adapter = _backend(
         modules,
         "TORCHAO",
@@ -216,7 +221,7 @@ def test_torchao_te_native_plan_derives_safe_negative_mapping(modules, monkeypat
 
 
 def test_transformers_4_aiter_falls_back_to_post_load(modules):
-    b = modules.backends
+    b = modules.quant
     adapter = _backend(
         modules,
         "AITER",
@@ -238,7 +243,7 @@ def test_transformers_4_aiter_falls_back_to_post_load(modules):
 
 
 def test_transformers_4_raises_before_allocation_without_post_load(modules):
-    b = modules.backends
+    b = modules.quant
     adapter = _backend(
         modules,
         "AITER",
@@ -256,7 +261,7 @@ def test_transformers_4_raises_before_allocation_without_post_load(modules):
 
 
 def test_missing_te_target_never_quantizes_all_linears(modules, monkeypatch):
-    b = modules.backends
+    b = modules.quant
     adapter = _backend(
         modules,
         "TORCHAO",

@@ -97,7 +97,7 @@ class QuantizationBackends:
         targets still gets a truthful answer about what it asked for.
         """
 
-        from .backends import probe_backend_capabilities
+        from .backend_capabilities import probe_backend_capabilities
 
         return probe_backend_capabilities(wanted=self._formats_requested())
 
@@ -125,7 +125,7 @@ class QuantizationBackends:
 
         # Imported for its registrations: each adapter class registers the
         # one pair it stores as it is defined.
-        from . import backends  # noqa: F401
+        from . import backend_adapters  # noqa: F401
         from .contracts import UnsupportedLoadContract
         from .quant_adapter import build_adapter, validate_fsdp_placement
 

@@ -34,6 +34,14 @@ class QuantizationBackend(str, Enum):
     TORCHAO = "torchao"
 
 
+#: The two FP8 implementations, spelled as QuantizationBackend values so a
+#: caller maps the answer onto its own enum without a second table. Here
+#: rather than beside either of them, so the probes and the adapters name the
+#: same implementation without one importing the other.
+AITER_FP8 = QuantizationBackend.AITER.value
+TORCHAO_FP8 = QuantizationBackend.TORCHAO.value
+
+
 class MaterializationMode(str, Enum):
     EAGER = "eager"
     FSDP_META = "fsdp_meta"

@@ -490,7 +490,7 @@ class ModelLoader:
     def plan_eager_blockwise_fallback(self, prepared, targets, wrap_attrs):
         """Return the component-level local fallback decision."""
 
-        from .backends import plan_eager_blockwise_fallback
+        from .quant_adapter import plan_eager_blockwise_fallback
 
         config = self.model.config
         offload_requested = any(

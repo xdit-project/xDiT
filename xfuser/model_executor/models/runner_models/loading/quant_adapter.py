@@ -14,6 +14,13 @@ layer each adapter finally installs.
 ``materialization_mode`` is *derived*, not declared. It follows from what the
 implementation can do, what the run needs, and whether the declaration narrows
 to particular leaves -- see ``prepare_native_load``.
+
+The concrete classes live in ``backend_adapters`` and the probes that say what
+this machine can store live in ``backend_capabilities``. What stays here is
+what reads the same for every one of them: the base class, the registry, the
+path helpers, and the load seams -- ``prepare_native_load``,
+``prepare_text_encoder_load`` and ``plan_eager_blockwise_fallback`` -- which
+ask an adapter what it can do rather than knowing which one they hold.
 """
 
 from dataclasses import dataclass, field
@@ -106,7 +113,7 @@ def text_encoder_formats() -> Tuple[str, ...]:
     """
 
     # Imported for their registrations, the same way `_select` does it.
-    from . import backends  # noqa: F401
+    from . import backend_adapters  # noqa: F401
     from .contracts import IMPL_PREFERENCE
 
     return tuple(
@@ -561,3 +568,127 @@ def describe_blockwise_load(
             "quantization targets do not align with streamed transformer blocks",
         )
     return descriptor_for(adapter, component_name, "blockwise")
+
+
+@dataclass(frozen=True)
+class EagerBlockwisePlan:
+    enabled: bool
+    reason: str | None = None
+
+
+def derive_linear_exclusions(
+    model,
+    targets,
+    *,
+    min_layer_size: int = 0,
+    is_linear=None,
+) -> list[str]:
+    """Translate positive target prefixes and size gates to Diffusers exclusions."""
+
+    ownership = derive_linear_ownership(
+        model,
+        targets,
+        min_layer_size=min_layer_size,
+        is_linear=is_linear,
+    )
+    return list(ownership.exclusions)
+
+
+def plan_eager_blockwise_fallback(
+    *,
+    prepared,
+    targets,
+    wrap_attrs,
+    world_size: int,
+    standard_loader: bool,
+    offload_requested: bool,
+) -> EagerBlockwisePlan:
+    """Decide whether an eager post-load fallback can use local block filling."""
+
+    if prepared.descriptor.materialization_mode != "post_load":
+        return EagerBlockwisePlan(False, "native loading already owns materialization")
+    if not prepared.descriptor.fills_blocks_locally:
+        return EagerBlockwisePlan(False, "this format requires ordinary eager post-load conversion")
+    if world_size != 1:
+        return EagerBlockwisePlan(False, "local blockwise loading requires one rank")
+    if not standard_loader:
+        return EagerBlockwisePlan(False, "loader does not expose the standard checkpoint seam")
+    if offload_requested:
+        return EagerBlockwisePlan(False, "local blockwise loading does not support offload")
+    targets = tuple(targets)
+    wrap_attrs = tuple(wrap_attrs)
+    if not targets or not wrap_attrs:
+        return EagerBlockwisePlan(False, "quantization targets or wrap attributes are empty")
+    if not all(any(module_path_is_covered(target, attr) for attr in wrap_attrs) for target in targets):
+        return EagerBlockwisePlan(
+            False,
+            "quantization targets are not fully owned by streamed transformer blocks",
+        )
+    return EagerBlockwisePlan(True)
+
+
+def prepare_text_encoder_load(
+    adapter,
+    *,
+    component_name: str,
+    targets,
+    model_factory=None,
+    stream_quant: bool = True,
+    supports_post_load: bool | None = None,
+    framework_config_factory=None,
+) -> PreparedQuantLoad:
+    """Plan one TE load, keeping framework construction behind its adapter."""
+
+    targets = tuple(targets)
+    label = adapter.format.value.upper()
+    if not targets:
+        fallback = f"{component_name} has no {label} targets"
+    elif not stream_quant:
+        fallback = "streaming disabled by the runner"
+    elif not adapter.uses_native_text_encoder_streaming:
+        fallback = (
+            adapter.text_encoder_unavailable_reason or "text-encoder framework quantize-on-load API is unavailable"
+        )
+    else:
+        try:
+            exclusions = ()
+            if adapter.streams_by_exclusion:
+                if model_factory is None:
+                    raise TargetMappingUnavailable("target mapping unavailable: no text-encoder structure factory")
+                try:
+                    model = model_factory()
+                except Exception as exc:
+                    raise TargetMappingUnavailable(f"target mapping unavailable: {type(exc).__name__}: {exc}") from exc
+                exclusions = derive_linear_ownership(model, targets).exclusions
+            if framework_config_factory is None:
+                from .text_encoder_adapter import TextEncoderFrameworkAdapter
+
+                framework = TextEncoderFrameworkAdapter()
+
+                def framework_config_factory(backend, targets, exclusions):
+                    return framework.component_quantization_config(
+                        backend=backend,
+                        targets=targets,
+                        exclusions=exclusions,
+                    )
+
+            config = framework_config_factory(
+                adapter.backend.value,
+                targets,
+                exclusions,
+            )
+        except TargetMappingUnavailable as exc:
+            fallback = str(exc)
+        except Exception as exc:
+            fallback = f"text-encoder framework config unavailable: {type(exc).__name__}: {exc}"
+        else:
+            return PreparedQuantLoad(
+                descriptor=descriptor_for(adapter, component_name, "streaming"),
+                quantization_config=config,
+            )
+
+    if supports_post_load is None:
+        supports_post_load = adapter.supports_text_encoder_post_load
+    if targets and not supports_post_load:
+        raise RuntimeError(f"{component_name} {label} cannot fall back before allocation: {fallback}")
+    return PreparedQuantLoad(descriptor=descriptor_for(adapter, component_name, "post_load", fallback))

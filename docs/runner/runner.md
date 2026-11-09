@@ -330,8 +330,13 @@ keeps layers 0-9 and 54-63, and both MiniMax-H3 runners keep the `attn.to_out.0`
 `ff.net.2`, and `adaln_proj.linear` leaves. Wan 2.2 I2V and T2V declare no block
 overrides at all. A model declares these as `keep_high`, which is inert under a
 single-format profile and names the better half under a tiered one. The
-`gemm_high_precision_*` keys in a `--gemm_config` file replace the declared
-module, prefix or suffix list rather than adding to it.
+`gemm_high_precision_module_patterns`, `..._prefix_patterns` and
+`..._suffix_patterns` keys in a `--gemm_config` file add to the declared
+`keep_high` selection. To replace it instead, set `gemm_high_precision_targets:
+none` in the same file, which empties the declaration before the patterns are
+added. All three pattern kinds name absolute pipeline paths, matched on segment
+boundaries, so a prefix is written `transformer.blocks.3` rather than as a
+block-relative index.
 
 #### Flag Combinations and Exclusions
 

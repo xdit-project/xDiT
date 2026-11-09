@@ -320,6 +320,11 @@ def _out_copies(g, ex, gi, outbox, elt):
     ]
 
 
+def host_issued() -> bool:
+    """Whether the transport queues its copies from the host, so a CUDA graph would not replay them."""
+    return transport.PeerGroup.host_issued
+
+
 def begin(process_group: dist.ProcessGroup, exchange: Exchange, rccl: bool = False) -> None:
     """Open a call on `process_group`. With `rccl`, or while a CUDA graph is being captured and
     the transport issues its copies from the host (a graph would not replay them), the call
@@ -330,7 +335,7 @@ def begin(process_group: dist.ProcessGroup, exchange: Exchange, rccl: bool = Fal
     world = dist.get_world_size(process_group)
     if exchange.world != world:
         raise ValueError(f"exchange for {exchange.world} ranks on a group of {world}")
-    if rccl or (transport.PeerGroup.host_issued and torch.cuda.is_current_stream_capturing()):
+    if rccl or (host_issued() and torch.cuda.is_current_stream_capturing()):
         state.open = _Call(exchange, None)
         return
     state.open = _Call(exchange, transport.group_for(process_group).begin())

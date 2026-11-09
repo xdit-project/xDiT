@@ -197,3 +197,75 @@ def test_attention_a2a_and_the_sdma_transport_exclude_each_other():
     with pytest.raises(ValueError, match="mutually exclusive"):
         xFuserArgs(ulysses_a2a="sdma", **common)
     assert xFuserArgs(**common).attention_a2a == "mxfp8-e4m3"
+
+
+def _ulysses_a2a(monkeypatch, mode, head_groups, overlap_qkv=False, world=8):
+    """A runtime state holding only the Ulysses all-to-all options, on `world` Ulysses ranks."""
+    from types import SimpleNamespace
+
+    from xfuser.config.ulysses_a2a import UlyssesA2AConfig
+    from xfuser.core.distributed import runtime_state
+
+    config = UlyssesA2AConfig(mode, head_groups, overlap_qkv=overlap_qkv)
+    monkeypatch.setattr(runtime_state, "_RUNTIME", SimpleNamespace(runtime_config=SimpleNamespace(ulysses_a2a=config)))
+    monkeypatch.setattr(usp_sdma, "get_ulysses_parallel_world_size", lambda: world)
+
+
+def _pipe_with_attention(*qk_first):
+    from types import SimpleNamespace
+
+    transformer = torch.nn.Module()
+    for index, flag in enumerate(qk_first):
+        module = torch.nn.Module()
+        module.processor = SimpleNamespace(qk_first=flag)
+        transformer.add_module(f"attn{index}", module)
+    return SimpleNamespace(transformer=transformer)
+
+
+@pytest.mark.parametrize("cpu_offload", [False, True])
+def test_grouped_qkv_weights_are_not_made_under_cpu_offload(monkeypatch, cpu_offload):
+    """Offload hooks set up before the copies would never move them to the device."""
+    _ulysses_a2a(monkeypatch, "sdma", 2, overlap_qkv=True)
+    calls, logged = [], []
+    monkeypatch.setattr(usp_sdma, "prepare_grouped_qkv", lambda component, world: calls.append(world) or 1)
+    monkeypatch.setattr(usp_sdma, "log", lambda message, **kwargs: logged.append(message))
+    usp_sdma.prepare(_pipe_with_attention(), ["transformer", "vae"], cpu_offload=cpu_offload)
+    assert calls == ([] if cpu_offload else [8])
+    assert any("ignored with CPU offload" in m for m in logged) == cpu_offload
+
+
+@pytest.mark.parametrize(
+    ("mode", "overlap_qkv", "world"), [("sdma", False, 8), ("default", True, 8), ("sdma", True, 1)]
+)
+def test_nothing_is_prepared_without_the_overlap(monkeypatch, mode, overlap_qkv, world):
+    _ulysses_a2a(monkeypatch, mode, 2, overlap_qkv=overlap_qkv, world=world)
+    calls = []
+    monkeypatch.setattr(usp_sdma, "prepare_grouped_qkv", lambda component, world: calls.append(world) or 1)
+    usp_sdma.prepare(_pipe_with_attention(), ["transformer"], cpu_offload=False)
+    assert calls == []
+
+
+def test_q_k_first_modules_are_reported_with_their_one_head_group(monkeypatch):
+    """Their self-attention ignores --ulysses_sdma_head_groups; the runner says so once."""
+    _ulysses_a2a(monkeypatch, "sdma", 2, overlap_qkv=True)
+    monkeypatch.setattr(usp_sdma, "prepare_grouped_qkv", lambda component, world: 0)
+    logged = []
+    monkeypatch.setattr(usp_sdma, "log", lambda message, **kwargs: logged.append(message))
+    usp_sdma.prepare(_pipe_with_attention(True, False), ["transformer"], cpu_offload=False)
+    assert any("1 attention modules send Q/K before projecting V" in m for m in logged), logged
+
+
+@pytest.mark.parametrize(
+    ("mode", "transport", "world", "expected"),
+    [
+        ("reduce-overhead", "sdma", 8, "default"),
+        ("max-autotune", "sdma", 8, "max-autotune-no-cudagraphs"),
+        ("default", "sdma", 8, "default"),
+        ("reduce-overhead", "sdma", 1, "reduce-overhead"),
+        ("reduce-overhead", "packed", 8, "reduce-overhead"),
+        ("reduce-overhead", "default", 8, "reduce-overhead"),
+    ],
+)
+def test_host_issued_copies_compile_without_cuda_graphs(monkeypatch, mode, transport, world, expected):
+    _ulysses_a2a(monkeypatch, transport, 2, world=world)
+    assert usp_sdma.compile_mode(mode) == expected

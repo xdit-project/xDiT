@@ -293,9 +293,10 @@ The exchange covers joint text in front of or behind the sequence,
 grouped-query K/V and extra per-head inputs. Calls it does not cover stay on
 the default all-to-all with a warning: ring attention, FP8 communication, PipeFusion KV cache,
 head balancing, sparse backends, attention masks, and a trailing sequence-parallel
-pad behind rear joint tensors. Runners compile without CUDA graphs while the
-SDMA path is selected, because host-issued copies would not be replayed.
-The `--ulysses_sdma_*` options need `--ulysses_a2a sdma`, and `--ulysses_a2a sdma`
+pad behind rear joint tensors. The copies are issued from the host, so a
+captured CUDA graph would not replay them: runners compile the transformer
+without CUDA graphs while the path is selected, and the other components, such
+as the VAE, keep theirs. The `--ulysses_sdma_*` options need `--ulysses_a2a sdma`, and `--ulysses_a2a sdma`
 excludes `--attention_a2a`.
 
 The gain is the part of the exchange RCCL leaves exposed. Where RCCL already

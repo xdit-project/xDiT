@@ -822,41 +822,30 @@ def USP(
 
     extra_inputs = _ulysses_extra_inputs(attention_kwargs, query)
 
-    if usp_sdma.selected() and ulysses_world_size > 1:
-        reason = usp_sdma.unsupported_reason(
+    if usp_sdma.selected():
+        out = usp_sdma.run(
             query,
             key,
             value,
+            group=PROCESS_GROUP.ULYSSES_PG,
             backend=hb_backend,
-            ring_world_size=ring_world_size,
-            joint_strategy=joint_strategy,
-            fp8_comms=fp8_comms,
+            dropout_p=dropout_p,
+            is_causal=is_causal,
+            attention_kwargs=attention_kwargs,
             extra_inputs=extra_inputs,
+            joint_key=joint_key,
+            joint_value=joint_value,
+            joint_strategy=joint_strategy,
+            kv_head_repeat=kv_head_repeat,
+            ring_world_size=ring_world_size,
+            fp8_comms=fp8_comms,
             has_kv_cache=_has_kv_cache(attn_layer),
             head_balanced=hb_applied,
-            attention_kwargs=attention_kwargs,
-            is_causal=is_causal,
         )
-        if reason is None:
-            out = usp_sdma.attention(
-                query,
-                key,
-                value,
-                backend=hb_backend,
-                dropout_p=dropout_p,
-                is_causal=is_causal,
-                attention_kwargs=attention_kwargs,
-                group=PROCESS_GROUP.ULYSSES_PG,
-                extra_inputs=extra_inputs,
-                joint_key=joint_key if joint_strategy else None,
-                joint_value=joint_value if joint_strategy else None,
-                joint_strategy=joint_strategy,
-                kv_head_repeat=kv_head_repeat,
-            )
+        if out is not None:
             if fp8_module is not None and not joint_strategy:
                 fp8_observe_output(runtime_state.fp8_comms, fp8_module, out, False)
             return out
-        usp_sdma.warn_fallback(reason)
 
     qkv_amaxes = None
     if ulysses_world_size > 1:

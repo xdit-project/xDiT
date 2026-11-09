@@ -495,11 +495,20 @@ def _cuda_graph_worker(rank, world_size, init_method):
     import torch.distributed as dist
 
     from xfuser.core.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
+    from xfuser.core.distributed.sdma import transport
     from xfuser.model_executor.layers.usp import USP
+
+    original_begin = transport.PeerGroup.begin
+    calls = []
+
+    def counted_begin(group):
+        calls.append(1)
+        return original_begin(group)
 
     try:
         device = _setup(rank, world_size, init_method, world_size)
         torch._dynamo.config.recompile_limit = 64
+        transport.PeerGroup.begin = counted_begin
 
         def layer(x, w):
             q, k, v = (torch.nn.functional.linear(x, w) * (i + 1) for i in range(3))
@@ -514,11 +523,17 @@ def _cuda_graph_worker(rank, world_size, init_method):
         w = w * 0.05
         for call in range(4):
             x = torch.randn(1, 384, 256, generator=generator, device=device, dtype=torch.bfloat16)
-            actual = _usp_call(graphed, x, w, "packed", 2).clone()
+            packed = _usp_call(graphed, x, w, "packed", 2).clone()
             expected = _usp_call(layer, x, w, "packed", 2)
-            torch.testing.assert_close(actual, expected, msg=lambda m: f"call {call}: {m}")
+            torch.testing.assert_close(packed, expected, msg=lambda m: f"call {call}: {m}")
+            # The SDMA ops run between the graph's partitions, on the transport, not captured.
+            before = len(calls)
+            actual = _usp_call(graphed, x, w, "sdma", 2).clone()
+            assert len(calls) == before + 1, f"call {call}: the SDMA transport did not run"
+            torch.testing.assert_close(actual, packed, rtol=0, atol=0, msg=lambda m: f"call {call}, sdma: {m}")
         dist.barrier()
     finally:
+        transport.PeerGroup.begin = original_begin
         # Graphs that captured RCCL kernels keep destroying their communicator from returning.
         torch.compiler.reset()
         torch.cuda.synchronize()
@@ -526,7 +541,7 @@ def _cuda_graph_worker(rank, world_size, init_method):
         destroy_distributed_environment()
 
 
-def test_packed_layout_runs_under_cuda_graphs(accelerator_ranks):
+def test_compiled_with_cuda_graphs_the_ops_run_between_graphs(accelerator_ranks):
     accelerator_ranks(_cuda_graph_worker, world_size=4, timeout=900)
 
 

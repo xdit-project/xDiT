@@ -8,19 +8,25 @@ The options are the runtime config's `ulysses_a2a` (xfuser/config/ulysses_a2a.py
 internal mode "packed" runs the same layout and head groups over the default all-to-all,
 which tells the transport's share of a gain from the layout's.
 
-A call is three custom ops, opaque to torch.compile and chained by a token: begin, one
-send per head group, and finish, which attends group by group with the selected backend
-and returns the output. The packing of each group runs in traced code between them, so
-Inductor writes it straight from the kernels producing Q/K/V; a model can even produce
-each group separately (`grouped_qkv_attention`) so a group's exchange overlaps the
-projection of the next.
+USP hands its Ulysses calls to `run`, and the runner calls `prepare` once before
+compiling. A call is three custom ops, opaque to torch.compile and chained by a token:
+begin, one send per head group, and finish, which attends group by group with the
+selected backend and returns the output. The packing of each group runs in traced code
+between them, so Inductor writes it straight from the kernels producing Q/K/V; a model
+can even produce each group separately (`grouped_qkv_attention`) so a group's exchange
+overlaps the projection of the next.
+
+The transport queues its copies from the host, so a CUDA graph would not replay them. The
+runner compiles the transformer without CUDA graphs (`compile_mode`); its other components
+keep theirs. The ops are also tagged cudagraph_unsafe, so a model compiled with graphs
+some other way runs them between graph partitions.
 
 The path covers Ulysses with joint tensors (front or rear), extra per-head inputs and
 grouped-query K/V, with a dense backend. Ring attention, FP8 communication, the PipeFusion
 KV cache, head balancing, sparse backends, a trailing SP pad behind rear joint tensors and
 attention_kwargs it does not forward stay on the default all-to-all. A call made while a
-CUDA graph is being captured exchanges the packed tensors over the default all-to-all (the
-SDMA copies are issued from the host).
+CUDA graph is being captured anyway (by torch.cuda.graph, or a torch without graph
+partitioning) exchanges the packed tensors over the default all-to-all.
 """
 
 from typing import List, Optional, Sequence
@@ -31,9 +37,15 @@ import torch.distributed as dist
 from xfuser.config.ulysses_a2a import UlyssesA2AConfig
 from xfuser.core.attention import registry as attention_registry
 from xfuser.core.attention.spec import AttentionBackendType
-from xfuser.core.distributed.runtime_state import get_runtime_state, runtime_state_is_initialized
+from xfuser.core.distributed import (
+    get_ring_parallel_world_size,
+    get_runtime_state,
+    get_ulysses_parallel_world_size,
+    runtime_state_is_initialized,
+)
 from xfuser.core.distributed.sdma import ulysses
-from xfuser.logger import init_logger
+from xfuser.core.utils.runner_utils import log
+from xfuser.logger import init_logger, warn_once
 
 logger = init_logger(__name__)
 
@@ -45,6 +57,8 @@ _UNFORWARDED_KWARGS = ("attn_mask", "pre_quantized", "q_descale", "k_descale", "
 
 _DEFAULT = UlyssesA2AConfig()
 _warned = set()
+# The same compilation without CUDA graphs.
+_WITHOUT_CUDAGRAPHS = {"reduce-overhead": "default", "max-autotune": "max-autotune-no-cudagraphs"}
 
 
 def _config() -> UlyssesA2AConfig:
@@ -66,6 +80,18 @@ def uses_sdma() -> bool:
 
 def overlap_qkv() -> bool:
     return selected() and _config().overlap_qkv
+
+
+def compile_mode(mode: str) -> str:
+    """The torch.compile mode for a component whose Ulysses attention takes this path: without
+    CUDA graphs when the transport issues its copies from the host. With graphs, Inductor runs
+    the ops between graph partitions, which costs a step more than the graphs save."""
+    if mode not in _WITHOUT_CUDAGRAPHS or not uses_sdma() or not ulysses.host_issued():
+        return mode
+    if get_ulysses_parallel_world_size() <= 1:
+        return mode
+    warn_once(logger, f"--ulysses_a2a sdma: compiling the transformer with mode {_WITHOUT_CUDAGRAPHS[mode]!r}.")
+    return _WITHOUT_CUDAGRAPHS[mode]
 
 
 def call_reason(
@@ -118,6 +144,60 @@ def unsupported_reason(query, key, value, *, extra_inputs, **settings) -> Option
     if any(x.shape != query.shape for _, x in extra_inputs):
         return "extra inputs not shaped like the query"
     return None
+
+
+def run(
+    query,
+    key,
+    value,
+    *,
+    group: dist.ProcessGroup,
+    backend,
+    dropout_p,
+    is_causal,
+    attention_kwargs,
+    extra_inputs,
+    joint_key,
+    joint_value,
+    joint_strategy,
+    kv_head_repeat: int,
+    **settings,
+):
+    """USP's Ulysses attention on this path; returns its output, or None when the call stays on
+    the default all-to-all (warning once per reason). Inputs are USP's [b, H, s, d] after its
+    joint handling: Q carries the joint rows, and `joint_key` / `joint_value` are this rank's
+    head slice. `settings` are `call_reason`'s other arguments."""
+    if dist.get_world_size(group) <= 1:
+        return None
+    reason = unsupported_reason(
+        query,
+        key,
+        value,
+        backend=backend,
+        joint_strategy=joint_strategy,
+        extra_inputs=extra_inputs,
+        attention_kwargs=attention_kwargs,
+        is_causal=is_causal,
+        **settings,
+    )
+    if reason is not None:
+        warn_fallback(reason)
+        return None
+    return attention(
+        query,
+        key,
+        value,
+        backend=backend,
+        dropout_p=dropout_p,
+        is_causal=is_causal,
+        attention_kwargs=attention_kwargs,
+        group=group,
+        extra_inputs=extra_inputs,
+        joint_key=joint_key if joint_strategy else None,
+        joint_value=joint_value if joint_strategy else None,
+        joint_strategy=joint_strategy,
+        kv_head_repeat=kv_head_repeat,
+    )
 
 
 def warn_fallback(reason: str) -> None:
@@ -271,7 +351,12 @@ def _group(name: str) -> dist.ProcessGroup:
     return dist.distributed_c10d._resolve_process_group(name)
 
 
-@torch.library.custom_op("xfuser::sdma_ulysses_begin", mutates_args=())
+# Host-issued copies: Inductor runs these ops between CUDA graph partitions instead of capturing
+# them (where the tag exists; else a capture falls back to the default all-to-all in begin).
+_HOST_ISSUED = (torch.Tag.cudagraph_unsafe,) if hasattr(torch.Tag, "cudagraph_unsafe") else ()
+
+
+@torch.library.custom_op("xfuser::sdma_ulysses_begin", mutates_args=(), tags=_HOST_ISSUED)
 def _sdma_ulysses_begin(ref: torch.Tensor, spec: List[int], group_name: str, mode: str) -> torch.Tensor:
     ulysses.begin(_group(group_name), ulysses.Exchange.decode(spec, ref.dtype), rccl=mode == "packed")
     return ref.new_empty(0)
@@ -286,7 +371,7 @@ def _(ref, spec, group_name, mode):
 # the engines read it until finish has waited for the peers' outputs, and only an op that
 # uses it keeps torch.compile from recomputing it into a second buffer or reusing its memory
 # (for the next group's pack, say) once send has returned.
-@torch.library.custom_op("xfuser::sdma_ulysses_send", mutates_args=("packed",))
+@torch.library.custom_op("xfuser::sdma_ulysses_send", mutates_args=("packed",), tags=_HOST_ISSUED)
 def _sdma_ulysses_send(
     token: torch.Tensor, packed: torch.Tensor, group: int, tensors: List[int], group_name: str
 ) -> torch.Tensor:
@@ -315,7 +400,7 @@ def _(token, x, weight, bias):
     return x.new_empty(*x.shape[:-1], weight.shape[0])
 
 
-@torch.library.custom_op("xfuser::sdma_ulysses_finish", mutates_args=())
+@torch.library.custom_op("xfuser::sdma_ulysses_finish", mutates_args=(), tags=_HOST_ISSUED)
 def _sdma_ulysses_finish(
     token: torch.Tensor,
     packed: List[torch.Tensor],
@@ -437,8 +522,6 @@ def qk_first_attention(
     world = dist.get_world_size(group)
     if world <= 1 or heads % world:
         return None
-    from xfuser.core.distributed import get_ring_parallel_world_size, get_runtime_state
-
     runtime = get_runtime_state()
     if backend is None:
         backend = runtime.attention_backend
@@ -477,6 +560,32 @@ def qk_first_attention(
         kv_head_repeat=1,
         group=group,
     )
+
+
+def prepare(pipe, components, *, cpu_offload: bool) -> None:
+    """Set up the attention modules of `pipe`'s `components` for --ulysses_sdma_overlap_qkv,
+    before compilation sees them: copy their Q/K/V weight rows per head group.
+
+    Not with CPU offload: the offload hooks, already set up, would not move the copies, and
+    offloading is for the memory the copies would spend. Q/K/V are then projected for all
+    heads at once, as without the option."""
+    world = get_ulysses_parallel_world_size()
+    if not overlap_qkv() or world <= 1:
+        return
+    if cpu_offload:
+        log("--ulysses_sdma_overlap_qkv is ignored with CPU offload: Q/K/V are projected for all heads at once.")
+        return
+    for name in components:
+        component = getattr(pipe, name, None)
+        if isinstance(component, torch.nn.Module):
+            prepared = prepare_grouped_qkv(component, world)
+            log(f"{name}: {prepared} attention modules project Q/K/V one head group at a time.")
+            qk_first = sum(getattr(getattr(m, "processor", None), "qk_first", False) for m in component.modules())
+            if qk_first:
+                log(
+                    f"{name}: {qk_first} attention modules send Q/K before projecting V, in one head group "
+                    "(--ulysses_sdma_head_groups does not apply to them)."
+                )
 
 
 def prepare_grouped_qkv(model: torch.nn.Module, world: int) -> int:
@@ -524,8 +633,6 @@ def grouped_qkv_attention(attn, hidden_states, norm_rope, *, backend, attention_
     """
     if not overlap_qkv():
         return None
-    from xfuser.core.distributed import get_ring_parallel_world_size, get_runtime_state
-
     layout = getattr(attn, "_xfuser_sdma_qkv_layout", None)
     world = dist.get_world_size(group)
     if layout is None or layout[0] != world:

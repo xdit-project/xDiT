@@ -51,7 +51,6 @@ from xfuser.core.distributed import (
     get_classifier_free_guidance_rank,
     get_pipeline_parallel_world_size,
     get_pp_group,
-    get_ulysses_parallel_world_size,
     is_pipeline_first_stage,
     initialize_runtime_state,
     get_runtime_state,
@@ -368,8 +367,6 @@ class xFuserModel(abc.ABC):
     # torch.compile modes that run the graph under CUDA Graphs, whose outputs live in a fixed
     # buffer pool and are therefore only valid until the next replay.
     CUDAGRAPH_COMPILE_MODES = frozenset({"reduce-overhead", "max-autotune"})
-    # The same compilation without CUDA graphs.
-    _WITHOUT_CUDAGRAPHS = {"reduce-overhead": "default", "max-autotune": "max-autotune-no-cudagraphs"}
 
     # Head dimensions this model's attention runs at, checked against what a backend serves.
     # Left empty where the value is only known from the loaded checkpoint; empty means no claim.
@@ -550,7 +547,13 @@ class xFuserModel(abc.ABC):
 
         # Before compilation sees the modules.
         if usp_sdma.overlap_qkv():
-            self._prepare_grouped_qkv()
+            config = self.config
+            offload = config.enable_group_cpu_offload or config.enable_sequential_cpu_offload
+            usp_sdma.prepare(
+                self.pipe,
+                self._get_compiled_pipe_components(),
+                cpu_offload=offload or config.enable_model_cpu_offload,
+            )
 
         # Compile and warm the original blocks before cache adapters replace or
         # patch them, keeping stateful cross-step cache logic out of traced graphs.
@@ -964,42 +967,6 @@ class xFuserModel(abc.ABC):
         # CUDA graphs are slow on RDNA4.
         return "default"  # TODO: Configurable
 
-    def _prepare_grouped_qkv(self) -> None:
-        """Copy each attention module's Q/K/V weight rows per head group for --ulysses_sdma_overlap_qkv.
-
-        Not with CPU offload: the offload hooks, already set up, would not move the copies, and
-        offloading is for the memory the copies would spend. Q/K/V are then projected for all
-        heads at once, as without the option."""
-        ulysses = get_ulysses_parallel_world_size()
-        if not usp_sdma.overlap_qkv() or ulysses <= 1:
-            return
-        config = self.config
-        if config.enable_group_cpu_offload or config.enable_sequential_cpu_offload or config.enable_model_cpu_offload:
-            log("--ulysses_sdma_overlap_qkv is ignored with CPU offload: Q/K/V are projected for all heads at once.")
-            return
-        for name in self._get_compiled_pipe_components():
-            component = getattr(self.pipe, name, None)
-            if isinstance(component, torch.nn.Module):
-                prepared = usp_sdma.prepare_grouped_qkv(component, ulysses)
-                log(f"{name}: {prepared} attention modules project Q/K/V one head group at a time.")
-                qk_first = sum(getattr(getattr(m, "processor", None), "qk_first", False) for m in component.modules())
-                if qk_first:
-                    log(
-                        f"{name}: {qk_first} attention modules send Q/K before projecting V, in one head group "
-                        "(--ulysses_sdma_head_groups does not apply to them)."
-                    )
-
-    def _compile_mode(self) -> str:
-        """The runner's compile mode, without CUDA graphs when Ulysses attention runs its
-        all-to-alls on SDMA engines (--ulysses_a2a sdma): those copies are issued from the
-        host, so a captured graph would replay RCCL instead."""
-        requested = self._get_compile_mode()
-        if requested in self.CUDAGRAPH_COMPILE_MODES and usp_sdma.uses_sdma() and get_ulysses_parallel_world_size() > 1:
-            mode = self._WITHOUT_CUDAGRAPHS[requested]
-            warn_once(logger, f"--ulysses_a2a sdma: compiling with mode {mode!r} instead of {requested!r}.")
-            return mode
-        return requested
-
     def _get_compile_dynamic(self, input_args=None) -> Optional[bool]:
         return None  # torch default (auto)
 
@@ -1110,7 +1077,7 @@ class xFuserModel(abc.ABC):
         returns ``None``.
         """
         self._enable_compute_comm_overlap()
-        compile_kwargs = {"mode": self._compile_mode()}
+        compile_kwargs = {"mode": self._get_compile_mode()}
         pp_degree = getattr(self.config, "pipefusion_parallel_degree", 1)
         compile_kwargs["dynamic"] = (
             self._get_compile_dynamic(input_args) if pp_degree > 1 else self._get_compile_dynamic()
@@ -1160,16 +1127,19 @@ class xFuserModel(abc.ABC):
                 self._reset_pipefusion_compile_state(stages)
 
         for name, module in components.items():
+            kwargs = compile_kwargs
+            if usp_sdma.uses_sdma() and name in self.settings.transformer_attr_names:
+                kwargs = {**compile_kwargs, "mode": usp_sdma.compile_mode(compile_kwargs["mode"])}
             blockwise = name in stages or name in sharded or name in cache_targets or self._prefer_blockwise_compile()
             if not blockwise:
-                setattr(self.pipe, name, torch.compile(module, **compile_kwargs))
+                setattr(self.pipe, name, torch.compile(module, **kwargs))
                 continue
             block_lists = self._declared_blocks(name, module)
             for block_list in block_lists:
                 for index in range(len(block_list)):
-                    block_list[index] = torch.compile(block_list[index], **compile_kwargs)
+                    block_list[index] = torch.compile(block_list[index], **kwargs)
             if name in stages and not any(len(block_list) for block_list in block_lists):
-                module.forward = torch.compile(module.forward, **compile_kwargs)
+                module.forward = torch.compile(module.forward, **kwargs)
                 continue
             if not block_lists:
                 if name in cache_targets:
@@ -1181,9 +1151,9 @@ class xFuserModel(abc.ABC):
                         f"{self.settings.fsdp_strategy.get(name, {}).get('wrap_attrs', [])} exist. Name them in "
                         f"fsdp_strategy[{name!r}]['wrap_attrs'] of {type(self).__name__}."
                     )
-                setattr(self.pipe, name, torch.compile(module, **compile_kwargs))
+                setattr(self.pipe, name, torch.compile(module, **kwargs))
                 continue
-            if compile_kwargs["mode"] in self.CUDAGRAPH_COMPILE_MODES:
+            if kwargs["mode"] in self.CUDAGRAPH_COMPILE_MODES:
                 self._mark_cudagraph_steps(module)
 
         if capture is not None and capture.calls:
@@ -1371,7 +1341,7 @@ class xFuserModel(abc.ABC):
             return False
         if self.config.warmup_calls:
             return False
-        if self._compile_mode() not in self.CUDAGRAPH_COMPILE_MODES:
+        if self._get_compile_mode() not in self.CUDAGRAPH_COMPILE_MODES:
             return False
 
         capture_args = copy.deepcopy(input_args)
@@ -1523,7 +1493,7 @@ class xFuserModel(abc.ABC):
         """Run compilation warmup, optionally profiling the CUDA graph recording phase."""
         enable_capture = (
             self.config.profile_capture_phase
-            and self._compile_mode() == "reduce-overhead"
+            and self._get_compile_mode() == "reduce-overhead"
             and not self.pipe.scheduler.config.shift_terminal
         )
         if not enable_capture:

@@ -14,6 +14,18 @@ import torch
 from xfuser.model_executor.models.runner_models import base_model
 from xfuser.model_executor.models.runner_models.base_model import xFuserModel
 from xfuser.model_executor.models.runner_models.loading import placement, transformer_load
+from xfuser.model_executor.models.runner_models.loading import (  # noqa: F401
+    backend_adapters,
+)
+from xfuser.model_executor.models.runner_models.loading.quant_adapter import (
+    FormatCapability,
+    build_adapter,
+)
+
+
+def _adapter(format_name, impl):
+    """A real adapter, so the test reads the declaration rather than a stub's."""
+    return build_adapter(format_name, impl, capability=FormatCapability(available=True))
 
 
 @pytest.fixture(autouse=True)
@@ -46,9 +58,11 @@ def _model(*, local_rank, monkeypatch, **offload_flags):
     model = SimpleNamespace(
         config=SimpleNamespace(**flags),
         pipe=pipe,
+        _get_compiled_pipe_components=lambda: [],
+        # `_enable_options` hands the decoding VAEs to their manager before it
+        # reaches the offload branches these tests are about.
         _vae_manager=SimpleNamespace(enable_options=lambda vaes: None),
         _decoding_vaes=lambda: [],
-        _get_compiled_pipe_components=lambda: [],
     )
     model._local_onload_device = lambda: xFuserModel._local_onload_device(model)
     model._group_offload_kwargs = lambda offload_type: xFuserModel._group_offload_kwargs(model, offload_type)
@@ -133,6 +147,9 @@ def test_offload_places_only_the_runners_resident_components(monkeypatch):
         fill_eager_transformers=lambda: None,
         replicated_broadcast_load=lambda: False,
         backends=SimpleNamespace(fp8=None),
+        # This run quantizes nothing, so both walks are no-ops and what is
+        # left is the placement the offload path performs.
+        quantization_plan=SimpleNamespace(gemm_plan=None),
     )
 
     placement.place_pipeline_components(loader)
@@ -148,17 +165,14 @@ def test_offload_places_only_the_runners_resident_components(monkeypatch):
         "enable_group_cpu_offload",
     ],
 )
-def test_native_fp8_load_targets_cpu_when_offload_is_requested(monkeypatch, offload_flag):
+def test_a_converter_that_packs_on_the_host_loads_there_under_offload(monkeypatch, offload_flag):
     monkeypatch.setattr(
         transformer_load,
         "get_world_group",
         lambda: SimpleNamespace(local_rank=3),
     )
     model = SimpleNamespace(config=SimpleNamespace(**{offload_flag: True}))
-    adapter = SimpleNamespace(
-        format=SimpleNamespace(value="fp8"),
-        backend=SimpleNamespace(value="aiter"),
-    )
+    adapter = _adapter("fp8", "aiter")
 
     assert transformer_load.native_quantization_device_map(model, adapter) == {"": "cpu"}
 
@@ -167,17 +181,14 @@ def test_native_fp8_load_targets_cpu_when_offload_is_requested(monkeypatch, offl
     ("format_name", "backend_name"),
     [("fp4", "aiter"), ("int8", "torchao"), ("fp8", "torchao")],
 )
-def test_other_native_loads_stay_on_accelerator_during_cpu_offload(monkeypatch, format_name, backend_name):
+def test_every_other_converter_stays_on_the_accelerator_under_offload(monkeypatch, format_name, backend_name):
     monkeypatch.setattr(
         transformer_load,
         "get_world_group",
         lambda: SimpleNamespace(local_rank=3),
     )
     model = SimpleNamespace(config=SimpleNamespace(enable_model_cpu_offload=True))
-    adapter = SimpleNamespace(
-        format=SimpleNamespace(value=format_name),
-        backend=SimpleNamespace(value=backend_name),
-    )
+    adapter = _adapter(format_name, backend_name)
 
     assert transformer_load.native_quantization_device_map(model, adapter) == {"": 3}
 
@@ -189,9 +200,6 @@ def test_native_fp8_load_stays_on_accelerator_without_cpu_offload(monkeypatch):
         lambda: SimpleNamespace(local_rank=3),
     )
     model = SimpleNamespace(config=SimpleNamespace())
-    adapter = SimpleNamespace(
-        format=SimpleNamespace(value="fp8"),
-        backend=SimpleNamespace(value="aiter"),
-    )
+    adapter = _adapter("fp8", "aiter")
 
     assert transformer_load.native_quantization_device_map(model, adapter) == {"": 3}

@@ -17,6 +17,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     xFuserModel,
 )
+from xfuser.model_executor.quant.targets import GemmTargets, Select
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     STANDARD_LOAD_ROUTES,
@@ -75,7 +76,7 @@ class _Flux3Model(xFuserModel):
         ulysses_degree=True,
         ring_degree=True,
         use_cfg_parallel=False,
-        use_fp8_gemms=True,
+        gemm_formats=frozenset({"fp8"}),
         use_fp8_comms=True,
         fully_shard_degree=True,
         enable_tiling=True,
@@ -86,11 +87,15 @@ class _Flux3Model(xFuserModel):
     settings = ModelSettings(
         model_output_type="image",
         mod_value=16,
-        fp8_gemm_module_list=[
-            "transformer.txt_mode_blocks",
-            "transformer.mode_blocks",
-            "transformer.single_transformer_blocks",
-        ],
+        gemm_targets=GemmTargets(
+            transformer=Select(
+                roots=(
+                    "transformer.txt_mode_blocks",
+                    "transformer.mode_blocks",
+                    "transformer.single_transformer_blocks",
+                )
+            ),
+        ),
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": [

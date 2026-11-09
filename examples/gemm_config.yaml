@@ -2,20 +2,30 @@
 #   --gemm_quantization low=fp4,high=fp6
 #   --gemm_quantization a6w4
 #
-# "model" starts with the runner's built-in high-precision targets.
-# Use "none" to start with an empty high-precision target set.
+# The keys below name the modules a tiered run holds at the high format. They
+# are inert under a single-format run, which has no better format to hold
+# anything at.
+#
+# "model" starts with the runner's built-in high-precision targets, and the
+# pattern lists below add to them. Use "none" to start from an empty set, which
+# is how the lists replace the declaration rather than extend it.
 gemm_high_precision_targets: model
 
-# Module entries must exactly match model-declared target roots, such as
-# transformer_2.blocks. Prefixes are relative to each selected low-precision
-# root, matching existing MXFP4 overrides; suffixes match layer-path endings.
+# All three pattern kinds name absolute pipeline paths and match on segment
+# boundaries, so "transformer.blocks.3" cannot also match "transformer.blocks.30".
+#
+# Modules and prefixes both select the named path and everything beneath it, and
+# each entry must name a model-declared target or something inside one, such as
+# transformer_2.blocks or transformer.blocks.3. The two lists exist because a
+# module names a whole declared target while a prefix reaches inside one; a path
+# in either list selects the same way. Suffixes match layer-path endings, such
+# as attn.to_out.0, wherever they occur inside a target.
 gemm_high_precision_module_patterns: []
 gemm_high_precision_prefix_patterns: []
 gemm_high_precision_suffix_patterns: []
 
 # For an explicit schedule, uncomment this key and provide exactly one entry
-# per denoising step using the selected profile's format names. Use fp6 or
-# a6w4 instead of fp8 below when selected as the high format. Do not combine
+# per denoising step, naming the formats this run quantizes to. Do not combine
 # this with the simple hybrid schedule CLI flags.
 #
 # hybrid_gemm_schedule:

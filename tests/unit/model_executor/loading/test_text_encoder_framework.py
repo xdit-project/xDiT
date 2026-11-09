@@ -1,5 +1,6 @@
 """Dependency-light contracts for text-encoder framework integration."""
 
+import importlib.machinery
 import importlib.util
 from pathlib import Path
 import sys
@@ -9,13 +10,32 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[4]
 ADAPTER_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/text_encoder_adapter.py"
-BACKENDS_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/fp8_backends.py"
+LOADING_DIR = ROOT / "xfuser/model_executor/models/runner_models/loading"
+ADAPTERS_PATH = LOADING_DIR / "backend_adapters.py"
 CONTRACTS_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/contracts.py"
+QUANT_ADAPTER_PATH = ROOT / "xfuser/model_executor/models/runner_models/loading/quant_adapter.py"
+
+
+#: A synthetic package over the loading directory. These modules are meant to
+#: be importable without the rest of the app, and they share a dependency-light
+#: base, so the loader gives relative imports somewhere to resolve rather than
+#: forcing the shared code to be duplicated or imported absolutely.
+_PKG = "te_framework_pkg"
+
+
+def _package():
+    if _PKG not in sys.modules:
+        package = importlib.util.module_from_spec(importlib.machinery.ModuleSpec(_PKG, None, is_package=True))
+        package.__path__ = [str(LOADING_DIR)]
+        sys.modules[_PKG] = package
+    return sys.modules[_PKG]
 
 
 def _load_module(path, name):
-    spec = importlib.util.spec_from_file_location(name, path)
+    _package()
+    spec = importlib.util.spec_from_file_location(f"{_PKG}.{name}", path)
     module = importlib.util.module_from_spec(spec)
+    sys.modules[f"{_PKG}.{name}"] = module
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
@@ -23,25 +43,26 @@ def _load_module(path, name):
 
 @pytest.fixture(scope="module")
 def modules():
+    quant = _load_module(QUANT_ADAPTER_PATH, "quant_adapter")
+    # After `quant`, and for its registrations: `build_adapter` reads the
+    # registry the adapter classes fill as they are defined, and loading them
+    # first would fill a copy that loading `quant` then replaces.
+    _load_module(ADAPTERS_PATH, "backend_adapters")
     return SimpleNamespace(
+        quant=quant,
         adapter=_load_module(ADAPTER_PATH, "te_framework_adapter"),
-        backends=_load_module(BACKENDS_PATH, "te_framework_backends"),
         contracts=_load_module(CONTRACTS_PATH, "te_framework_contracts"),
     )
 
 
-def _backend(modules, name, **capabilities):
-    c, b = modules.contracts, modules.backends
-    contract = SimpleNamespace(
-        requested_format=c.QuantizationFormat.FP8,
-        selected_backend=getattr(c.QuantizationBackend, name),
+def _backend(modules, name, **measured):
+    """The FP8 adapter one implementation gives, from a measured record."""
+    q = modules.quant
+    return q.build_adapter(
+        "fp8",
+        name.lower(),
+        capability=q.FormatCapability(available=True, **measured),
     )
-    defaults = {
-        "aiter_block_scale": name == "AITER",
-        "torchao_fp8": name == "TORCHAO",
-    }
-    defaults.update(capabilities)
-    return b.select_fp8_backend(contract, capabilities=b.Fp8BackendCapabilities(**defaults))
 
 
 def test_import_has_no_diffusers_or_transformers_dependency(monkeypatch):
@@ -162,23 +183,23 @@ def test_combined_mapping_rejects_component_overwrite(modules):
 
 
 def test_torchao_te_native_plan_derives_safe_negative_mapping(modules, monkeypatch):
-    b = modules.backends
+    b = modules.quant
     adapter = _backend(
         modules,
         "TORCHAO",
-        torchao_diffusers_streaming=True,
-        torchao_text_encoder_streaming=True,
+        streams=True,
+        te_streams=True,
     )
     sentinel = object()
     captured = []
 
     monkeypatch.setattr(
         b,
-        "derive_untargeted_linear_exclusions",
-        lambda model, targets: ["shared", "lm_head"],
+        "derive_linear_ownership",
+        lambda model, targets: SimpleNamespace(exclusions=("shared", "lm_head"), streamed=(), residual=()),
     )
 
-    prepared = b.prepare_text_encoder_fp8_load(
+    prepared = b.prepare_text_encoder_load(
         adapter,
         component_name="text_encoder",
         targets=("encoder.block",),
@@ -200,15 +221,15 @@ def test_torchao_te_native_plan_derives_safe_negative_mapping(modules, monkeypat
 
 
 def test_transformers_4_aiter_falls_back_to_post_load(modules):
-    b = modules.backends
+    b = modules.quant
     adapter = _backend(
         modules,
         "AITER",
-        aiter_transformers_streaming=False,
-        aiter_transformers_reason=("transformers>=5.0 streaming loader is unavailable"),
+        te_streams=False,
+        te_streams_reason="transformers>=5.0 streaming loader is unavailable",
     )
 
-    prepared = b.prepare_text_encoder_fp8_load(
+    prepared = b.prepare_text_encoder_load(
         adapter,
         component_name="text_encoder",
         targets=("encoder.block",),
@@ -222,15 +243,15 @@ def test_transformers_4_aiter_falls_back_to_post_load(modules):
 
 
 def test_transformers_4_raises_before_allocation_without_post_load(modules):
-    b = modules.backends
+    b = modules.quant
     adapter = _backend(
         modules,
         "AITER",
-        aiter_transformers_streaming=False,
-        aiter_transformers_reason="transformers>=5.0 is required",
+        te_streams=False,
+        te_streams_reason="transformers>=5.0 is required",
     )
     with pytest.raises(RuntimeError, match="before allocation"):
-        b.prepare_text_encoder_fp8_load(
+        b.prepare_text_encoder_load(
             adapter,
             component_name="text_encoder",
             targets=("encoder.block",),
@@ -240,18 +261,18 @@ def test_transformers_4_raises_before_allocation_without_post_load(modules):
 
 
 def test_missing_te_target_never_quantizes_all_linears(modules, monkeypatch):
-    b = modules.backends
+    b = modules.quant
     adapter = _backend(
         modules,
         "TORCHAO",
-        torchao_text_encoder_streaming=True,
+        te_streams=True,
     )
 
     def unavailable(model, targets):
         raise b.TargetMappingUnavailable("target mapping unavailable: missing")
 
-    monkeypatch.setattr(b, "derive_untargeted_linear_exclusions", unavailable)
-    prepared = b.prepare_text_encoder_fp8_load(
+    monkeypatch.setattr(b, "derive_linear_ownership", unavailable)
+    prepared = b.prepare_text_encoder_load(
         adapter,
         component_name="text_encoder",
         targets=("missing",),

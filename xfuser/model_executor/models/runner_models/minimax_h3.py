@@ -33,6 +33,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     xFuserModel,
 )
+from xfuser.model_executor.quant.targets import GemmTargets, Select
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     LoadRoute,
@@ -87,7 +88,10 @@ _SUPPORTED_TASKS = frozenset({"t2va", "i2va", "l2va", "fl2va", "ref2va"})
 # FP4 output close to the FP8 profile's while the rest keeps most of the FP4 speedup.
 # Written for the 50-block transformer and transformer_ref (num_layers in their configs);
 # a deeper variant would leave its extra blocks at FP4, since prefixes match by index.
-_FP4_FP8_BLOCKS = tuple(f"{i}." for i in [0, 1] + list(range(25, 50)))
+#: The blocks a tiered run holds at the better format. The first two and
+#: the last twenty-five carry more of the output quality than the middle
+#: ones, so a tiered run gives only the middle blocks to the low format.
+_HIGH_PRECISION_BLOCKS = (0, 1, *range(25, 50))
 FASTH3_V1_DATAFREE_MODEL_ID = "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree"
 # Dense-attention ablation of the same 4-step preview: distilled without VSA
 FASTH3_V1_DENSE_DATAFREE_MODEL_ID = "FastVideo/FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree"
@@ -487,14 +491,19 @@ class xFuserMiniMaxH3Model(xFuserModel):
         model_output_type="video",
         fps=24,
         resolution_divisor=32,
-        fp8_gemm_module_list=["transformer.transformer_blocks"],
-        fp8_gemm_include_suffixes=("attn.to_qkv", "ff.net.0.proj"),
-        fp4_gemm_module_list=["transformer.transformer_blocks"],
-        fp8_precision_overrides=_FP4_FP8_BLOCKS,
-        fp8_precision_override_suffixes=(
-            "attn.to_out.0",
-            "ff.net.2",
-            "adaln_proj.linear",
+        gemm_targets=GemmTargets(
+            transformer=Select(
+                roots=("transformer.transformer_blocks",),
+                only=("attn.to_qkv", "ff.net.0.proj"),
+            ),
+            keep_high=Select(
+                roots=tuple(f"transformer.transformer_blocks.{index}" for index in _HIGH_PRECISION_BLOCKS),
+                suffixes=(
+                    "attn.to_out.0",
+                    "ff.net.2",
+                    "adaln_proj.linear",
+                ),
+            ),
         ),
         fsdp_strategy={
             "transformer": {
@@ -520,8 +529,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
         use_cfg_parallel=False,
         use_parallel_vae=True,
         fully_shard_degree=True,
-        use_fp8_gemms=True,
-        use_fp4_gemms=True,
+        gemm_formats=frozenset({"fp8", "fp4"}),
         use_hybrid_attn_schedule=True,
         enable_slicing=False,
         enable_tiling=False,
@@ -893,6 +901,16 @@ class xFuserFastH3Model(xFuserMiniMaxH3Model):
     other MiniMax-H3 backends stay dense when selected explicitly.
     """
 
+    #: Same as MiniMax-H3's, declared rather than inherited: a registered
+    #: runner states its own load paths so a change to the parent cannot move
+    #: them silently.
+    load_support = LoadSupport(
+        meta_transformers=(),
+        meta_text_encoders=(),
+        replicated_meta=False,
+        routes=LoadRoute.NONE,
+    )
+
     default_input_values = DefaultInputValues(
         height=768,
         width=1344,
@@ -945,6 +963,16 @@ class xFuserFastH3DenseModel(xFuserFastH3Model):
     backend.
     """
 
+    #: Same as MiniMax-H3's, declared rather than inherited: a registered
+    #: runner states its own load paths so a change to the parent cannot move
+    #: them silently.
+    load_support = LoadSupport(
+        meta_transformers=(),
+        meta_text_encoders=(),
+        replicated_meta=False,
+        routes=LoadRoute.NONE,
+    )
+
     settings = copy.deepcopy(xFuserFastH3Model.settings)
     settings.model_name = FASTH3_V1_DENSE_DATAFREE_MODEL_ID
     settings.output_name = "fasth3_dense"
@@ -963,6 +991,16 @@ class xFuserFastH3DenseModel(xFuserFastH3Model):
 class xFuserFastH3V2Model(xFuserFastH3Model):
     """FastH3 V2 runner. Same VSA-H3 attention backend as V1 but trained for 8
     transformer forwards."""
+
+    #: Same as MiniMax-H3's, declared rather than inherited: a registered
+    #: runner states its own load paths so a change to the parent cannot move
+    #: them silently.
+    load_support = LoadSupport(
+        meta_transformers=(),
+        meta_text_encoders=(),
+        replicated_meta=False,
+        routes=LoadRoute.NONE,
+    )
 
     default_input_values = DefaultInputValues(
         height=768,
@@ -1086,12 +1124,18 @@ class xFuserVDNMiniMaxH3Model(xFuserMiniMaxH3Model):
     # H3 two-layer allowlist. The extra three (window/linear-branch outputs and
     # the FFN down projection) measured -0.44 s on example_2 (345f, 8x MI355X)
     # with same-seed PSNR/SSIM against bf16 inside the two-layer band.
-    settings.fp8_gemm_include_suffixes = (
-        "attn.to_qkv",  # fused Q/K/V projection
-        "ff.net.0.proj",  # SwiGLU up/gate projection
-        "attn.to_out.0",  # window-attention output projection
-        "attn.to_out_linear",  # linear-attention (Video-Delta) output projection
-        "ff.net.2",  # FFN down projection
+    settings.gemm_targets = dataclasses.replace(
+        settings.gemm_targets,
+        transformer=dataclasses.replace(
+            settings.gemm_targets.transformer,
+            only=(
+                "attn.to_qkv",  # fused Q/K/V projection
+                "ff.net.0.proj",  # SwiGLU up/gate projection
+                "attn.to_out.0",  # window-attention output projection
+                "attn.to_out_linear",  # linear-attention (Video-Delta) output projection
+                "ff.net.2",  # FFN down projection
+            ),
+        ),
     )
 
     # FSDP / fp4 / hybrid-attn schedule off. Ulysses is supported via the VDN
@@ -1102,8 +1146,7 @@ class xFuserVDNMiniMaxH3Model(xFuserMiniMaxH3Model):
         xFuserMiniMaxH3Model.capabilities,
         ulysses_degree=True,
         fully_shard_degree=False,
-        use_fp8_gemms=True,
-        use_fp4_gemms=False,
+        gemm_formats=frozenset({"fp8"}),
         use_hybrid_attn_schedule=False,
     )
 
@@ -1233,14 +1276,19 @@ class xFuserMiniMaxH3Ref2VAModel(xFuserMiniMaxH3Model):
         model_output_type="video",
         fps=24,
         resolution_divisor=32,
-        fp8_gemm_module_list=["transformer_ref.transformer_blocks"],
-        fp8_gemm_include_suffixes=("attn.to_qkv", "ff.net.0.proj"),
-        fp4_gemm_module_list=["transformer_ref.transformer_blocks"],
-        fp8_precision_overrides=_FP4_FP8_BLOCKS,
-        fp8_precision_override_suffixes=(
-            "attn.to_out.0",
-            "ff.net.2",
-            "adaln_proj.linear",
+        gemm_targets=GemmTargets(
+            transformer=Select(
+                roots=("transformer_ref.transformer_blocks",),
+                only=("attn.to_qkv", "ff.net.0.proj"),
+            ),
+            keep_high=Select(
+                roots=tuple(f"transformer_ref.transformer_blocks.{index}" for index in _HIGH_PRECISION_BLOCKS),
+                suffixes=(
+                    "attn.to_out.0",
+                    "ff.net.2",
+                    "adaln_proj.linear",
+                ),
+            ),
         ),
         fsdp_strategy={
             "transformer_ref": {

@@ -476,14 +476,15 @@ class Plan:
     """The copies of one push, registered once and issued per call with that call's source.
 
     `copies[i]` lists peer `g.peers[i]`'s copies as (source offset, destination address,
-    bytes); `flags[i]` is the address of the flag word set behind them.
+    bytes); `flags[i]` is the address of the flag word set behind them. With `flags=None` the
+    plan writes no flags, for copies that a later plan's flag on the same engines covers.
     """
 
     def __init__(self, g: PeerGroup, copies, flags):
         lib = load()
         n = len(g.peers)
-        if len(copies) != n or len(flags) != n:
-            raise ValueError(f"a plan needs copies and a flag for each of the {n} peers")
+        if len(copies) != n or (flags is not None and len(flags) != n):
+            raise ValueError(f"a plan needs copies and, unless flagless, a flag for each of the {n} peers")
         flat = [c for peer in copies for c in peer]
         u64 = ctypes.c_uint64 * max(1, len(flat))
         self.id = lib.sx_plan_create(
@@ -493,12 +494,12 @@ class Plan:
             u64(*[c[0] for c in flat]),
             u64(*[c[1] for c in flat]),
             u64(*[c[2] for c in flat]),
-            (ctypes.c_uint64 * n)(*flags),
+            None if flags is None else (ctypes.c_uint64 * n)(*flags),
         )
         if self.id < 0:
             raise RuntimeError(f"sx_plan_create failed with {self.id}")
         self.copies = len(flat)
-        self.flags = n
+        self.flags = 0 if flags is None else n
         self._one = g.one.data_ptr()
 
     def issue(self, slot: int, k: int, first_data: int, first_flag: int, src_base: int) -> None:

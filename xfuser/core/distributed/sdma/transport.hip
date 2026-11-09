@@ -357,7 +357,7 @@ struct Plan {
   bool live = false;
   std::vector<int> engines;                  // per peer
   std::vector<std::vector<PlanCopy>> peers;  // per peer, in issue order
-  std::vector<uint64_t> flags;               // per peer: the flag word set behind its copies
+  std::vector<uint64_t> flags;               // per peer: the flag word set behind its copies; none if empty
   int copies = 0;
 };
 
@@ -398,7 +398,9 @@ int sx_push(int slot, int k, int first_data, int first_flag, int n, const int* p
 
 // Registers a plan for `n` peers: peer i's copies are the next counts[i] entries of
 // src_offsets / dsts / bytes, on SDMA engine engines[i], followed on that engine by a 4-byte
-// flag write to flag_dsts[i]. Returns the plan id (>= 0), or a negative code.
+// flag write to flag_dsts[i]. With flag_dsts null the plan writes no flags: its copies are
+// covered by a later plan's flag on the same engines. Returns the plan id (>= 0), or a
+// negative code.
 int sx_plan_create(int n, const int* engines, const int* counts, const uint64_t* src_offsets, const uint64_t* dsts,
                    const uint64_t* bytes, const uint64_t* flag_dsts) {
   Plan plan;
@@ -407,7 +409,7 @@ int sx_plan_create(int n, const int* engines, const int* counts, const uint64_t*
   for (int i = 0; i < n; ++i) {
     if (counts[i] < 0) return -1;
     plan.engines.push_back(engines[i]);
-    plan.flags.push_back(flag_dsts[i]);
+    if (flag_dsts != nullptr) plan.flags.push_back(flag_dsts[i]);
     std::vector<PlanCopy> copies;
     for (int j = 0; j < counts[i]; ++j, ++c) copies.push_back({src_offsets[c], dsts[c], bytes[c]});
     plan.peers.push_back(std::move(copies));
@@ -441,8 +443,9 @@ int sx_plan_issue(int slot, int k, int first_data, int first_flag, int id, uint6
   if (id < 0 || id >= (int)g_plans.size() || !g_plans[id].live) return -2;
   const Plan& plan = g_plans[id];
   Slot& s = g_slots[slot];
-  int n = (int)plan.peers.size();
-  if (first_data + plan.copies > s.armed_data || first_flag + n > s.armed_flags || k < 0 || k >= kTriggers) return -1;
+  int n = (int)plan.peers.size(), n_flags = (int)plan.flags.size();
+  if (first_data + plan.copies > s.armed_data || first_flag + n_flags > s.armed_flags || k < 0 || k >= kTriggers)
+    return -1;
   int issue = g_issues++, c = first_data;
   for (int i = 0; i < n; ++i) {
     for (const PlanCopy& copy : plan.peers[i]) {
@@ -450,6 +453,7 @@ int sx_plan_issue(int slot, int k, int first_data, int first_flag, int id, uint6
                                            s.data[c++], plan.engines[i]);
       if (st != HSA_STATUS_SUCCESS) return -100 - (int)st;
     }
+    if (n_flags == 0) continue;
     hsa_status_t st = copy_after_trigger(s, k, flag_target(plan.flags[i], issue, i), (const void*)flag_src, 4,
                                          s.flag[first_flag + i], plan.engines[i]);
     if (st != HSA_STATUS_SUCCESS) return -200 - (int)st;

@@ -982,6 +982,12 @@ class xFuserModel(abc.ABC):
             if isinstance(component, torch.nn.Module):
                 prepared = usp_sdma.prepare_grouped_qkv(component, ulysses)
                 log(f"{name}: {prepared} attention modules project Q/K/V one head group at a time.")
+                qk_first = sum(getattr(getattr(m, "processor", None), "qk_first", False) for m in component.modules())
+                if qk_first:
+                    log(
+                        f"{name}: {qk_first} attention modules send Q/K before projecting V, in one head group "
+                        "(--ulysses_sdma_head_groups does not apply to them)."
+                    )
 
     def _compile_mode(self) -> str:
         """The runner's compile mode, without CUDA graphs when Ulysses attention runs its

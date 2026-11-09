@@ -236,7 +236,7 @@ def attention(
         pieces = [ulysses.pieces_from_heads(x, world, offsets[t], group_sizes[t]) for t, x in enumerate(tensors)]
         offsets = [o + h for o, h in zip(offsets, group_sizes)]
         packed.append(ulysses.pack_group(pieces))
-        token = torch.ops.xfuser.sdma_ulysses_send(token, packed[-1], g, group.group_name)
+        token = torch.ops.xfuser.sdma_ulysses_send(token, packed[-1], g, [], group.group_name)
     return finish(
         token,
         packed,
@@ -286,28 +286,6 @@ def _group(name: str) -> dist.ProcessGroup:
     return dist.distributed_c10d._resolve_process_group(name)
 
 
-@torch.library.custom_op("xfuser::sdma_ulysses_begin_qk", mutates_args=())
-def _sdma_ulysses_begin_qk(ref: torch.Tensor, spec: List[int], group_name: str) -> torch.Tensor:
-    ulysses.begin_qk(_group(group_name), ulysses.Exchange.decode(spec, ref.dtype))
-    return ref.new_empty(0)
-
-
-@_sdma_ulysses_begin_qk.register_fake
-def _sdma_ulysses_begin_qk_fake(ref, spec, group_name):
-    return ref.new_empty(0)
-
-
-@torch.library.custom_op("xfuser::sdma_ulysses_send_qk", mutates_args=("packed",))
-def _sdma_ulysses_send_qk(token: torch.Tensor, packed: torch.Tensor, value: bool, group_name: str) -> torch.Tensor:
-    ulysses.send_qk(_group(group_name), packed, value=value)
-    return token.new_empty(0)
-
-
-@_sdma_ulysses_send_qk.register_fake
-def _sdma_ulysses_send_qk_fake(token, packed, value, group_name):
-    return token.new_empty(0)
-
-
 @torch.library.custom_op("xfuser::sdma_ulysses_begin", mutates_args=())
 def _sdma_ulysses_begin(ref: torch.Tensor, spec: List[int], group_name: str, mode: str) -> torch.Tensor:
     ulysses.begin(_group(group_name), ulysses.Exchange.decode(spec, ref.dtype), rccl=mode == "packed")
@@ -324,13 +302,16 @@ def _(ref, spec, group_name, mode):
 # uses it keeps torch.compile from recomputing it into a second buffer or reusing its memory
 # (for the next group's pack, say) once send has returned.
 @torch.library.custom_op("xfuser::sdma_ulysses_send", mutates_args=("packed",))
-def _sdma_ulysses_send(token: torch.Tensor, packed: torch.Tensor, group: int, group_name: str) -> torch.Tensor:
-    ulysses.send(_group(group_name), group, packed)
+def _sdma_ulysses_send(
+    token: torch.Tensor, packed: torch.Tensor, group: int, tensors: List[int], group_name: str
+) -> torch.Tensor:
+    # `tensors` empty: the rest of the group's tensors (ulysses.send).
+    ulysses.send(_group(group_name), group, packed, tensors or None)
     return token.new_empty(0)
 
 
 @_sdma_ulysses_send.register_fake
-def _(token, packed, group, group_name):
+def _(token, packed, group, tensors, group_name):
     return token.new_empty(0)
 
 
@@ -447,37 +428,35 @@ def _qkv_parts(attn):
     return [(m.weight, m.bias) for m in linears]
 
 
-def wan_qk_attention(attn, hidden_states, rotary_emb, *, attention_kwargs, group: dist.ProcessGroup):
-    """Send full-width-normalized Wan Q/K before projecting V, or decline unsupported calls."""
-    if not uses_sdma() or not overlap_qkv() or _head_groups != 1 or torch.is_grad_enabled():
-        return None
-    if getattr(attn, "fused_projections", False) or _qkv_parts(attn) is None:
-        return None
-    if hidden_states.device.type != "cuda" or hidden_states.dtype != torch.bfloat16 or hidden_states.shape[0] != 1:
-        return None
-    linears = (attn.to_q, attn.to_k, attn.to_v)
-    if any(
-        module.weight.device != hidden_states.device
-        or module.weight.dtype != hidden_states.dtype
-        or module._forward_hooks
-        or module._forward_pre_hooks
-        or hasattr(module, "_hf_hook")
-        for module in linears
-    ):
-        return None
-    if any(
-        not isinstance(norm, torch.nn.RMSNorm) or norm.weight is None or norm.weight.dtype != hidden_states.dtype
-        for norm in (attn.norm_q, attn.norm_k)
-    ):
+# --- Q/K sent before V is projected ------------------------------------------------------------
+#
+# A model whose QK norm spans every head (Wan) cannot project one head group at a time, but it
+# can send Q and K, with all heads, as soon as they are normed and rotated, and project V while
+# they move. Its attention processor sets `qk_first = True` and calls `qk_first_attention`.
+
+
+def qk_first_attention(
+    ref, project_qk, project_v, *, heads, head_dim, backend, attention_kwargs, group: dist.ProcessGroup
+):
+    """Ulysses attention in one head group with Q/K sent before V is projected; returns USP's
+    [b, H, s, d], or None when the call cannot take this path (the processor runs its usual one).
+
+    `ref` is the [b, s, ...] input (batch, rows, dtype). `project_qk()` returns Q and K packed
+    peer by peer: for each rank p, Q's then K's [b, s, H/P, d] slice of rank p's heads.
+    `project_v(token)` returns V as [b, H, s, d]; it should project through
+    `torch.ops.xfuser.sdma_ulysses_linear(token, ...)`, which keeps the projection after the Q/K
+    send under torch.compile.
+    """
+    if not selected():
         return None
     world = dist.get_world_size(group)
-    if world <= 1 or attn.heads % world or attn.to_q.weight.shape[0] % attn.heads:
+    if world <= 1 or heads % world:
         return None
     from xfuser.core.distributed import get_ring_parallel_world_size, get_runtime_state
-    from xfuser.model_executor.layers.fused_qk_norm_rope_wan_flydsl import fused_qk_norm_rope_packed
 
     runtime = get_runtime_state()
-    backend = runtime.attention_backend
+    if backend is None:
+        backend = runtime.attention_backend
     reason = call_reason(
         backend=backend,
         ring_world_size=get_ring_parallel_world_size(),
@@ -490,24 +469,22 @@ def wan_qk_attention(attn, hidden_states, rotary_emb, *, attention_kwargs, group
     if reason is not None:
         warn_fallback(reason)
         return None
-    query = attn.to_q(hidden_states)
-    key = attn.to_k(hidden_states)
-    batch, rows, width = query.shape
-    spec = ulysses.encode(world, batch, width // attn.heads, [rows] * 3, [attn.heads // world] * 3, [(0, 0)] * 3, 1)
-    token = torch.ops.xfuser.sdma_ulysses_begin_qk(query, spec, group.group_name)
-    query_key = fused_qk_norm_rope_packed(query, key, attn.norm_q, attn.norm_k, *rotary_emb, attn.heads, world)
-    token = torch.ops.xfuser.sdma_ulysses_send_qk(token, query_key, False, group.group_name)
-    value = torch.ops.xfuser.sdma_ulysses_linear(token, hidden_states, attn.to_v.weight, attn.to_v.bias)
-    value = value.unflatten(2, (attn.heads, -1)).transpose(1, 2)
-    packed_value = ulysses.pack_group([ulysses.pieces_from_heads(value, world, 0, attn.heads // world)])
-    token = torch.ops.xfuser.sdma_ulysses_send_qk(token, packed_value, True, group.group_name)
+    per_rank = heads // world
+    spec = ulysses.encode(world, ref.shape[0], head_dim, [ref.shape[1]] * 3, [per_rank] * 3, [(0, 0)] * 3, 1)
+    packed_qk = project_qk()
+    # Opened on the packed Q/K: under torch.compile the call is armed once Q/K exist.
+    token = torch.ops.xfuser.sdma_ulysses_begin(packed_qk, spec, group.group_name, _mode)
+    token = torch.ops.xfuser.sdma_ulysses_send(token, packed_qk, 0, [0, 1], group.group_name)
+    value = project_v(token)
+    packed_v = ulysses.pack_group([ulysses.pieces_from_heads(value, world, 0, per_rank)])
+    token = torch.ops.xfuser.sdma_ulysses_send(token, packed_v, 0, [2], group.group_name)
     return finish(
         token,
-        [query_key, packed_value],
+        [packed_qk, packed_v],
         spec,
         joint_key=None,
         joint_value=None,
-        extra_names=(),
+        extra_names=[],
         backend=backend,
         dropout_p=0.0,
         is_causal=False,
@@ -605,7 +582,7 @@ def grouped_qkv_attention(attn, hidden_states, norm_rope, *, backend, attention_
         q, k, v = (x.unflatten(-1, (-1, head_dim)) for x in qkv.chunk(3, dim=-1))
         q, k, v = norm_rope(q, k, v)
         packed.append(ulysses.pack_group([ulysses.pieces_from_grouped(x, world) for x in (q, k, v)]))
-        token = torch.ops.xfuser.sdma_ulysses_send(token, packed[-1], g, group.group_name)
+        token = torch.ops.xfuser.sdma_ulysses_send(token, packed[-1], g, [], group.group_name)
     return finish(
         token,
         packed,

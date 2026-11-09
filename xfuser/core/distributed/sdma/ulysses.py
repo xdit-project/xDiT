@@ -222,15 +222,16 @@ class _Call:
 
     def __init__(self, exchange, slot, call, rccl):
         self.exchange, self.slot, self.call, self.rccl = exchange, slot, call, rccl
-        self.split_qk = False
-        self.qk_packed: Optional[torch.Tensor] = None
         # The packed tensors sent, held until `finish` returns: the engines read them until every
         # peer has the data, which this rank knows only once the peers' outputs are back.
         self.packed: List[torch.Tensor] = []
-
-    @property
-    def sent(self) -> int:
-        return len(self.packed)
+        self.sent = 0  # head groups sent completely
+        self.next_tensor = 0  # the first tensor of the current group not sent yet
+        self.sends = 0  # input sends issued, each on its own trigger
+        self.next_data = 0  # the first data signal of the next input send
+        # Over RCCL: the current group's parts, joined per peer once the group is complete.
+        self.parts: List[torch.Tensor] = []
+        self.groups: List[torch.Tensor] = []
 
 
 class _State:
@@ -289,9 +290,12 @@ def _out_flag(ex, g, p, world):
     return ((MAX_HEAD_GROUPS + g) * world + p) * 4
 
 
-def _plan(state, g, ex, direction, gi, inbox, outbox, flags, elt, roles=None) -> transport.Plan:
-    """The plan for group gi's input ("in") or output ("out") push, made for the current buffers."""
-    key = (ex, direction, gi, roles)
+def _plan(state, g, ex, direction, gi, inbox, outbox, flags, elt, tensors=None, flagged=True) -> transport.Plan:
+    """The plan for group gi's input ("in", of `tensors`, all by default) or output ("out") push,
+    made for the current buffers. A flagless plan writes no flags: the plan sending the rest of
+    the group follows it on the same engines, and its flags cover both."""
+    tensors = tuple(range(ex.tensors)) if tensors is None else tuple(tensors)
+    key = (ex, direction, gi, tensors, flagged)
     generations = (inbox.generation, outbox.generation, flags.generation)
     cached = state.plans.get(key)
     if cached is not None and cached[0] == generations:
@@ -304,15 +308,15 @@ def _plan(state, g, ex, direction, gi, inbox, outbox, flags, elt, roles=None) ->
         mine = []
         if direction == "in":
             offsets = ex.inbox_offsets[gi]
+            # The packed tensor holds each peer's pieces of `tensors` in turn.
+            peer_elems = sum(ex.piece_elems(gi, t) for t in tensors)
             start = 0
-            input_roles = range(ex.tensors) if roles is None else roles
-            peer_elements = sum(ex.piece_elems(gi, role) for role in input_roles)
-            for t in input_roles:
+            for t in tensors:
                 h, s, R = ex.sizes[gi][t], ex.rows[t], ex.inbox_rows(t)
                 block = s * h * d
                 before = ex.reserved[t][0]
                 for bi in range(b):
-                    src = (p * peer_elements + start + bi * block) * elt
+                    src = (p * peer_elems + start + bi * block) * elt
                     dst = inbox.peer_bases[i] + (offsets[t] + (bi * R + before + r * s) * h * d) * elt
                     mine.append((src, dst, block * elt))
                 start += ex.piece_elems(gi, t)
@@ -326,7 +330,7 @@ def _plan(state, g, ex, direction, gi, inbox, outbox, flags, elt, roles=None) ->
                 mine.append((src, dst, block * elt))
             flag_words.append(flags.peer_bases[i] + _out_flag(ex, gi, r, P))
         copies.append(mine)
-    plan = transport.Plan(g, copies, flag_words)
+    plan = transport.Plan(g, copies, flag_words if flagged else None)
     state.plans[key] = (generations, plan)
     return plan
 
@@ -346,12 +350,10 @@ def begin(process_group: dist.ProcessGroup, exchange: Exchange, rccl: bool = Fal
         return
     g = transport.group_for(process_group)
     ex, P, r = exchange, g.world, g.rank
-    inbox, outbox, flags, elt = _buffers(g, ex)
-    n_data = sum(
-        _plan(state, g, ex, direction, gi, inbox, outbox, flags, elt).copies
-        for direction in ("in", "out")
-        for gi in range(ex.groups)
-    )
+    _, _, flags, _ = _buffers(g, ex)
+    # Each peer gets one copy per batch row of every tensor of every group, and one per batch row
+    # of every group's output; each group's input and output write one flag per peer.
+    n_data = (P - 1) * ex.batch * ex.groups * (ex.tensors + 1)
     # Exactly the signals the call uses: the next use of the slot waits for each to complete.
     slot, call = transport.start(n_data, 2 * ex.groups * (P - 1))
     words = flags.local[: 2 * MAX_HEAD_GROUPS * P * 4].view(torch.int32).view(2, MAX_HEAD_GROUPS, P)
@@ -359,106 +361,53 @@ def begin(process_group: dist.ProcessGroup, exchange: Exchange, rccl: bool = Fal
     state.open = _Call(ex, slot, call, False)
 
 
-def _qk_plans(state, peers, exchange):
-    inbox, outbox, flags, element_size = _buffers(peers, exchange)
-    qk_flags = peers.buffer("ulysses_qk_flags", peers.world * 4, memory="uncached")
-    query_key = _plan(state, peers, exchange, "in", 0, inbox, outbox, qk_flags, element_size, roles=(0, 1))
-    value = _plan(state, peers, exchange, "in", 0, inbox, outbox, flags, element_size, roles=(2,))
-    return inbox, outbox, flags, element_size, query_key, value
+def send(
+    process_group: dist.ProcessGroup, gi: int, packed: torch.Tensor, tensors: Optional[Sequence[int]] = None
+) -> None:
+    """Push head group `gi`'s packed tensor (`pack_group`) once the stream has produced it.
 
-
-def begin_qk(process_group: dist.ProcessGroup, exchange: Exchange) -> None:
-    """Open one head group whose Q/K are sent before V; graph capture uses packed RCCL."""
-    if exchange.groups != 1 or exchange.tensors != 3 or any(before or after for before, after in exchange.reserved):
-        raise ValueError("split Q/K sends require one group and three tensors without joint rows")
-    if exchange.world != dist.get_world_size(process_group):
-        raise ValueError("split Q/K exchange world size does not match the process group")
-    state = _state(process_group)
-    if state.open is not None:
-        raise RuntimeError("an SDMA Ulysses call is already open on this group")
-    if torch.cuda.is_current_stream_capturing():
-        state.open = _Call(exchange, None, None, True)
-    else:
-        peers = transport.group_for(process_group)
-        inbox, outbox, flags, element_size, query_key, value = _qk_plans(state, peers, exchange)
-        output = _plan(state, peers, exchange, "out", 0, inbox, outbox, flags, element_size)
-        slot, call = transport.start(query_key.copies + value.copies + output.copies, 3 * (peers.world - 1))
-        flags.local.view(torch.int32).view(2, MAX_HEAD_GROUPS, peers.world)[:, 0, peers.rank].fill_(1)
-        state.open = _Call(exchange, slot, call, False)
-    state.open.split_qk = True
-
-
-def send_qk(process_group: dist.ProcessGroup, packed: torch.Tensor, *, value: bool = False) -> None:
-    """Send packed Q/K, then V. Only V signals that all three roles are ready."""
-    state = _state(process_group)
-    call = state.open
-    if call is None or not call.split_qk or call.sent or (call.qk_packed is None) == value:
-        raise RuntimeError("Q/K and V sends must alternate within a split Q/K call")
-    exchange = call.exchange
-    if not value:
-        call.qk_packed = packed
-    if call.rccl:
-        if value:
-            call.packed.append(
-                torch.cat(
-                    [call.qk_packed.view(exchange.world, -1), packed.view(exchange.world, -1)],
-                    dim=1,
-                ).reshape(-1)
-            )
-        return
-    peers = transport.group_for(process_group)
-    inbox, _, _, _, query_key, value_plan = _qk_plans(state, peers, exchange)
-    if value:
-        plan, trigger, first_data, first_flag = value_plan, 1, query_key.copies, 0
-        roles = (2,)
-        call.packed.append(packed)
-    else:
-        plan, trigger, first_data, first_flag = query_key, 0, 0, 2 * (peers.world - 1)
-        roles = (0, 1)
-    plan.issue(call.slot, trigger, first_data, first_flag, packed.data_ptr())
-    transport.release(call.slot, trigger, torch.cuda.current_stream())
-    own = packed.view(peers.world, -1)[peers.rank]
-    offset = 0
-    for role in roles:
-        heads, rows = exchange.sizes[0][role], exchange.rows[role]
-        elements = exchange.piece_elems(0, role)
-        view = _inbox(
-            inbox,
-            exchange.inbox_offsets[0][role],
-            exchange.batch,
-            exchange.inbox_rows(role),
-            heads,
-            exchange.head_dim,
-            exchange.dtype,
-        )
-        view[:, peers.rank * rows : (peers.rank + 1) * rows].copy_(
-            own[offset : offset + elements].view(exchange.batch, rows, heads, exchange.head_dim)
-        )
-        offset += elements
-
-
-def send(process_group: dist.ProcessGroup, gi: int, packed: torch.Tensor) -> None:
-    """Push head group `gi`'s packed tensor (`pack_group`) once the stream has produced it."""
+    `tensors` sends only those of the group's tensors, the next ones in order (by default all
+    that are left): a model can send Q and K as soon as they exist and V after it is projected.
+    Only the send that completes the group sets its flags; the engines keep the group's parts in
+    order, so the flag still lands after all of them.
+    """
     state = _state(process_group)
     c = state.open
-    if c is None or c.split_qk or gi != c.sent:
+    if c is None or gi != c.sent:
         raise RuntimeError(f"SDMA Ulysses send of group {gi} out of order")
+    ex = c.exchange
+    tensors = tuple(range(c.next_tensor, ex.tensors)) if tensors is None else tuple(tensors)
+    if not tensors or tensors != tuple(range(c.next_tensor, c.next_tensor + len(tensors))) or tensors[-1] >= ex.tensors:
+        raise ValueError(f"group {gi}: send its tensors in order from {c.next_tensor}; got {tensors}")
+    last = tensors[-1] == ex.tensors - 1
     c.packed.append(packed)
+    c.next_tensor = 0 if last else tensors[-1] + 1
     if c.rccl:
+        c.parts.append(packed)
+        if last:
+            parts = [part.view(ex.world, -1) for part in c.parts]
+            c.groups.append(parts[0].reshape(-1) if len(parts) == 1 else torch.cat(parts, dim=1).reshape(-1))
+            c.parts = []
+            c.sent += 1
         return
+    if c.sends >= MAX_HEAD_GROUPS:
+        raise ValueError(f"at most {MAX_HEAD_GROUPS} input sends per call")
     g = transport.group_for(process_group)
-    ex, P, r, b, d = c.exchange, g.world, g.rank, c.exchange.batch, c.exchange.head_dim
+    P, r, b, d = g.world, g.rank, ex.batch, ex.head_dim
     inbox, outbox, flags, elt = _buffers(g, ex)
-    n_peers = P - 1
-    first = sum(_plan(state, g, ex, "in", i, inbox, outbox, flags, elt).copies for i in range(gi))
+    plan = _plan(state, g, ex, "in", gi, inbox, outbox, flags, elt, tensors, flagged=last)
     # Queued before the trigger is released, so the host issues them while the stream finishes.
-    _plan(state, g, ex, "in", gi, inbox, outbox, flags, elt).issue(c.slot, gi, first, gi * n_peers, packed.data_ptr())
-    transport.release(c.slot, gi, torch.cuda.current_stream())
+    plan.issue(c.slot, c.sends, c.next_data, gi * (P - 1), packed.data_ptr())
+    transport.release(c.slot, c.sends, torch.cuda.current_stream())
+    c.sends += 1
+    c.next_data += plan.copies
+    if last:
+        c.sent += 1
     # This rank's own blocks, on the stream.
     mine = packed.view(P, -1)[r]
     offsets = ex.inbox_offsets[gi]
     start = 0
-    for t in range(ex.tensors):
+    for t in tensors:
         h, s, R, before = ex.sizes[gi][t], ex.rows[t], ex.inbox_rows(t), ex.reserved[t][0]
         n = ex.piece_elems(gi, t)
         _inbox(inbox, offsets[t], b, R, h, d, ex.dtype)[:, before + r * s : before + (r + 1) * s].copy_(
@@ -493,17 +442,14 @@ def finish(
         raise RuntimeError("SDMA Ulysses finish before every group was sent")
     state.open = None
     if c.rccl:
-        return _finish_rccl(process_group, c.exchange, c.packed, attend, local)
+        return _finish_rccl(process_group, c.exchange, c.groups, attend, local)
     g = transport.group_for(process_group)
     ex, P, r, b, d, G = c.exchange, g.world, g.rank, c.exchange.batch, c.exchange.head_dim, c.exchange.groups
     inbox, outbox, flags, elt = _buffers(g, ex)
     stream = torch.cuda.current_stream()
     n_peers = P - 1
-    in_copies = sum(_plan(state, g, ex, "in", i, inbox, outbox, flags, elt).copies for i in range(G))
-    out_first = [
-        in_copies + sum(_plan(state, g, ex, "out", i, inbox, outbox, flags, elt).copies for i in range(gi))
-        for gi in range(G)
-    ]
+    # Output copies follow the input sends' data signals, one per peer and batch row per group.
+    out_first = [c.next_data + gi * n_peers * b for gi in range(G)]
     if concurrent:
         ready = torch.cuda.Event()
         ready.record(stream)

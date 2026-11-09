@@ -34,9 +34,11 @@ from xfuser.envs import PACKAGES_CHECKER
 from xfuser.core.vsa_attention import jenga_scheduled_drop_rate
 from xfuser.model_executor.layers.fused_qk_norm_rope_wan_flydsl import (
     fused_qk_norm_rope,
+    fused_qk_norm_rope_packed,
     wan_flydsl_hadamard,
     _HAS_FLYDSL,
 )
+from xfuser.model_executor.layers import usp_sdma
 
 env_info = PACKAGES_CHECKER.get_packages_info()
 HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
@@ -56,6 +58,10 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
         else:
             self.attention_function = attention
         self.is_cross_attention = is_cross_attention
+        # With --ulysses_sdma_overlap_qkv, self-attention sends Q/K before V is projected
+        # (usp_sdma.qk_first_attention): the QK norm spans every head, so Q/K/V cannot be
+        # projected one head group at a time.
+        self.qk_first = not is_cross_attention
         # attention_kwargs is the shared, mutable dict used by sparse backends
         # (SSTA / sparge) to receive layout info like `thw`. Cross-attention and
         # the I2V image-context sub-call below are dense, so they don't read it.
@@ -112,6 +118,68 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
             rotary_emb,
         )
 
+    def _qk_first_eligible(self, attn, hidden_states, encoder_hidden_states, rotary_emb) -> bool:
+        """Whether this call can send Q/K before V: plain self-attention in inference, batch one and
+        BF16 (the packed norm/RoPE producer's layout), with resident unhooked nn.Linear
+        projections and nn.RMSNorm QK norms."""
+        if (
+            self.is_cross_attention
+            or self.attention_function is not USP
+            or encoder_hidden_states is not None
+            or attn.add_k_proj is not None
+            or rotary_emb is None
+            or torch.is_grad_enabled()
+            or getattr(attn, "fused_projections", False)
+        ):
+            return False
+        if hidden_states.device.type != "cuda" or hidden_states.dtype != torch.bfloat16 or hidden_states.shape[0] != 1:
+            return False
+        linears = (attn.to_q, attn.to_k, attn.to_v)
+        if len({m.weight.shape for m in linears}) != 1 or attn.to_q.weight.shape[0] % attn.heads:
+            return False
+        for module in linears:
+            if (
+                type(module) is not torch.nn.Linear
+                or hasattr(module.weight, "placements")
+                or module.weight.device != hidden_states.device
+                or module.weight.dtype != hidden_states.dtype
+                or module._forward_hooks
+                or module._forward_pre_hooks
+                or hasattr(module, "_hf_hook")
+            ):
+                return False
+        return all(
+            isinstance(norm, torch.nn.RMSNorm) and norm.weight is not None and norm.weight.dtype == hidden_states.dtype
+            for norm in (attn.norm_q, attn.norm_k)
+        )
+
+    def _call_qk_first(self, attn, hidden_states, rotary_emb):
+        """Q/K normed, rotated and packed peer by peer in one kernel, sent; then V. USP's
+        [b, H, s, d], or None if the call cannot take the SDMA path."""
+        from yunchang.globals import PROCESS_GROUP
+
+        group = PROCESS_GROUP.ULYSSES_PG
+        world = torch.distributed.get_world_size(group)
+
+        def project_qk():
+            query, key = attn.to_q(hidden_states), attn.to_k(hidden_states)
+            return fused_qk_norm_rope_packed(query, key, attn.norm_q, attn.norm_k, *rotary_emb, attn.heads, world)
+
+        def project_v(token):
+            value = torch.ops.xfuser.sdma_ulysses_linear(token, hidden_states, attn.to_v.weight, attn.to_v.bias)
+            return value.unflatten(2, (attn.heads, -1)).transpose(1, 2)
+
+        return usp_sdma.qk_first_attention(
+            hidden_states,
+            project_qk,
+            project_v,
+            heads=attn.heads,
+            head_dim=attn.to_q.weight.shape[0] // attn.heads,
+            backend=None,
+            attention_kwargs=self.attention_kwargs,
+            group=group,
+        )
+
     def _call_standard(
         self,
         attn: "WanAttention",
@@ -119,23 +187,8 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
         encoder_hidden_states: Optional[torch.Tensor],
         rotary_emb: Optional[tuple[torch.Tensor, torch.Tensor]],
     ) -> torch.Tensor:
-        if (
-            not self.is_cross_attention
-            and self.attention_function is USP
-            and encoder_hidden_states is None
-            and attn.add_k_proj is None
-            and rotary_emb is not None
-        ):
-            from yunchang.globals import PROCESS_GROUP
-            from xfuser.model_executor.layers import usp_sdma
-
-            output = usp_sdma.wan_qk_attention(
-                attn,
-                hidden_states,
-                rotary_emb,
-                attention_kwargs=self.attention_kwargs,
-                group=PROCESS_GROUP.ULYSSES_PG,
-            )
+        if usp_sdma.overlap_qkv() and self._qk_first_eligible(attn, hidden_states, encoder_hidden_states, rotary_emb):
+            output = self._call_qk_first(attn, hidden_states, rotary_emb)
             if output is not None:
                 return self._finish_attention(attn, output.transpose(1, 2), hidden_states.dtype, None)
         backend = None

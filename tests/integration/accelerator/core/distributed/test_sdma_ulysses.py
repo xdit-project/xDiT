@@ -87,13 +87,17 @@ def exchange_mismatches(group, case, seed, rccl=False, early=False):
     reserved = [(0, 0), kv, kv] + [(0, 0)] * extras
     local = [None, *joint] + [None] * extras if joint else None
     if early:
-        exchange = ulysses.Exchange.make(world, batch, HEAD_DIM, q.dtype, [s_q, s_kv, s_kv], heads, reserved, 1)
-        ulysses.begin_qk(group, exchange)
-        packed_qk = ulysses.pack_group([ulysses.pieces_from_heads(tensor, world, 0, hq) for tensor in (q, k)])
-        ulysses.send_qk(group, packed_qk)
-        packed_value = ulysses.pack_group([ulysses.pieces_from_heads(v, world, 0, hkv)])
-        ulysses.send_qk(group, packed_value, value=True)
-        out = ulysses.finish(group, attend)
+        # Each head group in two sends: Q and K first, then the rest.
+        rows = [x.shape[2] for x in tensors]
+        exchange = ulysses.Exchange.make(world, batch, HEAD_DIM, q.dtype, rows, heads, reserved, groups)
+        ulysses.begin(group, exchange)
+        offsets = [0] * len(tensors)
+        for gi, group_sizes in enumerate(sizes):
+            pieces = [ulysses.pieces_from_heads(x, world, offsets[t], group_sizes[t]) for t, x in enumerate(tensors)]
+            offsets = [o + h for o, h in zip(offsets, group_sizes)]
+            ulysses.send(group, gi, ulysses.pack_group(pieces[:2]), (0, 1))
+            ulysses.send(group, gi, ulysses.pack_group(pieces[2:]))
+        out = ulysses.finish(group, attend, local, concurrent)
     else:
         out = ulysses.attention(tensors, attend, group, groups, concurrent, reserved, local, rccl)
     wrong = (out != q.transpose(1, 2) * 2 + 1).sum() + sum(counts)
@@ -156,7 +160,7 @@ def _wan_early_worker(rank, world_size, init_method):
     try:
         _setup(rank, world_size, init_method, world_size)
         for call in range(12):
-            case = (1, 96 if call % 3 else 1024, 96 if call % 3 else 1024, 5, 5, 0, 0, True, 1, False)
+            case = (1, 96 if call % 3 else 1024, 96 if call % 3 else 1024, 5, 5, 0, 0, True, 1 + call % 2, False)
             for early in (False, True):
                 wrong = exchange_mismatches(PROCESS_GROUP.ULYSSES_PG, case, call, early=early)
                 assert wrong == 0, f"early={early}, call={call}: {wrong} wrong elements"
@@ -187,15 +191,15 @@ def _wan_early_compiled_worker(rank, world_size, init_method):
             key = query * 2
             if early:
                 spec = ulysses.encode(world_size, 1, HEAD_DIM, [hidden.shape[1]] * 3, [5] * 3, [(0, 0)] * 3, 1)
-                token = torch.ops.xfuser.sdma_ulysses_begin_qk(query, spec, group.group_name)
+                token = torch.ops.xfuser.sdma_ulysses_begin(query, spec, group.group_name, "sdma")
                 packed_qk = ulysses.pack_group(
                     [ulysses.pieces_from_heads(tensor, world_size, 0, 5) for tensor in (query, key)]
                 )
-                token = torch.ops.xfuser.sdma_ulysses_send_qk(token, packed_qk, False, group.group_name)
+                token = torch.ops.xfuser.sdma_ulysses_send(token, packed_qk, 0, [0, 1], group.group_name)
                 value = torch.ops.xfuser.sdma_ulysses_linear(token, hidden, weight, None) * 3
                 value = value.unflatten(-1, (-1, HEAD_DIM)).transpose(1, 2)
                 packed_value = ulysses.pack_group([ulysses.pieces_from_heads(value, world_size, 0, 5)])
-                token = torch.ops.xfuser.sdma_ulysses_send_qk(token, packed_value, True, group.group_name)
+                token = torch.ops.xfuser.sdma_ulysses_send(token, packed_value, 0, [2], group.group_name)
                 return usp_sdma.finish(
                     token,
                     [packed_qk, packed_value],
@@ -265,13 +269,13 @@ def _wan_packed_qk_worker(rank, world_size, init_method):
                 exchange = ulysses.Exchange.make(
                     world_size, 1, 128, query.dtype, [rows] * 3, [40 // world_size] * 3, [(0, 0)] * 3, 1
                 )
-                ulysses.begin_qk(group, exchange)
+                ulysses.begin(group, exchange)
                 packed_qk = fused_qk_norm_rope_packed(query, key, norm, norm, *rotary, 40, world_size)
-                ulysses.send_qk(group, packed_qk)
+                ulysses.send(group, 0, packed_qk, (0, 1))
                 packed_value = ulysses.pack_group(
                     [ulysses.pieces_from_heads(expected_k.transpose(1, 2), world_size, 0, 40 // world_size)]
                 )
-                ulysses.send_qk(group, packed_value, value=True)
+                ulysses.send(group, 0, packed_value, (2,))
                 output = ulysses.finish(group, lambda query, key, value: query * 2 + 1)
                 torch.testing.assert_close(output, expected_q * 2 + 1, rtol=0, atol=0)
             norm.float()
@@ -303,13 +307,14 @@ def _wan_processor_worker(rank, world_size, init_method, backend):
     from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanAttnProcessor
 
     graph = None
-    original_begin = ulysses.begin_qk
+    original_send = ulysses.send
     calls = 0
 
-    def counted_begin(*args, **kwargs):
+    def counted_send(process_group, gi, packed, tensors=None):
+        # Q/K sent on their own: the split path ran.
         nonlocal calls
-        calls += 1
-        return original_begin(*args, **kwargs)
+        calls += tensors is not None and tuple(tensors) == (0, 1)
+        return original_send(process_group, gi, packed, tensors)
 
     try:
         device = _setup(rank, world_size, init_method, world_size)
@@ -321,7 +326,7 @@ def _wan_processor_worker(rank, world_size, init_method, backend):
         hidden = torch.randn(1, 257, 256, generator=generator, device=device, dtype=torch.bfloat16)
         angle = torch.randn(1, 257, 1, 128, generator=generator, device=device)
         rotary = angle.cos(), angle.sin()
-        ulysses.begin_qk = counted_begin
+        ulysses.send = counted_send
         compiled = torch.compile(attn, fullgraph=True)
         with torch.no_grad():
             for run in (attn, compiled):
@@ -342,19 +347,25 @@ def _wan_processor_worker(rank, world_size, init_method, backend):
                 usp_sdma.configure("packed", 1)
                 expected = attn(hidden, rotary_emb=rotary)
                 torch.testing.assert_close(captured, expected, rtol=0, atol=0)
-            for groups, norm_dtype in ((2, torch.bfloat16), (1, torch.float32)):
-                attn.norm_q.to(norm_dtype)
-                attn.norm_k.to(norm_dtype)
-                usp_sdma.configure("sdma", groups, overlap_qkv=True)
-                before = calls
-                actual = attn(hidden, rotary_emb=rotary)
-                assert calls == before, "unsupported settings must not split Q/K"
-                usp_sdma.configure("sdma", groups)
-                expected = attn(hidden, rotary_emb=rotary)
-                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            # The head-group count does not apply: Wan self-attention splits Q/K in one group.
+            usp_sdma.configure("sdma", 2, overlap_qkv=True)
+            before = calls
+            actual = attn(hidden, rotary_emb=rotary)
+            assert calls == before + 1, "the split-QK path must run with --ulysses_sdma_head_groups 2"
+            usp_sdma.configure("packed", 1)
+            torch.testing.assert_close(actual, attn(hidden, rotary_emb=rotary), rtol=0, atol=0)
+            # Unsupported: FP32 QK norms keep the usual path.
+            attn.norm_q.to(torch.float32)
+            attn.norm_k.to(torch.float32)
+            usp_sdma.configure("sdma", 1, overlap_qkv=True)
+            before = calls
+            actual = attn(hidden, rotary_emb=rotary)
+            assert calls == before, "unsupported settings must not split Q/K"
+            usp_sdma.configure("sdma", 1)
+            torch.testing.assert_close(actual, attn(hidden, rotary_emb=rotary), rtol=0, atol=0)
     finally:
         graph = None
-        ulysses.begin_qk = original_begin
+        ulysses.send = original_send
         usp_sdma.configure("default", 2)
         torch.compiler.reset()
         torch.cuda.synchronize()

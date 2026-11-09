@@ -129,6 +129,36 @@ TURBO_ADAPTERS = {
 }
 
 
+def _load_minimax_h3_components(pipe) -> None:
+    """Load H3 components without requiring online metadata or a processor model config."""
+    from huggingface_hub.constants import HF_HUB_OFFLINE
+
+    specs = {
+        name: pipe.get_component_spec(name)
+        for name in pipe.pretrained_component_names
+        if getattr(pipe, name, None) is None
+    }
+    specs = {name: spec for name, spec in specs.items() if spec.pretrained_model_name_or_path is not None}
+    pipe.load_components(
+        dtype=torch.bfloat16,
+        # Diffusers' sharded loader checks this argument before model_info;
+        # HF_HUB_OFFLINE alone does not set it on ComponentSpec.load().
+        local_files_only=HF_HUB_OFFLINE,
+        # H3's processor/ has tokenizer_config.json but no model config.json.
+        # Select its tokenizer explicitly so Transformers does not require
+        # AutoConfig before reading H3's vocabulary and added special tokens.
+        tokenizer_type={"processor": "qwen2"},
+    )
+    missing = [name for name in specs if getattr(pipe, name, None) is None]
+    if missing:
+        # ModularPipeline logs component errors and continues with None. Stop
+        # here rather than failing later in prompt encoding or VAE decoding.
+        raise RuntimeError(
+            f"MiniMax-H3 failed to load required components: {', '.join(missing)}. "
+            "See the component loading errors above."
+        )
+
+
 def _minimax_h3_parallel_decode_clip(self, z: torch.Tensor) -> torch.Tensor:
     vae_group = get_vae_parallel_group()
     if vae_group.world_size == 1 or not self.use_tiling:
@@ -665,7 +695,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
             ),
         )
         pipe.update_components(transformer=transformer)
-        pipe.load_components(dtype=torch.bfloat16)
+        _load_minimax_h3_components(pipe)
         if self.config.lora_path:
             _merge_lora_into_transformer(
                 pipe.transformer,
@@ -1176,7 +1206,7 @@ class xFuserVDNMiniMaxH3Model(xFuserMiniMaxH3Model):
             ),
         )
         pipe.update_components(transformer=transformer)
-        pipe.load_components(dtype=torch.bfloat16)
+        _load_minimax_h3_components(pipe)
         pipe.transformer.fuse_qkv_projections()
         # The fused to_qkv projections are new modules, created in training mode.
         pipe.transformer.eval()
@@ -1274,7 +1304,7 @@ class xFuserMiniMaxH3Ref2VAModel(xFuserMiniMaxH3Model):
             ),
         )
         pipe.update_components(transformer_ref=transformer)
-        pipe.load_components(dtype=torch.bfloat16)
+        _load_minimax_h3_components(pipe)
         pipe.transformer_ref.fuse_qkv_projections()
         pipe.text_encoder.lm_head = None
         self._parallelize_text_encoder(pipe.text_encoder)

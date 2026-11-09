@@ -146,7 +146,10 @@ def _add_gemm_profile_args(parser) -> None:
         type=parse_gemm_quantization,
         default=None,
         help=(
-            "Transformer GEMM precision: none, fp8, fp4, fp6, a6w4, int8, or a supported low=fp4,high=<format> pair."
+            "Transformer GEMM precision: none, fp8, fp4, fp6, a6w4, int8, or a tiered "
+            "low=<format>,high=<format> pair. Any two distinct formats can be tiered; the "
+            "model declares which modules it quantizes and holds at the better format, and "
+            "whether this machine can store each format is checked when the model loads."
         ),
     )
     parser.add_argument(
@@ -1165,7 +1168,8 @@ class xFuserArgs:
             "--use_hybrid_gemm_schedule",
             action="store_true",
             default=False,
-            help="Use the profile's high format at denoising endpoints and FP4 in the middle.",
+            help="Run the high format at the first and last denoising steps and the low "
+            "format in between. Requires a tiered --gemm_quantization.",
         )
         parser.add_argument(
             "--num_hybrid_gemm_high_precision_steps",

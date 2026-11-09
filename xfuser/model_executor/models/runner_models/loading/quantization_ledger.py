@@ -74,10 +74,9 @@ class QuantizationLedger:
     def already_quantized(self):
         """The paths a walk should skip, whatever format it is placing.
 
-        One set, with no format in the question. It used to take an ``fp8``
-        flag choosing between ``streaming_targets`` and its union with the FP8
-        subset -- but every FP8 path was recorded in both, so the union was
-        always the first set and the flag never changed an answer.
+        One set, with no format in the question: a path either already holds
+        quantized weights or it does not, and a walk placing some other format
+        has to leave it alone either way.
         """
 
         return set(self.streaming_targets)

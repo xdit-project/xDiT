@@ -11,6 +11,7 @@ from diffusers import ConfigMixin, ModelMixin, ModularPipeline
 from diffusers.configuration_utils import register_to_config
 from diffusers.modular_pipelines.modular_pipeline import ModularPipelineBlocks
 from diffusers.modular_pipelines.modular_pipeline_utils import ComponentSpec
+from transformers import ProcessorMixin
 
 from xfuser.model_executor.models.runner_models.minimax_h3 import _load_minimax_h3_components
 
@@ -21,6 +22,13 @@ class TinyComponent(ModelMixin, ConfigMixin):
         super().__init__()
         self.first = torch.nn.Parameter(torch.ones(width, device="cpu"))
         self.second = torch.nn.Parameter(torch.zeros(width, device="cpu"))
+
+
+class TinyProcessor(ProcessorMixin):
+    """Exercise the shared tokenizer loader without image/video dependencies."""
+
+    def __init__(self, tokenizer, chat_template=None):
+        super().__init__(tokenizer, chat_template=chat_template)
 
 
 def _pipeline(*specs):
@@ -53,7 +61,7 @@ def offline(tmp_path, monkeypatch):
 def test_processor_loads_h3_special_tokens_without_model_config(tmp_path, monkeypatch):
     from tokenizers import Tokenizer
     from tokenizers.models import BPE
-    from transformers import AutoConfig, Qwen2TokenizerFast, Qwen3VLProcessor
+    from transformers import AutoConfig, Qwen2TokenizerFast
 
     processor_dir = tmp_path / "processor"
     tokenizer = Qwen2TokenizerFast(
@@ -61,18 +69,6 @@ def test_processor_loads_h3_special_tokens_without_model_config(tmp_path, monkey
         additional_special_tokens=["<d>"],
     )
     tokenizer.save_pretrained(processor_dir)
-    (processor_dir / "preprocessor_config.json").write_text(
-        json.dumps({
-            "image_processor_type": "Qwen2VLImageProcessorFast",
-            "processor_class": "Qwen3VLProcessor",
-        })
-    )
-    (processor_dir / "video_preprocessor_config.json").write_text(
-        json.dumps({
-            "video_processor_type": "Qwen3VLVideoProcessor",
-            "processor_class": "Qwen3VLProcessor",
-        })
-    )
     template = "{{ messages }}"
     (processor_dir / "chat_template.json").write_text(json.dumps({"chat_template": template}))
 
@@ -83,7 +79,7 @@ def test_processor_loads_h3_special_tokens_without_model_config(tmp_path, monkey
     pipe = _pipeline(
         ComponentSpec(
             name="processor",
-            type_hint=Qwen3VLProcessor,
+            type_hint=TinyProcessor,
             pretrained_model_name_or_path=str(tmp_path),
             subfolder="processor",
         )
@@ -92,9 +88,7 @@ def test_processor_loads_h3_special_tokens_without_model_config(tmp_path, monkey
     _load_minimax_h3_components(pipe)
 
     assert pipe.processor.chat_template == template
-    assert pipe.processor.tokenizer.encode("<d>", add_special_tokens=False) == [
-        tokenizer.convert_tokens_to_ids("<d>")
-    ]
+    assert pipe.processor.tokenizer.encode("<d>", add_special_tokens=False) == [tokenizer.convert_tokens_to_ids("<d>")]
     assert "<d>" in pipe.processor.tokenizer.all_special_tokens
     assert not (processor_dir / "config.json").exists()
 

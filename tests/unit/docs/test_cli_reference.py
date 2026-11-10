@@ -63,6 +63,18 @@ def test_long_choices_wrap_individually_without_widening_syntax():
     assert "{" not in syntax
 
 
+def test_boolean_help_is_stable_across_argparse_versions():
+    references = []
+    for help_text in ("Use sparse attention.", "Use sparse attention. (default: True)"):
+        parser = argparse.ArgumentParser()
+        action = parser.add_argument("--sparse", action=argparse.BooleanOptionalAction, default=True)
+        action.help = help_text  # Stored help differs between Python 3.10 and newer Python.
+        references.append(render_reference(parser))
+
+    assert references[0] == references[1]
+    assert "`--sparse`<br>`--no-sparse` | `True` | Use sparse attention." in references[0]
+
+
 def test_check_reports_drift_without_writing(tmp_path, capsys):
     parser = argparse.ArgumentParser()
     parser.add_argument("--path", default="a`b", help="Destination (default: %(default)s).")

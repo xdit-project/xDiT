@@ -177,7 +177,12 @@ def render_reference(parser: argparse.ArgumentParser) -> str:
             default = "Absent" if action.default == argparse.SUPPRESS else _code(repr(action.default))
             if action.dest != action.option_strings[0].lstrip("-").replace("-", "_"):
                 default += "<br>Setting: " + _code(action.dest)
-            description = _prose(formatter._expand_help(action)) if action.help else "No additional parser help."
+            help_text = formatter._expand_help(action) if action.help else "No additional parser help."
+            if isinstance(action, argparse.BooleanOptionalAction):
+                # Python 3.10 appends this to Boolean help; newer Python does not.
+                # Defaults already have their own column in this reference.
+                help_text = help_text.removesuffix(f" (default: {action.default})")
+            description = _prose(help_text)
             if action.required:
                 description = "**Required.** " + description
             if isinstance(action, argparse._StoreFalseAction):

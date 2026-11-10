@@ -16,7 +16,9 @@ Runner long options accept underscores or dashes (for example,
 registered by argparse, including negative spellings for Boolean options.
 
 In the syntax column, `TEXT`, `INT`, and `FLOAT` name value types; `VALUE`
-uses the format described by the option's help. Brackets mean optional values:
+uses the format described by the option's help.
+`CHOICE` refers to the accepted values listed in the description.
+Brackets mean optional values:
 `[TEXT ...]` accepts zero or more, and `TEXT [TEXT ...]` accepts one or more.
 Flags without a value placeholder take no value. Boolean positive spellings
 enable a setting and their `--no-...` spellings disable it.
@@ -132,7 +134,7 @@ enable a setting and their `--no-...` spellings disable it.
 | <a id="-attention_backend"></a><a id="--attention_backend"></a>`--attention_backend` `TEXT` | `None` | Attention backend name. If omitted, use the model's preferred backend or automatic selection. |
 | <a id="-cross_attention_backend"></a><a id="--cross_attention_backend"></a>`--cross_attention_backend` `TEXT` | `None` | Attention backend to use for cross-attention. If not specified, falls back to --attention\_backend. |
 | <a id="-mha_v4_kv_splits"></a><a id="--mha_v4_kv_splits"></a>`--mha_v4_kv_splits` `TEXT` | `'1'` | Dense AITER MHA v4 KV split count: 1 disables splitting; 'auto' delegates to AITER. A larger count requires a compatible AITER kernel and shape. Tune with measured latency; splitting adds host overhead and does not apply to every attention format. |
-| <a id="-attention_a2a"></a><a id="--attention_a2a"></a>`--attention_a2a` `{none,auto,e4m3-e4m3,int8-e4m3,mxfp8-e4m3,e4m3-mxfp6,mxfp6-e4m3,mxfp6-mxfp6,mxfp4-mxfp4,mxfp6-mxfp4}` | `'none'` | AITER Attention A2A input-hop profile. Explicit profiles require and validate a matching --attention\_backend; auto infers the profile from the active backend, including hybrid schedules. When Tier-2 async lowering is unavailable, xDiT uses the Tier-1 ordered path; if neither path is supported, initialization fails and this option must be disabled. |
+| <a id="-attention_a2a"></a><a id="--attention_a2a"></a>`--attention_a2a` `CHOICE` | `'none'` | AITER Attention A2A input-hop profile. Explicit profiles require and validate a matching --attention\_backend; auto infers the profile from the active backend, including hybrid schedules. When Tier-2 async lowering is unavailable, xDiT uses the Tier-1 ordered path; if neither path is supported, initialization fails and this option must be disabled.<br>Choices: `none`, `auto`, `e4m3-e4m3`, `int8-e4m3`, `mxfp8-e4m3`, `e4m3-mxfp6`, `mxfp6-e4m3`, `mxfp6-mxfp6`, `mxfp4-mxfp4`, `mxfp6-mxfp4`. |
 | <a id="-attention_a2a_hadamard"></a><a id="--attention_a2a_hadamard"></a>`--attention_a2a_hadamard` `{auto,preprocess,transport,epilogue,none}` | `'auto'` | Q/K Hadamard placement for Attention A2A. 'auto' uses the recipe default (none for INT8, preprocess for the MX/FP8 profiles). |
 | <a id="-use_fp8_comms"></a><a id="--use_fp8_comms"></a>`--use_fp8_comms` | `False` | Quantize Ulysses all-to-all communication to FP8. |
 | <a id="-fp8_comms_scale"></a><a id="--fp8_comms_scale"></a>`--fp8_comms_scale` `FLOAT` | `None` | Override the model-specific FP8 communication scale. |

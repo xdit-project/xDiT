@@ -104,6 +104,10 @@ def _prose(text: str) -> str:
     return re.sub(r"([\\`*_\[\]#|])", r"\\\1", text)
 
 
+def _long_choices(action: argparse.Action) -> bool:
+    return action.choices is not None and len(",".join(str(choice) for choice in action.choices)) > 48
+
+
 def _syntax(action: argparse.Action) -> str:
     options = "<br>".join(_code(option) for option in action.option_strings)
     if action.nargs == 0:
@@ -112,7 +116,7 @@ def _syntax(action: argparse.Action) -> str:
     if isinstance(value, tuple):
         return options + " " + _code(" ".join(value))
     if action.choices is not None:
-        value = "{" + ",".join(str(choice) for choice in action.choices) + "}"
+        value = "CHOICE" if _long_choices(action) else "{" + ",".join(str(choice) for choice in action.choices) + "}"
     forms = {None: value, "?": f"[{value}]", "*": f"[{value} ...]", "+": f"{value} [{value} ...]"}
     form = forms.get(action.nargs)
     if form is None:
@@ -145,7 +149,9 @@ def render_reference(parser: argparse.ArgumentParser) -> str:
         "registered by argparse, including negative spellings for Boolean options.",
         "",
         "In the syntax column, `TEXT`, `INT`, and `FLOAT` name value types; `VALUE`",
-        "uses the format described by the option's help. Brackets mean optional values:",
+        "uses the format described by the option's help.",
+        "`CHOICE` refers to the accepted values listed in the description.",
+        "Brackets mean optional values:",
         "`[TEXT ...]` accepts zero or more, and `TEXT [TEXT ...]` accepts one or more.",
         "Flags without a value placeholder take no value. Boolean positive spellings",
         "enable a setting and their `--no-...` spellings disable it.",
@@ -176,6 +182,8 @@ def render_reference(parser: argparse.ArgumentParser) -> str:
                 description = "**Required.** " + description
             if isinstance(action, argparse._StoreFalseAction):
                 description += " Sets " + _code(action.dest) + " to `False`."
+            if _long_choices(action):
+                description += "<br>Choices: " + ", ".join(_code(str(choice)) for choice in action.choices) + "."
             lines.append(f"| {syntax} | {default} | {description} |")
         lines.append("")
     return "\n".join(lines)

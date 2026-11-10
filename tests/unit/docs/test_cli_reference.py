@@ -47,6 +47,22 @@ def test_syntax_types_optional_values_and_unknown_options_remain_visible():
     assert "`--coordinates` `X Y`" in reference
 
 
+def test_long_choices_wrap_individually_without_widening_syntax():
+    parser = argparse.ArgumentParser()
+    choices = ["none", "auto", "e4m3-e4m3", "int8-e4m3", "mxfp8-e4m3", "e4m3-mxfp6", "mxfp6-e4m3"]
+    parser.add_argument("--attention_a2a", choices=choices, default="none", help="Input transport profile.")
+
+    reference = render_reference(parser)
+    row = next(line for line in reference.splitlines() if 'id="--attention_a2a"' in line)
+    syntax, default, description = row.strip("|").split(" | ")
+
+    assert "`--attention_a2a` `CHOICE`" in syntax
+    assert default == "`'none'`"
+    assert "Input transport profile." in description
+    assert "Choices: " + ", ".join(f"`{choice}`" for choice in choices) in description
+    assert "{" not in syntax
+
+
 def test_check_reports_drift_without_writing(tmp_path, capsys):
     parser = argparse.ArgumentParser()
     parser.add_argument("--path", default="a`b", help="Destination (default: %(default)s).")

@@ -28,7 +28,9 @@ from xfuser.model_executor.layers.fused_qk_rope_flydsl import (
     flydsl_fused_qk_norm_rope,
     prepare_neox_rope_tables,
 )
+from xfuser.model_executor.layers import usp_sdma
 from xfuser.model_executor.layers.usp import (
+    PROCESS_GROUP,
     ULYSSES_EXTRA_INPUTS_KEY,
     USP,
     attention,
@@ -79,37 +81,7 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
         query = query.unflatten(-1, (attn.heads, -1))
         key = key.unflatten(-1, (attn.heads, -1))
         value = value.unflatten(-1, (attn.heads, -1))
-
-        # Fuse norm_q -> norm_k -> rope(q) -> rope(k) into one FlyDSL kernel.
-        # Unfused, inductor cannot fold the RoPE into the norm (the RMS
-        # reduction sits between them) and emits a bandwidth-bound chain of
-        # conversion kernels per layer -- 0.318 s/request at 50 layers x 49
-        # steps in the MiniMax-H3 profile.  The wrapper falls back to the exact
-        # unfused path for anything out of envelope.  In envelope it is not
-        # bit-exact: the rotate runs in fp32 and rounds once where eager
-        # diffusers rounds three times in bf16, so q/k differ by at most 1 bf16
-        # ULP -- in the kernel's favour, it is the more accurate of the two.
-        #
-        # ``rotary_emb`` is a 4-tuple (cos, sin, cos_pad, sin_fold) when the
-        # transformer prepared the folded tables, else the plain 2-tuple.
-        if _HAS_FLYDSL and rotary_emb is not None and len(rotary_emb) == 4:
-            query, key = flydsl_fused_qk_norm_rope(
-                query,
-                key,
-                attn.norm_q,
-                attn.norm_k,
-                rotary_emb[:2],
-                rope_style="neox",
-                rotary_dim=rotary_emb[0].shape[-1],
-                neox_tables=(rotary_emb[2], rotary_emb[3]),
-            )
-        else:
-            query = attn.norm_q(query)
-            key = attn.norm_k(key)
-
-            if rotary_emb is not None:
-                query = _apply_rotary_emb(query, rotary_emb[0], rotary_emb[1])
-                key = _apply_rotary_emb(key, rotary_emb[0], rotary_emb[1])
+        query, key = self._norm_rope(attn, query, key, rotary_emb)
 
         use_vsa_h3 = self.use_vsa_h3
         if use_vsa_h3:
@@ -149,6 +121,78 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
         hidden_states = attn.to_out[0](hidden_states)
         hidden_states = attn.to_out[1](hidden_states)
         return hidden_states
+
+    def _norm_rope(self, attn, query, key, rotary_emb):
+        """QK RMSNorm and RoPE of [b, s, heads, d] projections, for any subset of heads."""
+        # Fuse norm_q -> norm_k -> rope(q) -> rope(k) into one FlyDSL kernel.
+        # Unfused, inductor cannot fold the RoPE into the norm (the RMS
+        # reduction sits between them) and emits a bandwidth-bound chain of
+        # conversion kernels per layer -- 0.318 s/request at 50 layers x 49
+        # steps in the MiniMax-H3 profile.  The wrapper falls back to the exact
+        # unfused path for anything out of envelope.  In envelope it is not
+        # bit-exact: the rotate runs in fp32 and rounds once where eager
+        # diffusers rounds three times in bf16, so q/k differ by at most 1 bf16
+        # ULP -- in the kernel's favour, it is the more accurate of the two.
+        #
+        # ``rotary_emb`` is a 4-tuple (cos, sin, cos_pad, sin_fold) when the
+        # transformer prepared the folded tables, else the plain 2-tuple.
+        if _HAS_FLYDSL and rotary_emb is not None and len(rotary_emb) == 4:
+            query, key = flydsl_fused_qk_norm_rope(
+                query,
+                key,
+                attn.norm_q,
+                attn.norm_k,
+                rotary_emb[:2],
+                rope_style="neox",
+                rotary_dim=rotary_emb[0].shape[-1],
+                neox_tables=(rotary_emb[2], rotary_emb[3]),
+            )
+        else:
+            query = attn.norm_q(query)
+            key = attn.norm_k(key)
+
+            if rotary_emb is not None:
+                query = _apply_rotary_emb(query, rotary_emb[0], rotary_emb[1])
+                key = _apply_rotary_emb(key, rotary_emb[0], rotary_emb[1])
+
+        return query, key
+
+
+@usp_sdma.sdma_processor(xFuserMiniMaxH3AttnProcessor)
+class xFuserMiniMaxH3SdmaAttnProcessor(xFuserMiniMaxH3AttnProcessor):
+    """xFuserMiniMaxH3AttnProcessor under --ulysses_a2a sdma --ulysses_sdma_overlap_qkv.
+
+    The QK norm and RoPE act per head, so Ulysses self-attention projects Q/K/V one head
+    group at a time and each group's exchange overlaps the next group's projection
+    (usp_sdma.grouped_qkv_attention). VSA-H3 attention and calls that path does not cover
+    take the base path.
+    """
+
+    @property
+    def sdma_grouped_qkv(self) -> bool:
+        return self.use_ulysses_parallel_attention and not self.use_vsa_h3
+
+    def __call__(
+        self,
+        attn,
+        hidden_states: torch.Tensor,
+        rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
+        attention_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if self.sdma_grouped_qkv and attention_mask is None and get_ulysses_parallel_world_size() > 1:
+            grouped = usp_sdma.grouped_qkv_attention(
+                attn,
+                hidden_states,
+                lambda q, k, v: (*self._norm_rope(attn, q, k, rotary_emb), v),
+                backend=self.backend,
+                attention_kwargs=self.attention_kwargs,
+                group=PROCESS_GROUP.ULYSSES_PG,
+            )
+            if grouped is not None:
+                hidden_states = grouped.transpose(1, 2).flatten(2, 3).type_as(hidden_states)
+                hidden_states = attn.to_out[0](hidden_states)
+                return attn.to_out[1](hidden_states)
+        return super().__call__(attn, hidden_states, rotary_emb, attention_mask)
 
 
 class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):

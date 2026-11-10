@@ -155,6 +155,10 @@ For startup adapter fusion on FLUX.1-dev and MiniMax-H3 Turbo, see [LoRA support
 | Argument | Description | Default |
 |----------|-------------|---------|
 | `--ulysses_degree` | Ulysses sequence parallel degree | 1 |
+| `--ulysses_a2a` | Ulysses all-to-all transport: `default` (the process group's collective, NCCL or RCCL) or `sdma` (the GPUs' SDMA copy engines, ROCm; see [Ulysses All-to-All on SDMA Engines](#ulysses-all-to-all-on-sdma-engines)) | `default` |
+| `--ulysses_sdma_head_groups` | With `--ulysses_a2a sdma`: head groups per rank whose exchanges overlap the other groups' attention | 2 |
+| `--ulysses_sdma_group_streams` | With `--ulysses_a2a sdma`: attend each head group on a stream of its own | False |
+| `--ulysses_sdma_overlap_qkv` | With `--ulysses_a2a sdma`: overlap the Q/K/V projection with the exchange, one head group at a time (MiniMax-H3, FLUX.3; keeps a second copy of the Q/K/V weights), or by sending Q/K before V is projected (Wan) | False |
 | `--ring_degree` | Ring sequence parallel degree | 1 |
 | `--pipefusion_parallel_degree` | PipeFusion pipeline stages | 1 |
 | `--tensor_parallel_degree` | Tensor parallel degree | 1 |
@@ -249,6 +253,69 @@ collective/wait lowering. If that private contract is unavailable it falls
 back to the Tier-1 ordered custom-op path. If neither path is supported,
 initialization fails and the run must disable the feature with
 `--attention_a2a none`.
+
+### Ulysses All-to-All on SDMA Engines
+
+On ROCm, `--ulysses_a2a sdma` moves both Ulysses all-to-alls (Q/K/V before
+attention, the output after it) from RCCL to the GPUs' SDMA copy engines, so
+the exchange uses no compute units and overlaps with compute.
+
+```bash
+xdit \
+    --model FLUX.3-image-klein-base \
+    --use_cfg_parallel \
+    --ulysses_degree 4 \
+    --attention_backend AITER_BF16 \
+    --ulysses_a2a sdma \
+    --ulysses_sdma_head_groups 2 \
+    --ulysses_sdma_overlap_qkv \
+    --use_torch_compile \
+    --prompt "A lighthouse on a rocky coast at dusk"
+```
+
+- Each rank pushes to every peer at once, one engine per peer, into buffers
+  mapped with HIP IPC handles. The data lands in the layout the attention
+  kernel reads, so the receiver unpacks nothing.
+- Each rank's heads are split into `--ulysses_sdma_head_groups` groups: a group
+  attends as soon as its Q/K/V have landed while later groups are still
+  moving, and its output goes back while later groups attend.
+  `--ulysses_sdma_group_streams` gives each group's attention a stream of its own.
+- Under `torch.compile` Inductor fuses the packing into the kernels that
+  produce Q/K/V.
+- `--ulysses_sdma_overlap_qkv` overlaps the Q/K/V projection with the exchange.
+  In models whose QK norm and RoPE work per head (MiniMax-H3, FLUX.3) it projects
+  Q/K/V one head group at a time, so each group's exchange overlaps the next
+  group's projection; this keeps a second copy of each layer's Q/K/V weights.
+  In models whose QK norm spans all heads (Wan) it sends Q and K, normed,
+  rotated and packed by one kernel, before V is projected, in one head group.
+  Under CPU offload only the latter applies: the weight copies would not be offloaded.
+
+The exchange covers joint text in front of or behind the sequence,
+grouped-query K/V and extra per-head inputs. Calls it does not cover stay on
+the default all-to-all with a warning: ring attention, FP8 communication, PipeFusion KV cache,
+head balancing, sparse backends, attention masks, and a trailing sequence-parallel
+pad behind rear joint tensors. The copies are issued from the host, so a
+captured CUDA graph would not replay them: runners compile the transformer
+without CUDA graphs while the path is selected, and the other components, such
+as the VAE, keep theirs. The `--ulysses_sdma_*` options need `--ulysses_a2a sdma`, and `--ulysses_a2a sdma`
+excludes `--attention_a2a`.
+
+The gain is the part of the exchange RCCL leaves exposed. Where RCCL already
+hides most of it, as for Wan2.2, the transport alone gains little: under
+`torch.compile` Inductor moves independent work next to RCCL's output
+all-to-all, while the SDMA output wait sits inside a custom op it cannot
+reorder around. For Wan, `--ulysses_sdma_overlap_qkv` hides the input exchange
+behind the V projection instead.
+
+ROCm only, one node, validated on gfx942 (MI300X) and gfx950 (MI350X/MI355X). Settings:
+
+- `XDIT_SDMA_LIB`: a prebuilt transport library (see
+  `python xfuser/core/distributed/sdma/build.py --help`); by default
+  `transport.hip` is built with `hipcc` on first use.
+- `XDIT_SDMA_WAIT_S` (default 30): how long a flag wait may take. A wait that
+  runs out holds the stream, so nothing runs on data that never came, and
+  aborts the process with a log of what is missing.
+- `XDIT_SDMA_ALLOW_UNTESTED=1`: run on other GPU architectures.
 
 ### Loading and Quantization Contract
 

@@ -17,6 +17,7 @@ from xfuser.config.attention_a2a import (
     ATTENTION_A2A_PROFILES,
     AttentionA2AConfig,
 )
+from xfuser.config.ulysses_a2a import UlyssesA2AConfig
 from xfuser.config.gemm import (
     GemmQuantizationSpec,
     load_gemm_config,
@@ -301,6 +302,12 @@ class xFuserArgs:
     fp8_comms_safety_factor: float = DEFAULT_FP8_COMMS_SAFETY_FACTOR
     attention_a2a: str = "none"
     attention_a2a_hadamard: str = "auto"
+    # Ulysses all-to-all transport (xfuser/model_executor/layers/usp_sdma.py). The head-group
+    # count is None when not given (2 with --ulysses_a2a sdma), so an explicit one is checked.
+    ulysses_a2a: str = "default"
+    ulysses_sdma_head_groups: Optional[int] = None
+    ulysses_sdma_group_streams: bool = False
+    ulysses_sdma_overlap_qkv: bool = False
     gemm_high_precision_targets: str = "model"
     gemm_high_precision_module_patterns: Optional[str] = None
     gemm_high_precision_prefix_patterns: Optional[str] = None
@@ -382,6 +389,7 @@ class xFuserArgs:
         )
         self._resolve_attention_a2a()
         self.mha_v4_kv_splits = _normalize_mha_v4_kv_splits(self.mha_v4_kv_splits)
+        self._validate_ulysses_a2a()
         if self.warmup_steps < 0:
             raise ValueError("--warmup_steps must be greater than or equal to 0")
         if self.pipefusion_parallel_degree > 1 and self.warmup_steps < 1:
@@ -431,6 +439,19 @@ class xFuserArgs:
         if self.cache_method == "pipefusion" and self.pipefusion_parallel_degree <= 1:
             raise ValueError("--cache_method pipefusion requires --pipefusion_parallel_degree greater than 1.")
 
+    def _validate_ulysses_a2a(self) -> None:
+        if self.ulysses_a2a not in ("default", "sdma"):
+            raise ValueError(f"--ulysses_a2a must be default or sdma; got {self.ulysses_a2a!r}")
+        tuning = (
+            self.ulysses_sdma_head_groups is not None
+            or self.ulysses_sdma_group_streams
+            or self.ulysses_sdma_overlap_qkv
+        )
+        if tuning and self.ulysses_a2a != "sdma":
+            raise ValueError("--ulysses_sdma_* options need --ulysses_a2a sdma")
+        if self.ulysses_sdma_head_groups is not None and self.ulysses_sdma_head_groups < 1:
+            raise ValueError("--ulysses_sdma_head_groups must be at least 1")
+
     def _resolve_attention_a2a(self) -> None:
         config = AttentionA2AConfig(
             profile=self.attention_a2a,
@@ -476,6 +497,8 @@ class xFuserArgs:
             config.resolve_for_backend(self.attention_backend)
         if self.use_fp8_comms:
             raise ValueError("--attention_a2a and --use_fp8_comms are mutually exclusive")
+        if self.ulysses_a2a == "sdma":
+            raise ValueError("--attention_a2a and --ulysses_a2a sdma are mutually exclusive")
         if self.ulysses_degree not in (2, 4, 8):
             raise ValueError("--attention_a2a requires --ulysses_degree 2, 4, or 8")
         effective_batch = (
@@ -880,6 +903,34 @@ class xFuserArgs:
             help="Quantize the transformer linear layers (selected models only).",
         )
         runtime_group.add_argument(
+            "--ulysses_a2a",
+            choices=["default", "sdma"],
+            default="default",
+            help="Ulysses all-to-all transport: default (the process group's collective, NCCL or RCCL) "
+            "or sdma (the GPUs' SDMA copy engines; ROCm, one node).",
+        )
+        runtime_group.add_argument(
+            "--ulysses_sdma_head_groups",
+            type=int,
+            default=None,
+            help="With --ulysses_a2a sdma: split each rank's heads into this many groups (default 2); a "
+            "group attends while later groups' data is still moving, and its output goes back while "
+            "later groups attend.",
+        )
+        runtime_group.add_argument(
+            "--ulysses_sdma_group_streams",
+            action="store_true",
+            help="With --ulysses_a2a sdma: attend each head group on a stream of its own.",
+        )
+        runtime_group.add_argument(
+            "--ulysses_sdma_overlap_qkv",
+            action="store_true",
+            help="With --ulysses_a2a sdma: overlap the Q/K/V projection with the exchange, in models that "
+            "support it. Where the QK norm works per head (MiniMax-H3, FLUX.3), Q/K/V are projected one head "
+            "group at a time, from a second copy of the Q/K/V weights; where it spans all heads (Wan), Q/K "
+            "are sent before V is projected, in one head group. Under CPU offload only the latter applies.",
+        )
+        runtime_group.add_argument(
             "--use_fp8_comms",
             action="store_true",
             help="Quantize Ulysses all-to-all communication to FP8.",
@@ -1260,6 +1311,34 @@ class xFuserArgs:
             type=nullable_str,
             default=None,
             help="Comma-delimited FQN suffix patterns to keep in FP8 during FP4 GEMMs.",
+        )
+        parser.add_argument(
+            "--ulysses_a2a",
+            choices=["default", "sdma"],
+            default="default",
+            help="Ulysses all-to-all transport: default (the process group's collective, NCCL or RCCL) "
+            "or sdma (the GPUs' SDMA copy engines; ROCm, one node).",
+        )
+        parser.add_argument(
+            "--ulysses_sdma_head_groups",
+            type=int,
+            default=None,
+            help="With --ulysses_a2a sdma: split each rank's heads into this many groups (default 2); a "
+            "group attends while later groups' data is still moving, and its output goes back while "
+            "later groups attend.",
+        )
+        parser.add_argument(
+            "--ulysses_sdma_group_streams",
+            action="store_true",
+            help="With --ulysses_a2a sdma: attend each head group on a stream of its own.",
+        )
+        parser.add_argument(
+            "--ulysses_sdma_overlap_qkv",
+            action="store_true",
+            help="With --ulysses_a2a sdma: overlap the Q/K/V projection with the exchange, in models that "
+            "support it. Where the QK norm works per head (MiniMax-H3, FLUX.3), Q/K/V are projected one head "
+            "group at a time, from a second copy of the Q/K/V weights; where it spans all heads (Wan), Q/K "
+            "are sent before V is projected, in one head group. Under CPU offload only the latter applies.",
         )
         parser.add_argument(
             "--use_fp8_comms",
@@ -1758,6 +1837,12 @@ class xFuserArgs:
             attention_a2a=AttentionA2AConfig(
                 profile=self.attention_a2a,
                 hadamard=self.attention_a2a_hadamard,
+            ),
+            ulysses_a2a=UlyssesA2AConfig(
+                mode=self.ulysses_a2a,
+                head_groups=self.ulysses_sdma_head_groups or 2,
+                group_streams=self.ulysses_sdma_group_streams,
+                overlap_qkv=self.ulysses_sdma_overlap_qkv,
             ),
         )
 

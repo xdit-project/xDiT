@@ -29,6 +29,7 @@ from xfuser.core.utils.runner_utils import (
     rgetattr,
 )
 from xfuser.model_executor.models.runner_models.image_postprocess import enable_fast_pil_postprocess
+from xfuser.model_executor.layers import usp_sdma
 from xfuser.model_executor.pipelines.base_pipeline import xFuserPipelineBaseWrapper
 from xfuser.model_executor.models.runner_models.vae_manager import (
     VAEManager,
@@ -543,6 +544,16 @@ class xFuserModel(abc.ABC):
             else:
                 group.pipeline_recv(idx=0, name="_xfuser_compile_prime")
                 group.pipeline_send(token, name="_xfuser_compile_prime", segment_idx=0)
+
+        # Before compilation sees the modules.
+        if usp_sdma.overlap_qkv():
+            config = self.config
+            offload = config.enable_group_cpu_offload or config.enable_sequential_cpu_offload
+            usp_sdma.prepare(
+                self.pipe,
+                self._get_compiled_pipe_components(),
+                cpu_offload=offload or config.enable_model_cpu_offload,
+            )
 
         # Compile and warm the original blocks before cache adapters replace or
         # patch them, keeping stateful cross-step cache logic out of traced graphs.
@@ -1116,16 +1127,19 @@ class xFuserModel(abc.ABC):
                 self._reset_pipefusion_compile_state(stages)
 
         for name, module in components.items():
+            kwargs = compile_kwargs
+            if usp_sdma.uses_sdma() and name in self.settings.transformer_attr_names:
+                kwargs = {**compile_kwargs, "mode": usp_sdma.compile_mode(compile_kwargs["mode"])}
             blockwise = name in stages or name in sharded or name in cache_targets or self._prefer_blockwise_compile()
             if not blockwise:
-                setattr(self.pipe, name, torch.compile(module, **compile_kwargs))
+                setattr(self.pipe, name, torch.compile(module, **kwargs))
                 continue
             block_lists = self._declared_blocks(name, module)
             for block_list in block_lists:
                 for index in range(len(block_list)):
-                    block_list[index] = torch.compile(block_list[index], **compile_kwargs)
+                    block_list[index] = torch.compile(block_list[index], **kwargs)
             if name in stages and not any(len(block_list) for block_list in block_lists):
-                module.forward = torch.compile(module.forward, **compile_kwargs)
+                module.forward = torch.compile(module.forward, **kwargs)
                 continue
             if not block_lists:
                 if name in cache_targets:
@@ -1137,9 +1151,9 @@ class xFuserModel(abc.ABC):
                         f"{self.settings.fsdp_strategy.get(name, {}).get('wrap_attrs', [])} exist. Name them in "
                         f"fsdp_strategy[{name!r}]['wrap_attrs'] of {type(self).__name__}."
                     )
-                setattr(self.pipe, name, torch.compile(module, **compile_kwargs))
+                setattr(self.pipe, name, torch.compile(module, **kwargs))
                 continue
-            if compile_kwargs["mode"] in self.CUDAGRAPH_COMPILE_MODES:
+            if kwargs["mode"] in self.CUDAGRAPH_COMPILE_MODES:
                 self._mark_cudagraph_steps(module)
 
         if capture is not None and capture.calls:

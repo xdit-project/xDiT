@@ -54,6 +54,7 @@ from xfuser.core.distributed.attention_a2a import (
     use_fused_a2a_interleave,
     use_fused_a2a_packed,
 )
+from xfuser.model_executor.layers import usp_sdma
 
 # Sparge backends whose kernel cost can be load-balanced across Ulysses ranks.
 # These all build a block mask via _build_sparge_block_mask and write the
@@ -820,6 +821,32 @@ def USP(
         }
 
     extra_inputs = _ulysses_extra_inputs(attention_kwargs, query)
+
+    if usp_sdma.selected():
+        out = usp_sdma.run(
+            query,
+            key,
+            value,
+            group=PROCESS_GROUP.ULYSSES_PG,
+            backend=hb_backend,
+            dropout_p=dropout_p,
+            is_causal=is_causal,
+            attention_kwargs=attention_kwargs,
+            extra_inputs=extra_inputs,
+            joint_key=joint_key,
+            joint_value=joint_value,
+            joint_strategy=joint_strategy,
+            kv_head_repeat=kv_head_repeat,
+            ring_world_size=ring_world_size,
+            fp8_comms=fp8_comms,
+            has_kv_cache=_has_kv_cache(attn_layer),
+            head_balanced=hb_applied,
+        )
+        if out is not None:
+            if fp8_module is not None and not joint_strategy:
+                fp8_observe_output(runtime_state.fp8_comms, fp8_module, out, False)
+            return out
+
     qkv_amaxes = None
     if ulysses_world_size > 1:
         if fp8_comms is not None:

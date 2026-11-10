@@ -394,88 +394,33 @@ PACKAGES_CHECKER = PackagesEnvChecker()
 _TORCH_GROUPNORM = torch.nn.GroupNorm
 
 
-_AITER_GROUPNORM_MODULE = "aiter.ops.groupnorm"
+def bind_group_norm(use_aiter: bool) -> None:
+    """Bind the GroupNorm class that the modules built after this one use.
 
+    AITER's kernel is the faster of the two run eagerly, so a run takes it
+    unless it needs the torch class: DistVAE identifies the layers to shard by
+    that type, and AITER's is an opaque custom op that Inductor cannot fuse
+    across.  A caller settles this before it builds its model, because rebinding
+    the class leaves the modules that exist already on the implementation they
+    were built with.
 
-def _is_aiter_group_norm(obj) -> bool:
-    """Whether ``obj`` -- a GroupNorm class or an instance of one -- is AITER's.
-
-    Identified by defining module rather than by import: AITER is optional, and
-    importing it here to compare classes would both load it on boxes that do not
-    have it and reverse the dependency direction of the patch in
-    :func:`_setup_rocm_libraries`.
+    Asking for AITER off ROCm, or without AITER installed, keeps torch's.
     """
-    cls = obj if isinstance(obj, type) else type(obj)
-    return cls.__module__ == _AITER_GROUPNORM_MODULE
-
-
-def restore_torch_group_norm_for_distvae() -> bool:
-    """Restore torch GroupNorm when xDiT's ROCm setup replaced it with AITER's.
-
-    DistVAE discovers norms to shard by their torch type. This must run before a VAE intended
-    for sharding is built, while xDiT is still validating its environment.
-
-    Rebinds the *class*, so it governs only modules built after it runs and
-    leaves existing instances alone. To take AITER back out of a model that is
-    already built, use :func:`restore_torch_group_norm_in`.
-    """
-    if not _is_aiter_group_norm(torch.nn.GroupNorm):
-        return False
-    torch.nn.GroupNorm = _TORCH_GROUPNORM
-    return True
-
-
-def restore_torch_group_norm_in(module: "torch.nn.Module") -> int:
-    """Swap AITER GroupNorm *instances* inside ``module`` for torch ones, in place.
-
-    The instance-level counterpart to :func:`restore_torch_group_norm_for_distvae`:
-    that one rebinds the global class and so reaches only modules built later,
-    while this one rewrites a tree that already exists and leaves the global
-    binding -- and every other model in the process -- untouched.
-
-    Each replacement adopts the original ``weight``/``bias`` objects rather than
-    copying them, so no parameter is duplicated and anything already holding a
-    reference (an optimizer, a state dict, an offload hook) still sees the same
-    tensors.
-
-    Returns the number of modules replaced, which is 0 on any non-ROCm box and
-    on any model AITER never touched.
-    """
-    replaced = 0
-    # Materialised before the walk: the replacement below rebinds entries of the
-    # very ``_modules`` dicts ``modules()`` is iterating.
-    for parent in list(module.modules()):
-        for child_name, child in list(parent.named_children()):
-            if not _is_aiter_group_norm(child):
-                continue
-            if not getattr(child, "affine", False) or child.weight is None:
-                continue  # non-affine AITER GroupNorm already defers to torch
-            replacement = _TORCH_GROUPNORM(child.num_groups, child.weight.shape[0], eps=child.eps, affine=True).to(
-                device=child.weight.device, dtype=child.weight.dtype
-            )
-            replacement.weight = child.weight
-            replacement.bias = child.bias
-            setattr(parent, child_name, replacement)
-            replaced += 1
-    return replaced
-
-
-def _setup_rocm_libraries():
-    if PACKAGES_CHECKER.packages_info.get("has_aiter", False):
-        try:
-            from aiter.ops.groupnorm import GroupNorm
-
-            torch.nn.GroupNorm = GroupNorm
-            logger.info("Using AITER GroupNorm as torch.nn.GroupNorm")
-        except ImportError:
-            logger.warning(
-                "Using AITER but AITER GroupNorm is not available, please update AITER. "
-                "Defaulting to torch GroupNorm implementation"
-            )
-
-
-if _is_hip():
-    _setup_rocm_libraries()
+    if not use_aiter:
+        torch.nn.GroupNorm = _TORCH_GROUPNORM
+        return
+    if not _is_hip() or not PACKAGES_CHECKER.packages_info.get("has_aiter", False):
+        return
+    try:
+        from aiter.ops.groupnorm import GroupNorm
+    except ImportError:
+        logger.warning(
+            "Using AITER but AITER GroupNorm is not available, please update AITER. "
+            "Defaulting to torch GroupNorm implementation"
+        )
+        return
+    torch.nn.GroupNorm = GroupNorm
+    logger.info("Using AITER GroupNorm as torch.nn.GroupNorm")
 
 
 def __getattr__(name):

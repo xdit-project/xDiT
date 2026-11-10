@@ -108,12 +108,9 @@ class _ZImageCompileMixin:
     measurements below were taken on the base model and confirmed on Turbo.
     """
 
-    def _compile_model(self, input_args: dict) -> None:
-        # Compiles the decoder submodule, not the VAE: pipelines call
-        # vae.decode, so torch.compile(vae) would never be entered.  No-ops
-        # under --use_parallel_vae.  Worth ~4.4 ms of a 1024x1024 decode.
-        self._compile_vae_decoder()
-        super()._compile_model(input_args)
+    def _compiles_vae_decoder(self) -> bool:
+        """Compile the VAE decoder alongside the transformer and the text encoder."""
+        return True
 
     def _get_compiled_pipe_components(self) -> list[str]:
         """Compile the text encoder alongside the transformer.

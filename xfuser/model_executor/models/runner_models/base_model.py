@@ -18,6 +18,7 @@ from xfuser.envs import (
     PACKAGES_CHECKER,
     _is_hip,
     _is_cuda,
+    bind_group_norm,
 )
 from xfuser.core.utils.outputs_equal import outputs_equal
 from xfuser.logger import warn_once
@@ -489,6 +490,7 @@ class xFuserModel(abc.ABC):
         self.engine_config.runtime_config.runner_managed_torch_compile = (
             getattr(self.config, "pipefusion_parallel_degree", 1) > 1
         )
+        bind_group_norm(use_aiter=self._uses_aiter_group_norm())
         log("Loading model pipeline...")
         self.pipe = self._load_model_checked()
         enable_fast_pil_postprocess([self.pipe, getattr(self, "second_pipe", None)])
@@ -941,6 +943,26 @@ class xFuserModel(abc.ABC):
         component.register_forward_pre_hook(_mark, with_kwargs=True, prepend=True)
         component._xfuser_marks_cudagraph_steps = True
 
+    def _compiles_vae_decoder(self) -> bool:
+        """Whether ``--use_torch_compile`` covers this model's VAE decoder too.
+
+        Off by default.  A decoder is compiled where a runner has measured it,
+        because this also builds the VAE with torch GroupNorm instead of AITER's,
+        which is the faster of the two for a decoder that stays eager.
+        """
+        return False
+
+    def _uses_aiter_group_norm(self) -> bool:
+        """Whether this run builds its model with AITER's GroupNorm.
+
+        AITER's kernel is the faster of the two run eagerly, so a run takes it
+        unless something needs the torch class: DistVAE identifies the layers to
+        shard by that type, and Inductor cannot fuse across AITER's custom op.
+        """
+        if self.config.use_parallel_vae:
+            return False
+        return not (self.config.use_torch_compile and self._compiles_vae_decoder())
+
     def _compile_vae_decoder(self, mode: str = "default") -> None:
         """Forward decoder compilation to the VAE manager, which owns the policy."""
         self._vae_manager.compile_decoders(self._decoding_vaes(), mode=mode)
@@ -1032,7 +1054,12 @@ class xFuserModel(abc.ABC):
         ``_get_compile_warmup_steps``; ``None`` preserves the caller's full
         cycle. This method runs before step-cache adapters are applied, so
         compilation always sees the original blocks.
+
+        A runner that opts in through ``_compiles_vae_decoder`` also has its VAE
+        decoder compiled here, in the mode the VAE manager selects for it.
         """
+        if self._compiles_vae_decoder():
+            self._compile_vae_decoder()
         self._enable_compute_comm_overlap()
 
         mode = self._get_compile_mode()

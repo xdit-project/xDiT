@@ -17,10 +17,6 @@ from xfuser.core.utils.runner_utils import (
     convert_model_convs_to_channels_last,
     log,
 )
-from xfuser.envs import (
-    restore_torch_group_norm_for_distvae,
-    restore_torch_group_norm_in,
-)
 
 
 def _validate_vae_tile_pair(config, capabilities, settings, kind, minimum, constraint) -> None:
@@ -47,13 +43,6 @@ def _validate_vae_tile_pair(config, capabilities, settings, kind, minimum, const
 
 def validate_vae_config(config, capabilities, settings) -> None:
     """Validate VAE-specific runner configuration without runner state."""
-    if config.use_parallel_vae:
-        if restore_torch_group_norm_for_distvae():
-            log(
-                "AITER GroupNorm cannot be sharded. Restoring torch GroupNorm so DistVAE can "
-                "identify and shard the GroupNorm layers."
-            )
-
     _validate_vae_tile_pair(config, capabilities, settings, "size", 1, "positive")
     _validate_vae_tile_pair(config, capabilities, settings, "overlap", 0, "non-negative")
 
@@ -184,35 +173,16 @@ class VAEManager:
         vae.decode = decode_wrapper
         vae._xfuser_decode_channels_last = True
 
-    def compile_decoders(self, vaes, mode: str = "default") -> None:
-        """Compile each VAE's decoder, after taking AITER's GroupNorm back out of it.
-
-        Two separate things, but neither pays off without the other.
+    def _compilable_decoders(self, vaes):
+        """Yield ``(vae, decoder)`` for each decoder the compile policy covers.
 
         ``torch.compile(vae)`` would be a no-op: pipelines call ``vae.decode``,
         not ``vae.forward``, so the compiled wrapper is never entered.  The
         decoder submodule is the thing whose ``forward`` actually runs.
 
-        And compiling it alone only gets part of the win, because xDiT swaps
-        ``torch.nn.GroupNorm`` for AITER's globally at import.  AITER's is much
-        the faster of the two run eagerly, but it is an opaque custom op and so
-        also a fusion barrier: the SiLU, the convolution bias and the residual
-        add on either side of it each stay their own pass over a full-resolution
-        activation.  Handing those back to Inductor beats the
-        faster-but-unfusable kernel -- but only once there is a compiler to hand
-        them to, so the restore is scoped to these decoders and coupled to the
-        compile, and must not outlive it.  That is why this calls
-        :func:`restore_torch_group_norm_in` and not its global sibling
-        :func:`restore_torch_group_norm_for_distvae`, which rebinds the class
-        for the whole process and would not touch an already-built decoder.
-
-        ``mode`` defaults to "default" rather than the caller's compile mode on
-        purpose: under CUDA Graphs the decoded image would live in the graph's
-        buffer pool and be valid only until the next replay, and the transformer
-        replays many times between one decode and the next.
-
-        Does nothing under ``--use_parallel_vae``, which shards the decoder
-        across ranks and owns its execution.
+        Yields nothing under ``--use_parallel_vae``, which shards the decoder
+        across ranks and owns its execution, and passes over a decoder that is
+        compiled already.
         """
         if self.config.use_parallel_vae:
             return
@@ -220,13 +190,17 @@ class VAEManager:
             decoder = getattr(vae, "decoder", None)
             if decoder is None or isinstance(decoder, torch._dynamo.OptimizedModule):
                 continue
-            restored = restore_torch_group_norm_in(decoder)
-            if restored:
-                log(
-                    f"Restored {restored} torch GroupNorm layer(s) in "
-                    f"{type(vae).__name__}'s decoder so Inductor can fuse across them.",
-                    debug=True,
-                )
+            yield vae, decoder
+
+    def compile_decoders(self, vaes, mode: str = "default") -> None:
+        """Compile each VAE's decoder.
+
+        ``mode`` defaults to "default" rather than the caller's compile mode on
+        purpose: under CUDA Graphs the decoded image would live in the graph's
+        buffer pool and be valid only until the next replay, and the transformer
+        replays many times between one decode and the next.
+        """
+        for vae, decoder in self._compilable_decoders(vaes):
             vae.decoder = torch.compile(decoder, mode=mode)
 
     def _requested_vae_tile_shape(self) -> Optional[Tuple[int, int]]:

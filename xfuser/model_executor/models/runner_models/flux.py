@@ -538,10 +538,9 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         step_cache_config={"fbcache": None},
     )
 
-    def _compile_model(self, input_args: dict) -> None:
-        """Compile the VAE decoder and apply the runner's component policy."""
-        self._compile_vae_decoder()
-        super()._compile_model(input_args)
+    def _compiles_vae_decoder(self) -> bool:
+        """Compile the VAE decoder alongside the transformer and the text encoder."""
+        return True
 
     def _get_compiled_pipe_components(self) -> list[str]:
         return ["transformer", "text_encoder"]

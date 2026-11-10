@@ -1,4 +1,6 @@
 ## Performance of SANA
+
+Historical benchmark report: the results below apply to the listed models, hardware, and measurement settings. Performance with current software versions or other configurations may differ. See the [runner reference](../../runner/runner.md) for current runner usage and its supported models.
 [Chinese Version](./sana_zh.md)
 
 We use the open-source version of `Sana_1600M_4Kpx_BF16_diffusers` for performance evaluation.
@@ -6,7 +8,7 @@ We use the open-source version of `Sana_1600M_4Kpx_BF16_diffusers` for performan
 Currently, xDiT supports acceleration for SANA with Pipefusion, Ulysses, Ring, CFG, and any combination thereof. Due to the limitation of the Head channel in the SANA network, the maximum parallelism supported by Ulysses is 2. We tested latency on an 8xA100 (NVLink) machine by generating 4096x4096 images with 20 steps. The measured latencies are shown in the table below. It can be seen that CFG achieves the best acceleration effect, while the other three acceleration strategies have similar performance. In the case of 8 GPUs, up to 4.4x generation acceleration can be achieved.
 
 | #GPUs | cfg | ulysses | ring | pp | Latency (seconds) |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | 1 | 1 | 1 | 1 | 1 | 17.551 |
 | 2 | 1 | 1 | 1 | 2 | 11.276 |
 | 2 | 1 | 1 | 2 | 1 | 11.447 |

@@ -1,36 +1,48 @@
 
-The commands below use the scripts in the `scripts/` directory of the [`legacy` branch](https://github.com/xdit-project/xDiT/tree/legacy/scripts), which produced the PipeFusion FID results; run them from a checkout of that branch. To measure FID with the current code, see [benchmark/fid/README.md](../../benchmark/fid/README.md).
+The commands below use the scripts in the `scripts/` directory of the [`legacy` branch](https://github.com/xdit-project/xDiT/tree/legacy/scripts), which produced the PipeFusion FID results; run them from a checkout of that branch. To measure FID with the current code, see [benchmark/fid/README.md](https://github.com/xdit-project/xDiT/blob/main/benchmark/fid/README.md).
 
 ### Procedure
+
 #### Prerequisite
+
 Firstly, Install the following additional dependencies before testing:
-```
+
+```bash
 pip3 install datasets tensorflow scipy
 ```
 
 #### Sample Batch Generation
+
 Then you can use `scripts/generate.py` to generate images with COCO captions. An example command is as follow:
-```
+
+```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --rdzv-endpoint=localhost:8070 scripts/generate.py --pipeline pixart --scheduler dpm-solver --warmup_steps 4 --parallelism pipeline --no_cuda_graph --dataset coco --no_split_batch --guidance_scale 2.0 --pp_num_patch 8.0
 ```
 
 After that, you can use `scripts/npz.py` to pack the generated images into a `.npz` file, where the `$GENERATED_IMAGES_FOLODER` is the path you saved the generated images, while `$IMAGES_NUM` is the total images count:
-```
+
+```bash
 python3 scripts/npz.py --sample_dir $GENERATED_IMAGES_FOLODER --num $IMAGES_NUM
 ```
 
 #### Reference Batch Generation
+
 To get the COCO ref images, you can run the following commands:
-```
+
+```bash
 python3 scripts/dump_coco.py
 ```
+
 Then you could use `scripts/npz.py` to pack the reference images into a `.npz` file as well, where the `$REF_IMAGES_FOLODER` is the path you saved the reference images, while `$IMAGES_NUM` is the total images count:
-```
+
+```bash
 python3 scripts/npz.py --sample_dir $REF_IMAGES_FOLODER --num $IMAGES_NUM
 ```
 
 #### Evaluate the results
+
 After you completing the above procedure, you'll get two .npz files `$SAMPLE_NPZ` and `$REF_NPZ` (replace them with the corresponding files). You can evalute the results with `scripts/evaluator` by running:
-```
+
+```bash
 python3 scripts/evaluator.py --ref_batch $REF_NPZ --sample_batch $SAMPLE_NPZ
 ```

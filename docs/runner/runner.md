@@ -113,6 +113,7 @@ Individual model classes that inherit from `xFuserModel`:
 | LTX-2.5 Full | `LTX-2.5-full` |
 | LTX-Video 0.9.7 | `LTX-Video-0.9.7-dev`, `Lightricks/LTX-Video-0.9.7-dev` |
 | Lumina-Image-2.0 | `Lumina2`, `Lumina-Image-2.0`, `Alpha-VLLM/Lumina-Image-2.0` |
+| MOSS-Image | `MOSS-Image`, `MOSS-Image-Base`, `OpenMOSS-Team/MOSS-Image-Base` |
 | MiniMax-H3 | `MiniMaxAI/MiniMax-H3`, `MiniMax-H3`, `MiniMax-H3-Ref2VA` |
 | MiniMax-H3 Turbo (lightx2v LoRA) | `MiniMax-H3-Turbo` |
 | VDN-H3 | `OpenVDN/vdn-minimax-h3`, `VDN-H3` |

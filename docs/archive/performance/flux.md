@@ -105,7 +105,7 @@ The performance of generating a 2048px image on 8xL40 GPUs is shown below. Due t
 On an A100 GPU, using Flux.1 on a single card for resolutions above 2048px leads to an Out Of Memory (OOM) error.
 This is due to the increased memory requirements for activations, along with memory spikes caused by convolution operators, both of which collectively contribute to the issue.
 
-By leveraging Parallel VAE, xDiT is able to demonstrate its capability for generating images at higher resolutions, enabling us to produce images with even greater detail and clarity. Applying `--use_parallel_vae` in the [runing script](https://github.com/xdit-project/xDiT/blob/main/examples/run.sh).
+Parallel VAE enabled higher-resolution image generation with `--use_parallel_vae`.
 
 prompt is "A hyperrealistic portrait of a weathered sailor in his 60s, with deep-set blue eyes, a salt-and-pepper beard, and sun-weathered skin. He's wearing a faded blue captain's hat and a thick wool sweater. The background shows a misty harbor at dawn, with fishing boats barely visible in the distance."
 

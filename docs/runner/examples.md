@@ -169,11 +169,8 @@ checkpoint ID or local directory to `--model` and follow each script's inputs.
 | FLUX.2 direct pipeline | [FLUX.2](https://github.com/xdit-project/xDiT/blob/main/examples/flux2_example.py) |
 | FLUX ControlNet | [ControlNet](https://github.com/xdit-project/xDiT/blob/main/examples/flux_control_example.py) |
 
-For a configurable launcher, edit the checkpoint, GPU count, and parallel layout
-in [examples/run.sh](https://github.com/xdit-project/xDiT/blob/main/examples/run.sh)
-and run `bash examples/run.sh`. Its defaults use eight GPUs.
-Match the parallel degrees to the launched process count. The unified runner's
-parallel VAE reuses model ranks.
+Launch the individual scripts with `torchrun`, matching the parallel degrees to
+the process count. The unified runner's parallel VAE reuses model ranks.
 
 The direct FLUX.2 script requires a downloaded checkpoint directory containing
 `model_index.json`:

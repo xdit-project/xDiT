@@ -103,7 +103,7 @@ Flux.1实时部署有如下挑战：
 
 在A100上，单卡使用Flux.1超过2048px就会OOM。这是因为Activation内存需求增加，同时卷积算子引发memory spike，二者共同导致的。
 
-使用通过Parallel VAE让xDiT得以一窥更高分辨率生成能力的真容，我们可以生成更高分辨率的图片。使用`--use_parallel_vae` 在[运行脚本中](https://github.com/xdit-project/xDiT/blob/main/examples/run.sh).
+使用 `--use_parallel_vae` 启用 Parallel VAE，可以生成更高分辨率的图片。
 
 prompt是"A hyperrealistic portrait of a weathered sailor in his 60s, with deep-set blue eyes, a salt-and-pepper beard, and sun-weathered skin. He’s wearing a faded blue captain’s hat and a thick wool sweater. The background shows a misty harbor at dawn, with fishing boats barely visible in the distance."
 

@@ -68,7 +68,7 @@ and the [CLI reference](docs/runner/cli.md) for other workflows and options.
 | --- | --- |
 | Scale inference across GPUs | [Ulysses and Ring](docs/methods/usp.md), [hybrid layouts](docs/methods/hybrid.md) |
 | Fit models and high-resolution outputs in memory | [Sharding and offload](docs/runner/memory.md), [parallel VAE](docs/methods/parallel_vae.md) |
-| Tune kernels, compute, and communication | [Attention](docs/runner/attention.md), [quantization](docs/runner/quantization.md), [FP8 communication](docs/runner/communication.md) |
+| Tune kernels, compute, and communication | [Attention](docs/runner/attention.md), [quantization](docs/runner/quantization.md), [communication](docs/runner/communication.md) |
 | Reuse denoising work | [Caching](docs/runner/caching.md) |
 | Adapt, measure, compile, and profile | [LoRA](docs/runner/lora.md), [benchmarking](docs/runner/benchmarking.md) |
 

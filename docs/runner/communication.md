@@ -8,12 +8,44 @@ path and measure your workload before changing the transport.
 | Control | What changes | Current requirements |
 | --- | --- | --- |
 | Default | Regular Ulysses collectives | A supported model, layout, and device backend |
+| `--ulysses_a2a sdma` | Uses SDMA copy engines for eligible input and output exchanges | ROCm, one node, and supported dense attention calls |
 | `--use_fp8_comms` | Quantizes eligible Q/K/V and attention-output exchanges | Model support and a pre-quantization attention backend; current kernels use ROCm/AITER |
 | `--attention_a2a` | Replaces the input exchange with AITER's intranode transport | Supported Wan models, ROCm/AITER, and MORI SHMEM |
 
 These controls affect communication tensors. [GEMM quantization](quantization.md)
 controls linear-layer compute precision. [Attention backend selection](attention.md)
 controls the attention kernel. Check the [model tables](models.md) before combining features.
+
+## SDMA Ulysses transport
+
+On ROCm, `--ulysses_a2a sdma` uses GPU copy engines for both Ulysses exchanges.
+It can overlap communication with attention and Q/K/V projections. Support was
+validated upstream on `gfx942` and `gfx950`; measure latency on your workload.
+
+```bash
+xdit --model flux-3-image-klein-base --prompt "A lighthouse on a rocky coast" \
+    --use_cfg_parallel --ulysses_degree 4 --attention_backend aiter_bf16 \
+    --ulysses_a2a sdma --ulysses_sdma_overlap_qkv --use_torch_compile
+```
+
+Use one node with peer-accessible GPUs. The transport builds with `hipcc` on first
+use, or loads a prebuilt library from `XDIT_SDMA_LIB`. See the
+[build script](https://github.com/xdit-project/xDiT/blob/main/xfuser/core/distributed/sdma/build.py).
+`--attention_a2a` and SDMA are mutually exclusive.
+
+| Option | Effect |
+| --- | --- |
+| `--ulysses_sdma_head_groups` | Splits each rank's heads into groups; effective default 2. Exchanges overlap other groups' attention. |
+| `--ulysses_sdma_group_streams` | Runs each group's attention on a separate stream. |
+| `--ulysses_sdma_overlap_qkv` | Overlaps projection with exchange. MiniMax-H3 and FLUX.3 project per group and retain a second Q/K/V weight copy. Wan sends Q/K before projecting V, without that copy. With CPU offload, only Wan's approach applies. |
+
+These options require `--ulysses_a2a sdma`. Unsupported calls fall back to regular
+collectives with a warning: Ring, FP8 communication, PipeFusion KV caching, head
+balancing, sparse kernels, attention masks, and certain padded joint-text layouts.
+While SDMA is selected, the runner disables transformer CUDA graphs because its
+host-issued copies cannot replay; other components can retain their graphs.
+`XDIT_SDMA_WAIT_S` sets the wait timeout in seconds (default 30).
+`XDIT_SDMA_ALLOW_UNTESTED=1` permits other GPU architectures.
 
 ## FP8 communication
 

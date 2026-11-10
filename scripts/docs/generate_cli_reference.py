@@ -72,7 +72,10 @@ def _category(action: argparse.Action) -> str:
         return "VAE memory and layout"
     if "gemm" in name or name in {"use_torch_compile", "use_fp8_text_encoder"} or name.startswith("fp8_precision_"):
         return "Compilation and GEMM quantization"
-    if name.startswith(("attention_", "cross_attention_", "mha_", "hybrid_attn_", "fp8_comms_")) or name in {
+    if name.startswith(
+        ("attention_", "cross_attention_", "mha_", "hybrid_attn_", "fp8_comms_", "ulysses_sdma_")
+    ) or name in {
+        "ulysses_a2a",
         "use_hybrid_attn_schedule",
         "num_hybrid_attn_high_precision_steps",
         "use_fp8_comms",

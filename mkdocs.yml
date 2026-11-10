@@ -35,7 +35,7 @@ nav:
       - Memory and loading: runner/memory.md
       - Attention backends: runner/attention.md
       - GEMM quantization: runner/quantization.md
-      - FP8 communication and Attention A2A: runner/communication.md
+      - Communication transports and FP8: runner/communication.md
       - Step caching: runner/caching.md
       - Startup LoRA: runner/lora.md
       - Benchmarking and outputs: runner/benchmarking.md

@@ -75,6 +75,19 @@ def test_boolean_help_is_stable_across_argparse_versions():
     assert "`--sparse`<br>`--no-sparse` | `True` | Use sparse attention." in references[0]
 
 
+def test_ulysses_transport_options_are_grouped_with_communication():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ulysses_a2a", choices=["default", "sdma"], default="default")
+    parser.add_argument("--ulysses_sdma_head_groups", type=int)
+
+    reference = render_reference(parser)
+
+    assert "## Attention backends and communication" in reference
+    assert reference.index("## Attention backends and communication") < reference.index('id="--ulysses_a2a"')
+    assert 'id="--ulysses_sdma_head_groups"' in reference
+    assert "## Other options" not in reference
+
+
 def test_check_reports_drift_without_writing(tmp_path, capsys):
     parser = argparse.ArgumentParser()
     parser.add_argument("--path", default="a`b", help="Destination (default: %(default)s).")

@@ -47,6 +47,10 @@ FastAPI, Ray, and Uvicorn.
 
 For external setup guidance, see [platform and ecosystem guides](../resources.md).
 
+For offline MiniMax-H3 and VDN-H3 runs, download all required components first,
+then set `HF_HUB_OFFLINE=1`. Component loading uses local files and fails if a
+required component cannot load. See [Hugging Face offline mode](https://huggingface.co/docs/huggingface_hub/package_reference/environment_variables#hfhuboffline).
+
 ### CUDA
 
 Use a CUDA-compatible PyTorch build and attention kernels supported by your GPU.

@@ -14,6 +14,7 @@ from xfuser.logger import init_logger
 from xfuser.core.distributed import init_distributed_environment
 from xfuser.config.attention_a2a import (
     ATTENTION_A2A_HADAMARD_PLACEMENTS,
+    ATTENTION_A2A_OUTPUT_HOPS,
     ATTENTION_A2A_PROFILES,
     AttentionA2AConfig,
 )
@@ -39,6 +40,9 @@ from xfuser.config.config import (
 )
 
 logger = init_logger(__name__)
+
+# GEMM formats whose output projection can consume a quantized attention output.
+_ATTENTION_A2A_OUTPUT_GEMM_FORMATS = frozenset({"fp8", "fp4", "fp6", "a6w4"})
 
 
 class FlexibleArgumentParser(argparse.ArgumentParser):
@@ -200,6 +204,19 @@ def _add_attention_a2a_args(parser) -> None:
             "default (none for INT8, preprocess for the MX/FP8 profiles)."
         ),
     )
+    parser.add_argument(
+        "--attention_a2a_output",
+        choices=ATTENTION_A2A_OUTPUT_HOPS,
+        default="none",
+        help=(
+            "Attention A2A output-hop transport. 'mori' quantizes the MHA output "
+            "to the activation format of the following output-projection GEMM "
+            "(TorchAO FP8, MXFP4, MXFP6, or A6W4) and performs the inverse "
+            "Ulysses all-to-all through MoRI. Requires an enabled "
+            "--attention_a2a profile and a --gemm_quantization profile built "
+            "from fp8, fp4, fp6, or a6w4."
+        ),
+    )
 
 
 @dataclass
@@ -301,6 +318,7 @@ class xFuserArgs:
     fp8_comms_safety_factor: float = DEFAULT_FP8_COMMS_SAFETY_FACTOR
     attention_a2a: str = "none"
     attention_a2a_hadamard: str = "auto"
+    attention_a2a_output: str = "none"
     gemm_high_precision_targets: str = "model"
     gemm_high_precision_module_patterns: Optional[str] = None
     gemm_high_precision_prefix_patterns: Optional[str] = None
@@ -411,6 +429,7 @@ class xFuserArgs:
                 "--fully_shard_components."
             )
         self._resolve_gemm_quantization()
+        self._validate_attention_a2a_output()
         if self.cache_method is None:
             if self.use_fbcache:
                 warnings.warn(
@@ -435,11 +454,13 @@ class xFuserArgs:
         config = AttentionA2AConfig(
             profile=self.attention_a2a,
             hadamard=self.attention_a2a_hadamard,
+            output=self.attention_a2a_output,
         )
         # Keep programmatic construction aligned with CLI parsing: the config
         # object strips whitespace and normalizes case before validation.
         self.attention_a2a = config.profile
         self.attention_a2a_hadamard = config.hadamard
+        self.attention_a2a_output = config.output
         if not config.enabled:
             return
         if self.use_hybrid_attn_schedule:
@@ -487,6 +508,15 @@ class xFuserArgs:
             raise ValueError("--attention_a2a does not support ring parallelism")
         if self.use_spargeattn_head_balance:
             raise ValueError("--attention_a2a does not support Sparge head balancing")
+
+    def _validate_attention_a2a_output(self) -> None:
+        if self.attention_a2a_output == "none":
+            return
+        if not self.gemm_quantization_spec.formats <= _ATTENTION_A2A_OUTPUT_GEMM_FORMATS:
+            raise ValueError(
+                "--attention_a2a_output mori requires --gemm_quantization fp8, fp4, fp6, "
+                f"a6w4, or a low=fp4 pair; got {self.gemm_quantization_spec}"
+            )
 
     @property
     def gemm_quantization_spec(self) -> GemmQuantizationSpec:
@@ -1758,6 +1788,7 @@ class xFuserArgs:
             attention_a2a=AttentionA2AConfig(
                 profile=self.attention_a2a,
                 hadamard=self.attention_a2a_hadamard,
+                output=self.attention_a2a_output,
             ),
         )
 

@@ -47,12 +47,18 @@ from xfuser.core.sparge_attention.head_balance import (
 from xfuser.core.distributed.attention_a2a import (
     fused_a2a_input,
     fused_a2a_input_role,
+    fused_a2a_output,
     get_fused_a2a_codecs,
     get_fused_a2a_mode,
     get_fused_a2a_profile,
     launch_attention_a2a_packed,
     use_fused_a2a_interleave,
+    use_fused_a2a_output,
     use_fused_a2a_packed,
+)
+from xfuser.model_executor.layers.quantized_attention_output import (
+    QuantizedAttentionOutput,
+    attention_output_codec,
 )
 
 # Sparge backends whose kernel cost can be load-balanced across Ulysses ranks.
@@ -614,8 +620,9 @@ def _attention_a2a_usp(
     attention_kwargs,
     kv_head_repeat,
     pending,
+    output_projection,
 ):
-    """Run the deliberately narrow AITER/MORI Ulysses input path."""
+    """Run the deliberately narrow AITER/MORI Ulysses input path and, for ``output_projection``, the output hop."""
     runtime_state = get_runtime_state()
     ulysses_world_size = get_ulysses_parallel_world_size()
     ring_world_size = get_ring_parallel_world_size()
@@ -640,6 +647,14 @@ def _attention_a2a_usp(
         raise RuntimeError("Attention A2A runtime did not activate a concrete profile")
     if pending is not None and not use_fused_a2a_interleave():
         raise ValueError("interleaved input requires eligible Attention A2A transport")
+    output_codec = None
+    if output_projection is not None:
+        output_codec = attention_output_codec(output_projection)
+        if output_codec is None:
+            raise RuntimeError(
+                "--attention_a2a_output mori requires a quantized output projection; "
+                f"{type(output_projection).__name__} consumes a BF16 activation"
+            )
 
     unsupported = []
     if _ulysses_extra_inputs(attention_kwargs, query):
@@ -681,8 +696,16 @@ def _attention_a2a_usp(
         *packed_scales,
         profile,
         query.shape[-1] ** -0.5,
-    ).transpose(1, 2)
-    return _ft_c_output_all_to_all(output)
+    )
+    if output_codec is not None:
+        payload, scale = fused_a2a_output(
+            output,
+            PROCESS_GROUP.ULYSSES_PG,
+            get_ulysses_parallel_rank(),
+            output_codec,
+        )
+        return QuantizedAttentionOutput(payload, scale, output_codec)
+    return _ft_c_output_all_to_all(output.transpose(1, 2))
 
 
 def USP(
@@ -703,6 +726,7 @@ def USP(
     kv_head_repeat: int = 1,
     attention_a2a_enabled: bool = False,
     attention_a2a_pending=None,
+    output_projection=None,
 ):
     """
     Unified Sequence Parallelism (USP) attention call, supporting combinations of Ulysses and
@@ -731,6 +755,12 @@ def USP(
     the Ulysses input all-to-all, then repeats each local KV head immediately
     before attention. With ``combine_qkv_a2a=True``, unequal Q and KV payloads
     are packed into one collective.
+
+    ``output_projection`` (optional) is the linear that consumes the attention
+    output. Passing it requires the Attention A2A output hop: USP then quantizes
+    the MHA output for that projection's GEMM, performs the inverse all-to-all
+    through MoRI, and returns a ``QuantizedAttentionOutput`` for
+    ``project_attention_output`` instead of the BF16 output.
     """
     if combine_qkv_a2a is None:
         combine_qkv_a2a = False
@@ -748,6 +778,8 @@ def USP(
     use_attention_a2a = attention_a2a_enabled and get_fused_a2a_mode() > 0
     if attention_a2a_pending is not None and not use_attention_a2a:
         raise ValueError("interleaved input requires eligible Attention A2A transport")
+    if output_projection is not None and not (use_attention_a2a and use_fused_a2a_output()):
+        raise ValueError("output_projection requires the Attention A2A output hop")
     if use_attention_a2a:
         return _attention_a2a_usp(
             query,
@@ -760,6 +792,7 @@ def USP(
             attention_kwargs=attention_kwargs,
             kv_head_repeat=kv_head_repeat,
             pending=attention_a2a_pending,
+            output_projection=output_projection,
         )
 
     runtime_state = get_runtime_state()

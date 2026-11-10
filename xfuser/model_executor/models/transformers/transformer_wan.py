@@ -18,6 +18,11 @@ from xfuser.core.distributed.attention_a2a import (
     get_fused_a2a_hadamard_placement,
     get_fused_a2a_mode,
     use_fused_a2a_interleave,
+    use_fused_a2a_output,
+)
+from xfuser.model_executor.layers.quantized_attention_output import (
+    QuantizedAttentionOutput,
+    project_attention_output,
 )
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
 from xfuser.core.distributed import (
@@ -266,8 +271,12 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
             attn_layer=attn,
             attention_a2a_enabled=True,
             attention_a2a_pending=pending,
-        ).transpose(1, 2)
-        return self._finish_attention(attn, output, activation_dtype)
+            output_projection=attn.to_out[0] if use_fused_a2a_output() else None,
+        )
+        if isinstance(output, QuantizedAttentionOutput):
+            logical_shape = (*query.shape[:2], query.shape[2] * query.shape[3])
+            return attn.to_out[1](project_attention_output(attn.to_out[0], output, logical_shape))
+        return self._finish_attention(attn, output.transpose(1, 2), activation_dtype)
 
     @staticmethod
     def _split_i2v_context(attn, encoder_hidden_states):

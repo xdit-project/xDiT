@@ -202,8 +202,8 @@ For startup adapter fusion on FLUX.1-dev and MiniMax-H3 Turbo, see [LoRA support
 ### Quantized Attention A2A
 
 Wan2.2 T2V, Wan2.1 I2V, and Wan2.2 I2V can replace the Ulysses input RCCL
-all-to-all with AITER's intranode Attention A2A transport. The output hop
-remains RCCL.
+all-to-all with AITER's intranode Attention A2A transport. Wan2.2 T2V can
+optionally replace the output all-to-all as well (see [Output hop](#output-hop)).
 
 ```bash
 xdit \
@@ -249,6 +249,40 @@ collective/wait lowering. If that private contract is unavailable it falls
 back to the Tier-1 ordered custom-op path. If neither path is supported,
 initialization fails and the run must disable the feature with
 `--attention_a2a none`.
+
+#### Output hop
+
+`--attention_a2a_output mori` also replaces the inverse Ulysses all-to-all
+after attention. xDiT quantizes the MHA output directly into the activation
+format of the following output projection and sends it to its sequence owner
+with AITER's `AttentionOutputA2AIntraNodeOp`, so the projection GEMM skips its
+own activation quantization:
+
+```bash
+xdit \
+    --model Wan-AI/Wan2.2-T2V-A14B-Diffusers \
+    --ulysses_degree 8 \
+    --attention_backend aiter_fp8 \
+    --attention_a2a auto \
+    --attention_a2a_output mori \
+    --gemm_quantization fp8 \
+    --use_torch_compile \
+    --prompt "A motorcycle cruising along a coastal highway"
+```
+
+Each block uses the codec of its own output projection:
+
+| Output projection | Transported activation |
+| --- | --- |
+| TorchAO FP8 (`fp8`) | `e4m3_external_scale`: FP8 with one descale per destination rank, derived exactly as TorchAO's dynamic per-tensor activation quantization would |
+| MXFP4 (`fp4`) | `mxfp4`: E2M1 with E8M0 per-1x32 scales in the A4W4 layout |
+| MXFP6 (`fp6`) and A6W4 (`a6w4`) | `mxfp6`: packed values and scales in the A6W6/A6W4 layout |
+
+The output hop requires an enabled `--attention_a2a` profile, gfx950, and a
+`--gemm_quantization` profile built from `fp8`, `fp4`, `fp6`, or `a6w4`,
+including the `low=fp4` pairs and `--use_hybrid_gemm_schedule`. A projection
+that consumes BF16 is an error rather than a silent RCCL fallback. Wan2.2 T2V
+is currently the only runner that supports the output hop.
 
 ### Loading and Quantization Contract
 

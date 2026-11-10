@@ -21,6 +21,30 @@ def test_module_cache_uses_a_nonpersistent_buffer(monkeypatch):
     assert "_xdit_kv_cache" not in layer.state_dict()
 
 
+def test_cache_state_context_isolates_branch_buffers():
+    manager = cache_manager.CacheManager()
+    layer = torch.nn.Linear(2, 2)
+    manager.register_cache_entry(layer, "attn")
+    first_branch = {}
+    second_branch = {}
+    first_value = torch.randn(1, 3, 8)
+    second_value = torch.randn_like(first_value)
+
+    with manager.use_cache_state([layer], first_branch):
+        assert layer._buffers["_xdit_kv_cache"] is None
+        layer._buffers["_xdit_kv_cache"] = first_value
+
+    with manager.use_cache_state([layer], second_branch):
+        assert layer._buffers["_xdit_kv_cache"] is None
+        layer._buffers["_xdit_kv_cache"] = second_value
+
+    with manager.use_cache_state([layer], first_branch):
+        assert layer._buffers["_xdit_kv_cache"] is first_value
+
+    assert first_branch[layer] is first_value
+    assert second_branch[layer] is second_value
+
+
 def test_compiled_update_writes_the_module_cache_buffer(monkeypatch):
     monkeypatch.setattr(
         cache_manager,

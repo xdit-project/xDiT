@@ -17,6 +17,7 @@ from xfuser.core.attention.requirements import ALWAYS, ARCH, NEVER, PARAM, Requi
 from xfuser.core.attention.constraints import (
     HEAD_DIM,
     MHA_ONLY,
+    MIN_KEY_LENGTH,
     NON_CAUSAL,
     NO_DROPOUT,
     NO_VARLEN,
@@ -95,6 +96,9 @@ class MhaV4Format:
     v_scale: Optional[Scale] = None
     dense: bool = True  # False = sparge variant only
     dense_on: Requirement = GFX950_OR_GFX942
+    # Fewest keys the dense kernel attends over correctly; shorter calls go to
+    # the fallback.
+    min_keys: int = 1
 
     @property
     def is_mxfp8(self) -> bool:
@@ -109,7 +113,10 @@ class MhaV4Format:
 # the columns and the header would index nothing.
 FORMATS = [
     #            name        Q/K              V                sparge on
-    MhaV4Format("BF16",      Fmt.BF16,        Fmt.BF16,        GFX950_OR_GFX942),
+    # The BF16 kernel returns garbage for 64 keys or fewer, whatever the query
+    # length; such calls (a short prompt's text refiner) take the fallback.
+    MhaV4Format("BF16",      Fmt.BF16,        Fmt.BF16,        GFX950_OR_GFX942,
+                min_keys=65),
     MhaV4Format("BF16FP8",   Fmt.BF16,        Fmt.NATIVE_FP8,  GFX950_OR_GFX942),
     MhaV4Format("I8FP8",     Fmt.INT8,        Fmt.NATIVE_FP8,  GFX950_OR_GFX942),
     MhaV4Format("F8F6",      Fmt.NATIVE_FP8,  Fmt.MXFP6,       GFX950),
@@ -155,7 +162,7 @@ def _dense_spec(fmt: MhaV4Format) -> Spec:
         impl=Impl("kernel:mha_v4_dense", {"fmt": fmt}),
         ring=DENSE_RING,
         low_precision=fmt.qk is not Fmt.BF16,
-        accepts=DENSE_CALLS,
+        accepts=DENSE_CALLS & MIN_KEY_LENGTH(fmt.min_keys) if fmt.min_keys > 1 else DENSE_CALLS,
         # Every row here is head dim 128, which makes the family unselectable
         # for a model that mixes widths: LTX-2 runs 128-wide video blocks
         # beside 64-wide audio ones under one backend choice. The odd widths

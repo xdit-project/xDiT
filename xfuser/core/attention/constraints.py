@@ -77,6 +77,23 @@ class HEAD_DIM(CallConstraint):
 
 
 @dataclass(frozen=True)
+class MIN_KEY_LENGTH(CallConstraint):
+    """Refuse calls that attend over fewer than ``minimum`` keys.
+
+    A packed call counts its valid keys (the longest segment), which is what a
+    kernel that shortens K/V to them is launched with; otherwise the key length.
+    """
+
+    minimum: int
+
+    def unmet(self, query, key, value, call) -> Optional[str]:
+        length = key.shape[2] if call.varlen is None else call.varlen.max_seqlen_k
+        if length >= self.minimum:
+            return None
+        return f"needs at least {self.minimum} keys, got {length}"
+
+
+@dataclass(frozen=True)
 class _NonCausal(CallConstraint):
     def unmet(self, query, key, value, call) -> Optional[str]:
         return "does not support causal masking" if call.is_causal else None

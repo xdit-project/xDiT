@@ -193,11 +193,7 @@ def _fused_block_forward(
     unmodulated context-refiner blocks, a grad-enabled call -- runs the upstream
     expression unchanged via the wrapper's own fallback.
     """
-    if not self.modulation or noise_mask is not None:
-        # The unmodulated context-refiner blocks and per-token modulation are
-        # both out of envelope.  Defer rather than transcribe: upstream's own
-        # forward is right there, and a copy of it would be one more thing to
-        # keep in step with diffusers for no gain.
+    if noise_mask is not None:
         return _UPSTREAM_BLOCK_FORWARD(
             self,
             x,
@@ -208,6 +204,8 @@ def _fused_block_forward(
             adaln_noisy,
             adaln_clean,
         )
+    if not self.modulation:
+        return _UPSTREAM_BLOCK_FORWARD(self, x, attn_mask, freqs_cis, adaln_input)
 
     mod = self.adaLN_modulation(adaln_input)
     scale_msa, gate_msa, scale_mlp, gate_mlp = mod.unsqueeze(1).chunk(4, dim=2)

@@ -235,9 +235,6 @@ class xFuserArgs:
     tensor_parallel_degree: int = 1
     text_encoder_tp_degree: int = 1
     split_scheme: Optional[str] = "row"
-    # ray arguments
-    use_ray: bool = False
-    ray_world_size: int = 1
     vae_parallel_size: int = 0
     dit_parallel_size: int = 0
     # pipefusion parallel
@@ -700,17 +697,6 @@ class xFuserArgs:
         _add_attention_a2a_args(runtime_group)
         # Parallel arguments
         parallel_group = parser.add_argument_group("Parallel Processing Options")
-        runtime_group.add_argument(
-            "--use_ray",
-            action="store_true",
-            help="Enable ray to run inference in multi-card",
-        )
-        parallel_group.add_argument(
-            "--ray_world_size",
-            type=int,
-            default=1,
-            help="The number of ray workers (world_size for ray)",
-        )
         parallel_group.add_argument(
             "--dit_parallel_size",
             type=int,
@@ -781,12 +767,6 @@ class xFuserArgs:
             type=str,
             default="row",
             help="Split scheme for tensor parallel.",
-        )
-        parallel_group.add_argument(
-            "--vae_parallel_size",
-            type=int,
-            default=0,
-            help="Number of processes for VAE parallelization. 0: no seperate process for VAE, 1: run VAE in a separate process, >1: distribute VAE across multiple processes.",
         )
 
         # Input arguments
@@ -1770,13 +1750,14 @@ class xFuserArgs:
         self,
     ) -> Tuple[EngineConfig, InputConfig]:
         self._validate_gemm_quantization_flags()
-        if not self.use_ray and not torch.distributed.is_initialized():
+        if self.vae_parallel_size != 0:
+            raise ValueError(
+                "Dedicated VAE ranks are no longer supported. Use --use_parallel_vae with the existing model ranks."
+            )
+        if not torch.distributed.is_initialized():
             logger.warning("Distributed environment is not initialized. Initializing...")
             init_distributed_environment()
-        if self.use_ray:
-            self.world_size = self.ray_world_size
-        else:
-            self.world_size = torch.distributed.get_world_size()
+        self.world_size = torch.distributed.get_world_size()
 
         if self.dit_parallel_size == 0 and (not self.use_parallel_vae or self.vae_parallel_size == 0):
             self.dit_parallel_size = self.world_size

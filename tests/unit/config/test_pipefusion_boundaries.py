@@ -3,6 +3,18 @@ import pytest
 from xfuser.config.args import FlexibleArgumentParser, xFuserArgs
 
 
+def test_dedicated_vae_ranks_fail_before_distributed_initialization(monkeypatch):
+    from xfuser.config import args as args_module
+
+    def unexpected_initialization(*args, **kwargs):
+        pytest.fail("Unsupported VAE topology must fail before distributed initialization")
+
+    monkeypatch.setattr(args_module, "init_distributed_environment", unexpected_initialization)
+
+    with pytest.raises(ValueError, match="Dedicated VAE ranks are no longer supported"):
+        xFuserArgs(use_parallel_vae=True, vae_parallel_size=1).create_config()
+
+
 def test_pipefusion_rejects_full_transformer_fsdp():
     with pytest.raises(ValueError, match="Full-transformer FSDP"):
         xFuserArgs(pipefusion_parallel_degree=2, fully_shard_degree=2)

@@ -53,7 +53,7 @@ def _gather_worker(rank, world_size, init_method, result_queue):
             )
             state = DiTRuntimeState.__new__(DiTRuntimeState)
             state.runtime_config = RuntimeConfig(dtype=torch.float32, use_parallel_vae=True)
-            # The VAE shares the model ranks; dedicated VAE ranks are a Ray-only topology.
+            # The runner's parallel VAE shares the model ranks.
             state.parallel_config = SimpleNamespace(vae_parallel_size=0)
             runtime_state._RUNTIME = state
 

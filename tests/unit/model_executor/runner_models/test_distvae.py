@@ -252,22 +252,7 @@ def test_enable_tiling_without_dimensions_keeps_native_window():
     apply.assert_not_called()
 
 
-def test_worker_vae_wrapper_uses_runtime_device_group_with_public_api():
-    vae = SimpleNamespace()
-    device_group = object()
-    coordinator = SimpleNamespace(device_group=device_group)
-
-    with (
-        mock.patch.object(base_pipeline, "get_vae_parallel_group", return_value=coordinator),
-        mock.patch.object(base_pipeline, "parallelize_decoder") as parallelize_decoder,
-    ):
-        converted = base_pipeline.xFuserVAEWrapper._convert_vae(object(), vae)
-
-    assert converted is vae
-    parallelize_decoder.assert_called_once_with(vae, device_group)
-
-
-def test_worker_vae_wrapper_accepts_dedicated_raw_process_group():
+def test_pipeline_vae_conversion_accepts_raw_process_group():
     vae = SimpleNamespace()
     process_group = object()
 
@@ -275,7 +260,7 @@ def test_worker_vae_wrapper_accepts_dedicated_raw_process_group():
         mock.patch.object(base_pipeline, "get_vae_parallel_group", return_value=process_group),
         mock.patch.object(base_pipeline, "parallelize_decoder") as parallelize_decoder,
     ):
-        converted = base_pipeline.xFuserVAEWrapper._convert_vae(object(), vae)
+        converted = base_pipeline.xFuserPipelineBaseWrapper._convert_vae(object(), vae)
 
     assert converted is vae
     parallelize_decoder.assert_called_once_with(vae, process_group)

@@ -255,13 +255,16 @@ def _stack_modulation(layers, adaln_input):
 def _stack_is_pipelinable(layers) -> bool:
     """True when the runner may drive the blocks' internals directly.
 
-    False for anything that has taken ownership of the block as a unit -- a
-    per-block ``torch.compile`` (FSDP, ``--cache_method``) wraps it in an
-    ``OptimizedModule``, and calling through to ``layer.attention`` would step
-    around that compiled graph.  Those stacks run the plain per-layer loop.
+    Compiled blocks and blocks with Diffusers or Accelerate hook registries
+    use the per-layer loop. This preserves their compiled forward calls and
+    device-placement hooks.
     """
     return bool(layers) and all(
-        type(layer) is ZImageTransformerBlock and getattr(layer, "modulation", False) for layer in layers
+        type(layer) is ZImageTransformerBlock
+        and getattr(layer, "modulation", False)
+        and not hasattr(layer, "_diffusers_hook")
+        and not hasattr(layer, "_hf_hook")
+        for layer in layers
     )
 
 

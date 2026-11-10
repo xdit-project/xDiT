@@ -19,6 +19,7 @@ import torch
 
 from xfuser.core.distributed import get_runtime_state
 from xfuser.core.utils.runner_utils import log
+from xfuser.envs import PACKAGES_CHECKER
 from xfuser.model_executor.layers import usp_sdma
 from xfuser.model_executor.models.runner_models.base_model import (
     DIFFUSERS_FROM_SOURCE,
@@ -272,6 +273,13 @@ class xFuserMiniMaxH3ImageModel(MiniMaxH3TextEncoderMixin, xFuserModel):
             pipe_kwargs["image"] = input_args["input_images"]
         image = self.pipe(**pipe_kwargs)[0]
         return DiffusionOutput(images=[image], pipe_args=input_args)
+
+    def _get_compile_mode(self) -> str:
+        # CUDA graphs pay off once the forward is sharded, and cost nothing on one GPU.
+        # Graphs re-capture pathologically on RDNA4, as for FLUX.2.
+        if PACKAGES_CHECKER._on_rdna4():
+            return "default"
+        return "reduce-overhead"
 
     def _compile_model(self, input_args: dict) -> None:
         mode = self._get_compile_mode()

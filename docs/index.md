@@ -38,9 +38,8 @@ change output quality; compare results and timing on your workload.
 
 ## Integrate and contribute
 
-Use [xDiT ComfyUI](https://github.com/xdit-project/xdit-comfyui), explore
-[cloud, device, and container guides](resources.md), or use the separate
-[HTTP service example](developer/Http_Service.md).
+Use [xDiT ComfyUI](https://github.com/xdit-project/xdit-comfyui) or explore
+[cloud, device, and container guides](resources.md).
 
 For development, start with [framework design](developer/The_implement_design_of_xdit_framework.md)
 and [adding a model](developer/adding_models/readme.md). Contributors can

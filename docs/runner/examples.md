@@ -172,8 +172,8 @@ checkpoint ID or local directory to `--model` and follow each script's inputs.
 For a configurable launcher, edit the checkpoint, GPU count, and parallel layout
 in [examples/run.sh](https://github.com/xdit-project/xDiT/blob/main/examples/run.sh)
 and run `bash examples/run.sh`. Its defaults use eight GPUs.
-Match the parallel degrees to the launched process count. Legacy examples can reserve
-VAE-only ranks; the unified runner's parallel VAE reuses model ranks.
+Match the parallel degrees to the launched process count. The unified runner's
+parallel VAE reuses model ranks.
 
 The direct FLUX.2 script requires a downloaded checkpoint directory containing
 `model_index.json`:
@@ -188,12 +188,10 @@ torchrun --nproc_per_node=4 examples/flux2_example.py \
 ### Legacy tensor parallelism
 
 The [FLUX ControlNet script](https://github.com/xdit-project/xDiT/blob/main/examples/flux_control_example.py)
-and [Ray FLUX script](https://github.com/xdit-project/xDiT/blob/main/examples/ray/ray_flux_example.py)
-use the legacy FLUX wrapper. With `--tensor_parallel_degree` greater than 1,
+uses the legacy FLUX wrapper. With `--tensor_parallel_degree` greater than 1,
 it shards feed-forward weights and combines their outputs with an all-reduce.
 Attention and other transformer weights stay replicated across TP ranks.
 
-These scripts use the legacy parser; the unified runner does not enable this TP path.
+This script uses the legacy parser; the unified runner does not enable this TP path.
 Set a compatible checkpoint and match the parallel degrees to the process count.
 For ControlNet, set the hard-coded `test_imgs/016#.png` path to your control image.
-The Ray script requires `xfuser[ray]` and uses Ray workers to launch the model.

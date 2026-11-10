@@ -80,10 +80,10 @@ output quality; compare results on your workload.
 
 <h2 id="comfyui">Integrations and resources</h2>
 
-<a id="using-example-scripts"></a><a id="5-launch-an-http-service"></a>
+<a id="using-example-scripts"></a>
 
 - [xDiT ComfyUI](https://github.com/xdit-project/xdit-comfyui): model loading and generation through ComfyUI.
-- [Legacy examples](docs/runner/examples.md#dedicated-pipeline-examples) and the [HTTP service](docs/developer/Http_Service.md).
+- [Legacy model examples](docs/runner/examples.md#dedicated-pipeline-examples).
 - [External model integrations](docs/runner/examples.md#external-model-integrations): StepVideo and Mochi use separate launchers.
 - [Container builds and workload configurations](https://github.com/AMD-AGI/diffusion-models-inference): CUDA, Instinct, and RDNA 4 environments.
 - [Community resources](docs/resources.md), including Google Cloud serving and ROCm recipes.

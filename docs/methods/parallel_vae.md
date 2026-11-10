@@ -88,5 +88,4 @@ VAE weights and final output assembly still consume memory on each rank.
 DistVAE's [decode strategy guide](https://github.com/xdit-project/DistVAE/blob/main/docs/strategies.md)
 and [tile-window guide](https://github.com/xdit-project/DistVAE/blob/main/docs/tiling.md)
 explain the family-specific tradeoffs. See the [runner guide](../runner/runner.md)
-for model support. Legacy Python examples use a separate parser and may
-support VAE-only ranks; those options are not part of the `xdit` CLI.
+for model support. The `xdit` CLI uses existing model ranks for parallel VAE.

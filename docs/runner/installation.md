@@ -34,14 +34,11 @@ installed parser with `python -m xfuser.runner --help`.
 | `torchao` | Supported torchao GEMM and text-encoder quantization paths. AITER has separate installation requirements. |
 | `flash-attn` | FlashAttention 2 (`>=2.7.0`). Other FlashAttention generations need their corresponding package; Ring requirements depend on the selected backend. |
 | `optimum-quanto` | FP8 T5 conversion in legacy pipeline examples; separate from the runner's GEMM/text-encoder controls. |
-| `ray` | `RayDiffusionPipeline` workflows. |
 | `opencv-python` | ConsisID examples; installs `opencv-python-headless`. |
 
 Install the device runtime separately. Check
 [attention backend](attention.md) and [quantization](quantization.md) requirements
 before selecting optional kernels.
-Follow the [HTTP service guide](../developer/Http_Service.md) to install
-FastAPI, Ray, and Uvicorn.
 
 ## Device environments
 

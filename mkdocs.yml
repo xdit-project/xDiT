@@ -55,5 +55,4 @@ nav:
       - CFG parallel: developer/adding_models/adding_model_cfg.md
       - CFG and USP: developer/adding_models/adding_model_cfg_usp.md
       - PipeFusion: developer/adding_models/adding_model_pipefusion.md
-      - HTTP service: developer/Http_Service.md
       - Build and update docs: maintaining.md

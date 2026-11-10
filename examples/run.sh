@@ -35,11 +35,8 @@ mkdir -p ./results
 # task args
 TASK_ARGS="--height 1024 --width 1024 --no_use_resolution_binning --guidance_scale 3.5"
 
-# Cache aliases below are deprecated; prefer --cache_method in the runner.
-# TeaCache/FBCache require PipeFusion degree 1. The default PP=2 layout
-# needs --cache_method pipefusion on a supported model instead.
-# CACHE_ARGS="--use_teacache"
-# CACHE_ARGS="--use_fbcache"
+# Unified runner only: stage-aware caching for the default PP=2 layout.
+# CACHE_ARGS="--cache_method pipefusion"
 
 # On 8 GPUs, pp=2, ulysses=2, ring=2, cfg=1.
 # Enabling CFG parallel doubles the rank count; adjust the other degrees or N_GPUS.

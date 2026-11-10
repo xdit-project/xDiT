@@ -139,6 +139,7 @@ The following open-sourced DiT Models are released with xDiT in day 1.
 | [🟢 Krea2-Raw](https://huggingface.co/krea/Krea-2-Raw) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🟢 Krea2-Turbo](https://huggingface.co/krea/Krea-2-Turbo) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🟢 Ideogram 4](https://huggingface.co/ideogram-ai/ideogram-4-fp8) | ✔️ | ✔️ | ❎ | ❎ | ✔️ | NA |
+| [🟣 MiniMax-H3-Image](https://huggingface.co/MiniMaxAI/MiniMax-H3-Image) | NA | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🎬 MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🎬 MiniMax-H3 Turbo](https://huggingface.co/lightx2v/Minimax-h3-Turbo) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🎬 VDN-H3](https://huggingface.co/OpenVDN/vdn-minimax-h3) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
@@ -356,6 +357,7 @@ Below is a list of validated diffusers version requirements. If the model is not
 | [Flux 2](https://huggingface.co/black-forest-labs/FLUX.2-dev) | >= 0.36.0 |
 | [Ideogram 4](https://huggingface.co/ideogram-ai/ideogram-4-fp8) | >= 0.39.0 |
 | [Flux 3 Image klein](https://huggingface.co/black-forest-labs/flux-3-image-klein) (and klein base) | from source (main; tested at `d42ebf9`) |
+| [MiniMax-H3-Image](https://huggingface.co/MiniMaxAI/MiniMax-H3-Image) | from source (main; tested at `87b6f2d`) |
 | [Flux](https://huggingface.co/black-forest-labs/FLUX.1-dev) | >= 0.35.2 |
 | [Flux Kontext](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) | >= 0.35.2 |
 | [HunyuanVideo](https://github.com/Tencent/HunyuanVideo) | >= 0.35.2 |

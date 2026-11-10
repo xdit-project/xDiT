@@ -143,6 +143,10 @@ class VAEManager:
             from diffusers.models import AutoencoderKLMiniMaxH3
         except ImportError:
             AutoencoderKLMiniMaxH3 = None
+        try:
+            from diffusers.models import AutoencoderKLMiniMaxH3Image
+        except ImportError:
+            AutoencoderKLMiniMaxH3Image = None
 
         for vae in vaes:
             if AutoencoderKLMiniMaxH3 is not None and isinstance(
@@ -153,6 +157,15 @@ class VAEManager:
                 )
 
                 install_minimax_h3_vae_tile_parallel(vae)
+                continue
+            if AutoencoderKLMiniMaxH3Image is not None and isinstance(
+                vae, AutoencoderKLMiniMaxH3Image
+            ):
+                from xfuser.model_executor.models.runner_models.minimax_h3_image import (
+                    install_minimax_h3_image_tiled_decode,
+                )
+
+                install_minimax_h3_image_tiled_decode(vae, coordinator)
                 continue
             if self._tiles(vae) and vae_tiling.supports_tile_parallel(vae):
                 mark(vae, tile_context)

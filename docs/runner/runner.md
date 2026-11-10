@@ -115,6 +115,7 @@ Individual model classes that inherit from `xFuserModel`:
 | Lumina-Image-2.0 | `Lumina2`, `Lumina-Image-2.0`, `Alpha-VLLM/Lumina-Image-2.0` |
 | MOSS-Image | `MOSS-Image`, `MOSS-Image-Base`, `OpenMOSS-Team/MOSS-Image-Base` |
 | MiniMax-H3 | `MiniMaxAI/MiniMax-H3`, `MiniMax-H3`, `MiniMax-H3-Ref2VA` |
+| MiniMax-H3-Image | `MiniMaxAI/MiniMax-H3-Image`, `MiniMax-H3-Image` |
 | MiniMax-H3 Turbo (lightx2v LoRA) | `MiniMax-H3-Turbo` |
 | VDN-H3 | `OpenVDN/vdn-minimax-h3`, `VDN-H3` |
 | Prism (preview-alpha) | `Prism`, `Prism-preview-alpha`, `FrancisRing/Prism` |
@@ -428,6 +429,7 @@ fill it from rank 0.
 | CausalWan | No shared load route declared; direct load with manual single-file fallback | None | Rejected before allocation: fallback discovery is not collective-safe | No |
 | Ideogram 4 | Streaming; both the conditional and unconditional transformer declared | None | Both transformers; text encoder loads normally | Yes, for both transformers; the `trust_remote_code` text encoder is filled eagerly because the manifest cannot read its parameter names ahead of the load |
 | MiniMax-H3 and MiniMax-H3-Ref2VA | Modular `ModularPipeline` construction with fused QKV projections; direct load only | None | Rejected before allocation: fusion rewrites attention into `attn.to_qkv`, so live tensor names stop matching checkpoint keys | No |
+| MiniMax-H3-Image | The same: modular `ModularPipeline` construction with fused QKV projections, transformer from `transformer_diffusers/`; direct load only | None | Rejected before allocation, for the same reason | No |
 | VDN-H3 | The MiniMax-H3 modular pipeline with its transformer replaced by the materialized VDN transformer from `--vdn_transformer_dir`; fused QKV projections; direct load only | None | Not exposed by this runner | No |
 | Prism | Vendored MOVA module tree built on meta from the `MOVA-360p` configs; the single Prism state dict is read straight onto each rank's device; no shared load route declared | None | Not exposed by this runner | No |
 
@@ -447,7 +449,7 @@ A listed target is only half the answer: the format still has to survive the har
 | MiniMax-H3 | `transformer.transformer_blocks`; the Ref2VA variant declares `transformer_ref.transformer_blocks` | No |
 | Cosmos3-Super and Cosmos3-Nano | `transformer.layers` | No |
 | Z-Image and Z-Image-Turbo | No | `transformer.layers`, `transformer.noise_refiner`, and `transformer.context_refiner`; `context_refiner` drops out under sequence parallelism |
-| FLUX.1, FLUX.1-Kontext, FLUX.2-klein, FLUX.3 Image klein and klein base, Wan 2.1 VACE, Qwen-Image variants, Stable Diffusion 3.5, HunyuanVideo variants, LTX variants, CausalWan, Prism, VDN-H3 | No | No |
+| FLUX.1, FLUX.1-Kontext, FLUX.2-klein, FLUX.3 Image klein and klein base, Wan 2.1 VACE, Qwen-Image variants, Stable Diffusion 3.5, HunyuanVideo variants, LTX variants, CausalWan, Prism, VDN-H3, MiniMax-H3-Image | No | No |
 
 Several runners hold part of an FP4 target at FP8 where full FP4 costs too much
 quality: Wan 2.1 I2V and T2V keep blocks 0-9 and 30-39, Wan 2.2 TI2V keeps
@@ -474,7 +476,7 @@ list rather than adding to it.
 - CPU/model offload can be combined with AITER FP8; converted leaves are evicted as they are processed. Other quantization backends first require their block or component on the GPU.
 - `--enable_group_cpu_offload` is rejected with FP4 on the AITER backend, including the hybrid FP8/FP4 mode, because packed FP4 weights survive neither leg of the offload: with `--group_offload_low_cpu_mem` the hook pins each tensor and torch has no `pin_memory` for `Float4_e2m1fn_x2`, and without it AITER binds a device from the parameter it is handed, so a host parameter resolves to an invalid ordinal and aborts the process. Offload at FP8 or bf16, or run FP4 without offload.
 - Offload works across ranks: each rank onloads to its own local device, so it combines with a parallel degree and with the replicated meta load.
-- MiniMax-H3 supports only `--enable_model_cpu_offload`, and there it keeps the transformer and both VAEs on the device and streams the Qwen3-VL text encoder from pinned host memory (leaf-level group offload), which costs one weight transfer per request. The transformer stays resident, so FP4 still quantizes on the device. Model offload is for single-GPU runs: multi-GPU runs use `--text_encoder_tp_degree` instead, and sequential and group offload are rejected.
+- MiniMax-H3 and MiniMax-H3-Image support only `--enable_model_cpu_offload`, and there it keeps the transformer and the VAEs on the device and streams the Qwen3-VL text encoder from pinned host memory (leaf-level group offload), which costs one weight transfer per request. The transformer stays resident, so FP4 still quantizes on the device. Model offload is for single-GPU runs: multi-GPU runs use `--text_encoder_tp_degree` instead, and sequential and group offload are rejected.
 - `--enable_group_cpu_offload` and `--enable_sequential_cpu_offload` are rejected with `--fully_shard_degree > 1`, because both reach inside a parameter that sharding has replaced with a DTensor: the group hook asks each parameter whether it is pinned, for which torch registers no sharding strategy, and sequential offload rebuilds each parameter as it moves it, which needs a spec a plain tensor does not carry. `--enable_model_cpu_offload` moves whole components and does work on top of a sharded, blockwise-filled load. Combining the two does mean a component's weights are driven by two mechanisms at once — FSDP2 all-gathers the parameters, the offload hook moves the module — so anything a kernel needs that is not a parameter has to be checked against the launch device rather than assumed to have travelled: the AITER block-scale FP8 layer keeps its weight scale beside the weight as a replicated buffer and co-locates it in `forward` for that reason.
 
 #### Load and Quantization Examples
@@ -641,6 +643,46 @@ The `stage-dmd-step-250` checkpoint is an 8-step distill, so `--num_inference_st
 defaults to 8 and other values are rejected. `num_inference_steps` counts transformer
 forwards here: the model card's diffusers `num_inference_steps=9` (9 sigma points) is
 the same schedule.
+
+### Image Generation and Editing (MiniMax-H3-Image)
+
+MiniMax-H3-Image is the MiniMax-H3 transformer without audio, distilled to six
+sampling steps with one output head per step. Guidance is distilled into the
+weights, so there is no CFG branch: `--num_inference_steps` is fixed at 6,
+`--guidance_scale` has no effect, and `--negative_prompt` is rejected.
+
+```bash
+torchrun --nproc_per_node=8 -m xfuser.runner \
+    --model MiniMax-H3-Image \
+    --prompt "An overhead photograph of a rustic farm-to-table spread on a weathered wooden table." \
+    --height 4096 --width 4096 \
+    --ulysses_degree 8 \
+    --use_parallel_vae \
+    --attention_backend AITER_BF16 \
+    --use_torch_compile
+```
+
+- The model generates at 4 megapixels or more. A smaller `--height`/`--width` is
+  generated on a larger canvas of the same aspect ratio and resized back, so it
+  costs as much as the 4-megapixel size. MiniMax recommends 4096x4096 for 1:1.
+- `--ulysses_degree` must be 1, 2, 4 or 8. Without `--text_encoder_tp_degree`
+  the first rank encodes the prompt and broadcasts it. That is the faster choice:
+  a prompt is short enough that the Qwen3-VL encoder is launch-bound, and sharding
+  it over the ranks only adds collectives. Use the flag when a GPU cannot hold the
+  encoder beside the transformer.
+- The VAE decodes in fixed-size tiles. They are batched on every run, and
+  `--use_parallel_vae` spreads them over the ranks.
+- `--input_images` switches to editing: the prompt refers to the reference images in
+  order as `<Picture 1>`, `<Picture 2>`, and so on.
+
+```bash
+torchrun --nproc_per_node=8 -m xfuser.runner \
+    --model MiniMax-H3-Image \
+    --input_images ./reference.png \
+    --prompt "Keep everything in <Picture 1> as it is, but remove the headphones." \
+    --height 4096 --width 4096 \
+    --ulysses_degree 8 --use_parallel_vae
+```
 
 ### Benchmarking with Multiple Iterations
 

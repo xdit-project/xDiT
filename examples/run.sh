@@ -35,11 +35,14 @@ mkdir -p ./results
 # task args
 TASK_ARGS="--height 1024 --width 1024 --no_use_resolution_binning --guidance_scale 3.5"
 
-# cache args
+# Cache aliases below are deprecated; prefer --cache_method in the runner.
+# TeaCache/FBCache require PipeFusion degree 1. The default PP=2 layout
+# needs --cache_method pipefusion on a supported model instead.
 # CACHE_ARGS="--use_teacache"
 # CACHE_ARGS="--use_fbcache"
 
-# On 8 gpus, pp=2, ulysses=2, ring=1, cfg_parallel=2 (split batch)
+# On 8 GPUs, pp=2, ulysses=2, ring=2, cfg=1.
+# Enabling CFG parallel doubles the rank count; adjust the other degrees or N_GPUS.
 N_GPUS=8
 PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 2"
 
@@ -48,16 +51,18 @@ PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 2
 # By default, num_pipeline_patch = pipefusion_degree, and you can tune this parameter to achieve optimal performance.
 # PIPEFUSION_ARGS="--num_pipeline_patch 8 "
 
-# For high-resolution images, we use the latent output type to avoid runing the vae module. Used for measuring speed.
+# Legacy scripts can use latent output to skip VAE decoding when measuring DiT speed.
 # OUTPUT_ARGS="--output_type latent"
 
 # PARALLLEL_VAE="--use_parallel_vae"
 
-# Another compile option is `--use_onediff` which will use onediff's compiler.
+# Legacy scripts also support --use_onediff; the runner supports --use_torch_compile.
+# These compilation options are mutually exclusive in legacy scripts.
 # COMPILE_FLAG="--use_torch_compile"
 
 
-# Use this flag to quantize the T5 text encoder, which could reduce the memory usage and have no effect on the result quality.
+# Legacy scripts can quantize the T5 encoder with optimum-quanto to reduce memory.
+# Quantization may affect output quality; validate it for your workload.
 # QUANTIZE_FLAG="--use_fp8_t5_encoder"
 
 # export CUDA_VISIBLE_DEVICES=4,5,6,7
@@ -65,8 +70,11 @@ PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 2
 PROMPT="brown dog laying on the ground with a metal bowl in front of him."
 
 if [ "$SCRIPT" = "runner" ]; then
-# The runner does not take --no_use_resolution_binning, --warmup_steps,
-# PIPEFUSION_ARGS, OUTPUT_ARGS or QUANTIZE_FLAG; see docs/runner/runner.md.
+# The runner supports --warmup_steps and --num_pipeline_patch, but this branch
+# does not forward PIPEFUSION_ARGS. It also does not forward OUTPUT_ARGS or
+# QUANTIZE_FLAG; --output_type, --no_use_resolution_binning, and
+# --use_fp8_t5_encoder belong to the legacy-script CLI. For runner flags,
+# including --use_fp8_text_encoder, see docs/runner/cli.md.
 torchrun --nproc_per_node=$N_GPUS -m xfuser.runner \
 --model $MODEL_ID \
 $PARALLEL_ARGS \

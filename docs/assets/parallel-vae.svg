@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" id="dark" width="1120" height="900" viewBox="0 0 1120 900" role="img" aria-labelledby="title description">
+  <title id="title">Parallel VAE row sharding and overlapping tile decoding</title>
+  <desc id="description">The default DistVAE path with tiling disabled splits decoder feature rows between ranks and exchanges convolution halos and GroupNorm statistics where required. With a supported tile adapter and tiling enabled, overlapping spatial windows are decoded as complete tiles; blending, cropping and gathering are arranged by the adapter. The tile illustration has two adjacent windows; actual grids and rank assignment depend on dimensions and adapter. MiniMax-H3 and other native paths are model-specific exceptions.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M1 1 L7 4 L1 7" fill="none" stroke="#0ea9ff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <style>
+    :root { --background: #ffffff; --surface: #f7f9fb; --border: #dde4e9; --text: #3a3a3a; --body: #505b64; --detail: #606b74; --link: #006aa3; }
+    :root:target { --background: #181c20; --surface: #22282e; --border: #404a53; --text: #e7edf2; --body: #cad5de; --detail: #aebecb; --link: #67cdff; }
+    .background { fill: var(--background); } .panel { fill: var(--surface); stroke: var(--border); stroke-width: 2; }
+    .card { fill: var(--background); stroke: var(--border); stroke-width: 2; }
+    text { font-family: sans-serif; fill: var(--body); font-size: 20px; }
+    .title { fill: var(--text); font-size: 30px; font-weight: 700; }
+    .heading { fill: var(--text); font-size: 24px; font-weight: 700; }
+    .detail { fill: var(--detail); font-size: 18px; }
+    .flag { fill: var(--link); font-family: monospace; font-size: 19px; }
+    .arrow { fill: none; stroke: var(--link); stroke-width: 2.5; marker-end: url(#arrow); }
+    .exchange { fill: none; stroke: #0ea9ff; stroke-width: 2.5; marker-start: url(#arrow); marker-end: url(#arrow); }
+    .accent { fill: var(--background); stroke: #0ea9ff; stroke-width: 2.5; }
+    .warm { fill: var(--background); stroke: #ffb22e; stroke-width: 2.5; }
+  </style>
+  <rect width="1120" height="900" class="background"/>
+  <text x="40" y="55" class="title" text-anchor="start">Parallel VAE: row sharding and tile decoding</text>
+  <text x="40" y="88" class="detail" text-anchor="start">DistVAE uses row sharding when tiling is disabled. Available decode paths depend on the VAE.</text>
+  <rect x="50" y="125" width="485" height="610" rx="10" class="panel"/>
+  <rect x="585" y="125" width="485" height="610" rx="10" class="panel"/>
+  <text x="74" y="165" class="heading" text-anchor="start">Row sharding · default</text>
+  <text x="74" y="195" class="detail" text-anchor="start">Supported decoder layers process local rows.</text>
+  <text x="609" y="165" class="heading" text-anchor="start">Whole tiles · optional</text>
+  <text x="609" y="195" class="detail" text-anchor="start">Decode overlapping windows on different ranks.</text>
+  <text x="74" y="240" class="heading" text-anchor="start">Decoder feature map</text>
+  <rect x="84" y="264" width="415" height="84" rx="10" class="accent"/>
+  <rect x="84" y="388" width="415" height="84" rx="10" class="warm"/>
+  <text x="291.5" y="299" class="heading" text-anchor="middle">Rank A · upper rows</text>
+  <text x="291.5" y="331" class="detail" text-anchor="middle">Local decoder features</text>
+  <text x="291.5" y="423" class="heading" text-anchor="middle">Rank B · lower rows</text>
+  <text x="291.5" y="455" class="detail" text-anchor="middle">Local decoder features</text>
+  <path d="M425 351 L425 385" class="exchange"/>
+  <text x="84" y="378" class="detail" text-anchor="start">Halo exchange</text>
+  <text x="74" y="520" class="detail" text-anchor="start">Convolutions exchange neighboring rows.</text>
+  <text x="74" y="549" class="detail" text-anchor="start">GroupNorm exchanges statistics where needed.</text>
+  <path d="M291.5 565 V592" class="arrow"/>
+  <rect x="84" y="599" width="415" height="102" rx="10" class="card"/>
+  <text x="291.5" y="642" class="heading" text-anchor="middle">Assemble decoded rows</text>
+  <text x="291.5" y="676" class="detail" text-anchor="middle">One spatially ordered output</text>
+  <text x="609" y="240" class="heading" text-anchor="start">Two overlapping windows</text>
+  <rect x="619" y="270" width="230" height="182" rx="10" class="accent"/>
+  <rect x="804" y="272" width="45" height="178" fill="#0ea9ff" opacity="0.12"/>
+  <rect x="804" y="270" width="230" height="182" rx="10" class="warm" style="fill:none"/>
+  <text x="734" y="353" class="heading" style="font-size:22px" text-anchor="middle">Rank A</text>
+  <text x="734" y="385" class="detail" text-anchor="middle">Window A</text>
+  <text x="919" y="353" class="heading" style="font-size:22px" text-anchor="middle">Rank B</text>
+  <text x="919" y="385" class="detail" text-anchor="middle">Window B</text>
+  <path d="M827 480 V460" class="arrow"/>
+  <text x="609" y="520" class="detail" text-anchor="start">Overlap: both windows decode this region.</text>
+  <text x="609" y="549" class="detail" text-anchor="start">Decode complete windows; assemble results.</text>
+  <path d="M826.5 565 V592" class="arrow"/>
+  <rect x="619" y="599" width="415" height="102" rx="10" class="card"/>
+  <text x="826.5" y="642" class="heading" text-anchor="middle">Assemble blended windows</text>
+  <text x="826.5" y="676" class="detail" text-anchor="middle">Tile size and overlap use output pixels.</text>
+  <text x="50" y="781" class="detail" text-anchor="start">Tile grids, rank assignment and geometry depend on the VAE adapter and input dimensions.</text>
+  <text x="50" y="816" class="detail" text-anchor="start">MiniMax-H3 uses native tiles. Parallel encoding is a separate capability; check the model table.</text>
+  <text x="50" y="851" class="detail" text-anchor="start">Weights and output assembly still consume memory. Measure quality and latency for your workload.</text>
+</svg>

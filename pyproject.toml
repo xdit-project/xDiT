@@ -60,6 +60,11 @@ test = [
 [project.scripts]
 xdit = "xfuser.cli:main"
 
+[dependency-groups]
+docs = [
+    "mkdocs==1.6.1",
+]
+
 [project.urls]
 Homepage = "https://github.com/xdit-project/xDiT."
 

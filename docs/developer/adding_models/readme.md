@@ -1,26 +1,30 @@
-# Apply xDiT to new models
+# Add a model
 
-xDiT was initially developed to accelerate the inference process of Diffusion Transformers (DiTs) within Huggingface `diffusers`. However, with the rapid emergence of various DiT models, you may find yourself needing to support new models that xDiT hasn't yet accommodated or models that are not officially supported by `diffusers` at all.
+Start with a runner adapter. Implement the parallel methods that the model needs.
+Use FLUX.1-dev as an image-model reference and Z-Image as a CFG reference.
 
-xDiT offers interfaces for multiple parallelization methods, including CFG parallelism, sequence parallelism, and PipeFusion, shown as below. 
+## Runner adapter
 
-<div align="center">
-    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/developer/api.jpg" 
-    alt="api.jpg">
-</div>
+1. Subclass `xFuserModel`.
+2. Implement `_load_model()` and `_run_pipe(input_args)`. Return a `DiffusionOutput` from `_run_pipe`.
+3. Register supported checkpoint names with `@register_model(...)`. The runner-model package imports its modules to populate `MODEL_REGISTRY`.
+4. Declare `ModelCapabilities`, `DefaultInputValues`, and `ModelSettings`. Capabilities describe validation rules; execution code must implement each feature.
+5. Set dependency requirements and `LoadSupport` for the loading routes you implement.
+6. Add model-specific validation for restrictions that shared checks cannot express.
+7. Test defaults and each supported combination before enabling it.
 
-CFG parallelism is the simplest method to implement, requiring only additional split and merge operations over the batch_size dimension during each iteration. By leveraging CFG parallelism, a nearly 2x speedup can be achieved when conducting inference on two GPUs. Sequence parallelism, on the other hand, involves splitting the sequence during each iteration and necessitates additional communication to handle attention computation in a distributed environment. xDiT introduces USP (Unified Sequence Parallelism) combining two existing sequence parallelism method such as Ulysses Attention and Ring Attention. 
+Read the [adapter contract](https://github.com/xdit-project/xDiT/blob/main/xfuser/model_executor/models/runner_models/base_model.py), [FLUX adapter](https://github.com/xdit-project/xDiT/blob/main/xfuser/model_executor/models/runner_models/flux.py), and [adapter imports](https://github.com/xdit-project/xDiT/blob/main/xfuser/model_executor/models/runner_models/__init__.py). FLUX's `_load_model()` selects different transformer and pipeline implementations for PipeFusion.
 
-PipeFusion is employed in situations where GPU memory is insufficient or the communication bandwidth between GPUs is low. The method distributes the model parameters among multiple GPUs. Supporting models with PipeFusion is more complex compared to CFG parallelism and USP, but it is useful given machines of limited GPU memory capacity or limited bandwidth.
+## Parallel implementation
 
-The parallelization methods mentioned above can be performed simultaneously to achieve further speed enhancements. For a detailed guide on leveraging CFG parallelism, USP, and PipeFusion using xDiT, refer to the following comprehensive tutorial.
+| Work | Guide | Current example |
+| --- | --- | --- |
+| Sequence and attention partitioning | [USP](adding_model_usp.md) | FLUX.1-dev |
+| Replicated condition tokens | [Replicated text](adding_model_usp_text_replica.md) | FLUX.1-dev |
+| Conditional/unconditional branch partitioning | [CFG](adding_model_cfg.md) | Z-Image |
+| Combined branch and sequence groups | [CFG + USP](adding_model_cfg_usp.md) | Z-Image |
+| Transformer stages and patch scheduling | [PipeFusion](adding_model_pipefusion.md) | FLUX.1-dev |
 
-[Parallelize new models with CFG parallelism provided by xDiT](adding_model_cfg.md)
-
-[Parallelize new models with USP provided by xDiT](adding_model_usp.md)
-
-[Parallelize new models with USP provided by xDiT (text replica)](adding_model_usp_text_replica.md)
-
-[Parallelize new models with a hybrid of CFG parallelism and USP provided by xDiT](adding_model_cfg_usp.md)
-
-[Parallelize new models with PipeFusion, USP, and CFG parallelism provided by xDiT](adding_model_pipefusion.md)
+These guides explain implementation requirements and link to complete source.
+See [framework design](../The_implement_design_of_xdit_framework.md) for runner adapters and component wrappers.
+See the [runner guide](../../runner/runner.md) for user commands.

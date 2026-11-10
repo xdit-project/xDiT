@@ -19,6 +19,7 @@ import torch
 
 from xfuser.core.distributed import get_runtime_state
 from xfuser.core.utils.runner_utils import log
+from xfuser.model_executor.layers import usp_sdma
 from xfuser.model_executor.models.runner_models.base_model import (
     DIFFUSERS_FROM_SOURCE,
     DefaultInputValues,
@@ -274,7 +275,9 @@ class xFuserMiniMaxH3ImageModel(MiniMaxH3TextEncoderMixin, xFuserModel):
 
     def _compile_model(self, input_args: dict) -> None:
         mode = self._get_compile_mode()
-        self.pipe.vae.compile_repeated_blocks(mode=mode, fullgraph=False)
+        # Without CUDA graphs: the decoder's blocks replay one graph back to back, so
+        # each replay would overwrite the output the next block is still reading.
+        self.pipe.vae.compile_repeated_blocks(mode="default", fullgraph=False)
         if self.config.fully_shard_degree > 1:
             super()._compile_model(input_args)
             return
@@ -286,7 +289,8 @@ class xFuserMiniMaxH3ImageModel(MiniMaxH3TextEncoderMixin, xFuserModel):
         transformer = self.pipe.transformer
         transformer._forward_body = torch.compile(
             transformer._forward_body,
-            mode=mode,
+            # Host-issued SDMA copies cannot be replayed by CUDA graphs.
+            mode=usp_sdma.compile_mode(mode),
             fullgraph=not get_runtime_state().has_attention_schedule(),
         )
         self._run_timed_pipe(copy.deepcopy(input_args))

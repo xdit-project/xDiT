@@ -1,7 +1,5 @@
 ## Specification list
 
-**pytest integration** - the way tests in this directory, including all subdirectories except `./_prototypes` subdirectory, use pytest shall be implemented according to `./_prototypes/pytest_integration` demo. See `./_prototypes/pytest_integration/README.md` for details.
-
 ## Document handling rules
 
 **Definitions** for this section:

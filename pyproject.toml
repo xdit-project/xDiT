@@ -51,6 +51,7 @@ cache-dit = [
 ]
 test = [
     "pytest",
+    "pytest-check",
     "pytest-timeout",
     "imageio",
     "imageio-ffmpeg",

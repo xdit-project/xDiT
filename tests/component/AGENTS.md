@@ -1,5 +1,7 @@
 ## Specification list
 
+`./_specification` contains requirements, designs and rules about the whole testing system.
+
 ## Document handling rules
 
 **Definitions** for this section:

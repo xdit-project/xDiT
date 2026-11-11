@@ -37,7 +37,9 @@ Instance A runs the components as production runs them. It runs in eager mode.
 ## 3. Capture
 
 1. The capture saves each selected call at once. Call numbers are non-negative, so the hooks know at once whether
-   a call is selected.
+   a call is selected. Several cases can list the same object with entries that do not overlap
+   ([component_paths.md](component_paths.md), section 3, item 4). The capture saves a call of such an object into
+   the case whose selection contains the address of the call. At most one case matches.
 2. For each call and rank, the capture saves:
    1. the positional and keyword arguments, before the component runs;
    2. the CPU and CUDA random number generator states, before the component runs;

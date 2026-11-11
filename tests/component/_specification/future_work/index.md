@@ -264,8 +264,8 @@ limitation of version 1 and how the future work removes it.
             stage 2 of the distilled LTX-2.5 runner.
          2. A call outside the call of its first element does not count for that path. In version 1, the rule of
             section 5.4, item 3 raises an exception for such a call, and the instance ends.
-         3. "One object listed two times" (section 3) permits the same object under different first elements,
-            because the cases then select different calls.
+         3. The check of overlapping entries ([../component_paths.md](../component_paths.md), section 3) treats
+            entries under different first elements as disjoint, because their cases then select different calls.
          4. Section 4.3, item 4 ("The first element is in a call during the whole runner run") no longer applies.
          5. A decision for direct calls by the runner: they cannot be listed, or a new first element for the runner
             itself is added.

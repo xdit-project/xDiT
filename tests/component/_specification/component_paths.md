@@ -78,18 +78,33 @@ integer   = [ "-" ] digits
    3. `:i` on a container;
    4. a processor;
    5. a method element that is not the last element;
-   6. one object listed two times;
+   6. two entries that overlap (item 4);
    7. a first element whose attribute holds `None`, for example `refiner_pipe` of the LingBot-Video runner without
       `--task refine`.
-4. "One object listed two times" compares the resolved objects. For a method, it compares the owner object and
-   the method name. Examples:
-   1. `pipe.transformer.blocks[0]` and `pipe.transformer.blocks[-40]` are the same object when the list has 40
-      blocks.
-   2. In the LTX-2.3 runner, `pipe.transformer` and `second_pipe.transformer` are the same object.
+4. **Overlapping entries.** Several entries can list the same object. The check compares the resolved objects. For
+   a method, it compares the owner object and the method name.
+   1. Two entries on the same object are permitted only if both conditions are true:
+      1. their called elements, including the first element, resolve to the same objects at every level;
+      2. at one or more levels, both entries give a call number, and the numbers differ.
 
-   Two entries with different call numbers on the same object are also an error.
-5. A path error gives FAILED_TO_START to the affected cases, with the path error as the reason. The instance
-   continues with the other cases.
+      Every other pair of entries on the same object overlaps.
+   2. Reason: the calls that an entry selects are a product of the choices at each level: one call number, or all
+      calls. Thus two entries select no common call exactly when, at one level, both give a call number and the
+      numbers differ. Condition 1 makes sure that the call numbers of both entries count the calls of the same
+      objects.
+   3. Permitted examples:
+      1. `pipe.transformer:0` and `pipe.transformer:1`;
+      2. `pipe.transformer.blocks[0]:0` and `pipe.transformer.blocks[-40]:1`, when the list has 40 blocks.
+   4. Overlapping examples:
+      1. `pipe.transformer.blocks[0]` and `pipe.transformer.blocks[-40]`, when the list has 40 blocks;
+      2. `pipe.transformer.blocks[0]:0` and `pipe.transformer:0.blocks[0]`: both select call 0 of the block during
+         call 0 of the transformer;
+      3. in the LTX-2.3 runner, `pipe.transformer:0` and `second_pipe.transformer:1`: the first elements differ.
+   5. The check covers only the selected cases, because the workers resolve only their paths
+      ([instance_a.md](instance_a.md), section 2, item 3). Thus an entry of an overlapping pair runs without the
+      error when it is the only selected entry of the pair.
+5. A path error gives FAILED_TO_START to the affected cases, with the path error as the reason. For overlapping
+   entries, every entry of the overlap gets FAILED_TO_START. The instance continues with the other cases.
 6. A path must resolve in A and in B. If it fails in B, the case gets FAILED_TO_START with the path error of B.
 
 ## 4. Hooks
@@ -156,8 +171,8 @@ integer   = [ "-" ] digits
    calls as for all other calls. Only the address can mislead.
 3. **Responsibility of the user.** The user must know which code calls a listed object, and must select the paths
    and the call numbers to match. Example: in the LTX-2.3 runner, `pipe.transformer` and `second_pipe.transformer`
-   are the same object, so only one of them can be listed (section 3). Its case selects the calls of `pipe` and the
-   calls of `second_pipe`.
+   are the same object, so all entries of this object must use the same first element (section 3, item 4). Their
+   calls include the calls of `pipe` and the calls of `second_pipe`.
 4. **Calls outside the path parent.** If other code calls a listed object outside the call of its path parent, the
    rules of section 5.4 still apply, and the instance ends with ERROR_A or ERROR_B.
 5. **Future work.** [future_work/index.md](future_work/index.md), section 2.15.

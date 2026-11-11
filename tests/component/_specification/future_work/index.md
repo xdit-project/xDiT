@@ -197,15 +197,80 @@ limitation of version 1 and how the future work removes it.
 3. **Solution.** Per-format knowledge of the pairing of data and scales, and a map from the arguments of A to the
    arguments of B.
 
-### 2.15 Several pipelines on one runner model object
+### 2.15 Calls from outside the first element
 
-1. **Limitation.** UNSUPPORTED in version 1 ([../component_paths.md](../component_paths.md), section 2.1). The
-   harness cannot tell which pipeline calls a shared component.
-2. **Solution.** An xDiT refactor sends every pipeline call through one method of the runner that the harness can
-   observe. Then any pipeline attribute can be the first path element, and the call address gets a stage for the
-   pipeline.
-3. **Rejected alternative.** A change of the class of the pipeline instance can hook `__call__`. This is a hack, so
-   it is not used.
+1. **Limitation.** The counter of a called element counts every call of its object during the runner run, whatever
+   code makes the call ([../component_paths.md](../component_paths.md), section 4.4). The harness does not hook
+   pipelines, so it cannot tell which pipeline, or which call of a pipeline, made a call. There are three causes:
+   1. several pipelines of the runner model object hold the same object, for example the `transformer` of `pipe`
+      and of `second_pipe` in the LTX-2.3 runner;
+   2. the runner calls a pipeline several times in one run, for example the two stages of the distilled LTX-2.5
+      runner, or batched mode;
+   3. the runner calls a component directly, for example `self.pipe.audio_vae.decode(...)` in the LTX-2.5 runners.
+
+   The results stay valid, because B makes the same calls with the same addresses. But the address can mislead, and
+   the user must know which code calls a listed object.
+2. **What a solution needs.** A marker of the pipeline call that runs now: an event at the start and at the end of
+   each call of a pipeline. Each hook reads the marker. With the marker, each call of a pipeline gets its own call
+   number, and a call that runs while no pipeline runs is a direct call by the runner. Python looks up `__call__`
+   on the type of the pipeline, so the harness cannot set a wrapper on one pipeline instance, as it does for the
+   methods of modules.
+3. **Ways to mark the pipeline calls.**
+   1. **Class swap.** This is the probable choice. See item 4.
+   2. **A proxy on the attribute of the runner model object.** The harness replaces, for example,
+      `runner.model.second_pipe` with an object whose `__call__` sets the marker and then calls the real pipeline.
+      The runner reads the attribute at each call, so `self.second_pipe(...)` goes through the proxy. Problems:
+      1. Calls through other references to the same pipeline do not go through the proxy. Example: the init stores
+         `self._legacy_pipe = self.pipe` for legacy wrappers
+         ([base_model.py:496](../../../../xfuser/model_executor/models/runner_models/base_model.py#L496-L496)). It
+         is not known whether code calls the pipeline through this reference.
+      2. It is a monkey patch.
+   3. **Stack inspection in each hook.** Each hook walks the Python frames up to the nearest `__call__` frame of a
+      pipeline. Problems: it depends on CPython frames, and it costs time in each hook call.
+   4. **An xDiT refactor.** One method of the runner sends every pipeline call, and the harness observes that
+      method. This is the clean solution. Problems: it needs a change in every runner model file, and a rule that
+      future runners must obey.
+4. **Class swap.**
+   1. **Mechanism.** After the init, in A and in B, the harness sets the class of each attribute that a path names
+      as a first element to a subclass of its class. The subclass wraps `__call__`: it sets the marker, calls the
+      original `__call__`, and clears the marker. Only these attributes need the swap: a call from any other code
+      then runs outside the call of the first element.
+   2. **Concerns.**
+      1. It is a hack. It depends on the assignment to `__class__`. Python permits this assignment only when the new
+         class keeps the object layout, so the subclass must not add `__slots__`.
+      2. A check of the exact type after the init, for example `type(pipe) is X`, fails after the swap. Checks with
+         `isinstance` still pass. A search of `xfuser` for `__class__` and `type(...pipe...)` found no exact check
+         that runs after the init. The diffusers code was not searched.
+      3. xDiT also swaps the classes of pipelines. A search of `xfuser` found these swaps only in load code:
+         `_load_refiner`
+         ([lingbot_video.py:224](../../../../xfuser/model_executor/models/runner_models/lingbot_video.py#L224-L224)),
+         `_build_pipe`
+         ([lingbot_video.py:319](../../../../xfuser/model_executor/models/runner_models/lingbot_video.py#L319-L319)),
+         and `from_pretrained`
+         ([pipeline_lingbot_video.py:31](../../../../xfuser/model_executor/pipelines/pipeline_lingbot_video.py#L31-L31)
+         and
+         [pipeline_ideogram4.py:484](../../../../xfuser/model_executor/pipelines/pipeline_ideogram4.py#L484-L484)).
+         Thus the swap of the harness must come after the init. A swap by xDiT after the swap of the harness removes
+         the marker.
+      4. If one pipeline calls another pipeline, the marker needs a stack and a rule that tells which pipeline call
+         owns a component call. It is not known whether an xDiT pipeline calls another pipeline.
+      5. Direct calls by the runner (item 1, cause 3) still run outside all pipeline calls. The marker does not
+         change this.
+   3. **What the implementation needs.**
+      1. Code: about 5 lines for the subclass, 1 line for the swap, and about 10 lines for a tracker of the
+         pipeline calls that run.
+      2. Changes to the rules of [../component_paths.md](../component_paths.md):
+         1. The counter of the first element counts the real calls of its pipeline, for example `pipe:1` for
+            stage 2 of the distilled LTX-2.5 runner.
+         2. A call outside the call of its first element does not count for that path. In version 1, the rule of
+            section 5.4, item 3 raises an exception for such a call, and the instance ends.
+         3. "One object listed two times" (section 3) permits the same object under different first elements,
+            because the cases then select different calls.
+         4. Section 4.3, item 4 ("The first element is in a call during the whole runner run") no longer applies.
+         5. A decision for direct calls by the runner: they cannot be listed, or a new first element for the runner
+            itself is added.
+      3. Tests of the harness with a fake runner that has two pipelines with a shared module, one pipeline that the
+         runner calls two times, and a direct call by the runner.
 
 ### 2.16 Full cleanup on request
 
@@ -238,13 +303,7 @@ limitation of version 1 and how the future work removes it.
    ends with ERROR_B. Wan2.2 I2V does not set this capability, so the first configuration is not affected.
 2. **Solution.** A way for reference builds to skip this check.
 
-### 2.20 Batched mode (Not confirmed)
-
-1. **Limitation.** With `batch_size` set, the runner calls the pipeline several times in one run, so the count of
-   `pipe` calls is wrong. The harness gives UNSUPPORTED.
-2. **Solution.** Count the pipeline calls through the observable entry point of section 2.15.
-
-### 2.21 Run-level determinism checks and benchmarks
+### 2.20 Run-level determinism checks and benchmarks
 
 1. **Limitation.** The tests check determinism only through replays of single calls. They do not measure time.
 2. **Solution.** Separate tools that reuse the harness:
@@ -253,12 +312,12 @@ limitation of version 1 and how the future work removes it.
       position-weighted integer sum over the bytes;
    2. benchmarks of single components: warmup replays, then timed replays with CUDA events, on an exclusive node.
 
-### 2.22 Shapes that no configuration produces
+### 2.21 Shapes that no configuration produces
 
 Arbitrary shape grids belong to kernel-level tests. They are outside this design. A sub-component can get a new
 shape only through a new whole-model shape ([multiple_input_sets.md](multiple_input_sets.md), section 3).
 
-### 2.23 One instance B for similar configurations
+### 2.22 One instance B for similar configurations
 
 1. **Limitation.** Each configuration starts its own instance B.
 2. **Solution.** Configurations are often alike. In many cases, they can probably share at least the same instance

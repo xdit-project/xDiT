@@ -9,7 +9,7 @@ one case.
 
 1. A path is a sequence of elements, separated by dots. Example: `pipe.transformer.blocks[0].attn1`.
 2. The path has no leading dot.
-3. The first element must be `pipe` in version 1. See section 2.1.
+3. The first element names an attribute of the runner model object. See section 2.1.
 4. `[i]` after an element selects item `i` of a container. `i` is an integer with Python index semantics, so
    negative values are permitted. Example: `blocks[-1]`.
 5. For an `nn.ModuleDict`, `[key]` selects the item `key`.
@@ -41,24 +41,19 @@ integer   = [ "-" ] digits
 ### 2.1 The root
 
 1. The root of every path is the runner model object (`runner.model`).
-2. The first element must be `pipe`.
-3. A runner model object that holds another pipeline is UNSUPPORTED in version 1. Examples:
-   1. LTX runners hold `second_pipe` and `upsample_pipe`
-      ([ltx.py:155-156](../../../xfuser/model_executor/models/runner_models/ltx.py#L155-L156)), and one variant
-      also holds `decode_pipe`
-      ([ltx.py:565](../../../xfuser/model_executor/models/runner_models/ltx.py#L565-L565)).
-   2. The LingBot-Video runner holds `refiner_pipe`
-      ([lingbot_video.py:273](../../../xfuser/model_executor/models/runner_models/lingbot_video.py#L273-L273)).
-4. Reason for item 3: such pipelines share components with `pipe`. For example, the LTX `second_pipe` uses the same
-   `transformer` object. Hooks are on objects, so a call from the other pipeline would count as a call under
-   `pipe`. The harness cannot tell the pipelines apart (section 4.3).
-5. `pipe` can be an xDiT pipeline wrapper. The wrapper forwards unknown attributes to the wrapped diffusers
+2. The first element names an attribute of the runner model object, for example `pipe`, `second_pipe` or
+   `refiner_pipe`.
+   1. The harness does not hook the first element. It counts the runner runs as the calls of the first element
+      (section 4.3).
+   2. The harness does not check that the attribute holds a pipeline.
+   3. Calls from other code can count under the first element (section 4.4).
+3. `pipe` can be an xDiT pipeline wrapper. The wrapper forwards unknown attributes to the wrapped diffusers
    pipeline ([base_wrapper.py:24-30](../../../xfuser/model_executor/base_wrapper.py#L24-L30)), so
    `pipe.transformer` still resolves.
 
 ### 2.2 Element kinds
 
-1. `pipe`. The harness counts its calls (section 4.3).
+1. The first element. The harness does not hook it and counts its calls itself (section 4.3).
 2. An `nn.Module`.
 3. A container, followed by `[i]`.
 4. A method of a module, as the last element only. Example: `pipe.vae.decode`.
@@ -83,10 +78,16 @@ integer   = [ "-" ] digits
    3. `:i` on a container;
    4. a processor;
    5. a method element that is not the last element;
-   6. one object listed two times.
+   6. one object listed two times;
+   7. a first element whose attribute holds `None`, for example `refiner_pipe` of the LingBot-Video runner without
+      `--task refine`.
 4. "One object listed two times" compares the resolved objects. For a method, it compares the owner object and
-   the method name. Example: `pipe.transformer.blocks[0]` and `pipe.transformer.blocks[-40]` are the same object
-   when the list has 40 blocks. Two entries with different call numbers on the same object are also an error.
+   the method name. Examples:
+   1. `pipe.transformer.blocks[0]` and `pipe.transformer.blocks[-40]` are the same object when the list has 40
+      blocks.
+   2. In the LTX-2.3 runner, `pipe.transformer` and `second_pipe.transformer` are the same object.
+
+   Two entries with different call numbers on the same object are also an error.
 5. A path error gives FAILED_TO_START to the affected cases, with the path error as the reason. The instance
    continues with the other cases.
 6. A path must resolve in A and in B. If it fails in B, the case gets FAILED_TO_START with the path error of B.
@@ -112,13 +113,54 @@ integer   = [ "-" ] digits
    wrapper first. Wrappers that xDiT puts around the method stay inside the captured call.
 3. During replays, the harness disables all capture hooks.
 
-### 4.3 The `pipe` element
+### 4.3 The first element
 
-1. `pipe` cannot be hooked. It is not an `nn.Module`, and `pipe(...)` looks up `__call__` on the type.
-2. The harness starts each pipeline run itself. The forced overrides make each runner run call the pipeline exactly
-   once ([test_definition.md](test_definition.md), section 3.2). Thus the harness counts its own pipeline runs as
-   the calls of `pipe`.
-3. In version 1, each instance runs the pipeline once. The address of every call thus starts with `pipe:0`.
+1. The harness does not hook the first element. A pipeline is not an `nn.Module`, and `pipe(...)` looks up
+   `__call__` on the type, so the harness cannot hook one pipeline instance. The rule applies to every first
+   element, so all first elements work the same.
+2. The harness starts each runner run itself and counts these runs as the calls of the first element. The forced
+   overrides remove the extra runs of the run loop ([test_definition.md](test_definition.md), section 3.2). The
+   code of the runner can still call a pipeline more than once in one run (section 4.4).
+3. In version 1, each instance runs the runner once. The address of every call thus starts with the first element
+   and call number 0, for example `pipe:0`.
+4. The first element is in a call during the whole runner run. Thus a direct child of the first element never
+   breaks the rules of section 5.4.
+
+### 4.4 Calls from outside the first element
+
+1. **Limitation.** The counter of a called element counts every call of its object during the runner run, whatever
+   code makes the call. The harness does not detect, warn about or report calls from outside the first element.
+   Thus an address does not tell which pipeline, or which call of a pipeline, made a call. There are three causes:
+   1. Several pipelines of the runner model object hold the same object. Hooks are on objects, so the calls of all
+      these pipelines count under the first element of the path. Examples:
+      1. The LTX-2.3 runner builds `second_pipe` with the same `transformer` object
+         ([ltx.py:131-135](../../../xfuser/model_executor/models/runner_models/ltx.py#L131-L135)), and
+         `upsample_pipe` with the `vae` of `pipe`
+         ([ltx.py:150](../../../xfuser/model_executor/models/runner_models/ltx.py#L150-L150)).
+      2. With `--task refine`, the LingBot-Video `refiner_pipe` gets the `vae` and the `text_encoder` of `pipe`
+         ([lingbot_video.py:217-223](../../../xfuser/model_executor/models/runner_models/lingbot_video.py#L217-L223)).
+   2. The runner calls a pipeline several times in one run. Examples:
+      1. The distilled LTX-2.5 runner calls `self.pipe(...)` for stage 1
+         ([ltx.py:633](../../../xfuser/model_executor/models/runner_models/ltx.py#L633-L633)) and for stage 2
+         ([ltx.py:660](../../../xfuser/model_executor/models/runner_models/ltx.py#L660-L660)). The calls of stage 2
+         continue the counters of stage 1 under `pipe:0`.
+      2. Batched mode (`batch_size` is set) runs the pipeline code of the runner once for each batch
+         ([base_model.py:1310](../../../xfuser/model_executor/models/runner_models/base_model.py#L1310-L1310)).
+   3. The runner calls a component directly, outside all pipeline calls. Examples:
+      1. The LTX-2.5 runners call `self.pipe.audio_vae.decode(...)`
+         ([ltx.py:700](../../../xfuser/model_executor/models/runner_models/ltx.py#L700-L700)).
+      2. The LingBot-Video runner calls `vae.encode(...)` on the VAE that it shares with `pipe`
+         ([lingbot_video.py:410](../../../xfuser/model_executor/models/runner_models/lingbot_video.py#L410-L410)).
+2. **The results stay valid.** Each of these calls is a real call with its real inputs. B runs the same runner with
+   the same run arguments, so it makes the same calls with the same addresses. The test compares A and B for these
+   calls as for all other calls. Only the address can mislead.
+3. **Responsibility of the user.** The user must know which code calls a listed object, and must select the paths
+   and the call numbers to match. Example: in the LTX-2.3 runner, `pipe.transformer` and `second_pipe.transformer`
+   are the same object, so only one of them can be listed (section 3). Its case selects the calls of `pipe` and the
+   calls of `second_pipe`.
+4. **Calls outside the path parent.** If other code calls a listed object outside the call of its path parent, the
+   rules of section 5.4 still apply, and the instance ends with ERROR_A or ERROR_B.
+5. **Future work.** [future_work/index.md](future_work/index.md), section 2.15.
 
 ## 5. Call addresses
 

@@ -16,8 +16,6 @@ true, every case of the configuration gets UNSUPPORTED with the reason. The inst
 | PipeFusion | `pipefusion_parallel_degree` > 1 | Patch state is global and changes during the run. |
 | Step caching | `cache_method` is set, or `use_teacache` or `use_fbcache` is set | A step cache keeps state across steps. |
 | FSDP sharding | `fully_shard_degree` > 1 | B cannot safely convert FSDP flat parameters to the reference dtype after the load. FSDP rejects a mixture of dtypes in one unit ([sharding.py:395-402](../../../xfuser/core/distributed/sharding.py#L395-L402)). |
-| Other pipelines on the runner model object | An attribute of the runner model object other than `pipe` holds a pipeline object | See [component_paths.md](component_paths.md), section 2.1. |
-| Batched mode (Not confirmed) | `batch_size` is set | Batched mode calls the pipeline several times in one run, so the count of `pipe` calls is wrong. |
 
 The first configuration has none of these conditions. It sets neither schedule flag and no `gemm_config`. Its
 backend `aiter_mxfp6` is not a VSA backend. The schedules are set up only when the flags are on

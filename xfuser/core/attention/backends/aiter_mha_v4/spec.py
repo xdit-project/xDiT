@@ -116,6 +116,8 @@ FORMATS = [
     # The BF16 kernel returns garbage for 64 keys or fewer, whatever the query
     # length (observed on gfx950; applied on gfx942 too, to be safe). Such calls,
     # e.g. a short prompt's text refiner, take the fallback.
+    # TODO: AITER mainline fixes the kernel. Once the rocm/pytorch-xdit docker image ships an AITER
+    # with the fix, drop min_keys here (and MIN_KEY_LENGTH if nothing else declares it).
     MhaV4Format("BF16",      Fmt.BF16,        Fmt.BF16,        GFX950_OR_GFX942,
                 min_keys=65),
     MhaV4Format("BF16FP8",   Fmt.BF16,        Fmt.NATIVE_FP8,  GFX950_OR_GFX942),

@@ -21,7 +21,6 @@ This document describes how a test module defines its configurations.
       ([main.py:386-389](../../../../../venv/lib/python3.12/site-packages/_pytest/main.py#L386-L389)).
    2. The benefit: the user sees the error at once, before any GPU run.
    3. The cost: one wrong configuration stops all configurations until the user corrects it.
-   4. Duplicate names are the exception. The configuration fixture detects them (section 7).
 
 ## 2. The configuration call
 
@@ -236,14 +235,17 @@ when the reference profile does not change a shape argument.
    ([component_paths.md](component_paths.md), section 6).
 3. **Characters.** A name contains only letters, digits, `_`, `.` and `-`. Thus it is a valid file name, `-k`
    accepts it, and it contains no `:`. The entry names in the CI benchmark files meet this rule.
-4. **Errors during collection.** The harness raises an error if the merged entry has no name, or if the name
-   contains other characters (section 1, item 8).
+4. **Errors during collection.** The harness raises an error if the merged entry has no name, if the name contains
+   other characters, or if the name is not unique (item 5). See section 1, item 8.
 5. **Unique names.** Two configurations with the same name would share the data directory and the metrics file.
-   1. The harness keeps the set of names of the configurations that started in the pytest process.
-   2. When the configuration fixture starts, it raises an exception if the name is already in the set. pytest then
-      gives the outcome "error" to every case of this configuration. The other configurations continue.
-   3. The message names the two possible causes: two configurations have the same name, or pytest ran the cases of
-      one configuration in two parts, for example with `--ff`
-      ([pytest_integration.md](pytest_integration.md), section 7).
-   4. The check covers one pytest session. It does not see two configurations with the same name that run in
-      different sessions. Unique names across sessions are the responsibility of the user.
+   1. `make_test` registers the name of each of its configurations in one registry for the whole pytest process,
+      together with the test module that defines the configuration.
+   2. If a name is already in the registry, `make_test` raises an exception during collection. The message names
+      both test modules, so the user can find both definitions.
+   3. pytest imports all collected test modules before it runs a test, and it deselects tests only after the import.
+      Thus the check covers all configurations that the session collects, also the configurations that `-k`
+      deselects.
+   4. The check does not see configurations in test modules that the session does not import. Unique names across
+      such modules and across sessions are the responsibility of the user.
+   5. A separate check of the configuration fixture stops a configuration that starts a second time in one session
+      ([pytest_integration.md](pytest_integration.md), section 3, item 2).

@@ -111,5 +111,5 @@ attributes crashes and hangs.
 
 ## 7. B after A
 
-The configuration fixture starts B only if A ended clean. "Clean" means that the launcher of A recorded no crash, no hang,
-no error, and no UNSUPPORTED configuration.
+The configuration fixture starts B only if A ended clean. "Clean" means that the launcher of A recorded no crash, no
+hang, no error, and no UNSUPPORTED configuration.

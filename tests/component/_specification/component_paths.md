@@ -161,11 +161,14 @@ A and B use the same run arguments. Thus they produce the same addresses. The te
 
 ## 6. Case IDs
 
-1. The case ID is the path string. Example: `test_component[pipe.transformer:3.blocks[0]:0]`.
-2. pytest `-k` accepts these characters. Its identifier grammar is `(\w|:|\+|-|\.|\[|\]|\\|/)+`
+1. The case ID is the configuration name, a colon, and the path string. Example:
+   `test_component[wan2_2.quantgemm_quantattn.gfx950:pipe.transformer:3.blocks[0]:0]`.
+2. A configuration name contains no `:` ([test_definition.md](test_definition.md), section 7). Thus the first `:`
+   of a case ID separates the name from the path.
+3. pytest `-k` accepts these characters. Its identifier grammar is `(\w|:|\+|-|\.|\[|\]|\\|/)+`
    ([expression.py:10](../../../../../venv/lib/python3.12/site-packages/_pytest/mark/expression.py#L10-L10),
    pytest 9.0.3).
-3. `-k` matches substrings. For example, `-k transformer:3` also selects `transformer:30`. Use node IDs for an exact
+4. `-k` matches substrings. For example, `-k transformer:3` also selects `transformer:30`. Use node IDs for an exact
    selection.
-4. The harness can change the case IDs before pytest sees them, if a future path needs characters that `-k` does
+5. The harness can change the case IDs before pytest sees them, if a future path needs characters that `-k` does
    not accept.

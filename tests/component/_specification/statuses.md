@@ -8,7 +8,7 @@ human-readable messages instead.
 
 | Status | Set by | Meaning | Data for checks | pytest outcome |
 |---|---|---|---|---|
-| ABOUT_TO_START | group fixture | A fresh run created the state. No instance has finished the case yet. | no | error, if a later run finds it (section 2) |
+| ABOUT_TO_START | configuration fixture | A fresh run created the state. No instance has finished the case yet. | no | error, if a later run finds it (section 2) |
 | UNSUPPORTED | worker of A or B | The configuration or the case uses a feature that version 1 does not support ([unsupported.md](unsupported.md)). | no | skipped |
 | FAILED_TO_START | worker or launcher | The case has no data to finish the test: a path error, or a failure outside the replays. | no | error |
 | CRASHED_A, CRASHED_B | launcher | The instance crashed while it replayed this case. | no | failed |
@@ -40,8 +40,8 @@ A reuse run does not start A or B. It uses the stored states ([files.md](files.m
 
 ## 3. Statuses of an instance
 
-The launcher also records one status for the instance as a whole. The group fixture uses it to decide whether to
-start B.
+The launcher also records one status for the instance as a whole. The configuration fixture uses it to decide
+whether to start B.
 
 1. CLEAN: the instance finished all its steps.
 2. UNSUPPORTED: the configuration is not supported. B does not start.

@@ -257,3 +257,10 @@ limitation of version 1 and how the future work removes it.
 
 Arbitrary shape grids belong to kernel-level tests. They are outside this design. A sub-component can get a new
 shape only through a new whole-model shape ([multiple_input_sets.md](multiple_input_sets.md), section 3).
+
+### 2.23 One instance B for similar configurations
+
+1. **Limitation.** Each configuration starts its own instance B.
+2. **Solution.** Configurations are often alike. In many cases, they can probably share at least the same instance
+   B. This can make the runs significantly faster. An automatic grouping algorithm that does not depend on the
+   model can be difficult.

@@ -6,10 +6,11 @@ rule. [prototype_changes.md](prototype_changes.md) lists the changes that the ha
 
 ## 1. Files
 
-1. Test modules: `xDiT/tests/component/test_*.py`, one module for each configuration.
+1. Test modules: `xDiT/tests/component/test_*.py`. By convention, one module for each xDiT model, with many or all
+   configurations of that model ([test_definition.md](test_definition.md), section 1).
 2. The harness package: `xDiT/tests/component/harness/`.
-3. The shared fixtures: `xDiT/tests/component/conftest.py`. A test module only defines the configuration and the
-   test function ([test_definition.md](test_definition.md), section 2.1).
+3. The shared fixtures: `xDiT/tests/component/conftest.py`. A test module only defines its configurations and
+   calls `make_test` one time ([test_definition.md](test_definition.md), section 2.1).
 4. [pytest.ini](../../../pytest.ini) does not collect `tests/component`. Run the component tests with explicit
    paths, for example `python -m pytest tests/component/test_wan22_i2v.py`.
 5. The prototype also has a top-level module named `harness`
@@ -19,27 +20,49 @@ rule. [prototype_changes.md](prototype_changes.md) lists the changes that the ha
    `tests/component/conftest.py` must exclude `_prototypes` from collection, for example with
    `collect_ignore = ["_prototypes"]`.
 
-## 2. Groups and cases
+## 2. Configurations and cases
 
-1. A group is one configuration, that is, one test module.
-2. A case is one listed component path. The harness parametrizes the test function with the case IDs
+1. A test module holds one or more configurations.
+2. A case is one listed component path of one configuration. `make_test` parametrizes the test function with one
+   pair (configuration, case) for each case. The case ID holds the configuration name and the path
    ([component_paths.md](component_paths.md), section 6).
-3. The groups run one after another. A and B of one group run one after another.
+3. The configurations run one after another. A and B of one configuration run one after another.
+4. The tests of a configuration run after its instances and before the next configuration starts its instances.
+   Thus the disk holds the dumps of at most one configuration, plus the files that failing tests keep
+   ([files.md](files.md), section 8).
 
-## 3. Group fixture
+## 3. Configuration fixture
 
-1. The group fixture has module scope. The first selected test of the module starts it.
-2. It gets the selected cases of the module from `request.session.items`, as `selected_cases()` of the prototype
-   does ([harness.py:27-39](../_prototypes/pytest_integration/harness.py#L27-L39)). Thus the instances capture
-   and replay only the selected cases. The pipeline runs are complete in all cases.
-3. It handles the data directory ([files.md](files.md), section 5): a fresh run or a reuse run.
-4. For a fresh run:
+1. **One instance for each configuration.**
+   1. `make_test` gives the configuration to the fixture as an indirect parameter with module scope
+      (`indirect=["configuration"]` and `scope="module"` in `pytest.mark.parametrize`).
+   2. pytest keeps one instance of the fixture for each parameter value. pytest compares the parameter of each test
+      with the parameter of the current instance with `==`
+      ([fixtures.py:1119-1120](../../../../../venv/lib/python3.12/site-packages/_pytest/fixtures.py#L1119-L1120)).
+      If they differ, pytest tears down the current instance and starts a new one
+      ([fixtures.py:1078-1096](../../../../../venv/lib/python3.12/site-packages/_pytest/fixtures.py#L1078-L1096)).
+   3. `make_test` must list the pairs grouped by configuration. pytest does not regroup them: each pair has its own
+      parameter index, and pytest sorts tests only by that index
+      ([fixtures.py:213-214](../../../../../venv/lib/python3.12/site-packages/_pytest/fixtures.py#L213-L214)). With
+      pairs in mixed order, pytest starts the fixture of one configuration more than one time.
+   4. Configuration objects compare by identity. Reason: if two configuration objects compared equal, pytest would
+      use the fixture instance of the first configuration for the second. The name check (item 2) would then not
+      run, and the cases of the second configuration would get the data of the first.
+2. **Name check.** At its start, the fixture checks that the name is unique in the session
+   ([test_definition.md](test_definition.md), section 7). For a duplicate, it raises an exception, and every case
+   of the configuration gets the outcome "error".
+3. **Selected cases.** The fixture gets the selected cases of its configuration from `request.session.items`: the
+   tests whose configuration parameter is its configuration. The prototype does the same for a module in
+   `selected_cases()` ([harness.py:27-39](../_prototypes/pytest_integration/harness.py#L27-L39)). Thus the instances
+   capture and replay only the selected cases. The pipeline runs are complete in all cases.
+4. It handles the data directory ([files.md](files.md), section 5): a fresh run or a reuse run.
+5. For a fresh run:
    1. It writes the state ABOUT_TO_START for each selected case.
    2. It runs the launcher of A.
    3. If the instance status of A is CLEAN, it runs the launcher of B.
-5. It raises an exception only if a launcher exits with a nonzero status ([processes.md](processes.md),
-   section 2). All cases of the group then get the outcome "error".
-6. Before each launcher, it writes a header line with the configuration name, the instance and the selected cases.
+6. It raises an exception only for a duplicate name (item 2), or if a launcher exits with a nonzero status
+   ([processes.md](processes.md), section 2). All cases of the configuration then get the outcome "error".
+7. Before each launcher, it writes a header line with the configuration name, the instance and the selected cases.
 
 ## 4. Case fixture
 
@@ -57,7 +80,7 @@ rule. [prototype_changes.md](prototype_changes.md) lists the changes that the ha
 
 ## 6. Live output
 
-1. The group fixture runs each launcher through `run_in_pty()`. The output of the workers goes live to the console
+1. The configuration fixture runs each launcher through `run_in_pty()`. The output of the workers goes live to the console
    in every capture mode, through `console_writer()` of the prototype
    ([harness.py:42-52](../_prototypes/pytest_integration/harness.py#L42-L52)).
 2. `console_writer()` uses the internal pytest API `CaptureManager.global_and_fixture_disabled()`. A future pytest
@@ -67,7 +90,14 @@ rule. [prototype_changes.md](prototype_changes.md) lists the changes that the ha
 
 ## 7. Selection
 
-1. `-k`, node IDs, `-m`, `--deselect` and `--lf` work, because `selected_cases()` reads the final list of tests.
-2. `-k` matches substrings ([component_paths.md](component_paths.md), section 6).
-3. Selection by a node ID that contains nested brackets, for example `test_component[pipe.transformer.blocks[0]]`,
-   is not verified.
+1. `-k`, node IDs, `-m`, `--deselect` and `--lf` work, because the configuration fixture reads the final list of
+   tests (section 3, item 3). `--lf` keeps the order of the tests.
+2. `-k` matches substrings ([component_paths.md](component_paths.md), section 6). For example, `-k gfx950` selects
+   the cases of every configuration whose name contains `gfx950`.
+3. Selection by a node ID that contains nested brackets, for example
+   `test_component[wan2_2.quantgemm_quantattn.gfx950:pipe.transformer.blocks[0]]`, is not verified.
+4. `--ff` (failed tests first) is not supported. It moves the failed tests to the front after pytest made the list
+   of tests ([cacheprovider.py:369-399](../../../../../venv/lib/python3.12/site-packages/_pytest/cacheprovider.py#L369-L399)).
+   The cases of one configuration can then run in two parts. The configuration fixture then starts a second time,
+   and the name check gives "error" to the cases of the second part ([test_definition.md](test_definition.md),
+   section 7).

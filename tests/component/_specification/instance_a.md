@@ -4,10 +4,10 @@ Instance A runs the components as production runs them. It runs in eager mode.
 
 ## 1. Profile
 
-1. The run arguments are the YAML entry, the overrides of the test module, and the forced overrides
-   ([test_definition.md](test_definition.md), section 3.2).
+1. The run arguments are the merged entry (the YAML entry with the overrides of the configuration) and the forced
+   overrides ([test_definition.md](test_definition.md), section 3.2).
 2. A uses the production kernels, quantization and communication of the configuration. The only differences from
-   production are the forced overrides and the step override of the test module.
+   production are the forced overrides and the step override of the configuration.
 
 ## 2. Flow of one worker
 
@@ -111,5 +111,5 @@ attributes crashes and hangs.
 
 ## 7. B after A
 
-The group fixture starts B only if A ended clean. "Clean" means that the launcher of A recorded no crash, no hang,
+The configuration fixture starts B only if A ended clean. "Clean" means that the launcher of A recorded no crash, no hang,
 no error, and no UNSUPPORTED configuration.

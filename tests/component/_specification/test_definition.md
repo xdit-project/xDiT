@@ -26,13 +26,12 @@ This document describes how a test module defines its configurations.
 
 ### 2.1 Example
 
-The names in this example are a proposal (Not confirmed). The parameters are the requirement. The two
-configurations share their settings through plain Python values.
+The parameters are the requirement. The two configurations share their settings through plain Python values.
 
 ```python
 import harness
 
-WAN22 = "/app/.ci/benchmark_configs/wan2_2.yaml"
+BASE_CONFIG = "/app/.ci/benchmark_configs/wan2_2.yaml"
 FEW_STEPS = {"args": {"num_inference_steps": 5}}
 REFERENCE = harness.Reference(
     dtype="float32",
@@ -47,7 +46,7 @@ COMPONENTS = {
 }
 
 QUANT_ATTN = harness.Configuration(
-    yaml_path=WAN22,
+    yaml_path=BASE_CONFIG,
     entry="wan2_2.quantgemm_quantattn.gfx950",
     overrides=FEW_STEPS,
     reference=REFERENCE,
@@ -55,7 +54,7 @@ QUANT_ATTN = harness.Configuration(
 )
 
 BF16_ATTN = harness.Configuration(
-    yaml_path=WAN22,
+    yaml_path=BASE_CONFIG,
     entry="wan2_2.quantgemm_quantattn_bf16.gfx950",
     overrides=FEW_STEPS,
     reference=REFERENCE,
@@ -147,6 +146,9 @@ each warmup call and once for each iteration
 
 ### 3.3 The step override of the first configuration
 
+The below explains `num_inference_steps` set to 5 in the example. It is specific to Wan2.2 model, so another
+model might have a different appropriate override value, but the principle remains.
+
 1. The first configuration uses `num_inference_steps` 5 instead of 40, through
    `overrides={"args": {"num_inference_steps": 5}}`. This keeps the run time of A and B low.
 2. The checkpoint of the first configuration has a boundary timestep of 900 (`boundary_ratio` 0.9). The pipeline
@@ -188,8 +190,8 @@ when the reference profile does not change a shape argument.
 
 1. For each component, the definition must list every tensor output of the component.
 2. Each output has a `Tolerance` with two metrics: `max_abs` and `rel_l2`.
-3. A metric without a value gets the default tolerance. The default is a very large value, `1e30` (the value is
-   Not confirmed). The user sets real values later.
+3. A metric without a value gets the default tolerance. The default is a very small value, `1e-10`, to cause a test
+   failure, helping to come up with initial reasonable tolerances.
 4. One tolerance applies to all ranks.
 5. The test function checks the names in both directions:
    1. A tensor output without a tolerance is a failure.
@@ -235,7 +237,8 @@ when the reference profile does not change a shape argument.
    ([component_paths.md](component_paths.md), section 6).
 3. **Characters.** A name contains only letters, digits, `_`, `.` and `-`. Thus it is a valid file name, `-k`
    accepts it, and it contains no `:`. The entry names in the CI benchmark files meet this rule.
-4. **Errors during collection.** The harness raises an error if the merged entry has no name, if the name contains
+4. **Errors during collection.** The harness raises an error if the merged entry has no name (i.e. either name
+   is absent, or set to None, or not a string, or an empty string), if the name contains
    other characters, or if the name is not unique (item 5). See section 1, item 8.
 5. **Unique names.** Two configurations with the same name would share the data directory and the metrics file.
    1. `make_test` registers the name of each of its configurations in one registry for the whole pytest process,

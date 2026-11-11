@@ -12,7 +12,7 @@ one case.
 3. The first element must be `pipe` in version 1. See section 2.1.
 4. `[i]` after an element selects item `i` of a container. `i` is an integer with Python index semantics, so
    negative values are permitted. Example: `blocks[-1]`.
-5. For an `nn.ModuleDict`, `[key]` selects the item `key` (Not confirmed).
+5. For an `nn.ModuleDict`, `[key]` selects the item `key`.
 6. `:i` after a called element selects call `i` of that element. `i` must be a non-negative integer. Example:
    `pipe.transformer:3.blocks[0]:0`.
 7. An element without `:i` selects all of its calls.

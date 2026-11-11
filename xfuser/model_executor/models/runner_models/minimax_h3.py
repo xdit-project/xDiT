@@ -523,7 +523,10 @@ class MiniMaxH3TextEncoderMixin:
             return
         from diffusers.hooks import apply_group_offloading
 
-        log("Enabling MiniMax-H3 CPU offload: text encoder streamed from host, transformer and VAEs on device.")
+        log(
+            f"Enabling {self.settings.model_name} CPU offload: text encoder streamed from host, "
+            "transformer and VAEs on device."
+        )
         apply_group_offloading(module=self.pipe.text_encoder, **self._group_offload_kwargs("leaf_level"))
 
     @staticmethod
@@ -560,7 +563,7 @@ class MiniMaxH3TextEncoderMixin:
         world_group = get_world_group()
         if degree != world_group.world_size:
             raise ValueError(
-                f"MiniMax-H3 text encoder TP degree {degree} must match world size {world_group.world_size}."
+                f"{self.settings.model_name} text encoder TP degree {degree} must match world size {world_group.world_size}."
             )
 
         device = torch.device(f"cuda:{world_group.local_rank}")
@@ -574,7 +577,7 @@ class MiniMaxH3TextEncoderMixin:
             src_data_rank=None,
         )
         text_encoder._xfuser_tp_mesh = mesh
-        log(f"Sharded MiniMax-H3 Qwen3-VL text encoder with TP{degree}.")
+        log(f"Sharded {self.settings.model_name} Qwen3-VL text encoder with TP{degree}.")
 
 
 @register_model("MiniMaxAI/MiniMax-H3")

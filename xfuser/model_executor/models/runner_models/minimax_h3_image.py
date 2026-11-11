@@ -31,7 +31,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     xFuserModel,
 )
-from xfuser.model_executor.models.runner_models.flux3 import trim_text_encoder
+from xfuser.model_executor.models.runner_models.text_encoder_utils import trim_text_encoder
 from xfuser.model_executor.models.runner_models.loading.contracts import LoadRoute, LoadSupport
 from xfuser.model_executor.models.runner_models.minimax_h3 import (
     _SUPPORTED_ATTN_BACKENDS,
@@ -125,7 +125,7 @@ class xFuserMiniMaxH3ImageModel(MiniMaxH3TextEncoderMixin, xFuserModel):
         height=2048,
         width=2048,
         num_inference_steps=MINIMAX_H3_IMAGE_STEPS,
-        num_hybrid_attn_high_precision_steps=1,
+        num_hybrid_attn_high_precision_steps=2,
     )
 
     settings = ModelSettings(
@@ -193,7 +193,7 @@ class xFuserMiniMaxH3ImageModel(MiniMaxH3TextEncoderMixin, xFuserModel):
         if config.enable_model_cpu_offload and (ulysses_degree > 1 or config.fully_shard_degree > 1):
             raise ValueError(
                 "MiniMax-H3-Image --enable_model_cpu_offload is for single-GPU runs. Multi-GPU runs "
-                "shard the text encoder with --text_encoder_tp_degree instead."
+                "encode on the first rank; use --text_encoder_tp_degree if the encoder does not fit."
             )
         if config.batch_size is not None or config.dataset_path is not None:
             raise ValueError(
@@ -247,6 +247,9 @@ class xFuserMiniMaxH3ImageModel(MiniMaxH3TextEncoderMixin, xFuserModel):
         pipe.transformer.eval()
         # The transformer conditions on hidden_states[text_encoder_layer]; the decoder
         # layers after it, the final norm and the LM head never reach it.
+        # The config keeps its 64 layers: diffusers' get_qwen3vl_prompt_embeds checks the
+        # config's layer count against text_encoder_layer, and the trimmed stack still
+        # yields hidden_states[text_encoder_layer] unchanged.
         trim_text_encoder(pipe.text_encoder, pipe.text_encoder_layer)
         pipe.text_encoder.eval()
         self._parallelize_text_encoder(pipe.text_encoder)

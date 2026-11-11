@@ -190,7 +190,7 @@ when the reference profile does not change a shape argument.
 
 ### 5.1 Requirements
 
-1. For each component, the definition must list every tensor output of the component.
+1. For each component path, the definition must list every tensor output of the component.
 2. Each output has a `Tolerance` with two metrics: `max_abs` and `rel_l2`.
 3. A metric without a value gets the default tolerance. The default is a very small value, `1e-10`, to cause a test
    failure, helping to come up with initial reasonable tolerances.

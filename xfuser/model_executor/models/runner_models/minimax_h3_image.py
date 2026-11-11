@@ -12,6 +12,7 @@ MiniMax-H3. The first rank encodes the prompt and broadcasts it, unless
 from __future__ import annotations
 
 import copy
+import functools
 import math
 from types import MethodType
 
@@ -255,6 +256,29 @@ class xFuserMiniMaxH3ImageModel(MiniMaxH3TextEncoderMixin, xFuserModel):
         self._parallelize_text_encoder(pipe.text_encoder)
         install_minimax_h3_image_tiled_decode(pipe.vae)
         return pipe
+
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        self._expose_transformer_signature()
+
+    def _expose_transformer_signature(self) -> None:
+        """Show the denoise step the transformer's real forward parameters.
+
+        The step passes the transformer only the layout fields its forward signature
+        names. FSDP wraps the transformer in a module whose forward takes
+        (*args, **kwargs), which would drop them all, as for FLUX.3.
+        """
+        transformer = self.pipe.transformer
+        inner = getattr(transformer, "module", None)
+        if not isinstance(inner, torch.nn.Module):
+            return
+        outer_forward = transformer.forward
+
+        @functools.wraps(inner.forward)
+        def forward(*args, **kwargs):
+            return outer_forward(*args, **kwargs)
+
+        transformer.forward = forward
 
     def _get_runtime_state_pipeline(self):
         return self.pipe

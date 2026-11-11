@@ -267,3 +267,37 @@ def test_tiled_decode_leaves_untiled_decode_alone():
         expected = vae.decode(latents).sample
         install_minimax_h3_image_tiled_decode(vae)
         torch.testing.assert_close(vae.decode(latents).sample, expected, rtol=0, atol=0)
+
+
+class _OpaqueWrapper(torch.nn.Module):
+    """Wraps a module the way FSDP does: the inner one as ``module``, forward(*args, **kwargs)."""
+
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+
+    def forward(self, *args, **kwargs):
+        return self.module(*args, **kwargs)
+
+
+def test_the_denoise_step_sees_the_layout_fields_of_a_wrapped_transformer(runner_env, single_rank):
+    """The denoise step passes only the fields the transformer's forward names; behind
+    FSDP's wrapper it would pass none of token_tags, position_ids and the row indices."""
+    import inspect
+    from types import SimpleNamespace
+
+    from xfuser import xFuserArgs
+    from xfuser.model_executor.models.runner_models.minimax_h3_image import xFuserMiniMaxH3ImageModel
+
+    model = xFuserMiniMaxH3ImageModel(xFuserArgs(model="MiniMax-H3-Image"))
+    _, wrapped = _tiny_models()
+    model.pipe = SimpleNamespace(transformer=_OpaqueWrapper(wrapped))
+
+    model._expose_transformer_signature()
+
+    transformer = model.pipe.transformer
+    fields = {"token_tags", "position_ids", "image_indices", "text_indices", "pdd_step_index"}
+    assert fields <= set(inspect.signature(transformer.forward).parameters)
+    inputs = _tiny_inputs()
+    with torch.no_grad():
+        torch.testing.assert_close(transformer(**inputs).sample, wrapped(**inputs).sample)

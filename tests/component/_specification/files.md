@@ -8,8 +8,8 @@ safety guards, serialization, and the metrics file.
 1. The harness writes into two directories next to the test module:
    1. `_data/` for dumps and states;
    2. `_metrics/` for the metrics files.
-2. The base directory is the directory of the running test module (`request.path.parent` in the configuration fixture). It
-   is not the working directory.
+2. The base directory is the directory of the running test module (`request.path.parent` in the configuration
+   fixture). It is not the working directory.
 3. The pytest process resolves both directories once. Launchers and workers get absolute paths, so their working
    directory has no effect.
 4. The metrics files live in a directory separate from the dumps. Thus a cleanup of the dumps cannot delete them.
@@ -52,8 +52,8 @@ safety guards, serialization, and the metrics file.
 1. At the start, the configuration fixture reads the state files of the configuration directory.
 2. **Fresh run.** If the directory has no state files, or if every recorded case passed, the configuration fixture
    cleans the directory and runs A and B from the start. UNSUPPORTED counts as passed for this decision.
-3. **Reuse run.** In all other cases, the configuration fixture prints a warning and does not start A or B. Each case gets
-   the outcome of its stored state ([statuses.md](statuses.md), section 2).
+3. **Reuse run.** In all other cases, the configuration fixture prints a warning and does not start A or B. Each
+   case gets the outcome of its stored state ([statuses.md](statuses.md), section 2).
 4. The warning says that the run uses old data. Thus changes of the xDiT code or of the settings since then are
    not tested.
 5. There is no fingerprint check of the settings. After a change of the settings, the user must clean the

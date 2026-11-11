@@ -45,12 +45,14 @@ rule. [prototype_changes.md](prototype_changes.md) lists the changes that the ha
       parameter index, and pytest sorts tests only by that index
       ([fixtures.py:213-214](../../../../../venv/lib/python3.12/site-packages/_pytest/fixtures.py#L213-L214)). With
       pairs in mixed order, pytest starts the fixture of one configuration more than one time.
-   4. Configuration objects compare by identity. Reason: if two configuration objects compared equal, pytest would
-      use the fixture instance of the first configuration for the second. The name check (item 2) would then not
-      run, and the cases of the second configuration would get the data of the first.
-2. **Name check.** At its start, the fixture checks that the name is unique in the session
-   ([test_definition.md](test_definition.md), section 7). For a duplicate, it raises an exception, and every case
-   of the configuration gets the outcome "error".
+   4. Configuration objects compare by identity. Reason: then the `==` of pytest never compares the nested settings
+      of two configurations. Two different configurations can never be equal anyway, because their names are unique
+      ([test_definition.md](test_definition.md), section 7).
+2. **Second start.** The fixture keeps the set of names of the configurations that started in the pytest process.
+   At its start, it raises an exception if its configuration is already in the set. Then every case of this second
+   start gets the outcome "error". The message says that the configuration started a second time in this session,
+   because pytest ran its cases in two parts, for example with `--ff` (section 7). The names are unique
+   ([test_definition.md](test_definition.md), section 7), so the name identifies the configuration.
 3. **Selected cases.** The fixture gets the selected cases of its configuration from `request.session.items`: the
    tests whose configuration parameter is its configuration. The prototype does the same for a module in
    `selected_cases()` ([harness.py:27-39](../_prototypes/pytest_integration/harness.py#L27-L39)). Thus the instances
@@ -60,7 +62,7 @@ rule. [prototype_changes.md](prototype_changes.md) lists the changes that the ha
    1. It writes the state ABOUT_TO_START for each selected case.
    2. It runs the launcher of A.
    3. If the instance status of A is CLEAN, it runs the launcher of B.
-6. It raises an exception only for a duplicate name (item 2), or if a launcher exits with a nonzero status
+6. It raises an exception only for a second start (item 2), or if a launcher exits with a nonzero status
    ([processes.md](processes.md), section 2). All cases of the configuration then get the outcome "error".
 7. Before each launcher, it writes a header line with the configuration name, the instance and the selected cases.
 
@@ -80,8 +82,8 @@ rule. [prototype_changes.md](prototype_changes.md) lists the changes that the ha
 
 ## 6. Live output
 
-1. The configuration fixture runs each launcher through `run_in_pty()`. The output of the workers goes live to the console
-   in every capture mode, through `console_writer()` of the prototype
+1. The configuration fixture runs each launcher through `run_in_pty()`. The output of the workers goes live to the
+   console in every capture mode, through `console_writer()` of the prototype
    ([harness.py:42-52](../_prototypes/pytest_integration/harness.py#L42-L52)).
 2. `console_writer()` uses the internal pytest API `CaptureManager.global_and_fixture_disabled()`. A future pytest
    version can change it. The prototype was tested with pytest 9.0.3.
@@ -99,5 +101,4 @@ rule. [prototype_changes.md](prototype_changes.md) lists the changes that the ha
 4. `--ff` (failed tests first) is not supported. It moves the failed tests to the front after pytest made the list
    of tests ([cacheprovider.py:369-399](../../../../../venv/lib/python3.12/site-packages/_pytest/cacheprovider.py#L369-L399)).
    The cases of one configuration can then run in two parts. The configuration fixture then starts a second time,
-   and the name check gives "error" to the cases of the second part ([test_definition.md](test_definition.md),
-   section 7).
+   and the check of a second start gives "error" to the cases of the second part (section 3, item 2).

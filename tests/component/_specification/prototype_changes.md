@@ -65,8 +65,8 @@ not a binding rule. The section numbers refer to its [README.md](../_prototypes/
       function does the checks of [checks.md](checks.md) with `pytest-check`.
 8. **The configuration directory replaces the old result files.**
    1. Today the harness deletes the old result file before each run (README section 3.2, item 4.1).
-   2. Change: the configuration fixture handles the configuration directory with the rules of fresh runs, reuse runs, the
-      marker file and the lock ([files.md](files.md), sections 5 and 6).
+   2. Change: the configuration fixture handles the configuration directory with the rules of fresh runs, reuse
+      runs, the marker file and the lock ([files.md](files.md), sections 5 and 6).
 9. **Grace period.**
    1. Today the default is 5 seconds (`terminal.DEFAULT_GRACE_PERIOD`, README section 6.1, item 3).
    2. Change: GPU processes need a longer grace period. The harness uses 30 seconds (Not confirmed).

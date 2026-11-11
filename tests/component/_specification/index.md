@@ -96,11 +96,13 @@ Where this specification conflicts with the testing skill in
 ## 5. End-to-end flow
 
 1. **Collection.** pytest imports the test module. The module defines its configurations. The harness makes one
-   case for each component path of each configuration. It does not build a model for this step.
+   case for each component path of each configuration, and it checks that the names of all collected
+   configurations are unique ([test_definition.md](test_definition.md), section 7). It does not build a model for
+   this step.
 2. **Configuration fixture.** The configurations run one after another. The first selected test of a configuration
    starts the configuration fixture of that configuration. The fixture does these steps:
-   1. It checks that no configuration with the same name started before in the session
-      ([test_definition.md](test_definition.md), section 7).
+   1. It checks that this configuration did not already start in the session
+      ([pytest_integration.md](pytest_integration.md), section 3, item 2).
    2. It decides between a fresh run and a reuse of earlier data ([files.md](files.md), section 5).
    3. For a fresh run, it runs the launcher of A.
    4. If A ended clean, it runs the launcher of B.

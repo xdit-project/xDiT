@@ -22,8 +22,8 @@ The harness depends on these interfaces. A change of one of them needs a change 
    ([runner.py:148](../../../xfuser/runner.py#L148-L148)).
 2. `xFuserModelRunner(args)`, `preprocess_args`, `initialize` and `run`
    ([runner.py:57-95](../../../xfuser/runner.py#L57-L95)).
-3. `runner.model`, the runner model object, and its attribute `pipe`.
-4. The run loop that calls the pipeline once for each warmup call and once for each iteration
+3. `runner.model`, the runner model object, and its attributes that the paths name as first elements.
+4. The run loop that runs the pipeline code of the runner once for each warmup call and once for each iteration
    ([base_model.py:1239-1262](../../../xfuser/model_executor/models/runner_models/base_model.py#L1239-L1262)).
 5. The attention backend registry: `AttentionBackendType`, `Spec` with `fallback`, `sparsity` and the vendor
    requirements ([spec.py](../../../xfuser/core/attention/spec.py)).

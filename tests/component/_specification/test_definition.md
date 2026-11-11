@@ -139,10 +139,12 @@ The configuration call has no `name` parameter. The configuration name is the `n
    3. `use_torch_compile` off.
 3. The reference profile, in B only. See [instance_b.md](instance_b.md), section 2.
 
-The forced overrides make one runner run call the pipeline exactly once. The runner calls the pipeline once for
-each warmup call and once for each iteration
+The forced overrides remove the extra runs of the run loop. The run loop runs the pipeline code of the runner once
+for each warmup call and once for each iteration
 ([base_model.py:1239-1243](../../../xfuser/model_executor/models/runner_models/base_model.py#L1239-L1243) and
-[base_model.py:1262](../../../xfuser/model_executor/models/runner_models/base_model.py#L1262-L1262)).
+[base_model.py:1262](../../../xfuser/model_executor/models/runner_models/base_model.py#L1262-L1262)). The pipeline
+code of the runner can still call a pipeline more than once
+([component_paths.md](component_paths.md), section 4.4).
 
 ### 3.3 The step override of the first configuration
 

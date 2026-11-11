@@ -114,7 +114,8 @@ class MhaV4Format:
 FORMATS = [
     #            name        Q/K              V                sparge on
     # The BF16 kernel returns garbage for 64 keys or fewer, whatever the query
-    # length; such calls (a short prompt's text refiner) take the fallback.
+    # length (observed on gfx950; applied on gfx942 too, to be safe). Such calls,
+    # e.g. a short prompt's text refiner, take the fallback.
     MhaV4Format("BF16",      Fmt.BF16,        Fmt.BF16,        GFX950_OR_GFX942,
                 min_keys=65),
     MhaV4Format("BF16FP8",   Fmt.BF16,        Fmt.NATIVE_FP8,  GFX950_OR_GFX942),

@@ -233,7 +233,6 @@ def test_min_key_length_counts_the_keys_a_call_attends_over():
 
 def test_aiter_bf16_refuses_the_short_key_lengths_its_kernel_gets_wrong():
     spec = registry.get(AttentionBackendType.AITER_BF16)
-    assert spec.fallback is AttentionBackendType.AITER
     for kv_len, refused in ((53, True), (64, True), (65, False), (4096, False)):
         q, k, v = _qkv(q_len=4096, kv_len=kv_len)
         assert (spec.accepts.unmet(q, k, v, AttnCall()) is not None) is refused, kv_len

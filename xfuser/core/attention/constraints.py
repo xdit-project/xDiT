@@ -82,6 +82,9 @@ class MIN_KEY_LENGTH(CallConstraint):
 
     A packed call counts its valid keys (the longest segment), which is what a
     kernel that shortens K/V to them is launched with; otherwise the key length.
+    A batch of several packed rows is judged by its longest row, since the
+    shortest one is only known on the device; a kernel that reads per-row
+    lengths (seqlens_k) can still see a shorter row.
     """
 
     minimum: int

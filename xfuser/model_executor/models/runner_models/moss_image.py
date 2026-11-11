@@ -10,6 +10,9 @@ the 24 heads. The text refiner stays replicated. ``--use_cfg_parallel`` runs
 the positive and negative passes on two ranks.
 """
 
+import ast
+import os
+
 import torch
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
@@ -22,6 +25,13 @@ from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
 )
 from xfuser.model_executor.models.runner_models.loading.contracts import LoadRoute, LoadSupport
+
+
+def _vae_dtype():
+    # BF16 decode is ~3x faster than FP32 on MI355 (MIOpen FP32 convs are slow) at ~56 dB PSNR.
+    return {"fp32": torch.float32, "bf16": torch.bfloat16, "fp16": torch.float16}[
+        os.environ.get("MOSS_VAE_DTYPE", "bf16")
+    ]
 
 
 @register_model("OpenMOSS-Team/MOSS-Image-Base")
@@ -44,6 +54,7 @@ class xFuserMOSSImageModel(xFuserModel):
         pipefusion_parallel_degree=False,
         tensor_parallel_degree=False,
         use_cfg_parallel=True,
+        use_parallel_vae=True,
         enable_tiling=True,
         enable_slicing=True,
         fully_shard_degree=False,
@@ -63,15 +74,33 @@ class xFuserMOSSImageModel(xFuserModel):
         resolution_divisor=16,
     )
 
+    def _get_compile_mode(self) -> str:
+        return os.environ.get("XDIT_COMPILE_MODE", "default")
+
+    def _enable_compute_comm_overlap(self) -> None:
+        super()._enable_compute_comm_overlap()
+        # XDIT_INDUCTOR_OVERRIDES="key=pyliteral;key2=pyliteral" applied to torch._inductor.config.
+        overrides = os.environ.get("XDIT_INDUCTOR_OVERRIDES", "")
+        for item in filter(None, overrides.split(";")):
+            key, value = item.split("=", 1)
+            torch._inductor.config.__setattr__(key.strip(), ast.literal_eval(value.strip()))
+
     def _load_model(self) -> DiffusionPipeline:
         from xfuser.model_executor.pipelines.pipeline_moss_image import xFuserMOSSImagePipeline
 
         return xFuserMOSSImagePipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
-            vae_dtype=torch.float32,
+            vae_dtype=_vae_dtype(),
             cache_dir=self.config.download_dir,
         )
+
+    def _get_compiled_pipe_components(self):
+        # The eager Qwen3.5 encoder is launch bound (~7.8k kernels for prompt + negative);
+        # compiled it encodes ~3x faster. Prompts are re-encoded on every call, inside the timed region.
+        if os.environ.get("MOSS_COMPILE_TEXT_ENCODER", "1") == "1":
+            return ["transformer", "text_encoder"]
+        return ["transformer"]
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         negative = input_args.get("negative_prompt")

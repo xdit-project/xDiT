@@ -67,12 +67,14 @@ Where this specification conflicts with the testing skill in
 
 1. **Runner model object.** The `xFuserModel` object that `xFuserModelRunner` creates. It is `runner.model` in
    [runner.py:57-66](../../../xfuser/runner.py#L57-L66). Component paths start at this object.
-2. **Configuration.** One test module. It holds one CI YAML entry, the overrides, the parameters of B, the
-   component list, and the tolerances.
-3. **Group.** All cases of one configuration.
+2. **Configuration.** One configuration call in a test module. It holds the run settings (a CI YAML entry with
+   overrides, or overrides only), the parameters of B, the component list, and the tolerances. Each configuration
+   has its own instances A and B. See [test_definition.md](test_definition.md).
+3. **Test module.** One pytest file with one or more configurations. By convention, it covers many or all
+   configurations of one xDiT model.
 4. **Component path.** A string that leads from the runner model object to a component, for example
    `pipe.transformer.blocks[0]`. See [component_paths.md](component_paths.md).
-5. **Case.** One listed component path. A case is one pytest test.
+5. **Case.** One listed component path of one configuration. A case is one pytest test.
 6. **Call.** One execution of a listed component in a pipeline run.
 7. **Call address.** The tuple of call counters that identifies one call. See
    [component_paths.md](component_paths.md), section 5.
@@ -88,16 +90,22 @@ Where this specification conflicts with the testing skill in
 15. **Worker.** One rank of an instance.
 16. **State file.** The file that holds the status and the file paths of one case. See [files.md](files.md).
 17. **Metrics file.** The file that collects metric values across runs. See [files.md](files.md), section 9.
+18. **Configuration fixture.** The pytest fixture that runs A and B of one configuration. It has one instance for
+    each configuration. See [pytest_integration.md](pytest_integration.md), section 3.
 
 ## 5. End-to-end flow
 
-1. **Collection.** pytest imports the test module. The module defines the configuration. The harness makes one
-   case for each component path. It does not build a model for this step.
-2. **Group fixture.** The first selected test of the module starts the module-scoped group fixture. The fixture
-   does these steps:
-   1. It decides between a fresh run and a reuse of earlier data ([files.md](files.md), section 5).
-   2. For a fresh run, it runs the launcher of A.
-   3. If A ended clean, it runs the launcher of B.
+1. **Collection.** pytest imports the test module. The module defines its configurations. The harness makes one
+   case for each component path of each configuration. It does not build a model for this step.
+2. **Configuration fixture.** The configurations run one after another. The first selected test of a configuration
+   starts the configuration fixture of that configuration. The fixture does these steps:
+   1. It checks that no configuration with the same name started before in the session
+      ([test_definition.md](test_definition.md), section 7).
+   2. It decides between a fresh run and a reuse of earlier data ([files.md](files.md), section 5).
+   3. For a fresh run, it runs the launcher of A.
+   4. If A ended clean, it runs the launcher of B.
+
+   Then the tests of this configuration run (item 5). After them, the next configuration starts its instances.
 3. **Instance A** ([instance_a.md](instance_a.md)):
    1. builds and initializes the model as the xDiT runner does;
    2. resolves the component paths;
@@ -132,8 +140,8 @@ Where this specification conflicts with the testing skill in
 
 ## 8. Document map
 
-1. [test_definition.md](test_definition.md): the configuration call, the YAML helper, overrides, the parameters
-   of B, tolerances, output names, deadlines.
+1. [test_definition.md](test_definition.md): test modules, the configuration call, the merged entry and its
+   overrides, the parameters of B, tolerances, output names, deadlines, the configuration name.
 2. [component_paths.md](component_paths.md): path syntax, path elements, resolution, hooks, call addresses, case
    IDs.
 3. [instance_a.md](instance_a.md): the flow of A, capture, replays, fidelity and determinism.

@@ -1,6 +1,6 @@
 # Changes to the pytest_integration prototype
 
-The prototype in [_prototypes/pytest_integration/](../_prototypes/pytest_integration/) shows how a group of tests
+The prototype in [_prototypes/pytest_integration/](../_prototypes/pytest_integration/) shows how a set of tests
 can share two expensive processes, select single cases, show live output, and leave no processes behind. The
 harness takes the parts that fit and changes them as this document lists. The prototype is an implementation hint,
 not a binding rule. The section numbers refer to its [README.md](../_prototypes/pytest_integration/README.md).
@@ -13,15 +13,18 @@ not a binding rule. The section numbers refer to its [README.md](../_prototypes/
    every capture mode.
 3. `run_in_pty()` and the subreaper supervisor in [terminal.py](../_prototypes/pytest_integration/terminal.py): one
    ordered output stream and no leftover processes. The tests in `terminal_tests/` go with it.
-4. The module-scoped group fixture that runs the expensive processes once for each group (README section 3.2).
-5. Groups run one after another, and A and B of one group run one after another (README section 2.1, item 3).
+4. A fixture that runs the expensive processes one time and gives their data to many tests (README section 3.2).
+   The harness changes its scope: one instance for each configuration, not one for each module (section 2,
+   item 6).
+5. Configurations run one after another, and A and B of one configuration run one after another (README
+   section 2.1, item 3).
 
 ## 2. Required changes
 
 1. **A launcher for each instance.**
    1. Today the fixture runs the process directly, and a nonzero exit raises `subprocess.CalledProcessError`
       ([harness.py:101-103](../_prototypes/pytest_integration/harness.py#L101-L103)). README section 3.2, item 6
-      says that every test of the group then reports ERROR.
+      says that every test of the module then reports ERROR.
    2. torchrun exits with a nonzero status when a worker crashes. The harness needs an outcome for each case, also
       after a crash.
    3. Change: the fixture runs a launcher, and the launcher runs torchrun. The launcher survives crashes and hangs
@@ -43,22 +46,26 @@ not a binding rule. The section numbers refer to its [README.md](../_prototypes/
       ([test_group_a.py:13-16](../_prototypes/pytest_integration/test_group_a.py#L13-L16)).
    2. Change: the fixture starts B only if the instance status of A is CLEAN.
 5. **Cases from the configuration call.**
-   1. Today each group file has a list `CASES` of integers, and the case IDs are `case1`, `case2` and so on (README
+   1. Today each test file has a list `CASES` of integers, and the case IDs are `case1`, `case2` and so on (README
       section 6.1, item 5).
-   2. Change: the cases come from the configuration call, and the case IDs are the component paths
-      ([component_paths.md](component_paths.md), section 6).
-6. **Shared fixtures.**
-   1. Today each group file holds its own fixture (README section 2.6, item 1).
-   2. Change: the group fixture and the case fixture live in `tests/component/conftest.py`. The test module defines
-      only the configuration and the test function. The configuration call is the place for customization of a
-      group.
+   2. Change: the cases come from the configuration calls, and each case ID holds the configuration name and the
+      component path ([component_paths.md](component_paths.md), section 6).
+6. **Shared fixtures, one instance for each configuration.**
+   1. Today each test file holds its own module-scoped fixture, which runs the processes once for the whole module
+      (README section 2.6, item 1).
+   2. Change: the configuration fixture and the case fixture live in `tests/component/conftest.py`. A test module
+      defines only its configurations and calls `make_test` one time. The configuration call is the place for
+      customization of a configuration.
+   3. Change: the configuration fixture has one instance for each configuration, not one for each module. Thus one
+      module can hold many configurations, and the tests of each configuration run right after its instances
+      ([pytest_integration.md](pytest_integration.md), sections 2 and 3).
 7. **Case fixture and outcomes.**
    1. Today a test compares two strings with `assert`.
    2. Change: a function-scoped case fixture maps the case state to the outcomes "error" and "skipped", and the test
       function does the checks of [checks.md](checks.md) with `pytest-check`.
 8. **The configuration directory replaces the old result files.**
    1. Today the harness deletes the old result file before each run (README section 3.2, item 4.1).
-   2. Change: the group fixture handles the configuration directory with the rules of fresh runs, reuse runs, the
+   2. Change: the configuration fixture handles the configuration directory with the rules of fresh runs, reuse runs, the
       marker file and the lock ([files.md](files.md), sections 5 and 6).
 9. **Grace period.**
    1. Today the default is 5 seconds (`terminal.DEFAULT_GRACE_PERIOD`, README section 6.1, item 3).

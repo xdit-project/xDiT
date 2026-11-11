@@ -5,15 +5,17 @@ attributes crashes and hangs.
 
 ## 1. Process tree
 
-1. **pytest process.** It runs the group fixture.
-2. **Supervisor.** The group fixture starts each launcher through `run_in_pty()` from the prototype
+1. **pytest process.** It runs the configuration fixture.
+2. **Supervisor.** The configuration fixture starts each launcher through `run_in_pty()` from the prototype
    ([terminal.py](../_prototypes/pytest_integration/terminal.py)). The supervisor gives live output and kills every
    leftover process at the end.
 3. **Launcher.** One launcher for each instance: `python -m harness.launcher` with the instance name, the
    configuration and the absolute data directory.
 4. **torchrun.** The launcher starts `python -m torch.distributed.run` with the same options that the xDiT CLI uses
    ([cli.py:131-142](../../../xfuser/cli.py#L131-L142)), but with the worker module of the harness instead of
-   `xfuser.runner`.
+   `xfuser.runner`. The number of workers (`--nproc_per_node`) is the `num_gpus` field of the merged entry
+   ([test_definition.md](test_definition.md), section 3.1). Without it, the launcher computes the number as the
+   xDiT CLI does ([cli.py:122-127](../../../xfuser/cli.py#L122-L127)).
 5. **Workers.** One worker for each rank: `python -m harness.worker`.
 
 ## 2. Launcher contract
@@ -21,8 +23,8 @@ attributes crashes and hangs.
 1. The launcher survives a crash or a hang of its workers.
 2. The launcher writes the instance status and the case states to files.
 3. The launcher exits with 0 when it wrote its records, also after a crash or a hang of the workers.
-4. A nonzero exit means that the launcher itself failed and no data exists. The group fixture then raises an
-   exception, and every case of the group gets the pytest outcome "error".
+4. A nonzero exit means that the launcher itself failed and no data exists. The configuration fixture then raises
+   an exception, and every case of the configuration gets the pytest outcome "error".
 
 ## 3. Environment
 
@@ -82,7 +84,7 @@ The launcher reads the progress records and the error records after the end of t
 4. **Cases with complete data.** A case whose replays in B finished before a failure of B keeps its data. The test
    function checks it as usual.
 5. **Cases without complete data.** Every other case gets FAILED_TO_START.
-6. **After a failure of A,** the group fixture does not start B. Thus no case has complete data: the case whose
+6. **After a failure of A,** the configuration fixture does not start B. Thus no case has complete data: the case whose
    replay was running gets CRASHED_A, HUNG_A or ERROR_A, and every other case gets FAILED_TO_START.
 
 Version 1 does not recover. It does not run B for the cases that A finished, and it does not continue after B

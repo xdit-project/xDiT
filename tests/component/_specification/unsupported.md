@@ -6,7 +6,7 @@ entry in [future_work/index.md](future_work/index.md).
 ## 1. Configurations
 
 The workers check these conditions after they parse the run arguments and build the model. If one condition is
-true, every case of the group gets UNSUPPORTED with the reason. The instance then ends, and B does not start.
+true, every case of the configuration gets UNSUPPORTED with the reason. The instance then ends, and B does not start.
 
 | Feature | Detection | Reason |
 |---|---|---|

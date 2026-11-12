@@ -1545,6 +1545,7 @@ class xFuserArgs:
             "--sparseattn_block_size",
             type=block_size,
             default=None,
+            metavar="QxKV",
             help="Block-sparse tile as QxKV, e.g. 64x64: the query rows and keys one mask "
             "entry covers. Omit to use each recipe's default tile. Honoured by the AITER MHA v4 "
             "Sparge backends; the run is refused at startup if this GPU has no kernel at that "

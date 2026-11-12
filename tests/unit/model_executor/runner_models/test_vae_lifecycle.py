@@ -84,6 +84,9 @@ def test_initialize_sets_up_every_parallel_vae_before_enabling_options(
         initialize = xFuserModel.initialize
         _decoding_vaes = xFuserModel._decoding_vaes
         _wrapper_parallelizes_vae = xFuserModel._wrapper_parallelizes_vae
+        # initialize() settles the GroupNorm binding before it loads the model.
+        _uses_aiter_group_norm = xFuserModel._uses_aiter_group_norm
+        _compiles_vae_decoder = xFuserModel._compiles_vae_decoder
 
         def __init__(self):
             self.engine = SimpleNamespace(runtime_config=SimpleNamespace())

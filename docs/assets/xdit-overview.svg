@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" id="dark" width="1200" height="800" viewBox="0 0 1200 800" role="img" aria-labelledby="title description">
+  <title id="title">How to run a model with xDiT</title>
+  <desc id="description">Choose a registered model and its inputs, a layout for one or multiple devices and nodes, and optional memory, kernel, caching, compilation, and precision settings. xDiT validates supported combinations, loads and distributes the model, then generates and measures inference. Outputs include images, video or video with audio, timings, and optional profiling traces. Choices depend on the model, hardware, and installed software. Python and legacy example interfaces are also available.</desc>
+  <defs>
+    <!-- Preserve the logo's full palette in the xDiT brand accent. -->
+    <linearGradient id="logo-accent" x1="0" x2="1" y1="0" y2="0">
+      <stop offset="0" stop-color="#ffb22e"/>
+      <stop offset="0.25" stop-color="#f62238"/>
+      <stop offset="0.5" stop-color="#ee19d7"/>
+      <stop offset="0.75" stop-color="#4005b5"/>
+      <stop offset="1" stop-color="#0ea9ff"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M1 1 L7 4 L1 7" fill="none" stroke="#8f9da7" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <style>
+    /* The #dark fragment selects the same theme as the documentation page.
+       Without a fragment, the README and standalone image use the light palette. */
+    :root { --background: #ffffff; --surface: #f7f9fb; --border: #dde4e9;
+            --text: #3a3a3a; --body: #505b64; --detail: #606b74; --link: #006aa3; }
+    :root:target { --background: #181c20; --surface: #22282e; --border: #404a53;
+                   --text: #e7edf2; --body: #cad5de; --detail: #aebecb; --link: #67cdff; }
+    [fill="#ffffff"] { fill: var(--background); }
+    [fill="#f7f9fb"] { fill: var(--surface); }
+    [fill="#3a3a3a"] { fill: var(--text); }
+    [stroke="#dde4e9"], [stroke="#dde4e9"] { stroke: var(--border); }
+
+    text { font-family: sans-serif; }
+    .heading { fill: var(--text); font-size: 24px; font-weight: 700; }
+    .subheading { fill: var(--text); font-size: 20px; font-weight: 700; }
+    .body { fill: var(--body); font-size: 18px; }
+    .detail { fill: var(--detail); font-size: 16px; }
+    .flag { fill: var(--link); font-family: monospace; font-size: 16px; }
+    .panel { fill: var(--background); stroke: var(--border); stroke-width: 1.5; }
+    .connector { fill: none; stroke: #aab8c2; stroke-width: 1.5; }
+  </style>
+  <rect width="1200" height="800" rx="16" fill="#ffffff"/>
+  <text x="48" y="58" fill="#3a3a3a" font-size="36" font-weight="700">xDiT</text>
+  <rect x="48" y="74" width="88" height="4" rx="2" fill="url(#logo-accent)"/>
+  <text x="176" y="56" class="heading">From model choice to generated outputs</text>
+  <text x="48" y="111" class="body">Set the model and inputs. Choose a device layout. Add optimizations when needed.</text>
+  <!-- The three cards are independent choices feeding the same run. -->
+  <rect x="48" y="144" width="352" height="188" rx="12" class="panel"/>
+  <path d="M72 164 H108" stroke="#0ea9ff" stroke-width="4" stroke-linecap="round"/>
+  <text x="72" y="199" class="heading">Model &amp; inputs</text>
+  <text x="72" y="230" class="body">Model · task · prompt</text>
+  <text x="72" y="263" class="flag">--model · --prompt</text>
+  <text x="72" y="301" class="detail">Dimensions · steps · seed</text>
+  <rect x="424" y="144" width="352" height="188" rx="12" class="panel"/>
+  <path d="M448 164 H484" stroke="#ffb22e" stroke-width="4" stroke-linecap="round"/>
+  <text x="448" y="199" class="heading">Device layout</text>
+  <text x="448" y="230" class="body">One or more devices</text>
+  <text x="448" y="257" class="body">across one or more nodes.</text>
+  <text x="448" y="301" class="flag">--ulysses_degree 4</text>
+  <rect x="800" y="144" width="352" height="188" rx="12" class="panel"/>
+  <path d="M824 164 H860" stroke="#f62238" stroke-width="4" stroke-linecap="round"/>
+  <text x="824" y="199" class="heading">Optional tuning</text>
+  <text x="824" y="230" class="body">Memory · kernels · caching</text>
+  <text x="824" y="257" class="body">Compilation &amp; precision</text>
+  <text x="824" y="301" class="flag">--use_torch_compile</text>
+  <path d="M224 332 V354 H976 V332 M600 332 V380" class="connector"/>
+  <path d="M600 354 V380" class="connector" marker-end="url(#arrow)"/>
+  <rect x="48" y="386" width="1104" height="188" rx="12" fill="#f7f9fb" stroke="#dde4e9" stroke-width="1.5"/>
+  <text x="72" y="426" class="heading">xDiT coordinates the run</text>
+  <text x="72" y="471" class="subheading">Validate configuration</text>
+  <text x="72" y="501" class="detail">Model support &amp; flag combinations</text>
+  <path d="M412 454 V510" stroke="#dde4e9"/>
+  <text x="440" y="471" class="subheading">Load &amp; distribute</text>
+  <text x="440" y="501" class="detail">Weights, rank groups &amp; memory</text>
+  <path d="M780 454 V510" stroke="#dde4e9"/>
+  <text x="808" y="471" class="subheading">Generate &amp; measure</text>
+  <text x="808" y="501" class="detail">Inference, timings &amp; profiling</text>
+  <text x="72" y="550" class="detail">PyTorch distributed · Installed attention and GEMM backends</text>
+  <path d="M600 574 V616" class="connector" marker-end="url(#arrow)"/>
+  <rect x="48" y="622" width="1104" height="98" rx="12" class="panel"/>
+  <text x="72" y="658" class="heading">Generated outputs</text>
+  <text x="72" y="693" class="body">Images · Video · Video + audio</text>
+  <text x="750" y="693" class="body">Timings · Optional traces</text>
+  <text x="48" y="760" class="detail">Available features depend on the model, device, and installed software.</text>
+  <text x="48" y="786" class="detail">Also available through Python and legacy model examples.</text>
+</svg>

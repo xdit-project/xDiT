@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" id="dark" width="1200" height="620" viewBox="0 0 1200 620" role="img" aria-labelledby="title description">
+  <title id="title">xDiT pipeline-wrapper components</title>
+  <desc id="description">Pipeline, model, layer, and scheduler wrappers inherit from xFuserBaseWrapper. The transformer wrapper specializes the model wrapper. Representative implementations include the FLUX PipeFusion pipeline and transformer, convolution layers, and FlowMatch Euler scheduler. This diagram describes composition wrappers, excluding transformer subclasses and the separate unified runner model adapter contract. Arrows point from a child class to its parent; additional PyTorch bases and mixins are omitted.</desc>
+  <defs>
+    <marker id="parent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M1 1 L9 5 L1 9 Z" fill="var(--background)" stroke="var(--detail)"/>
+    </marker>
+  </defs>
+  <style>
+:root { --background:#ffffff; --surface:#f7f9fb; --border:#dde4e9; --text:#3a3a3a; --body:#505b64; --detail:#606b74; --link:#006aa3; }
+:root:target { --background:#181c20; --surface:#22282e; --border:#404a53; --text:#e7edf2; --body:#cad5de; --detail:#aebecb; --link:#67cdff; }
+text { font-family:sans-serif; fill:var(--text); } .title {font-size:30px;font-weight:700} .heading {font-size:20px;font-weight:700} .body {font-size:17px;fill:var(--body)} .code {font-family:monospace;font-size:15px;fill:var(--link)} .detail {font-size:16px;fill:var(--detail)} .panel {fill:var(--surface);stroke:var(--border);stroke-width:1.5} .arrow {fill:none;stroke:var(--detail);stroke-width:1.5;marker-end:url(#parent)}
+</style>
+  <rect width="1200" height="620" rx="16" fill="var(--background)"/>
+  <text x="40" y="50" class="title">Pipeline-wrapper components</text>
+  <text x="40" y="82" class="body">Composition wrapper hierarchy. Each arrow points to a parent class.</text>
+  <rect x="400" y="110" width="400" height="92" rx="10" class="panel"/>
+  <text x="600" y="146" text-anchor="middle" class="heading">xFuserBaseWrapper</text>
+  <text x="600" y="177" text-anchor="middle" class="body">Attribute forwarding and runtime checks</text>
+  <path d="M168 265 V230 H600 V204" class="arrow"/>
+  <rect x="40" y="265" width="256" height="110" rx="10" class="panel"/>
+  <text x="168" y="296" text-anchor="middle" class="heading">Pipeline</text>
+  <text x="168" y="325" text-anchor="middle" class="code">xFuserPipelineBaseWrapper</text>
+  <text x="168" y="354" text-anchor="middle" class="detail">FLUX PipeFusion pipeline</text>
+  <path d="M456 265 V230 H600 V204" class="arrow"/>
+  <rect x="328" y="265" width="256" height="110" rx="10" class="panel"/>
+  <text x="456" y="296" text-anchor="middle" class="heading">Model</text>
+  <text x="456" y="325" text-anchor="middle" class="code">xFuserModelBaseWrapper</text>
+  <text x="456" y="354" text-anchor="middle" class="detail">Transformer wrapper below</text>
+  <path d="M744 265 V230 H600 V204" class="arrow"/>
+  <rect x="616" y="265" width="256" height="110" rx="10" class="panel"/>
+  <text x="744" y="296" text-anchor="middle" class="heading">Layer</text>
+  <text x="744" y="325" text-anchor="middle" class="code">xFuserLayerBaseWrapper</text>
+  <text x="744" y="354" text-anchor="middle" class="detail">Conv2d and attention</text>
+  <path d="M1032 265 V230 H600 V204" class="arrow"/>
+  <rect x="904" y="265" width="256" height="110" rx="10" class="panel"/>
+  <text x="1032" y="296" text-anchor="middle" class="heading">Scheduler</text>
+  <text x="1032" y="325" text-anchor="middle" class="code">xFuserSchedulerBaseWrapper</text>
+  <text x="1032" y="354" text-anchor="middle" class="detail">FlowMatch Euler wrapper</text>
+  <path d="M456 428 V377" class="arrow"/>
+  <rect x="268" y="428" width="376" height="98" rx="10" class="panel"/>
+  <text x="456" y="459" text-anchor="middle" class="heading">Transformer</text>
+  <text x="456" y="488" text-anchor="middle" class="code">xFuserTransformerBaseWrapper</text>
+  <text x="456" y="514" text-anchor="middle" class="detail">Example: FLUX PipeFusion transformer</text>
+  <text x="40" y="568" class="body">Component registries select composition wrappers for supported Diffusers classes.</text>
+  <text x="40" y="595" class="detail">Transformer subclasses and xFuserModel runner adapters are separate. Other bases and mixins are omitted.</text>
+</svg>

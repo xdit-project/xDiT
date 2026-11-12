@@ -10,4 +10,6 @@ profile/
 xfuser.egg-info/
 xfuser/__version__.py
 dist/*
+site/
+.venv-docs/
 *.mp4

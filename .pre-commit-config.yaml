@@ -21,3 +21,13 @@ repos:
     hooks:
       - id: actionlint
         args: [-shellcheck=]
+
+  - repo: local
+    hooks:
+      - id: pymarkdown
+        name: Lint Markdown
+        entry: pymarkdown
+        language: python
+        additional_dependencies: [pymarkdownlnt==0.9.41]
+        types: [markdown]
+        args: [--config, .pymarkdown.json, --strict-config, scan]

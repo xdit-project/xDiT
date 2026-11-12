@@ -57,13 +57,16 @@ rule. [prototype_changes.md](prototype_changes.md) lists the changes that the ha
    tests whose configuration parameter is its configuration. The prototype does the same for a module in
    `selected_cases()` ([harness.py:27-39](../_prototypes/pytest_integration/harness.py#L27-L39)). Thus the instances
    capture and replay only the selected cases. The pipeline runs are complete in all cases.
-4. It handles the data directory ([files.md](files.md), section 5): a fresh run or a reuse run.
+4. It takes the lock of the configuration, prepares the configuration directory, and decides between a fresh run
+   and a reuse run ([files.md](files.md), sections 5 and 6).
 5. For a fresh run:
    1. It writes the state ABOUT_TO_START for each selected case.
    2. It runs the launcher of A.
    3. If the instance status of A is CLEAN, it runs the launcher of B.
-6. It raises an exception only for a second start (item 2), or if a launcher exits with a nonzero status
-   ([processes.md](processes.md), section 2). All cases of the configuration then get the outcome "error".
+6. It raises an exception only for a second start (item 2), if another session holds the lock of the
+   configuration, if the configuration directory is not empty and has no marker file ([files.md](files.md),
+   section 6), or if a launcher exits with a nonzero status ([processes.md](processes.md), section 2). All cases
+   of the configuration then get the outcome "error".
 7. Before each launcher, it writes a header line with the configuration name, the instance and the selected cases.
 
 ## 4. Case fixture

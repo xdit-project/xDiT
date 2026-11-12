@@ -234,8 +234,8 @@ when the reference profile does not change a shape argument.
    2. `overrides={"name": ...}` sets another name. Example: two configurations that use the same entry with
       different parameters of B need different names.
    3. Without `yaml_path` and `entry`, `overrides` must set `name`.
-2. **Use.** The name selects the data directory `_data/<name>/` and the metrics file `_metrics/<name>.jsonl` (see
-   [files.md](files.md)). It is also the first part of each case ID
+2. **Use.** The name selects the data directory `_data/<name>/`, the lock file `_locks/<name>.lock` and the
+   metrics file `_metrics/<name>.jsonl` (see [files.md](files.md)). It is also the first part of each case ID
    ([component_paths.md](component_paths.md), section 6).
 3. **Characters.** A name contains only letters, digits, `_`, `.` and `-`. Thus it is a valid file name, `-k`
    accepts it, and it contains no `:`. The entry names in the CI benchmark files meet this rule.

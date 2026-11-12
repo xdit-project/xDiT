@@ -5,14 +5,16 @@ safety guards, serialization, and the metrics file.
 
 ## 1. Path resolution
 
-1. The harness writes into two directories next to the test module:
+1. The harness writes into three directories next to the test module:
    1. `_data/` for dumps and states;
-   2. `_metrics/` for the metrics files.
+   2. `_metrics/` for the metrics files;
+   3. `_locks/` for the lock files (section 6, item 2).
 2. The base directory is the directory of the running test module (`request.path.parent` in the configuration
    fixture). It is not the working directory.
-3. The pytest process resolves both directories once. Launchers and workers get absolute paths, so their working
+3. The pytest process resolves these directories once. Launchers and workers get absolute paths, so their working
    directory has no effect.
-4. The metrics files live in a directory separate from the dumps. Thus a cleanup of the dumps cannot delete them.
+4. The metrics files and the lock files live in directories separate from the dumps. Thus a cleanup of the dumps
+   cannot delete them.
 
 ## 2. Configuration directory
 
@@ -20,15 +22,15 @@ safety guards, serialization, and the metrics file.
    ([test_definition.md](test_definition.md), section 7).
 2. The directory holds:
    1. a marker file that the harness creates with the directory;
-   2. a lock file;
-   3. one state file for each case;
-   4. the instance records of A and B;
-   5. the progress files of the workers;
-   6. the dumps of A and B.
+   2. one state file for each case;
+   3. the instance records of A and B;
+   4. the progress files of the workers;
+   5. the dumps of A and B.
 
 ## 3. One owner of the layout
 
-1. One module of the harness defines all paths in the configuration directory. The launchers use this module.
+1. One module of the harness defines all paths in the configuration directory and the path of the lock file. The
+   launchers use this module.
 2. The state of each case holds the paths of its data files. The case fixture gives these paths to the test
    function. The test function reads and deletes the files at these paths. It does not compute paths.
 3. The layout module maps a case ID and a call address to file names that are safe for the file system.
@@ -49,9 +51,18 @@ safety guards, serialization, and the metrics file.
 
 ## 5. Fresh run and reuse run
 
-1. At the start, the configuration fixture reads the state files of the configuration directory.
+1. At the start, the configuration fixture does these steps in this order:
+   1. It takes the lock of the configuration (section 6, item 2).
+   2. It prepares the configuration directory. If the directory does not exist or is empty, the fixture creates
+      it with the marker file. Otherwise, it checks the marker file (section 6, item 1).
+   3. It reads the state files of the configuration directory.
+
+   The lock comes first. Thus no other session can change the directory between the read of the states and the
+   end of the run.
 2. **Fresh run.** If the directory has no state files, or if every recorded case passed, the configuration fixture
-   cleans the directory and runs A and B from the start. UNSUPPORTED counts as passed for this decision.
+   cleans the directory and runs A and B from the start. UNSUPPORTED counts as passed for this decision. To clean,
+   the fixture deletes the configuration directory with all its content and creates it again with a new marker
+   file. The cleaning does not touch the lock file and the metrics file (section 1, item 4).
 3. **Reuse run.** In all other cases, the configuration fixture prints a warning and does not start A or B. Each
    case gets the outcome of its stored state ([statuses.md](statuses.md), section 2).
 4. The warning says that the run uses old data. Thus changes of the xDiT code or of the settings since then are
@@ -64,9 +75,23 @@ safety guards, serialization, and the metrics file.
 
 1. **Marker file.** Automatic cleaning deletes only a directory that holds the marker file. A directory that is not
    empty and has no marker file is an error. Thus a wrong path cannot delete unrelated files.
-2. **Lock.** The pytest session holds an exclusive lock (`fcntl.flock`) on the lock file of the configuration
-   directory. A second session on the same directory fails at once. Without the lock, a second session could clean
-   the directory while the first session writes into it.
+2. **Lock.**
+   1. Each configuration has one lock file: `_locks/<name>.lock`. It is outside the configuration directory, so
+      neither the cleaning (section 5, item 2) nor a manual deletion of the configuration directory deletes it.
+   2. The configuration fixture takes an exclusive lock (`fcntl.flock`) on the lock file before it reads or
+      changes anything in the configuration directory (section 5, item 1). If another session holds the lock, the
+      fixture raises an exception at once. The message names the lock file.
+   3. The pytest process holds the lock until it ends.
+   4. Without the lock, a second session could clean the directory while the first session writes into it.
+   5. The harness never deletes a lock file. Reason: `flock` locks an open file, not a path. If the lock file is
+      deleted and created again, a second session can lock the new file while the first session still holds the
+      lock on the deleted file. Then both sessions use the same configuration directory.
+   6. **Accepted limit.** Only the pytest process holds the lock, not the supervisor, the launchers or the
+      workers. If the pytest process dies, the operating system releases the lock at once, but the supervisor
+      needs up to the grace period to stop the launchers and the workers ([processes.md](processes.md),
+      section 4, item 6). If the supervisor itself gets SIGKILL, they can survive
+      ([prototype_changes.md](prototype_changes.md), section 3, item 3). In both cases, a new session can clean
+      the directory while these processes still write into it.
 
 ## 7. Serialization
 
@@ -96,9 +121,9 @@ safety guards, serialization, and the metrics file.
 
 1. JSON Lines: one JSON object for each line.
 2. Timestamps are in UTC, in ISO 8601 format.
-3. Each append takes an exclusive `fcntl.flock` lock on the metrics file. The lock of the configuration directory
-   (section 6) already stops two sessions on one configuration. The lock of the metrics file is a second guard
-   that costs almost nothing, so two writers can never mix their lines.
+3. Each append takes an exclusive `fcntl.flock` lock on the metrics file. The lock of the configuration (section 6,
+   item 2) already stops two sessions on one configuration. The lock of the metrics file is a second guard that
+   costs almost nothing, so two writers can never mix their lines.
 
 ### 9.3 Lines
 

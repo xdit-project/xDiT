@@ -23,7 +23,7 @@ from xfuser.core.distributed import (
 )
 from xfuser.core.utils.runner_utils import log
 from xfuser.core.utils.video_utils import encode_video_with_audio
-from xfuser.envs import get_device_name
+from xfuser.envs import PACKAGES_CHECKER, get_device_name
 from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
@@ -236,20 +236,92 @@ def _minimax_h3_parallel_decode_clip(self, z: torch.Tensor) -> torch.Tensor:
     return self._stitch_tiles(rows, y_overlaps, x_overlaps)
 
 
+def _minimax_h3_parallel_encode_clip(self, x: torch.Tensor) -> torch.Tensor:
+    vae_group = get_vae_parallel_group()
+    if vae_group.world_size == 1 or not self.use_tiling:
+        return self._xfuser_original_encode_clip(x)
+
+    y_indices, y_lengths, y_overlaps = self._split_tiles(
+        x.shape[-2],
+        self.tile_sample_min_height,
+        self.tile_sample_min_overlap_height,
+    )
+    x_indices, x_lengths, x_overlaps = self._split_tiles(
+        x.shape[-1],
+        self.tile_sample_min_width,
+        self.tile_sample_min_overlap_width,
+    )
+    tile_specs = [
+        (y, tile_height, x_start, tile_width)
+        for y, tile_height in zip(y_indices, y_lengths)
+        for x_start, tile_width in zip(x_indices, x_lengths)
+    ]
+    # A rank without a tile of its own would not know the encoded tile shape.
+    if len(tile_specs) < vae_group.world_size:
+        return self._xfuser_original_encode_clip(x)
+
+    world_size, rank = vae_group.world_size, vae_group.rank_in_group
+    local_tiles = {
+        index: self.quant_conv(self.encoder(x[..., y : y + height, x_start : x_start + width])).contiguous()
+        for index, (y, height, x_start, width) in enumerate(tile_specs)
+        if index % world_size == rank
+    }
+    # _split_tiles gives every tile along an axis the same length, so every
+    # encoded tile has the shape of this rank's own.
+    template = next(iter(local_tiles.values()))
+    encoded = [
+        vae_group.broadcast(
+            local_tiles[index] if index % world_size == rank else torch.empty_like(template), src=index % world_size
+        )
+        for index in range(len(tile_specs))
+    ]
+    columns = len(x_lengths)
+    rows = [encoded[start : start + columns] for start in range(0, len(encoded), columns)]
+
+    ratio = self.spatial_compression_ratio
+    return self._stitch_tiles(
+        rows,
+        [overlap // ratio for overlap in y_overlaps],
+        [overlap // ratio for overlap in x_overlaps],
+    )
+
+
+def _record_cudagraph_on_first_call(compiled_forward):
+    """Replay a once-per-request compiled forward as a CUDA graph from its first call on."""
+    recorded = False
+
+    def forward(hidden_states: torch.Tensor) -> torch.Tensor:
+        nonlocal recorded
+        if not recorded:
+            # A graph records on its second call. Make both happen in the first
+            # call, which is the compile warmup, rather than in a timed run.
+            torch.compiler.cudagraph_mark_step_begin()
+            compiled_forward(hidden_states)
+            recorded = True
+        torch.compiler.cudagraph_mark_step_begin()
+        # The result outlives the call, and the next replay reuses its buffer.
+        return compiled_forward(hidden_states).clone()
+
+    return forward
+
+
 def install_minimax_h3_vae_tile_parallel(vae) -> None:
     """Distribute MiniMax-H3 spatial VAE tiles across the existing VAE ranks.
 
-    DistVAE does not reimplement MiniMax-H3's clip/tile/stitch decode loop, so
-    this keeps that native loop and only shards complete spatial tiles.
+    DistVAE does not reimplement MiniMax-H3's clip/tile/stitch loops, so this
+    keeps those native loops and only shards complete spatial tiles, for both
+    encoding and decoding.
     """
     if getattr(vae, "_xfuser_tile_parallel", False):
         return
 
     vae._xfuser_original_decode_clip = vae._decode_clip
     vae._decode_clip = MethodType(_minimax_h3_parallel_decode_clip, vae)
+    vae._xfuser_original_encode_clip = vae._encode_clip
+    vae._encode_clip = MethodType(_minimax_h3_parallel_encode_clip, vae)
     vae._xfuser_tile_parallel = True
     log(
-        "MiniMax-H3 parallel VAE enabled: distributing spatial decode tiles "
+        "MiniMax-H3 parallel VAE enabled: distributing spatial encode and decode tiles "
         f"across {get_vae_parallel_group().world_size} ranks."
     )
 
@@ -477,6 +549,7 @@ def _count_steps_as_forwards(scheduler) -> None:
     def set_timesteps(num_inference_steps, device=None):
         # MiniMaxH3Scheduler runs one step fewer than requested, so ask for one extra.
         set_grid_points(num_inference_steps + 1, device=device)
+        scheduler.set_begin_index(0)
 
     scheduler.set_timesteps = set_timesteps
 
@@ -818,12 +891,39 @@ class xFuserMiniMaxH3Model(xFuserModel):
         if input_args.get("negative_prompt") is not None:
             raise ValueError("MiniMax-H3 is guidance-distilled and does not accept a negative prompt.")
 
+    def _get_vae_compile_mode(self) -> str:
+        if PACKAGES_CHECKER._on_rdna4():
+            return "default"
+        return "reduce-overhead"
+
+    def _compile_vae_decoder_blocks(self, vae) -> None:
+        mode = self._get_vae_compile_mode()
+        vae.compile_repeated_blocks(mode=mode, fullgraph=False)
+        if mode in self.CUDAGRAPH_COMPILE_MODES:
+            self._mark_cudagraph_steps(vae.decoder)
+        log("MiniMax-H3 torch.compile enabled for repeated video VAE decoder blocks.")
+
+    def _compile_audio_vae_decoder(self, audio_vae) -> None:
+        mode = self._get_vae_compile_mode()
+        decoder = audio_vae.decoder
+        for module in decoder.modules():
+            if hasattr(module, "weight_g"):
+                torch.nn.utils.remove_weight_norm(module)
+        compiled_forward = torch.compile(decoder.forward, mode=mode, fullgraph=False)
+        if mode in self.CUDAGRAPH_COMPILE_MODES:
+            decoder.forward = _record_cudagraph_on_first_call(compiled_forward)
+        else:
+            decoder.forward = compiled_forward
+        log("MiniMax-H3 torch.compile enabled for the audio VAE decoder.")
+
     def _compile_model(self, input_args: dict) -> None:
         mode = self._get_compile_mode()
         vae = getattr(self.pipe, "vae", None)
         if vae is not None:
-            vae.compile_repeated_blocks(mode=mode, fullgraph=False)
-            log("MiniMax-H3 torch.compile enabled for repeated video VAE decoder blocks.")
+            self._compile_vae_decoder_blocks(vae)
+        audio_vae = getattr(self.pipe, "audio_vae", None)
+        if audio_vae is not None:
+            self._compile_audio_vae_decoder(audio_vae)
 
         if self.config.fully_shard_degree > 1:
             super()._compile_model(input_args)

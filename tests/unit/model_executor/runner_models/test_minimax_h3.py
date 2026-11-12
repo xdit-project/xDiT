@@ -886,7 +886,9 @@ def test_vdn_step_count_runs_the_distilled_9_point_grid(monkeypatch):
         xFuserVDNMiniMaxH3Model._validate_args(model, {"num_inference_steps": 9})
 
     grid_points = []
-    scheduler = SimpleNamespace(set_timesteps=lambda n, device=None: grid_points.append(n))
+    scheduler = SimpleNamespace(
+        set_timesteps=lambda n, device=None: grid_points.append(n), set_begin_index=lambda index: None
+    )
     _count_steps_as_forwards(scheduler)
     scheduler.set_timesteps(xFuserVDNMiniMaxH3Model.default_input_values.num_inference_steps)
     assert grid_points == [9]
@@ -1030,6 +1032,7 @@ def test_minimax_h3_parallel_vae_single_rank_falls_back(monkeypatch):
 
         def __init__(self):
             self._decode_clip = lambda z: z + 1
+            self._encode_clip = lambda x: x - 1
 
     monkeypatch.setattr(
         minimax_h3,
@@ -1043,6 +1046,7 @@ def test_minimax_h3_parallel_vae_single_rank_falls_back(monkeypatch):
     actual = vae._decode_clip(torch.zeros(1))
 
     torch.testing.assert_close(actual, torch.ones(1))
+    torch.testing.assert_close(vae._encode_clip(torch.zeros(1)), -torch.ones(1))
     assert vae._xfuser_tile_parallel
 
 
@@ -1069,6 +1073,18 @@ class _FakeTileDecoder:
         )
 
 
+class _FakeTileEncoder:
+    """Halves each spatial axis and tags every latent with its tile's first pixel."""
+
+    def __init__(self, calls):
+        self.calls = calls
+
+    def __call__(self, tile):
+        self.calls.append(tile.detach().clone())
+        batch, _, frames, height, width = tile.shape
+        return torch.full((batch, 8, frames, height // 2, width // 2), float(tile.flatten()[0]))
+
+
 class _FakeTiledVae:
     use_tiling = True
     spatial_compression_ratio = 2
@@ -1082,6 +1098,10 @@ class _FakeTiledVae:
         self.decoder = _FakeTileDecoder(self.decode_calls)
         self.post_quant_conv = lambda tile: tile
         self._decode_clip = lambda z: z
+        self.encode_calls = []
+        self.encoder = _FakeTileEncoder(self.encode_calls)
+        self.quant_conv = lambda moments: moments
+        self._encode_clip = lambda x: x
 
     def _split_tiles(self, size, min_size, overlap):
         count = size // min_size
@@ -1222,6 +1242,49 @@ def test_minimax_h3_parallel_vae_caches_dtype_broadcast(monkeypatch):
     assert group.object_broadcasts == 1
     vae._decode_clip(latent)
     assert group.object_broadcasts == 1
+
+
+def _encoded_tiles(vae, pixels):
+    """The tiles diffusers' own `_encode_clip` would encode, in its row-major order."""
+    y_indices, y_lengths, _ = vae._split_tiles(pixels.shape[-2], vae.tile_sample_min_height, 0)
+    x_indices, x_lengths, _ = vae._split_tiles(pixels.shape[-1], vae.tile_sample_min_width, 0)
+    inputs = [
+        pixels[..., y : y + height, x : x + width]
+        for y, height in zip(y_indices, y_lengths)
+        for x, width in zip(x_indices, x_lengths)
+    ]
+    rows = len(y_indices)
+    return inputs, [vae.quant_conv(vae.encoder(tile)) for tile in inputs], rows
+
+
+def test_minimax_h3_parallel_vae_encodes_each_tile_once_across_ranks(monkeypatch):
+    from xfuser.model_executor.models.runner_models import minimax_h3
+
+    world_size = 2
+    pixels = torch.zeros(1, 3, 1, 8, 8)
+    for y in range(pixels.shape[-2]):
+        for x in range(pixels.shape[-1]):
+            pixels[..., y, x] = y * 10 + x
+    expected_inputs, expected_tiles, rows = _encoded_tiles(_FakeTiledVae(), pixels)
+    per_row = len(expected_tiles) // rows
+    expected = _FakeTiledVae()._stitch_tiles(
+        [expected_tiles[row * per_row : (row + 1) * per_row] for row in range(rows)], [0], [0]
+    )
+    monkeypatch.setattr(minimax_h3, "log", lambda message: None)
+
+    for rank in range(world_size):
+        vae = _FakeTiledVae()
+        group = _FakeVaeGroup(world_size, rank, dict(enumerate(expected_tiles)), expected_tiles[0].dtype)
+        monkeypatch.setattr(minimax_h3, "get_vae_parallel_group", lambda group=group: group)
+        minimax_h3.install_minimax_h3_vae_tile_parallel(vae)
+
+        actual = vae._encode_clip(pixels)
+
+        owned = [index for index in range(len(expected_tiles)) if index % world_size == rank]
+        assert len(vae.encode_calls) == len(owned)
+        for call, index in zip(vae.encode_calls, owned):
+            torch.testing.assert_close(call, expected_inputs[index])
+        torch.testing.assert_close(actual, expected)
 
 
 @pytest.mark.parametrize(
@@ -1704,6 +1767,7 @@ def test_minimax_h3_compile_preserves_forward_signature(monkeypatch):
     model.pipe = SimpleNamespace(transformer=transformer, vae=vae)
     model._enable_compute_comm_overlap = lambda: None
     model._get_compile_mode = lambda: "default"
+    model._get_vae_compile_mode = lambda: "default"
     model._run_timed_pipe = lambda input_args: None
     monkeypatch.setattr(
         "xfuser.model_executor.models.runner_models.minimax_h3.log",

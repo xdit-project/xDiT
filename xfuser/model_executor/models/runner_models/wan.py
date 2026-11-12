@@ -1,3 +1,4 @@
+import copy
 import re
 import torch
 from dataclasses import replace
@@ -405,8 +406,8 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
 
         attn_kwargs = {"attention_kwargs": _build_attention_kwargs(self.config)}
         transformer = self.loader.load_transformer(xFuserWanTransformer3DWrapper, init_kwargs=attn_kwargs)
-        transformer_2 = self.loader.load_transformer(
-            xFuserWanTransformer3DWrapper, subfolder="transformer_2", init_kwargs=attn_kwargs
+        transformer_2 = self.loader.load_transformer(  # removing hidden coupling by copying attn_kwargs
+            xFuserWanTransformer3DWrapper, subfolder="transformer_2", init_kwargs=copy.deepcopy(attn_kwargs)
         )
         te_kwargs, te_quant = self.loader.plan_text_encoders()
         pipe = xFuserWanImageToVideoPipeline.from_pretrained(
@@ -859,8 +860,8 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
 
         attn_kwargs = {"attention_kwargs": _build_attention_kwargs(self.config)}
         transformer = self.loader.load_transformer(xFuserWanTransformer3DWrapper, init_kwargs=attn_kwargs)
-        transformer_2 = self.loader.load_transformer(
-            xFuserWanTransformer3DWrapper, subfolder="transformer_2", init_kwargs=attn_kwargs
+        transformer_2 = self.loader.load_transformer(  # removing hidden coupling by copying attn_kwargs
+            xFuserWanTransformer3DWrapper, subfolder="transformer_2", init_kwargs=copy.deepcopy(attn_kwargs)
         )
         te_kwargs, te_quant = self.loader.plan_text_encoders()
         pipe = WanPipeline.from_pretrained(

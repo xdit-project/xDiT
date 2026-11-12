@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" id="dark" width="1120" height="900" viewBox="0 0 1120 900" role="img" aria-labelledby="title description">
+  <title id="title">FLUX PipeFusion patch overlap and denoising feedback</title>
+  <desc id="description">After synchronous denoising initializes per-stage KV caches, two stages process two patches with overlapping work. Stage zero sends patch activations to stage one. The last stage applies a patch-local scheduler update and sends the updated patch back to stage zero for the next denoising step, except after the final step. Each stage updates current patch KV entries and retains other entries, which may still be from the preceding step. Slots illustrate dependencies and overlap, not measured timing.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M1 1 L7 4 L1 7" fill="none" stroke="#0ea9ff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <style>
+    :root { --background: #ffffff; --surface: #f7f9fb; --border: #dde4e9; --text: #3a3a3a; --body: #505b64; --detail: #606b74; --link: #006aa3; }
+    :root:target { --background: #181c20; --surface: #22282e; --border: #404a53; --text: #e7edf2; --body: #cad5de; --detail: #aebecb; --link: #67cdff; }
+    .background { fill: var(--background); } .panel { fill: var(--surface); stroke: var(--border); stroke-width: 2; }
+    .card { fill: var(--background); stroke: var(--border); stroke-width: 2; }
+    text { font-family: sans-serif; fill: var(--body); font-size: 20px; }
+    .title { fill: var(--text); font-size: 30px; font-weight: 700; }
+    .heading { fill: var(--text); font-size: 24px; font-weight: 700; }
+    .detail { fill: var(--detail); font-size: 18px; }
+    .flag { fill: var(--link); font-family: monospace; font-size: 19px; }
+    .arrow { fill: none; stroke: var(--link); stroke-width: 2.5; marker-end: url(#arrow); }
+    .exchange { fill: none; stroke: #0ea9ff; stroke-width: 2.5; marker-start: url(#arrow); marker-end: url(#arrow); }
+    .accent { fill: var(--background); stroke: #0ea9ff; stroke-width: 2.5; }
+    .warm { fill: var(--background); stroke: #ffb22e; stroke-width: 2.5; }
+  </style>
+  <rect width="1120" height="900" class="background"/>
+  <text x="40" y="55" class="title" text-anchor="start">PipeFusion: patch overlap and denoising feedback</text>
+  <text x="40" y="88" class="detail" text-anchor="start">FLUX example: two stages and two patches. Slot widths do not represent measured times.</text>
+  <rect x="50" y="118" width="1020" height="90" rx="10" class="card"/>
+  <text x="74" y="154" class="heading" text-anchor="start">First: synchronous denoising fills the attention KV caches.</text>
+  <text x="74" y="186" class="detail" text-anchor="start">--warmup_steps ≥ 1. These steps are part of generation, separate from benchmarking warmup calls.</text>
+  <text x="50" y="252" class="heading" text-anchor="start">Then: patch work overlaps across stages</text>
+  <path d="M260 286 H1050" class="arrow"/>
+  <text x="1040" y="276" class="detail" text-anchor="end">Execution →</text>
+  <text x="50" y="348" class="heading" text-anchor="start">Stage 0</text>
+  <text x="50" y="378" class="detail" text-anchor="start">First blocks</text>
+  <text x="50" y="468" class="heading" text-anchor="start">Stage 1</text>
+  <text x="50" y="498" class="detail" text-anchor="start">Last blocks</text>
+  <text x="350" y="312" class="detail" text-anchor="middle">Slot 1</text>
+  <text x="550" y="312" class="detail" text-anchor="middle">Slot 2</text>
+  <text x="750" y="312" class="detail" text-anchor="middle">Slot 3</text>
+  <text x="950" y="312" class="detail" text-anchor="middle">Slot 4</text>
+  <rect x="260" y="327" width="180" height="73" rx="10" class="accent"/>
+  <text x="350" y="369" class="detail" text-anchor="middle">Patch 0</text>
+  <rect x="460" y="327" width="180" height="73" rx="10" class="warm"/>
+  <text x="550" y="369" class="detail" text-anchor="middle">Patch 1</text>
+  <rect x="660" y="327" width="180" height="73" rx="10" class="accent"/>
+  <text x="750" y="369" class="detail" text-anchor="middle">Patch 0 · next</text>
+  <rect x="860" y="327" width="180" height="73" rx="10" class="warm"/>
+  <text x="950" y="369" class="detail" text-anchor="middle">Patch 1 · next</text>
+  <rect x="460" y="447" width="180" height="85" rx="10" class="accent"/>
+  <text x="550" y="479" class="detail" text-anchor="middle">Patch 0</text>
+  <text x="550" y="509" class="detail" text-anchor="middle">+ scheduler</text>
+  <rect x="660" y="447" width="180" height="85" rx="10" class="warm"/>
+  <text x="750" y="479" class="detail" text-anchor="middle">Patch 1</text>
+  <text x="750" y="509" class="detail" text-anchor="middle">+ scheduler</text>
+  <rect x="860" y="447" width="180" height="85" rx="10" class="accent"/>
+  <text x="950" y="479" class="detail" text-anchor="middle">Patch 0 · next</text>
+  <text x="950" y="509" class="detail" text-anchor="middle">+ scheduler</text>
+  <path d="M410 403 L470 440" class="arrow"/>
+  <path d="M610 403 L670 440" class="arrow"/>
+  <path d="M810 403 L870 440" class="arrow"/>
+  <path d="M550 447 V422 H750 V406" class="arrow" stroke-dasharray="5 4"/>
+  <text x="746" y="441" class="detail" text-anchor="middle">Feedback</text>
+  <text x="50" y="575" class="heading" text-anchor="start">Return the updated patch to stage 0 for the next denoising step.</text>
+  <text x="50" y="607" class="detail" text-anchor="start">The last stage keeps the final output. “Next” labels the following denoising step.</text>
+  <rect x="50" y="647" width="495" height="157" rx="10" class="panel"/>
+  <text x="73" y="682" class="heading" text-anchor="start">KV cache · stage 0</text>
+  <rect x="73" y="705" width="212" height="58" rx="10" class="accent"/>
+  <rect x="303" y="705" width="219" height="58" rx="10" class="warm"/>
+  <text x="179" y="729" class="detail" text-anchor="middle" style="font-size:16px">Current patch</text>
+  <text x="179" y="750" class="detail" text-anchor="middle" style="font-size:16px">Updated KV</text>
+  <text x="412" y="729" class="detail" text-anchor="middle" style="font-size:16px">Other patch</text>
+  <text x="412" y="750" class="detail" text-anchor="middle" style="font-size:16px">Retained KV</text>
+  <text x="73" y="789" class="detail" text-anchor="start">Each attention layer keeps its own patch entries.</text>
+  <rect x="575" y="647" width="495" height="157" rx="10" class="panel"/>
+  <text x="598" y="682" class="heading" text-anchor="start">KV cache · stage 1</text>
+  <rect x="598" y="705" width="212" height="58" rx="10" class="accent"/>
+  <rect x="828" y="705" width="219" height="58" rx="10" class="warm"/>
+  <text x="704" y="729" class="detail" text-anchor="middle" style="font-size:16px">Current patch</text>
+  <text x="704" y="750" class="detail" text-anchor="middle" style="font-size:16px">Updated KV</text>
+  <text x="937" y="729" class="detail" text-anchor="middle" style="font-size:16px">Other patch</text>
+  <text x="937" y="750" class="detail" text-anchor="middle" style="font-size:16px">Retained KV</text>
+  <text x="598" y="789" class="detail" text-anchor="start">Each attention layer keeps its own patch entries.</text>
+  <text x="50" y="839" class="detail" text-anchor="start">Retained KV may be from the preceding step: compare quality against a synchronous baseline.</text>
+  <text x="50" y="873" class="detail" text-anchor="start">Sequence parallelism can run within a stage. Optional step caching is separate from these KV caches.</text>
+</svg>

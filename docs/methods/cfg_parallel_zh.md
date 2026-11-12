@@ -1,5 +1,25 @@
-# Classifier-Free Guidance (CFG) Parallel 
+# CFG 并行
 
-Classifier-Free Guidance通过提供更广泛的条件控制、减少训练负担、增强生成内容的质量和细节，以及提高模型的实用性和适应性，成为了扩散模型领域的一个重要进展技术。
+[English](cfg_parallel.md)
 
-对于一个输入prompt，使用CFG需要同时进行unconditional guide和text guide的生成 ，相当于输入DiT blocks的input latents batch_size = 2。CFG Parallel分离两个latents分别进行计算，在每个Diffusion Step forward完成后、Scheduler执行前Allgather一次latent space结果。它通信量远小于Pipefusion和Sequence Parallel。因此，使用CFG一定要使用CFG Parallel。
+无分类器引导（CFG）组合正向和负向提示词的预测结果。
+`--use_cfg_parallel` 将 rank 分配到两个预测分支，收集预测后再执行
+引导运算和 scheduler 更新。CFG 并行度固定为 2。
+
+[![两个 CFG 分支独立计算预测，收集结果后执行引导运算](../assets/cfg-parallel.svg)](../assets/cfg-parallel.svg)
+
+Z-Image 支持 CFG 并行，默认 guidance scale 为 4：
+
+```bash
+xdit --model Z-Image --use_cfg_parallel \
+    --prompt "A cat running in a garden"
+```
+
+此命令启动两个 rank。添加 `--ulysses_degree 4` 后启动八个 rank，
+每个 CFG 分支使用四个序列并行 rank。支持的组合见
+[混合并行布局](hybrid.md)和[模型能力表](../runner/models.md)。
+
+只有两个预测分支都启用时，才应使用 CFG 并行。Z-Image-Turbo 和
+FLUX.1-dev 不支持此选项：Turbo 默认关闭 CFG，FLUX 则使用 guidance
+embedding，而不是两个独立分支。单个 rank 也可以执行普通 CFG；并行收益
+取决于工作负载和通信成本。Z-Image 需要 Diffusers 0.36 或更新版本。

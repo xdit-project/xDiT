@@ -1,0 +1,62 @@
+name: Documentation
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install documentation tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --group docs
+      - name: Build site and check links
+        run: python -m mkdocs build --strict
+      - name: Upload Pages artifact
+        if: >-
+          github.repository == 'xdit-project/xDiT' &&
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+          github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+  deploy:
+    name: Publish documentation
+    needs: build
+    if: >-
+      github.repository == 'xdit-project/xDiT' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

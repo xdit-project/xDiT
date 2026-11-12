@@ -1,0 +1,58 @@
+site_name: xDiT
+site_description: Run diffusion transformers with xDiT
+site_url: https://xdit-project.github.io/xDiT/
+repo_url: https://github.com/xdit-project/xDiT
+repo_name: xdit-project/xDiT
+edit_uri: edit/main/docs/
+theme:
+  name: mkdocs
+  navigation_depth: 3
+  custom_dir: docs/theme
+  highlightjs: false
+  color_mode: auto
+  user_color_mode_toggle: true
+plugins:
+  - search
+extra_css:
+  - assets/stylesheets/extra.css
+exclude_docs: |
+  /theme/
+  /archive/
+validation:
+  links:
+    not_found: warn
+    anchors: warn
+nav:
+  - Home: index.md
+  - Run a model:
+      - Overview and quick start: runner/runner.md
+      - Supported models and features: runner/models.md
+      - Installation and containers: runner/installation.md
+      - Launch on multiple devices: runner/launching.md
+      - Model and hardware examples: runner/examples.md
+      - CLI reference: runner/cli.md
+  - Optimize inference:
+      - Memory and loading: runner/memory.md
+      - Attention backends: runner/attention.md
+      - GEMM quantization: runner/quantization.md
+      - Communication transports and FP8: runner/communication.md
+      - Step caching: runner/caching.md
+      - Startup LoRA: runner/lora.md
+      - Benchmarking and outputs: runner/benchmarking.md
+  - Parallel methods:
+      - Unified sequence parallelism: methods/usp.md
+      - Hybrid parallelism: methods/hybrid.md
+      - CFG parallel: methods/cfg_parallel.md
+      - PipeFusion: methods/pipefusion.md
+      - Parallel VAE: methods/parallel_vae.md
+      - DiTFastAttn: methods/ditfastattn.md
+  - Community resources: resources.md
+  - Developer guides:
+      - Framework design: developer/The_implement_design_of_xdit_framework.md
+      - Add a model: developer/adding_models/readme.md
+      - Ulysses and Ring: developer/adding_models/adding_model_usp.md
+      - Replicated text in USP: developer/adding_models/adding_model_usp_text_replica.md
+      - CFG parallel: developer/adding_models/adding_model_cfg.md
+      - CFG and USP: developer/adding_models/adding_model_cfg_usp.md
+      - PipeFusion: developer/adding_models/adding_model_pipefusion.md
+      - Build and update docs: maintaining.md

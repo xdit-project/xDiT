@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" id="dark" width="1120" height="610" viewBox="0 0 1120 610" role="img" aria-labelledby="title description">
+  <title id="title">Z-Image classifier-free guidance branches</title>
+  <desc id="description">The Z-Image pipeline prepares positive inputs before negative inputs. CFG rank zero computes positive predictions and rank one computes negative predictions. The wrapper gathers predictions back in that order; the pipeline applies model-specific guidance and updates latents.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M1 1 L7 4 L1 7" fill="none" stroke="#0ea9ff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <style>
+    :root { --background: #ffffff; --surface: #f7f9fb; --border: #dde4e9; --text: #3a3a3a; --body: #505b64; --detail: #606b74; --link: #006aa3; }
+    :root:target { --background: #181c20; --surface: #22282e; --border: #404a53; --text: #e7edf2; --body: #cad5de; --detail: #aebecb; --link: #67cdff; }
+    .background { fill: var(--background); } .panel { fill: var(--surface); stroke: var(--border); stroke-width: 2; }
+    .card { fill: var(--background); stroke: var(--border); stroke-width: 2; }
+    text { font-family: sans-serif; fill: var(--body); font-size: 20px; }
+    .title { fill: var(--text); font-size: 30px; font-weight: 700; }
+    .heading { fill: var(--text); font-size: 24px; font-weight: 700; }
+    .detail { fill: var(--detail); font-size: 18px; }
+    .flag { fill: var(--link); font-family: monospace; font-size: 19px; }
+    .arrow { fill: none; stroke: var(--link); stroke-width: 2.5; marker-end: url(#arrow); }
+    .exchange { fill: none; stroke: #0ea9ff; stroke-width: 2.5; marker-start: url(#arrow); marker-end: url(#arrow); }
+    .accent { fill: var(--background); stroke: #0ea9ff; stroke-width: 2.5; }
+    .warm { fill: var(--background); stroke: #ffb22e; stroke-width: 2.5; }
+  </style>
+  <rect width="1120" height="610" class="background"/>
+  <text x="40" y="55" class="title" text-anchor="start">CFG: compute the two guidance branches separately</text>
+  <text x="40" y="88" class="detail" text-anchor="start">Z-Image keeps its original pipeline; the transformer wrapper distributes branch execution.</text>
+  <rect x="260" y="124" width="600" height="65" rx="10" class="card"/>
+  <text x="560" y="165" class="heading" text-anchor="middle">Latents + positive / negative conditions</text>
+  <path d="M445 195 L280 242" class="arrow"/>
+  <path d="M675 195 L840 242" class="arrow"/>
+  <rect x="60" y="254" width="420" height="112" rx="10" class="accent"/>
+  <text x="82" y="292" class="heading" text-anchor="start">CFG rank 0</text>
+  <text x="82" y="330" class="detail" text-anchor="start">Conditional prediction</text>
+  <rect x="640" y="254" width="420" height="112" rx="10" class="warm"/>
+  <text x="662" y="292" class="heading" text-anchor="start">CFG rank 1</text>
+  <text x="662" y="330" class="detail" text-anchor="start">Unconditional prediction</text>
+  <path d="M280 374 L445 431" class="arrow"/>
+  <path d="M840 374 L675 431" class="arrow"/>
+  <rect x="200" y="442" width="720" height="84" rx="10" class="card"/>
+  <text x="560" y="474" class="heading" text-anchor="middle">Gather predictions in pipeline order</text>
+  <text x="560" y="507" class="detail" text-anchor="middle">The Z-Image pipeline applies guidance, then updates latents.</text>
+  <text x="60" y="566" class="detail" text-anchor="start">Ulysses and Ring can split attention within each branch. The CFG degree stays 2.</text>
+</svg>

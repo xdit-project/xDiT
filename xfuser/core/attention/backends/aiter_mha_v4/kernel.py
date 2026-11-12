@@ -123,8 +123,11 @@ def _sparse_geometries(fmt: MhaV4Format) -> dict[Optional[tuple[int, int]], Spar
 SPARSE_GEOMETRY = {fmt.name: _sparse_geometries(fmt) for fmt in FORMATS if fmt.sparge_on is not None}
 
 
-def check_sparse_block_size(fmt: MhaV4Format, block_size: tuple[int, int]) -> None:
+def check_sparse_block_size(runtime_config, *, fmt: MhaV4Format) -> None:
     """Refuse a --sparseattn_block_size that ``fmt``'s sparse row is not built at."""
+    block_size = runtime_config.sparseattn_block_size
+    if block_size is None:
+        return
     served = sorted(tile for tile in SPARSE_GEOMETRY[fmt.name] if tile is not None)
     if HAS_BLOCK_TILE and tuple(block_size) in served:
         return

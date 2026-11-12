@@ -192,6 +192,7 @@ def _sparge_spec(fmt: MhaV4Format) -> Spec:
         low_precision=fmt.qk is not Fmt.BF16,
         accepts=SPARGE_CALLS,
         requires=SYMBOL(_MHA_V4) & PARAM(_MHA_V4, "block_mask") & _scale_modes(fmt) & fmt.sparge_on,
+        validates=Impl("kernel:check_sparse_block_size", {"fmt": fmt}),
     )
 
 

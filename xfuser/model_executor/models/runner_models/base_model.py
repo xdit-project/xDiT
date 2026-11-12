@@ -160,16 +160,15 @@ def _selected_attention_backends(config: xFuserArgs) -> list[AttentionBackendTyp
 
 
 def _validate_sparseattn_block_size(config: xFuserArgs) -> None:
-    """Refuse, before loading, a --sparseattn_block_size no selected AITER MHA v4 Sparge backend has a kernel for."""
+    """Refuse, before loading, a --sparseattn_block_size no selected backend reads.
+
+    Whether the GPU has a kernel at that tile is checked by the backend's spec
+    when it is selected, once the device is set.
+    """
     if config.sparseattn_block_size is None:
         return
-    formats = [MHA_V4_SPARGE_FORMATS[b] for b in _selected_attention_backends(config) if b in MHA_V4_SPARGE_FORMATS]
-    if not formats:
+    if not any(b in MHA_V4_SPARGE_FORMATS for b in _selected_attention_backends(config)):
         raise ValueError("--sparseattn_block_size applies only to the AITER MHA v4 Sparge attention backends.")
-    from xfuser.core.attention.backends.aiter_mha_v4.kernel import check_sparse_block_size
-
-    for fmt in formats:
-        check_sparse_block_size(fmt, config.sparseattn_block_size)
 
 
 def _validate_attention_head_dims(model: "xFuserModel", config: xFuserArgs) -> None:

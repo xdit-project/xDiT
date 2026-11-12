@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from xfuser.config.config import RuntimeConfig
 from xfuser.core.attention import registry
 from xfuser.core.attention.spec import AttentionBackendType, AttnCall, Sparsity
 
@@ -267,10 +268,11 @@ def test_an_unserved_block_size_is_refused_with_the_tiles_that_are():
     fmt = next(fmt for fmt in FORMATS if fmt.name == "FP8")
     default = kernel.SPARSE_GEOMETRY["FP8"][None].block_tile
     if kernel.HAS_BLOCK_TILE:
-        kernel.check_sparse_block_size(fmt, default)
+        kernel.check_sparse_block_size(RuntimeConfig(sparseattn_block_size=default), fmt=fmt)
+    kernel.check_sparse_block_size(RuntimeConfig(), fmt=fmt)
 
     with pytest.raises(ValueError, match="--sparseattn_block_size 32x32 has no AITER_FP8_SPARGE kernel") as error:
-        kernel.check_sparse_block_size(fmt, (32, 32))
+        kernel.check_sparse_block_size(RuntimeConfig(sparseattn_block_size=(32, 32)), fmt=fmt)
     if kernel.HAS_BLOCK_TILE:
         assert f"{default[0]}x{default[1]}" in str(error.value)
 

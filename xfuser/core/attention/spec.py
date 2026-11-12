@@ -236,6 +236,11 @@ class Spec:
     # one place to forget.
     initializers: Tuple[Callable[[], None], ...] = ()
 
+    # Checked when the backend is selected, against the run's RuntimeConfig,
+    # after the kernel has resolved. Raises if this backend cannot serve that
+    # configuration on this device.
+    validates: Optional[Impl | Callable] = None
+
     # Filled in by the registry from the module the spec came from, so Impl
     # targets can be written relative to the backend package.
     package: str = ""
@@ -270,6 +275,14 @@ class Spec:
     def rejects(self, query, key, value, call: AttnCall) -> Optional[str]:
         """Why this backend cannot serve this particular call, or None."""
         return self.accepts.unmet(query, key, value, call)
+
+    def validate(self, runtime_config) -> None:
+        """Raise if this backend cannot serve the run's configuration."""
+        check = self.validates
+        if isinstance(check, Impl):
+            check = check.resolve(self.package)
+        if check is not None:
+            check(runtime_config)
 
     def resolved(self) -> AttnFn:
         """The callable, importing the kernel module if it has not been yet.

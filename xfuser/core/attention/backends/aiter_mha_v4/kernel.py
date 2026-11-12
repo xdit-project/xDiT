@@ -51,17 +51,18 @@ _PACKED_SCALE = {
     "e8m0_per_1x32": Scale.E8M0_PER_1X32,
 }
 
+# Whether this AITER takes the mask's tile explicitly rather than assuming the
+# recipe's default.
+HAS_BLOCK_TILE = PARAM("aiter.ops.mha_v4:mha_v4", "block_tile").satisfied()
+
 
 @dataclass(frozen=True)
 class SparseGeometry:
-    """How one format's sorted-sparse row cuts and bounds the keys.
+    """Sparse attention configuration.
 
-    ``block_tile`` is the (q_tile, kv_tile) the Sparge mask must be cut at. The
-    rows do not agree on it: at 256 query rows gfx950 routes BF16 and BF16/FP8 on
-    64 keys and the rest on 128. ``ragged_kv`` says the row masks the keys past a
-    short last block itself, so the tail needs no zero pad -- which is not just a
-    copy saved, since a zero key inside a selected block is attended at score 0
-    rather than skipped.
+    ``block_tile`` is the (q_tile, kv_tile) sparse mask block size.
+    ``ragged_kv`` says the row masks the keys past a short last block itself,
+    so the tail needs no zero pad.
     """
 
     block_tile: tuple[int, int]
@@ -81,20 +82,19 @@ def _legacy_kv_tile() -> int:
 def _sparse_geometries(fmt: MhaV4Format) -> dict[Optional[tuple[int, int]], SparseGeometry]:
     """Every tile this GPU serves ``fmt``'s sparse row at, keyed by tile, plus
     its default under None. Empty when the format has no sparse row here."""
-    # Not hoisted: older AITER builds have none of these, and answer one KV tile
-    # for every row at a fixed 256 query rows.
-    try:
-        from aiter.ops.mha_v4 import (
-            MHA_V4_SPARSE_MODE,
-            AttentionPack,
-            mha_v4_block_tile,
-            mha_v4_block_tiles,
-            mha_v4_operands,
-            mha_v4_ragged_kv,
-            scale_modes_for_formats,
-        )
-    except ImportError:
+    if not HAS_BLOCK_TILE:
+        # Older AITER answers one KV tile for every row at a fixed 256 query rows.
         return {None: SparseGeometry((256, _legacy_kv_tile()))}
+
+    # Not hoisted: older AITER builds have none of these.
+    from aiter.ops.mha_v4 import (
+        MHA_V4_SPARSE_MODE,
+        mha_v4_block_tile,
+        mha_v4_block_tiles,
+        mha_v4_operands,
+        mha_v4_ragged_kv,
+        scale_modes_for_formats,
+    )
 
     qk, v = FORMAT[fmt.qk], FORMAT[fmt.v]
     if fmt.qk_scale is None:
@@ -121,10 +121,6 @@ def _sparse_geometries(fmt: MhaV4Format) -> dict[Optional[tuple[int, int]], Spar
 # format this GPU has no sparse row for has no entries; its spec is unselectable
 # there, so the lookup never happens.
 SPARSE_GEOMETRY = {fmt.name: _sparse_geometries(fmt) for fmt in FORMATS if fmt.sparge_on is not None}
-
-# Whether this AITER takes the mask's tile explicitly rather than assuming the
-# recipe's default.
-HAS_BLOCK_TILE = PARAM("aiter.ops.mha_v4:mha_v4", "block_tile").satisfied()
 
 
 def check_sparse_block_size(fmt: MhaV4Format, block_size: tuple[int, int]) -> None:

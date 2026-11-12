@@ -58,6 +58,7 @@ from xfuser.core.distributed import (
     init_distributed_environment,
 )
 from xfuser.core.attention import registry as attention_registry
+from xfuser.core.attention.backends.aiter_mha_v4.spec import SPARGE_FORMATS as MHA_V4_SPARGE_FORMATS
 from xfuser.core.attention.spec import AttentionBackendType, Sparsity
 from xfuser.core.distributed.fp8_comms import setup_fp8_comms, validate_fp8_comms_config
 from xfuser.core.distributed.attention_schedule import (
@@ -141,7 +142,11 @@ def _validate_cross_attention_for_sparge(config: xFuserArgs) -> None:
 
 def _selected_attention_backends(config: xFuserArgs) -> list[AttentionBackendType]:
     """Every backend the run would actually dispatch to, named as the user named them."""
-    if config.use_hybrid_attn_schedule:
+    scheduled: list[AttentionBackendType] = []
+    if config.use_hybrid_attn_schedule and config.hybrid_attn_schedule:
+        scheduled = AttentionSchedule.from_comma_delimited_string(config.hybrid_attn_schedule).backends
+        specs = []
+    elif config.use_hybrid_attn_schedule:
         specs = [
             (config.hybrid_attn_high_precision_backend, "hybrid attention high precision backend"),
             (config.hybrid_attn_low_precision_backend, "hybrid attention low precision backend"),
@@ -149,7 +154,21 @@ def _selected_attention_backends(config: xFuserArgs) -> list[AttentionBackendTyp
     else:
         specs = [(config.attention_backend, "attention backend")]
     specs.append((config.cross_attention_backend, "cross attention backend"))
-    return [backend for value, kind in specs if (backend := _parse_attention_backend(value, kind)) is not None]
+    return scheduled + [
+        backend for value, kind in specs if (backend := _parse_attention_backend(value, kind)) is not None
+    ]
+
+
+def _validate_sparseattn_block_size(config: xFuserArgs) -> None:
+    """Refuse, before loading, a --sparseattn_block_size no selected backend reads.
+
+    Whether the GPU has a kernel at that tile is checked by the backend's spec
+    when it is selected, once the device is set.
+    """
+    if config.sparseattn_block_size is None:
+        return
+    if not any(b in MHA_V4_SPARGE_FORMATS for b in _selected_attention_backends(config)):
+        raise ValueError("--sparseattn_block_size applies only to the AITER MHA v4 Sparge attention backends.")
 
 
 def _validate_attention_head_dims(model: "xFuserModel", config: xFuserArgs) -> None:
@@ -849,6 +868,7 @@ class xFuserModel(abc.ABC):
                 )
 
         self._validate_supported_attn_backends(config)
+        _validate_sparseattn_block_size(config)
 
         if not self.capabilities.supports_bsa_attention_backends:
             for value, label in (

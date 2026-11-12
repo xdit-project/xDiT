@@ -32,7 +32,7 @@ def kv_splits(monkeypatch):
     """Set --mha_v4_kv_splits as the runtime config carries it."""
 
     def set_splits(splits):
-        runtime = SimpleNamespace(runtime_config=SimpleNamespace(mha_v4_kv_splits=splits))
+        runtime = SimpleNamespace(runtime_config=SimpleNamespace(mha_v4_kv_splits=splits, sparseattn_block_size=None))
         monkeypatch.setattr("xfuser.core.distributed.runtime_state._RUNTIME", runtime)
 
     return set_splits

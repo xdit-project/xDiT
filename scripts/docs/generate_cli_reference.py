@@ -81,7 +81,9 @@ def _category(action: argparse.Action) -> str:
         "use_fp8_comms",
     }:
         return "Attention backends and communication"
-    if name.startswith(("spargeattn_", "use_spargeattn_", "sol_attn_", "vsa_", "use_vsa_", "bsa_", "use_ssta_")):
+    if name.startswith(
+        ("spargeattn_", "use_spargeattn_", "sparseattn_", "sol_attn_", "vsa_", "use_vsa_", "bsa_", "use_ssta_")
+    ):
         return "Sparse attention"
     if name.startswith("cache_") or name in {"use_teacache", "use_fbcache"}:
         return "Step caching"

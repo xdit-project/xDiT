@@ -1,12 +1,43 @@
-"""The automatic attention-backend choice on a host that cannot run it."""
+"""Attention-backend selection: the checks it runs and the automatic choice."""
 
+from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
 import torch
 
-from xfuser.core.attention import requirements
-from xfuser.core.attention.spec import AttentionBackendType
+from xfuser.config.config import RuntimeConfig
+from xfuser.core.attention import registry, requirements
+from xfuser.core.attention.constraints import ANY_CALL
+from xfuser.core.attention.requirements import ALWAYS
+from xfuser.core.attention.spec import AttentionBackendType, Spec
 from xfuser.core.distributed import runtime_state
+
+
+def test_selection_checks_the_run_config_against_the_spec_after_the_kernel_resolves():
+    events = []
+
+    def validates(config):
+        events.append(("validated", config.sparseattn_block_size))
+        raise ValueError("no kernel at that tile")
+
+    spec = Spec(
+        AttentionBackendType.SDPA,
+        impl=lambda q, k, v, c: (q, None),
+        ring=ALWAYS,
+        requires=ALWAYS,
+        accepts=ANY_CALL,
+        initializers=(lambda: events.append("resolved"),),
+        validates=validates,
+    )
+    state = runtime_state.DiTRuntimeState.__new__(runtime_state.DiTRuntimeState)
+    state.runtime_config = RuntimeConfig(sparseattn_block_size=(64, 64))
+    state.parallel_config = SimpleNamespace(ring_degree=1)
+
+    with registry.using([spec]), pytest.raises(ValueError, match="no kernel at that tile"):
+        state._check_if_backend_compatible_with_current_configuration(AttentionBackendType.SDPA)
+
+    assert events == ["resolved", ("validated", (64, 64))]
 
 
 def test_unrunnable_automatic_backend_falls_back_to_sdpa_with_a_warning(monkeypatch):

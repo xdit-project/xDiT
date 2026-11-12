@@ -189,9 +189,6 @@ def _require_mha_v4_recipe(backend_name):
 # Dense MXFP4 V returned garbage at any sequence length that is not a multiple of 128: cosine
 # against SDPA measured 0.040 at S=257 and -0.012 at S=129. AITER main serves F6F4 and MXFP4
 # correctly there; F4F4 stays marked until a build with its gfx950 kernel shows the same.
-_MXFP4_V_BACKENDS = ("AITER_F4F4", "AITER_F6F4", "AITER_MXFP4")
-
-
 def _mixed_attention_case(backend_name, sequence_length):
     if backend_name == "AITER_F4F4" and sequence_length % 128:
         return pytest.param(
@@ -344,11 +341,8 @@ def test_aiter_mixed_attention_unequal_sequence_lengths(backend_name):
     _require_mha_v4_aiter(backend_name)
     _require_mha_v4_recipe(backend_name)
 
-    # The MXFP4-V rows require a full V tile. Keep Q and K unequal while
-    # respecting that kernel constraint; the other rows exercise a ragged K.
-    key_length = 256 if backend_name in _MXFP4_V_BACKENDS else 257
     query = torch.randn((2, 5, 128, 128), device="cuda", dtype=torch.bfloat16)
-    key = torch.randn((2, 5, key_length, 128), device="cuda", dtype=torch.bfloat16)
+    key = torch.randn((2, 5, 257, 128), device="cuda", dtype=torch.bfloat16)
     value = torch.randn_like(key)
     output, _ = _run(backend_name, query, key, value, dropout_p=0.0, is_causal=False)
 

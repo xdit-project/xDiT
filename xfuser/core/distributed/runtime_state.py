@@ -329,6 +329,7 @@ class RuntimeState(metaclass=ABCMeta):
         # schedule. Resolving walks the fallback chain, so a call that lands on
         # a fallback mid-graph finds it already imported.
         spec.resolved()
+        spec.validate(self.runtime_config)
 
 
 class UnetRuntimeState(RuntimeState):

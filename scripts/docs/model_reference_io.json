@@ -29,6 +29,7 @@
   "xFuserLingBotVideoMoEModel": {"input": "Text; optional image"},
   "xFuserLumina2Model": {"input": "Text"},
   "xFuserMOSSImageModel": {"input": "Text"},
+  "xFuserMiniMaxH3ImageModel": {"input": "Text; optional reference images (editing)"},
   "xFuserMiniMaxH3Model": {"input": "Text; t2va: no images; i2va: first frame; l2va: last frame; fl2va: both", "output": "video + audio"},
   "xFuserMiniMaxH3Ref2VAModel": {"input": "Text + one or more reference images", "output": "video + audio"},
   "xFuserMiniMaxH3TurboModel": {"input": "Text; t2va: no images; i2va: first frame; l2va: last frame; fl2va: both", "output": "video + audio"},

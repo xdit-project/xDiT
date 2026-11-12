@@ -129,7 +129,7 @@ TURBO_ADAPTERS = {
 }
 
 
-def _load_minimax_h3_components(pipe) -> None:
+def _load_minimax_h3_components(pipe, model_name: str = "MiniMax-H3") -> None:
     """Load H3 components without requiring online metadata or a processor model config."""
     from huggingface_hub.constants import HF_HUB_OFFLINE
 
@@ -154,7 +154,7 @@ def _load_minimax_h3_components(pipe) -> None:
         # ModularPipeline logs component errors and continues with None. Stop
         # here rather than failing later in prompt encoding or VAE decoding.
         raise RuntimeError(
-            f"MiniMax-H3 failed to load required components: {', '.join(missing)}. "
+            f"{model_name} failed to load required components: {', '.join(missing)}. "
             "See the component loading errors above."
         )
 
@@ -254,8 +254,14 @@ def install_minimax_h3_vae_tile_parallel(vae) -> None:
     )
 
 
-def _patch_minimax_h3_text_encoder_broadcast() -> None:
-    from diffusers.modular_pipelines.minimax_h3 import encoders
+def _patch_minimax_h3_text_encoder_broadcast(encoders=None) -> None:
+    """Encode prompts on the first rank only and broadcast the embeddings.
+
+    ``encoders`` is the modular pipeline's encoders module, whose
+    ``get_qwen3vl_prompt_embeds`` gets patched; MiniMax-H3's by default.
+    """
+    if encoders is None:
+        from diffusers.modular_pipelines.minimax_h3 import encoders
 
     if getattr(encoders, "_xfuser_broadcast_patched", False):
         return
@@ -494,9 +500,89 @@ class MiniMaxH3DiffusionOutput(DiffusionOutput):
         self.audio_sample_rate = audio_sample_rate
 
 
+class MiniMaxH3TextEncoderMixin:
+    """Qwen3-VL text encoder handling shared by the MiniMax-H3 family of runners:
+    TP sharding over every rank, and streaming it from host memory under
+    --enable_model_cpu_offload."""
+
+    def _offload_resident_components(self) -> tuple[str, ...]:
+        # Model offload moves only the text encoder: the transformer runs every step and is
+        # quantized on the device, and the VAEs are small.
+        names = (self._transformer_component_name, "vae", "audio_vae")
+        return tuple(name for name in names if getattr(self.pipe, name, None) is not None)
+
+    def _enable_cpu_offload(self) -> None:
+        """Stream the text encoder from host memory under --enable_model_cpu_offload.
+
+        ModularPipeline has no enable_model_cpu_offload, and the 63 GB Qwen3-VL encoder is the one
+        component that runs once per request, so it is the one worth leaving on the host. Leaf-level
+        group offload keeps its weights pinned there and streams them in layer by layer, so nothing
+        is copied back after encoding. _validate_config refuses the other offload modes.
+        """
+        if not self.config.enable_model_cpu_offload:
+            return
+        from diffusers.hooks import apply_group_offloading
+
+        log(
+            f"Enabling {self.settings.model_name} CPU offload: text encoder streamed from host, "
+            "transformer and VAEs on device."
+        )
+        apply_group_offloading(module=self.pipe.text_encoder, **self._group_offload_kwargs("leaf_level"))
+
+    @staticmethod
+    def _build_text_encoder_tp_plan(num_layers: int):
+        from torch.distributed.tensor.parallel import (
+            ColwiseParallel,
+            RowwiseParallel,
+        )
+
+        plan = {}
+        for layer_index in range(num_layers):
+            prefix = f"layers.{layer_index}"
+            plan.update(
+                {
+                    f"{prefix}.self_attn.q_proj": ColwiseParallel(),
+                    f"{prefix}.self_attn.k_proj": ColwiseParallel(),
+                    f"{prefix}.self_attn.v_proj": ColwiseParallel(),
+                    f"{prefix}.self_attn.o_proj": RowwiseParallel(),
+                    f"{prefix}.mlp.gate_proj": ColwiseParallel(),
+                    f"{prefix}.mlp.up_proj": ColwiseParallel(),
+                    f"{prefix}.mlp.down_proj": RowwiseParallel(),
+                }
+            )
+        return plan
+
+    def _parallelize_text_encoder(self, text_encoder) -> None:
+        degree = self.config.text_encoder_tp_degree or 1
+        if degree <= 1:
+            return
+
+        from torch.distributed.device_mesh import DeviceMesh
+        from torch.distributed.tensor.parallel import parallelize_module
+
+        world_group = get_world_group()
+        if degree != world_group.world_size:
+            raise ValueError(
+                f"{self.settings.model_name} text encoder TP degree {degree} must match world size {world_group.world_size}."
+            )
+
+        device = torch.device(f"cuda:{world_group.local_rank}")
+        language_model = text_encoder.model.language_model
+        text_encoder.to(device)
+        mesh = DeviceMesh.from_group(world_group.device_group, "cuda")
+        parallelize_module(
+            language_model,
+            device_mesh=mesh,
+            parallelize_plan=self._build_text_encoder_tp_plan(len(language_model.layers)),
+            src_data_rank=None,
+        )
+        text_encoder._xfuser_tp_mesh = mesh
+        log(f"Sharded {self.settings.model_name} Qwen3-VL text encoder with TP{degree}.")
+
+
 @register_model("MiniMaxAI/MiniMax-H3")
 @register_model("MiniMax-H3")
-class xFuserMiniMaxH3Model(xFuserModel):
+class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
     # From the registered checkpoint's transformer config.
     attention_heads = 56
 
@@ -649,27 +735,6 @@ class xFuserMiniMaxH3Model(xFuserModel):
             args["prompt"] = args["prompt"][0]
         return args
 
-    def _offload_resident_components(self) -> tuple[str, ...]:
-        # Model offload moves only the text encoder: the transformer runs every step and is
-        # quantized on the device, and the VAEs are small.
-        names = (self._transformer_component_name, "vae", "audio_vae")
-        return tuple(name for name in names if getattr(self.pipe, name, None) is not None)
-
-    def _enable_cpu_offload(self) -> None:
-        """Stream the text encoder from host memory under --enable_model_cpu_offload.
-
-        ModularPipeline has no enable_model_cpu_offload, and the 63 GB Qwen3-VL encoder is the one
-        component that runs once per request, so it is the one worth leaving on the host. Leaf-level
-        group offload keeps its weights pinned there and streams them in layer by layer, so nothing
-        is copied back after encoding. _validate_config refuses the other offload modes.
-        """
-        if not self.config.enable_model_cpu_offload:
-            return
-        from diffusers.hooks import apply_group_offloading
-
-        log("Enabling MiniMax-H3 CPU offload: text encoder streamed from host, transformer and VAEs on device.")
-        apply_group_offloading(module=self.pipe.text_encoder, **self._group_offload_kwargs("leaf_level"))
-
     def _load_model(self):
         from diffusers import ModularPipeline
         from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
@@ -708,56 +773,6 @@ class xFuserMiniMaxH3Model(xFuserModel):
         _count_steps_as_forwards(pipe.scheduler)
         _count_steps_as_forwards(pipe.audio_scheduler)
         return pipe
-
-    @staticmethod
-    def _build_text_encoder_tp_plan(num_layers: int):
-        from torch.distributed.tensor.parallel import (
-            ColwiseParallel,
-            RowwiseParallel,
-        )
-
-        plan = {}
-        for layer_index in range(num_layers):
-            prefix = f"layers.{layer_index}"
-            plan.update(
-                {
-                    f"{prefix}.self_attn.q_proj": ColwiseParallel(),
-                    f"{prefix}.self_attn.k_proj": ColwiseParallel(),
-                    f"{prefix}.self_attn.v_proj": ColwiseParallel(),
-                    f"{prefix}.self_attn.o_proj": RowwiseParallel(),
-                    f"{prefix}.mlp.gate_proj": ColwiseParallel(),
-                    f"{prefix}.mlp.up_proj": ColwiseParallel(),
-                    f"{prefix}.mlp.down_proj": RowwiseParallel(),
-                }
-            )
-        return plan
-
-    def _parallelize_text_encoder(self, text_encoder) -> None:
-        degree = self.config.text_encoder_tp_degree or 1
-        if degree <= 1:
-            return
-
-        from torch.distributed.device_mesh import DeviceMesh
-        from torch.distributed.tensor.parallel import parallelize_module
-
-        world_group = get_world_group()
-        if degree != world_group.world_size:
-            raise ValueError(
-                f"MiniMax-H3 text encoder TP degree {degree} must match world size {world_group.world_size}."
-            )
-
-        device = torch.device(f"cuda:{world_group.local_rank}")
-        language_model = text_encoder.model.language_model
-        text_encoder.to(device)
-        mesh = DeviceMesh.from_group(world_group.device_group, "cuda")
-        parallelize_module(
-            language_model,
-            device_mesh=mesh,
-            parallelize_plan=self._build_text_encoder_tp_plan(len(language_model.layers)),
-            src_data_rank=None,
-        )
-        text_encoder._xfuser_tp_mesh = mesh
-        log(f"Sharded MiniMax-H3 Qwen3-VL text encoder with TP{degree}.")
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         prompt = input_args["prompt"]

@@ -29,6 +29,7 @@ from xfuser.core.attention.constraints import (
     HEAD_DIM,
     MASKED_VARLEN,
     MHA_ONLY,
+    MIN_KEY_LENGTH,
     NON_CAUSAL,
     NO_VARLEN,
 )
@@ -216,6 +217,28 @@ def test_head_dim_is_readable_for_shape_selection():
     assert HEAD_DIM(128).head_dims() == (128,)
     assert (HEAD_DIM(128) & NON_CAUSAL).head_dims() == (128,)
     assert ANY_CALL.head_dims() is None
+
+
+def test_min_key_length_counts_the_keys_a_call_attends_over():
+    q, k, v = _qkv(q_len=128, kv_len=128)
+    assert MIN_KEY_LENGTH(65).unmet(q, k, v, AttnCall()) is None
+    assert MIN_KEY_LENGTH(129).unmet(q, k, v, AttnCall()) == "needs at least 129 keys, got 128"
+
+    # A packed call attends over its valid keys, not the padded length.
+    packed = AttnCall(
+        varlen=VarlenPacking(indices_k=torch.arange(60), cu_seqlens_k=torch.tensor([0, 60]), max_seqlen_k=60)
+    )
+    assert MIN_KEY_LENGTH(65).unmet(q, k, v, packed) == "needs at least 65 keys, got 60"
+
+
+def test_aiter_bf16_refuses_the_short_key_lengths_its_kernel_gets_wrong():
+    spec = registry.get(AttentionBackendType.AITER_BF16)
+    for kv_len, refused in ((53, True), (64, True), (65, False), (4096, False)):
+        q, k, v = _qkv(q_len=4096, kv_len=kv_len)
+        assert (spec.accepts.unmet(q, k, v, AttnCall()) is not None) is refused, kv_len
+    # The other rows run another kernel, which has no such floor.
+    q, k, v = _qkv(kv_len=16)
+    assert registry.get(AttentionBackendType.AITER_BF16FP8).accepts.unmet(q, k, v, AttnCall()) is None
 
 
 def test_non_causal_constraint():
@@ -940,12 +963,13 @@ def test_only_varlen_capable_backends_accept_packed_keys():
     from xfuser.core.attention import registry
     from xfuser.core.attention.spec import VarlenPacking
 
-    q = torch.zeros(1, 4, 8, 128)
+    # 80 valid keys of 160: a count every kernel serves, so packing support alone decides.
+    q = torch.zeros(1, 4, 160, 128)
     packed = AttnCall(
         varlen=VarlenPacking(
-            indices_k=torch.tensor([0]),
-            cu_seqlens_k=torch.tensor([0, 1]),
-            max_seqlen_k=1,
+            indices_k=torch.arange(80),
+            cu_seqlens_k=torch.tensor([0, 80]),
+            max_seqlen_k=80,
         )
     )
     accepting = {backend.name for backend, spec in registry.REGISTRY.items() if spec.rejects(q, q, q, packed) is None}
@@ -994,8 +1018,8 @@ def test_a_masked_pack_reaches_the_varlen_and_mask_applying_backends_only():
 
     # xDiT's CUDNN spec accepts only half-precision calls; use a supported
     # dtype so this test isolates masked-varlen support from the dtype gate.
-    q = torch.zeros(1, 4, 8, 128, dtype=torch.bfloat16)
-    call = _masked_pack()
+    q = torch.zeros(1, 4, 160, 128, dtype=torch.bfloat16)
+    call = _masked_pack(kv_len=160)
     accepting = {backend.name for backend, spec in registry.REGISTRY.items() if spec.rejects(q, q, q, call) is None}
     expected = VARLEN_CAPABLE | MASK_APPLYING
     assert accepting == expected, f"unexpected: {sorted(accepting - expected)}, missing: {sorted(expected - accepting)}"
@@ -1131,8 +1155,8 @@ def test_dense_mha_v4_serves_packed_keys_but_sparge_does_not():
     alignment both a trailing-pad slice and a gather remove."""
     from xfuser.core.attention import registry
 
-    t = torch.empty((1, 2, 8, 128))
-    call = _packed(4, valid_kv_len=4)
+    t = torch.empty((1, 2, 96, 128))
+    call = _packed(80, valid_kv_len=80)
 
     dense = registry.get(AttentionBackendType.AITER_BF16)
     assert dense.rejects(t, t, t, call) is None

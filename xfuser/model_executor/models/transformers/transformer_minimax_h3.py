@@ -44,6 +44,59 @@ VSA_H3_BACKENDS = attention_registry.types_where(sparsity=Sparsity.H3)
 MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT = 64
 
 
+def pad_packed_rows(
+    hidden_states: torch.Tensor,
+    timestep_indices: torch.Tensor,
+    token_tags: torch.Tensor,
+    position_ids: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    """Append rows to a packed MiniMax-H3 sequence up to the next multiple of 64.
+
+    The pad rows are tagged -1, so callers can tell them apart from real rows.
+    """
+    sequence_length = position_ids.shape[0]
+    padded_length = (
+        (sequence_length + MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT - 1)
+        // MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT
+        * MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT
+    )
+    pad_amount = padded_length - sequence_length
+    if pad_amount == 0:
+        return hidden_states, timestep_indices, token_tags, position_ids, 0
+
+    hidden_states = torch.cat(
+        (
+            hidden_states,
+            hidden_states.new_zeros(
+                hidden_states.shape[0],
+                pad_amount,
+                hidden_states.shape[-1],
+            ),
+        ),
+        dim=1,
+    )
+    timestep_indices = torch.cat(
+        (
+            timestep_indices,
+            timestep_indices.new_zeros(pad_amount),
+        )
+    )
+    token_tags = torch.cat(
+        (
+            token_tags,
+            token_tags.new_full((pad_amount,), -1),
+        )
+    )
+    position_ids = torch.cat(
+        (
+            position_ids,
+            position_ids.new_zeros(pad_amount, position_ids.shape[-1]),
+        ),
+        dim=0,
+    )
+    return hidden_states, timestep_indices, token_tags, position_ids, pad_amount
+
+
 class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
     def __init__(
         self,
@@ -306,54 +359,7 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
 
         self.register_forward_pre_hook(lambda module, args: get_runtime_state().increment_step_counter())
 
-    @staticmethod
-    def _pad_rows(
-        hidden_states: torch.Tensor,
-        timestep_indices: torch.Tensor,
-        token_tags: torch.Tensor,
-        position_ids: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
-        sequence_length = position_ids.shape[0]
-        padded_length = (
-            (sequence_length + MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT - 1)
-            // MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT
-            * MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT
-        )
-        pad_amount = padded_length - sequence_length
-        if pad_amount == 0:
-            return hidden_states, timestep_indices, token_tags, position_ids, 0
-
-        hidden_states = torch.cat(
-            (
-                hidden_states,
-                hidden_states.new_zeros(
-                    hidden_states.shape[0],
-                    pad_amount,
-                    hidden_states.shape[-1],
-                ),
-            ),
-            dim=1,
-        )
-        timestep_indices = torch.cat(
-            (
-                timestep_indices,
-                timestep_indices.new_zeros(pad_amount),
-            )
-        )
-        token_tags = torch.cat(
-            (
-                token_tags,
-                token_tags.new_full((pad_amount,), -1),
-            )
-        )
-        position_ids = torch.cat(
-            (
-                position_ids,
-                position_ids.new_zeros(pad_amount, position_ids.shape[-1]),
-            ),
-            dim=0,
-        )
-        return hidden_states, timestep_indices, token_tags, position_ids, pad_amount
+    _pad_rows = staticmethod(pad_packed_rows)
 
     def prepare_vsa_h3_metadata(
         self,

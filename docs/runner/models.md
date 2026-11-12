@@ -57,6 +57,7 @@ Text-encoder TP is separate; see the **Text TP** column.
 | [LTX-Video-0.9.7-dev](#model-ltx-video-0-9-7-dev) | ✓ | ✓ | ✓ | — | ✓ | — | ✓ | — | — |
 | [Lumina2](#model-lumina2) | ✓ | — | ✓ | — | ✓ | — | — | — | — |
 | [MiniMax-H3](#model-minimax-h3) | ✓ | — | — | — | — | — | ✓ | ✓ | D |
+| [MiniMax-H3-Image](#model-minimax-h3-image) | ✓ | — | — | — | — | — | ✓ | ✓ | D |
 | [MiniMax-H3-Ref2VA](#model-minimax-h3-ref2va) | ✓ | — | — | — | — | — | ✓ | ✓ | D |
 | [MiniMax-H3-Turbo](#model-minimax-h3-turbo) | ✓ | — | — | — | — | — | ✓ | ✓ | D |
 | [MOSS-Image](#model-moss-image) | ✓ | ✓ | ✓ | — | ✓ | — | — | — | — |
@@ -118,6 +119,7 @@ not the entire model. Text FP8 is a separate opt-in for supported encoders.
 | [LTX-Video-0.9.7-dev](#model-ltx-video-0-9-7-dev) | — | — | — | — | — | — | ✓ | ✓ |
 | [Lumina2](#model-lumina2) | — | — | — | — | — | — | ✓ | ✓ |
 | [MiniMax-H3](#model-minimax-h3) | ✓ | ✓ | — | — | — | — | — | — |
+| [MiniMax-H3-Image](#model-minimax-h3-image) | ✓ | — | — | — | — | — | — | — |
 | [MiniMax-H3-Ref2VA](#model-minimax-h3-ref2va) | ✓ | ✓ | — | — | — | — | — | — |
 | [MiniMax-H3-Turbo](#model-minimax-h3-turbo) | ✓ | ✓ | — | — | — | — | — | — |
 | [MOSS-Image](#model-moss-image) | — | — | — | — | — | — | ✓ | ✓ |
@@ -182,6 +184,7 @@ requires a compatible DBCache layout and is described in the PipeFusion guide.
 | [LTX-Video-0.9.7-dev](#model-ltx-video-0-9-7-dev) | — | — | — | — | — |
 | [Lumina2](#model-lumina2) | — | — | — | — | — |
 | [MiniMax-H3](#model-minimax-h3) | — | — | — | — | — |
+| [MiniMax-H3-Image](#model-minimax-h3-image) | — | — | — | — | — |
 | [MiniMax-H3-Ref2VA](#model-minimax-h3-ref2va) | — | — | — | — | — |
 | [MiniMax-H3-Turbo](#model-minimax-h3-turbo) | — | — | — | — | ✓ |
 | [MOSS-Image](#model-moss-image) | — | — | — | — | — |
@@ -248,6 +251,7 @@ Optional and task-specific inputs are labeled; check the source for image counts
 | <a id="model-ltx-video-0-9-7-dev"></a>[LTX-Video-0.9.7-dev](https://github.com/xdit-project/xDiT/blob/main/xfuser/model_executor/models/runner_models/ltx_video.py) | `LTX-Video-0.9.7-dev`, `Lightricks/LTX-Video-0.9.7-dev` | t2v: text; i2v: text + one image | video | `0.34.0` |
 | <a id="model-lumina2"></a>[Lumina2](https://github.com/xdit-project/xDiT/blob/main/xfuser/model_executor/models/runner_models/lumina2.py) | `Lumina2`, `Lumina-Image-2.0`, `Alpha-VLLM/Lumina-Image-2.0` | Text | image | Not declared |
 | <a id="model-minimax-h3"></a>[MiniMax-H3](https://github.com/xdit-project/xDiT/blob/main/xfuser/model_executor/models/runner_models/minimax_h3.py) | `MiniMax-H3`, `MiniMaxAI/MiniMax-H3` | Text; t2va: no images; i2va: first frame; l2va: last frame; fl2va: both | video + audio | `0.40.0` |
+| <a id="model-minimax-h3-image"></a>[MiniMax-H3-Image](https://github.com/xdit-project/xDiT/blob/main/xfuser/model_executor/models/runner_models/minimax_h3_image.py) | `MiniMax-H3-Image`, `MiniMaxAI/MiniMax-H3-Image` | Text; optional reference images (editing) | image | `source` |
 | <a id="model-minimax-h3-ref2va"></a>[MiniMax-H3-Ref2VA](https://github.com/xdit-project/xDiT/blob/main/xfuser/model_executor/models/runner_models/minimax_h3.py) | `MiniMax-H3-Ref2VA` | Text + one or more reference images | video + audio | `0.40.0` |
 | <a id="model-minimax-h3-turbo"></a>[MiniMax-H3-Turbo](https://github.com/xdit-project/xDiT/blob/main/xfuser/model_executor/models/runner_models/minimax_h3.py) | `MiniMax-H3-Turbo` | Text; t2va: no images; i2va: first frame; l2va: last frame; fl2va: both | video + audio | `0.40.0` |
 | <a id="model-moss-image"></a>[MOSS-Image](https://github.com/xdit-project/xDiT/blob/main/xfuser/model_executor/models/runner_models/moss_image.py) | `MOSS-Image`, `MOSS-Image-Base`, `OpenMOSS-Team/MOSS-Image-Base` | Text | image | `0.38.0` |

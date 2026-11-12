@@ -74,6 +74,47 @@ The `stage-dmd-step-250` checkpoint uses eight transformer forward passes.
 The model card expresses the same schedule as Diffusers `num_inference_steps=9`,
 which counts nine sigma points.
 
+## Text-to-image and editing (MiniMax-H3-Image)
+
+MiniMax-H3-Image is the MiniMax-H3 transformer without audio. The checkpoint
+samples six fixed steps and has guidance distilled into its weights. The runner
+fixes `--num_inference_steps` at 6 and rejects `--negative_prompt`;
+`--guidance_scale` has no effect. It needs Diffusers installed from source.
+
+```bash
+torchrun --nproc_per_node=8 -m xfuser.runner \
+    --model MiniMax-H3-Image \
+    --prompt "An overhead photograph of a rustic farm-to-table spread on a weathered wooden table." \
+    --height 4096 \
+    --width 4096 \
+    --ulysses_degree 8 \
+    --use_parallel_vae \
+    --attention_backend AITER_BF16 \
+    --use_torch_compile
+```
+
+- The model generates at 4 megapixels or more. A smaller size is generated on a
+  larger canvas of the same aspect ratio and resized back. MiniMax recommends
+  4096x4096 for a square image.
+- `--ulysses_degree` must be 1, 2, 4, or 8. The first rank encodes the prompt and
+  broadcasts it to the other ranks.
+- The VAE decodes fixed-size tiles in one batch. `--use_parallel_vae` divides the
+  tiles among the ranks.
+
+To edit images, pass them with `--input_images`. The prompt refers to them in
+order as `<Picture 1>`, `<Picture 2>`, and so on:
+
+```bash
+torchrun --nproc_per_node=8 -m xfuser.runner \
+    --model MiniMax-H3-Image \
+    --input_images ./reference.png \
+    --prompt "Keep everything in <Picture 1> as it is, but remove the headphones." \
+    --height 4096 \
+    --width 4096 \
+    --ulysses_degree 8 \
+    --use_parallel_vae
+```
+
 <a id="amd-hardware-examples"></a>
 
 ## Hardware recipes

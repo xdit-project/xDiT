@@ -103,9 +103,11 @@ Where this specification conflicts with the testing skill in
    starts the configuration fixture of that configuration. The fixture does these steps:
    1. It checks that this configuration did not already start in the session
       ([pytest_integration.md](pytest_integration.md), section 3, item 2).
-   2. It decides between a fresh run and a reuse of earlier data ([files.md](files.md), section 5).
-   3. For a fresh run, it runs the launcher of A.
-   4. If A ended clean, it runs the launcher of B.
+   2. It takes the lock of the configuration and prepares the configuration directory ([files.md](files.md),
+      sections 5 and 6).
+   3. It decides between a fresh run and a reuse of earlier data ([files.md](files.md), section 5).
+   4. For a fresh run, it runs the launcher of A.
+   5. If A ended clean, it runs the launcher of B.
 
    Then the tests of this configuration run (item 5). After them, the next configuration starts its instances.
 3. **Instance A** ([instance_a.md](instance_a.md)):

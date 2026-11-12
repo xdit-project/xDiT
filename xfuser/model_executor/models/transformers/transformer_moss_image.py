@@ -14,11 +14,18 @@ import torch
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.models.modeling_utils import ModelMixin
+from diffusers.models.normalization import RMSNorm as _DiffusersRMSNorm
 from diffusers.schedulers.scheduling_flow_match_euler_discrete import (
     FlowMatchEulerDiscreteScheduler,
 )
 from torch import nn
 from torch.nn import functional as F
+
+from xfuser.model_executor.layers.fused_qk_rope_flydsl import (
+    _HAS_FLYDSL,
+    flydsl_fused_qk_norm_rope,
+    prepare_neox_rope_tables,
+)
 
 _COMBINE_QKV_A2A = os.environ.get("MOSS_COMBINE_QKV_A2A", "0") == "1"
 # One compiled graph for the whole layer stack instead of one per block.
@@ -29,13 +36,14 @@ _PAIR_BATCH = os.environ.get("MOSS_PAIR_BATCH", "0") == "1"
 _PAIR_A2A = os.environ.get("MOSS_PAIR_A2A", "0") == "1"
 
 
-class RMSNorm(nn.Module):
+class RMSNorm(_DiffusersRMSNorm):
+    # Rounds like diffusers' RMSNorm for bf16 weights (after the norm and after the
+    # affine), which is the schedule the FlyDSL QK-norm kernel keys on.
     def __init__(self, dim):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(dim))
+        super().__init__(dim, eps=1e-6)
 
     def forward(self, x):
-        y = x.float() * torch.rsqrt(x.float().square().mean(-1, keepdim=True) + 1e-6)
+        y = x.float() * torch.rsqrt(x.float().square().mean(-1, keepdim=True) + self.eps)
         return y.to(x.dtype) * self.weight
 
 
@@ -56,6 +64,17 @@ def _rotate(x, rope):
     cos = torch.cat((cos, cos), -1).unsqueeze(-2)
     a, b = x.chunk(2, -1)
     return x * cos + torch.cat((-b, a), -1) * sin
+
+
+def _neox_rope_tables(rope):
+    """(cos, sin, cos_pad, sin_fold) for ``flydsl_fused_qk_norm_rope(rope_style="neox")``.
+
+    ``_rotate`` is rotate-half RoPE over the whole head, so the plain pair feeds the
+    kernel's fallback and the folded pair feeds the kernel.
+    """
+    sin, cos = rope[0].chunk(2, -1)
+    cos, sin = torch.cat((cos, cos), -1), torch.cat((sin, sin), -1)
+    return (cos, sin, *prepare_neox_rope_tables(cos, sin, cos.shape[-1]))
 
 
 def _sequence_parallel_world_size():
@@ -207,13 +226,13 @@ class _Block(nn.Module):
         self.proj["ffn_up_gate"] = nn.Linear(dim, 2 * ffn_dim, bias=False)
         self.proj["ffn_down"] = nn.Linear(ffn_dim, dim, bias=False)
 
-    def forward(self, x, rope, modulation, valid_kv_len=None):
+    def forward(self, x, rope, modulation, valid_kv_len=None, rope_tables=None):
         shift_a, scale_a, gate_a, shift_f, scale_f, gate_f = modulation.unbind(1)
         y = self.norm1(x) * (1 + scale_a[:, None]) + shift_a[:, None]
         dtype = self.proj["o"].weight.dtype
         y = y.to(dtype)
-        if _FUSED_QK_PROLOGUE and dtype == torch.bfloat16 and _ulysses_bshd_enabled(y):
-            attended = self._fused_attend(y, rope, valid_kv_len)
+        if rope_tables is not None and dtype == torch.bfloat16 and _ulysses_bshd_enabled(y):
+            attended = self._fused_attend(y, rope_tables, valid_kv_len)
         else:
             q, k, v = self._project_qkv(y)
             q = self.q_norm(q.unflatten(-1, (self.heads, -1))).flatten(2)
@@ -263,12 +282,21 @@ class _Block(nn.Module):
         x = x + self.proj["ffn_down"](situ(hidden, gate)) * gate_f[:, None]
         return x[:, :split], x[:, split:]
 
-    def _fused_attend(self, y, rope, valid_kv_len):
-        from xfuser.model_executor.models.transformers.moss_image_kernels import qk_norm_rope_send
-
+    def _fused_attend(self, y, rope_tables, valid_kv_len):
         world = _sequence_parallel_world_size()
         q, k, value = self._project_qkv(y)
-        query, key = qk_norm_rope_send(q, k, self.q_norm.weight, self.k_norm.weight, rope, world, 1e-6)
+        cos, sin, cos_pad, sin_fold = rope_tables
+        query, key = flydsl_fused_qk_norm_rope(
+            q.unflatten(-1, (self.heads, -1)),
+            k.unflatten(-1, (self.heads, -1)),
+            self.q_norm,
+            self.k_norm,
+            (cos, sin),
+            rope_style="neox",
+            rotary_dim=cos.shape[-1],
+            neox_tables=(cos_pad, sin_fold),
+            send_world=world,
+        )
         value = _to_send_layout(value.unflatten(-1, (self.heads, -1)), world)
         return _ulysses_bshd_attention(query, key, value, valid_kv_len)
 
@@ -409,7 +437,8 @@ class MOSSImageTransformer(ModelMixin, ConfigMixin):
             text = self.text_embedder(context, rope[:, height * width :])
             # This rank's shard of the joint-sequence RoPE, materialized once.
             rope = _shard_sequence(rope, None)[0].contiguous()
-            contexts.append((text, rope))
+            rope_tables = _neox_rope_tables(rope) if _FUSED_QK_PROLOGUE and _HAS_FLYDSL else None
+            contexts.append((text, rope, rope_tables))
         return tuple(contexts)
 
     def fuse_qkv_projections(self, names=("q", "k", "v")):
@@ -446,7 +475,7 @@ class MOSSImageTransformer(ModelMixin, ConfigMixin):
         if context is None:
             context = self.encode_context(encoder_hidden_states, encoder_attention_mask, height, width)
         if len(context) != batch:
-            raise ValueError("context must hold one (text, rope) pair per sample.")
+            raise ValueError("context must hold one (text, rope, rope_tables) entry per sample.")
         if pair_encoder_hidden_states is not None:
             if batch != 1 or pair_encoder_hidden_states.ndim != 3 or pair_encoder_hidden_states.shape[0] != 1:
                 raise ValueError("pair_encoder_hidden_states requires batch size 1.")
@@ -469,9 +498,7 @@ class MOSSImageTransformer(ModelMixin, ConfigMixin):
             first = self._embed_sample(hidden_states, *context[0])
             second = self._embed_sample(hidden_states, *pair_context[0])
             torch._dynamo.graph_break()
-            tokens_a, tokens_b = self._run_layers_pair(
-                first[0], first[1], first[2], skip_layers, second[0], second[1], second[2], pair_skip_layers, sample_mod
-            )
+            tokens_a, tokens_b = self._run_layers_pair(first, skip_layers, second, pair_skip_layers, sample_mod)
             sample = torch.cat(
                 [
                     self._finalize_sample(tokens_a, first[2], head[:1], height, width),
@@ -481,7 +508,7 @@ class MOSSImageTransformer(ModelMixin, ConfigMixin):
             return Transformer2DModelOutput(sample=sample) if return_dict else (sample,)
         outputs = []
         for index in range(batch):
-            text, rope = context[index]
+            text, rope, rope_tables = context[index]
             video = hidden_states[index : index + 1].flatten(2).transpose(1, 2)
             video = self.video_embedder(video.to(self.video_embedder.weight.dtype).contiguous())
             tokens = torch.cat((video, text), 1)
@@ -492,11 +519,11 @@ class MOSSImageTransformer(ModelMixin, ConfigMixin):
             torch._dynamo.graph_break()
             sample_mod = mod[index : index + 1]
             if _FUSED_LAYER_LOOP:
-                tokens = self._run_layers(tokens, rope, sample_mod, valid_length, skip_layers)
+                tokens = self._run_layers(tokens, rope, rope_tables, sample_mod, valid_length, skip_layers)
             else:
                 for layer_index, layer in enumerate(self.layers):
                     if layer_index not in skip_layers:
-                        tokens = layer(tokens, rope, sample_mod, valid_kv_len=valid_length)
+                        tokens = layer(tokens, rope, sample_mod, valid_kv_len=valid_length, rope_tables=rope_tables)
             tokens = _gather_sequence(tokens, valid_length)
             tokens = self.final_norm_video(tokens[:, : height * width].to(self.final_norm_video.weight.dtype))
             tokens = tokens * (1 + head[index : index + 1, 1, None]) + head[index : index + 1, 0, None]
@@ -514,12 +541,12 @@ class MOSSImageTransformer(ModelMixin, ConfigMixin):
             raise ValueError("encoder_attention_mask must be a binary [B, S] mask.")
         return mask
 
-    def _embed_sample(self, hidden_states, text, rope):
+    def _embed_sample(self, hidden_states, text, rope, rope_tables):
         video = hidden_states.flatten(2).transpose(1, 2)
         video = self.video_embedder(video.to(self.video_embedder.weight.dtype).contiguous())
         tokens = torch.cat((video, text), 1)
         tokens, _, valid_length = _shard_sequence(tokens, None)
-        return tokens, rope, valid_length
+        return tokens, rope, valid_length, rope_tables
 
     def _finalize_sample(self, tokens, valid_length, sample_head, height, width):
         tokens = _gather_sequence(tokens, valid_length)
@@ -528,7 +555,9 @@ class MOSSImageTransformer(ModelMixin, ConfigMixin):
         tokens = self.final_linear_video(tokens.to(self.final_linear_video.weight.dtype))
         return tokens.transpose(1, 2).reshape(1, -1, height, width)
 
-    def _run_layers_pair(self, tokens_a, rope_a, valid_a, skip_a, tokens_b, rope_b, valid_b, skip_b, sample_mod):
+    def _run_layers_pair(self, sample_a, skip_a, sample_b, skip_b, sample_mod):
+        tokens_a, rope_a, valid_a, tables_a = sample_a
+        tokens_b, rope_b, valid_b, tables_b = sample_b
         for layer_index, layer in enumerate(self.layers):
             run_a = layer_index not in skip_a
             run_b = layer_index not in skip_b
@@ -538,17 +567,17 @@ class MOSSImageTransformer(ModelMixin, ConfigMixin):
                 )
                 continue
             if run_a:
-                tokens_a = layer(tokens_a, rope_a, sample_mod, valid_kv_len=valid_a)
+                tokens_a = layer(tokens_a, rope_a, sample_mod, valid_kv_len=valid_a, rope_tables=tables_a)
             if run_b:
-                tokens_b = layer(tokens_b, rope_b, sample_mod, valid_kv_len=valid_b)
+                tokens_b = layer(tokens_b, rope_b, sample_mod, valid_kv_len=valid_b, rope_tables=tables_b)
         return tokens_a, tokens_b
 
-    def _run_layers(self, tokens, rope, sample_mod, valid_length, skip_layers):
+    def _run_layers(self, tokens, rope, rope_tables, sample_mod, valid_length, skip_layers):
         # Kept free of data-dependent control flow so Dynamo traces it as one graph
         # even though forward() itself graph-breaks on the text mask.
         for layer_index, layer in enumerate(self.layers):
             if layer_index not in skip_layers:
-                tokens = layer(tokens, rope, sample_mod, valid_kv_len=valid_length)
+                tokens = layer(tokens, rope, sample_mod, valid_kv_len=valid_length, rope_tables=rope_tables)
         return tokens
 
 

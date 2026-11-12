@@ -1,10 +1,12 @@
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from typing import List, Optional, Union
 
 import torch
 from packaging import version
 
 from xfuser.compat import declared_floor, version_at_least
+from xfuser.config.attention_a2a import AttentionA2AConfig
+from xfuser.config.ulysses_a2a import UlyssesA2AConfig
 from xfuser.envs import CUDA_VERSION, PACKAGES_CHECKER, TORCH_VERSION
 from xfuser.logger import init_logger
 
@@ -63,6 +65,7 @@ class RuntimeConfig:
     use_fbcache: bool = False
     attention_backend: Optional[str] = None
     cross_attention_backend: Optional[str] = None
+    mha_v4_kv_splits: Union[str, int] = 1
     spargeattn_reorder_sequence: bool = True
     use_spargeattn_static_block_mask: bool = True
     spargeattn_simthreshold: float = 0.3
@@ -87,6 +90,8 @@ class RuntimeConfig:
     use_fp8_comms: bool = False
     fp8_comms_scale: Optional[float] = None
     fp8_comms_safety_factor: float = DEFAULT_FP8_COMMS_SAFETY_FACTOR
+    attention_a2a: AttentionA2AConfig = field(default_factory=AttentionA2AConfig)
+    ulysses_a2a: UlyssesA2AConfig = field(default_factory=UlyssesA2AConfig)
 
     def __post_init__(self):
         if self.warmup_steps < 0:

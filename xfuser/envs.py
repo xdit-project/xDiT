@@ -58,6 +58,12 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     #       quantise and broadcast work, at the cost of a second shard resident.
     # These are reclaimable file-backed pages that the fill drops as it finishes each shard.
     "XDIT_WARM_SHARDS": lambda: os.environ.get("XDIT_WARM_SHARDS", "2"),
+    # SDMA transport (xfuser/core/distributed/sdma): a prebuilt library to load instead of building
+    # transport.hip on first use; how long a flag wait may take before the process aborts with a log
+    # of what was missing; and whether to run on GPU architectures the transport is not validated on.
+    "XDIT_SDMA_LIB": lambda: os.environ.get("XDIT_SDMA_LIB", ""),
+    "XDIT_SDMA_WAIT_S": lambda: os.environ.get("XDIT_SDMA_WAIT_S", "30"),
+    "XDIT_SDMA_ALLOW_UNTESTED": lambda: os.environ.get("XDIT_SDMA_ALLOW_UNTESTED", "0"),
 }
 
 
@@ -220,7 +226,7 @@ class PackagesEnvChecker:
         """
         if not torch.cuda.is_available():
             return False
-        if not self._on_mi3xx() and not self._on_rdna4():
+        if not self._on_mi3xx() and not self._on_rdna4() and not self._on_gfx1250():
             return False
         try:
             import aiter
@@ -388,6 +394,11 @@ class PackagesEnvChecker:
         device = torch.cuda.current_device()
         gcn_arch_name = torch.cuda.get_device_properties(device).gcnArchName
         return any(arch in gcn_arch_name for arch in ["gfx1200", "gfx1201"])
+
+    def _on_gfx1250(self):
+        device = torch.cuda.current_device()
+        gcn_arch_name = torch.cuda.get_device_properties(device).gcnArchName
+        return "gfx1250" in gcn_arch_name
 
 
 PACKAGES_CHECKER = PackagesEnvChecker()

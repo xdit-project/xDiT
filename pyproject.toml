@@ -37,12 +37,6 @@ optimum-quanto = [
 torchao = [
     "torchao",  # NOTE: torchao is necessary if use_fp8_gemms is enabled
 ]
-flask = [
-    "flask",  # NOTE: flask is necessary to run xDiT as an http service
-]
-ray = [
-    "ray",  # NOTE: ray is necessary if RayDiffusionPipeline is used
-]
 opencv-python = [
     "opencv-python-headless",  # NOTE: opencv-python is necessary if ConsisIDPipeline is used
 ]
@@ -54,10 +48,16 @@ test = [
     "pytest-timeout",
     "imageio",
     "imageio-ffmpeg",
+    "xfuser[cache-dit]",  # NOTE: unit tests drive Cache-DiT's context manager
 ]
 
 [project.scripts]
 xdit = "xfuser.cli:main"
+
+[dependency-groups]
+docs = [
+    "mkdocs==1.6.1",
+]
 
 [project.urls]
 Homepage = "https://github.com/xdit-project/xDiT."

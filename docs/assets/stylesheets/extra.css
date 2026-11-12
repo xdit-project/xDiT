@@ -1,0 +1,232 @@
+/* xDiT logo palette. Use saturated colors for accents and interactive states. */
+:root {
+  --xdit-charcoal: #3a3a3a;
+  --xdit-cyan: #0ea9ff;
+  --xdit-amber: #ffb22e;
+  --xdit-red: #f62238;
+  /* Darker cyan for accessible text on light surfaces. */
+  --xdit-blue: #006aa3;
+  --bs-primary: var(--xdit-blue);
+  --bs-primary-rgb: 0, 106, 163;
+  --bs-link-color: var(--xdit-blue);
+  --bs-link-hover-color: #004b75;
+  --xdit-background: #fff;
+  --xdit-surface: #f7f9fb;
+  --xdit-text: var(--xdit-charcoal);
+  --xdit-border: #dde4e9;
+  --xdit-link: var(--xdit-blue);
+  --xdit-link-hover: #004b75;
+}
+
+:root[data-bs-theme="dark"] {
+  color-scheme: dark;
+  --xdit-background: #181c20;
+  --xdit-surface: #22282e;
+  --xdit-text: #e7edf2;
+  --xdit-border: #404a53;
+  --xdit-link: #67cdff;
+  --xdit-link-hover: #b1e5ff;
+  --bs-body-bg: var(--xdit-background);
+  --bs-body-color: var(--xdit-text);
+  --bs-border-color: var(--xdit-border);
+  --bs-link-color: var(--xdit-link);
+  --bs-link-hover-color: var(--xdit-link-hover);
+}
+
+:root[data-bs-theme="light"] { color-scheme: light; }
+
+body {
+  background: var(--xdit-background);
+  color: var(--xdit-text);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 16px;
+  line-height: 1.65;
+}
+
+body::before { background: var(--xdit-background); }
+.col-md-9 { overflow-wrap: anywhere; }
+a { color: var(--xdit-link); }
+a:hover, a:focus { color: var(--xdit-link-hover); }
+:focus-visible { outline: 2px solid var(--xdit-link); outline-offset: 3px; }
+
+.navbar.bg-primary {
+  background: var(--xdit-background) !important;
+  border-top: 3px solid var(--xdit-cyan);
+  box-shadow: 0 1px 0 var(--xdit-border);
+}
+
+.navbar .navbar-brand,
+.navbar .nav-link {
+  color: var(--xdit-text) !important;
+}
+
+.navbar .navbar-brand {
+  font-weight: 750;
+  letter-spacing: -0.04em;
+}
+
+/* A light backing keeps the official charcoal wordmark readable in both themes. */
+.navbar .xdit-brand {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 4px;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.xdit-brand img {
+  display: block;
+  height: 34px;
+  width: auto;
+}
+
+.navbar .nav-link:hover,
+.navbar .nav-link:focus {
+  color: var(--xdit-link) !important;
+}
+
+.navbar .navbar-toggler {
+  border-color: var(--xdit-border);
+}
+
+.navbar .navbar-toggler-icon {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 30 30'%3E%3Cpath stroke='%233a3a3a' stroke-width='2' stroke-linecap='round' d='M4 7h22M4 15h22M4 23h22'/%3E%3C/svg%3E");
+}
+
+[data-bs-theme="dark"] .navbar .navbar-toggler-icon {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 30 30'%3E%3Cpath stroke='%23e7edf2' stroke-width='2' stroke-linecap='round' d='M4 7h22M4 15h22M4 23h22'/%3E%3C/svg%3E");
+}
+
+.dropdown-menu {
+  border: 1px solid var(--xdit-border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgb(58 58 58 / 8%);
+}
+
+.dropdown-item.active,
+.dropdown-item:active {
+  background-color: var(--xdit-blue);
+}
+
+h1, h2, h3, h4 {
+  color: var(--xdit-text);
+  font-weight: 650;
+  letter-spacing: -0.025em;
+  line-height: 1.25;
+}
+
+h1 { font-size: 2.25rem; margin-bottom: 1.25rem; }
+h2 { font-size: 1.65rem; margin-top: 2.5rem; }
+h3 { font-size: 1.25rem; margin-top: 1.75rem; }
+
+.bs-sidebar.card {
+  background: var(--xdit-surface);
+  border: 1px solid var(--xdit-border);
+  border-radius: 10px;
+}
+
+.bs-sidebar .nav > li > a {
+  border-color: var(--xdit-link);
+}
+
+table { font-size: 0.95rem; }
+th { font-weight: 650; }
+/* Wide references scroll within the table instead of squeezing short columns. */
+#accepted-model-names-and-requirements ~ table:last-of-type {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+#accepted-model-names-and-requirements ~ table:last-of-type th,
+#accepted-model-names-and-requirements ~ table:last-of-type td {
+  overflow-wrap: normal;
+}
+#accepted-model-names-and-requirements ~ table:last-of-type th:nth-child(1),
+#accepted-model-names-and-requirements ~ table:last-of-type td:nth-child(1) {
+  min-width: 10rem;
+}
+#accepted-model-names-and-requirements ~ table:last-of-type th:nth-child(2),
+#accepted-model-names-and-requirements ~ table:last-of-type td:nth-child(2) {
+  min-width: 18rem;
+}
+#accepted-model-names-and-requirements ~ table:last-of-type td:nth-child(2) code {
+  max-width: 16rem;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+#accepted-model-names-and-requirements ~ table:last-of-type th:nth-child(3),
+#accepted-model-names-and-requirements ~ table:last-of-type td:nth-child(3) {
+  min-width: 12rem;
+}
+#projects-and-deployment-guides ~ table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+#projects-and-deployment-guides ~ table th,
+#projects-and-deployment-guides ~ table td {
+  overflow-wrap: normal;
+}
+#projects-and-deployment-guides ~ table:first-of-type th:nth-child(1),
+#projects-and-deployment-guides ~ table:first-of-type td:nth-child(1) { min-width: 15rem; }
+#projects-and-deployment-guides ~ table:first-of-type th:nth-child(2),
+#projects-and-deployment-guides ~ table:first-of-type td:nth-child(2) { min-width: 8rem; }
+#projects-and-deployment-guides ~ table:first-of-type th:nth-child(3),
+#projects-and-deployment-guides ~ table:first-of-type td:nth-child(3) { min-width: 26rem; }
+#articles-and-case-studies ~ table th:nth-child(1),
+#articles-and-case-studies ~ table td:nth-child(1) { min-width: 7rem; white-space: nowrap; }
+#articles-and-case-studies ~ table th:nth-child(2),
+#articles-and-case-studies ~ table td:nth-child(2) { min-width: 18rem; }
+#articles-and-case-studies ~ table th:nth-child(3),
+#articles-and-case-studies ~ table td:nth-child(3) { min-width: 8rem; }
+#articles-and-case-studies ~ table th:nth-child(4),
+#articles-and-case-studies ~ table td:nth-child(4) { min-width: 26rem; }
+#accepted-model-names-and-requirements ~ table:last-of-type th:nth-child(4),
+#accepted-model-names-and-requirements ~ table:last-of-type td:nth-child(4) {
+  min-width: 6rem;
+  white-space: nowrap;
+}
+#accepted-model-names-and-requirements ~ table:last-of-type th:nth-child(5),
+#accepted-model-names-and-requirements ~ table:last-of-type td:nth-child(5) {
+  min-width: 10rem;
+  white-space: nowrap;
+}
+pre { background: var(--xdit-surface); border: 1px solid var(--xdit-border); border-radius: 8px; padding: 1rem; }
+code { color: var(--xdit-link); }
+/* Keep inline identifiers and flags intact; scroll unusually long values locally. */
+:not(pre) > code {
+  display: inline-block;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow-x: auto;
+  vertical-align: bottom;
+}
+pre code { color: inherit; }
+hr { border-color: var(--xdit-border); }
+
+.col-md-9 img[src*="assets/"][src*=".svg"] {
+  background: var(--xdit-background);
+  border: 0;
+  padding: 0;
+}
+
+@media (min-width: 992px) {
+  .navbar .nav-link { font-size: 0.875rem; padding-inline: 0.5rem; }
+}
+
+/* Use the collapsible navigation until the complete header fits comfortably. */
+@media (min-width: 992px) and (max-width: 1199px) {
+  .navbar-expand-lg > .container { flex-wrap: wrap; }
+  .navbar-expand-lg .navbar-toggler { display: block; }
+  .navbar-expand-lg .navbar-collapse { flex-basis: 100%; }
+  .navbar-expand-lg .navbar-collapse.collapse:not(.show) { display: none !important; }
+  .navbar-expand-lg .navbar-nav { flex-direction: column; }
+  .navbar-expand-lg .navbar-nav.ms-md-auto { margin-left: 0 !important; }
+  .navbar-expand-lg .dropdown-menu { position: static; }
+}
+
+@media (max-width: 767px) {
+  h1 { font-size: 1.85rem; }
+  h2 { font-size: 1.45rem; }
+  .table { display: block; overflow-x: auto; }
+}

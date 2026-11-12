@@ -59,7 +59,6 @@ from xfuser.model_executor.schedulers import xFuserSchedulerBaseWrapper, xFuserS
 from xfuser.model_executor.models.transformers import xFuserTransformerWrappersRegister  # noqa: E402
 from xfuser.model_executor.layers.attention_processor import xFuserAttentionBaseWrapper  # noqa: E402
 from xfuser.model_executor.cache.adapters import apply_cache  # noqa: E402
-from xfuser.config.config import ParallelConfig  # noqa: E402
 
 try:
     import os
@@ -77,89 +76,6 @@ logger = init_logger(__name__)
 def _vae_process_group():
     group = get_vae_parallel_group()
     return getattr(group, "device_group", group)
-
-
-class xFuserVAEWrapper:
-    def __init__(
-        self,
-        vae,
-        engine_config: EngineConfig,
-        dit_parallel_config: ParallelConfig,
-        use_parallel: bool = False,
-        image_processor=None,
-    ):
-        self.vae = self._convert_vae(vae) if use_parallel else vae
-        self.engine_config = engine_config
-        self.dtype = engine_config.runtime_config.dtype
-        self.is_parallel = use_parallel
-        self.dit_parallel_config = dit_parallel_config
-        self.dit_parallel_size = (
-            dit_parallel_config.pp_degree
-            * dit_parallel_config.sp_degree
-            * dit_parallel_config.cfg_degree
-            * dit_parallel_config.dp_degree
-            * dit_parallel_config.tp_degree
-        )
-        # Calculate DiT model's dp_last_group rank
-        if use_parallel:
-            # Calculate rank in dp_last_group
-            sp_last = dit_parallel_config.sp_degree - 1
-            cfg_last = dit_parallel_config.cfg_degree - 1
-            pp_last = dit_parallel_config.pp_degree - 1
-
-            # Calculate rank in dp_last_group
-            self.dit_last_rank = (
-                sp_last * (dit_parallel_config.cfg_degree * dit_parallel_config.pp_degree)
-                + cfg_last * dit_parallel_config.pp_degree
-                + pp_last
-            )
-            self.image_processor = image_processor
-
-    def _convert_vae(self, vae: AutoencoderKL):
-        """Convert VAE to parallel version"""
-        logger.info("VAE found; enabling parallel VAE decoding...")
-        parallelize_decoder(vae, _vae_process_group())
-        return vae
-
-    def reset_activation_cache(self):
-        if hasattr(self.vae, "reset_activation_cache"):
-            self.vae.reset_activation_cache()
-
-    # The Ray VAE worker calls this outside any pipeline __call__, and DistVAE refuses grad mode.
-    @torch.no_grad()
-    def execute(self, output_type: str):
-        if self.vae is not None:
-            device = get_device(get_world_group().local_rank)
-            rank = get_world_group().rank
-            dit_parallel_size = self.dit_parallel_size
-            dtype = self.dtype
-            # Check if this is the first VAE rank
-            if rank == dit_parallel_size:  # First VAE rank
-                # Get the rank of the DiT worker that will send the data
-                dit_rank = dit_parallel_size - 1  # Last DiT rank
-                # Receive data from DiT
-                shape_len = torch.zeros(1, dtype=torch.int, device=device)
-                torch.distributed.recv(shape_len, src=dit_rank)
-                shape_tensor = torch.zeros(shape_len[0], dtype=torch.int, device=device)
-                torch.distributed.recv(shape_tensor, src=dit_rank)
-                latents = torch.zeros(torch.Size(shape_tensor), dtype=dtype, device=device)
-                torch.distributed.recv(latents, src=dit_rank)
-                # Broadcast data to VAE group
-                torch.distributed.broadcast(shape_len, src=rank, group=get_vae_parallel_group())
-                torch.distributed.broadcast(shape_tensor, src=rank, group=get_vae_parallel_group())
-                torch.distributed.broadcast(latents, src=rank, group=get_vae_parallel_group())
-            else:
-                # Other VAE ranks receive broadcast
-                shape_len = torch.zeros(1, dtype=torch.int, device=device)
-                torch.distributed.broadcast(shape_len, src=dit_parallel_size, group=get_vae_parallel_group())
-                shape_tensor = torch.zeros(shape_len[0], dtype=torch.int, device=device)
-                torch.distributed.broadcast(shape_tensor, src=dit_parallel_size, group=get_vae_parallel_group())
-                latents = torch.zeros(torch.Size(shape_tensor), dtype=dtype, device=device)
-                torch.distributed.broadcast(latents, src=dit_parallel_size, group=get_vae_parallel_group())
-
-            image = self.vae.decode(latents, return_dict=False)[0]
-            image = self.image_processor.postprocess(image, output_type=output_type)
-            return image
 
 
 class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):

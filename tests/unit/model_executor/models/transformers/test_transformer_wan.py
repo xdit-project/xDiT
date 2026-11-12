@@ -88,3 +88,29 @@ def test_forward_matches_diffusers_on_one_rank(single_rank):
         actual = wrapper(*_inputs(), return_dict=False)[0]
 
     torch.testing.assert_close(actual, expected)
+
+
+class _QuantizedLinear(torch.nn.Linear):
+    """Stands in for a quantized GEMM module that replaces nn.Linear."""
+
+
+@pytest.mark.parametrize(
+    ("change", "counted"),
+    [(None, True), ("cross-attention", False), ("quantized", False), ("fp32", False)],
+)
+def test_sdma_q_k_first_is_counted_only_where_it_can_run(change, counted):
+    """The runner's count of Q/K-first modules matches the projections the path accepts."""
+    from diffusers.models.transformers.transformer_wan import WanAttention
+
+    from xfuser.model_executor.layers import usp_sdma
+
+    processor = transformer_wan.xFuserWanAttnProcessor(is_cross_attention=change == "cross-attention")
+    attn = WanAttention(64, heads=4, dim_head=16, processor=processor).to(torch.bfloat16)
+    if change == "quantized":
+        attn.to_q = _QuantizedLinear(64, 64, dtype=torch.bfloat16)
+    if change == "fp32":
+        attn.float()
+    # The runner's preparation turns the processor into its registered SDMA subclass.
+    sdma = usp_sdma._PROCESSORS[transformer_wan.xFuserWanAttnProcessor]
+    processor.__class__ = sdma
+    assert processor.sdma_qk_first(attn) == counted

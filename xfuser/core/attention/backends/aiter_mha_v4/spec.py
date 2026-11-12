@@ -17,6 +17,7 @@ from xfuser.core.attention.requirements import ALWAYS, ARCH, NEVER, PARAM, Requi
 from xfuser.core.attention.constraints import (
     HEAD_DIM,
     MHA_ONLY,
+    MIN_KEY_LENGTH,
     NON_CAUSAL,
     NO_DROPOUT,
     NO_VARLEN,
@@ -76,6 +77,7 @@ class Scale(Enum):
     """Names must match AITER's AttentionScaleMode members."""
 
     E8M0_PER_1X32 = auto()
+    F32_PER_CHANNEL = auto()
     F32_PER_TENSOR = auto()
 
 
@@ -93,6 +95,10 @@ class MhaV4Format:
     qk_scale: Optional[Scale] = None
     v_scale: Optional[Scale] = None
     dense: bool = True  # False = sparge variant only
+    dense_on: Requirement = GFX950_OR_GFX942
+    # Fewest keys the dense kernel attends over correctly; shorter calls go to
+    # the fallback.
+    min_keys: int = 1
 
     @property
     def is_mxfp8(self) -> bool:
@@ -107,11 +113,18 @@ class MhaV4Format:
 # the columns and the header would index nothing.
 FORMATS = [
     #            name        Q/K              V                sparge on
-    MhaV4Format("BF16",      Fmt.BF16,        Fmt.BF16,        GFX950_OR_GFX942),
+    # The BF16 kernel returns garbage for 64 keys or fewer, whatever the query
+    # length (observed on gfx950; applied on gfx942 too, to be safe). Such calls,
+    # e.g. a short prompt's text refiner, take the fallback.
+    # TODO: AITER mainline fixes the kernel. Once the rocm/pytorch-xdit docker image ships an AITER
+    # with the fix, drop min_keys here (and MIN_KEY_LENGTH if nothing else declares it).
+    MhaV4Format("BF16",      Fmt.BF16,        Fmt.BF16,        GFX950_OR_GFX942,
+                min_keys=65),
     MhaV4Format("BF16FP8",   Fmt.BF16,        Fmt.NATIVE_FP8,  GFX950_OR_GFX942),
     MhaV4Format("I8FP8",     Fmt.INT8,        Fmt.NATIVE_FP8,  GFX950_OR_GFX942),
     MhaV4Format("F8F6",      Fmt.NATIVE_FP8,  Fmt.MXFP6,       GFX950),
     MhaV4Format("MXFP6",     Fmt.MXFP6,       Fmt.NATIVE_FP8,  GFX950),
+    MhaV4Format("F6F6",      Fmt.MXFP6,       Fmt.MXFP6, dense_on=GFX950),
     MhaV4Format("F6F4",      Fmt.MXFP6,       Fmt.MXFP4,       GFX950),
     # MXFP4 Q/K with FP8 V is not a row AITER has; it rejects the combination.
     MhaV4Format("MXFP4",     Fmt.MXFP4,       Fmt.MXFP4,       GFX950),
@@ -152,7 +165,7 @@ def _dense_spec(fmt: MhaV4Format) -> Spec:
         impl=Impl("kernel:mha_v4_dense", {"fmt": fmt}),
         ring=DENSE_RING,
         low_precision=fmt.qk is not Fmt.BF16,
-        accepts=DENSE_CALLS,
+        accepts=DENSE_CALLS & MIN_KEY_LENGTH(fmt.min_keys) if fmt.min_keys > 1 else DENSE_CALLS,
         # Every row here is head dim 128, which makes the family unselectable
         # for a model that mixes widths: LTX-2 runs 128-wide video blocks
         # beside 64-wide audio ones under one backend choice. The odd widths
@@ -160,7 +173,7 @@ def _dense_spec(fmt: MhaV4Format) -> Spec:
         # LSE -- on a ring run that would hand the merge a partial from the
         # 128-wide blocks and nothing from the rest.
         fallback=AttentionBackendType.AITER,
-        requires=SYMBOL(_MHA_V4) & GFX950_OR_GFX942 & _scale_modes(fmt),
+        requires=SYMBOL(_MHA_V4) & fmt.dense_on & _scale_modes(fmt),
     )
 
 

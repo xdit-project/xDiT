@@ -17,6 +17,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     xFuserModel,
 )
+from xfuser.model_executor.models.runner_models.text_encoder_utils import trim_text_encoder
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     STANDARD_LOAD_ROUTES,
@@ -29,22 +30,6 @@ def _deepest_text_encoder_layer(blocks) -> int:
         if param.name == "text_encoder_out_layers":
             return max(param.default)
     raise ValueError("The FLUX.3 text-encoder step no longer declares text_encoder_out_layers.")
-
-
-def trim_text_encoder(text_encoder, last_layer: int) -> None:
-    """Drop what the prompt embeddings never read: the decoder layers after ``last_layer``,
-    the final norm and the LM head.
-
-    The encoder step stacks hidden states 4, 8, ..., 32 of Qwen3-VL's 36 layers. The final
-    norm only ever feeds the last hidden state and the logits are discarded, so the
-    embeddings stay bit-exact, while encoding takes ~20% less time and ~1.5 GB less memory.
-    """
-    language_model = text_encoder.model.language_model
-    if len(language_model.layers) <= last_layer:
-        return
-    language_model.layers = language_model.layers[:last_layer]
-    language_model.norm = torch.nn.Identity()
-    text_encoder.lm_head = torch.nn.Identity()
 
 
 class _Flux3Model(xFuserModel):

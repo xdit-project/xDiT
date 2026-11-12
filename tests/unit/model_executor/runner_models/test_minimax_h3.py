@@ -904,6 +904,8 @@ def test_vdn_load_leaves_the_fused_transformer_in_eval_mode(monkeypatch):
     from xfuser.model_executor.models.transformers.vdn_minimax_h3 import window_softmax
 
     class FakePipe:
+        pretrained_component_names = ()
+
         def __init__(self):
             self.text_encoder = SimpleNamespace(lm_head=object())
             self.scheduler = SimpleNamespace(set_timesteps=lambda n, device=None: None)
@@ -912,7 +914,7 @@ def test_vdn_load_leaves_the_fused_transformer_in_eval_mode(monkeypatch):
         def update_components(self, transformer):
             self.transformer = transformer
 
-        def load_components(self, dtype):
+        def load_components(self, dtype, **kwargs):
             pass
 
     # from_pretrained returns modules in eval mode; the tiny base wrapper fuses QKV like the VDN one.
@@ -1363,6 +1365,8 @@ def _attach_online_loader(model, monkeypatch):
 
 
 class _FakeMiniMaxPipe:
+    pretrained_component_names = ()
+
     def __init__(self):
         self.text_encoder = SimpleNamespace(lm_head=object())
         self.loaded_dtype = None
@@ -1373,7 +1377,7 @@ class _FakeMiniMaxPipe:
         for name, component in components.items():
             setattr(self, name, component)
 
-    def load_components(self, dtype):
+    def load_components(self, dtype, **kwargs):
         self.loaded_dtype = dtype
 
 

@@ -1,37 +1,33 @@
-# Parallelize new models with CFG parallelism and USP provided by xDiT
+# Combine CFG parallelism and USP
 
-The following two tutorials provide detailed instructions on how to implement CFG parallelism and USP (Unified Sequence Parallelism) supported by xDiT for a new DiT model:
+Combine [branch partitioning](adding_model_cfg.md) with [sequence partitioning](adding_model_usp.md)
+when the model supports both. The [Z-Image runner adapter](https://github.com/xdit-project/xDiT/blob/main/xfuser/model_executor/models/runner_models/z_image.py)
+supports CFG, Ulysses, and Ring. Z-Image-Turbo supports sequence parallelism but
+not CFG parallelism.
 
-[Parallelize new models with CFG parallelism provided by xDiT](adding_model_cfg.md)
+## Rank layout
 
-[Parallelize new models with USP provided by xDiT](adding_model_usp.md)
+Without other parallel methods, the process count is
+`2 × ulysses_degree × ring_degree`. For example, CFG degree 2 and Ulysses degree 4
+use eight ranks. Each branch's sequence group cooperates on attention. CFG groups exchange
+predictions between corresponding ranks of the two branches.
+See [hybrid layouts](../../methods/hybrid.md) for layouts with other degrees.
 
-[Parallelize new models with USP provided by xDiT (text replica)](adding_model_usp_text_replica.md)
+Initialize process groups and runtime state through the runner's configuration
+path. Attention reads backend settings and sequence metadata as well as group
+membership. Creating process groups alone is insufficient.
 
-Both parallelization techniques can be concurrently employed. To achieve this, specify the level of parallelization for both CFG parallelism and USP as demonstrated below. The number of GPUs should be twice the product of the degrees of ulysses attention and ring attention:
+## Execution order
 
-```python
-from xfuser.core.distributed import initialize_model_parallel
-initialize_model_parallel(
-    ring_degree=<ring_degree>,
-    ulysses_degree=<ulysses_degree>,
-    classifier_free_guidance_degree=2,
-)
-# restriction: dist.get_world_size() == 2 x <ring_degree> x <ulysses_degree>
-```
+The [Z-Image transformer wrapper](https://github.com/xdit-project/xDiT/blob/main/xfuser/model_executor/models/transformers/transformer_z_image.py)
+selects the local CFG batch first. It then partitions image, caption, and combined
+sequences with matching masks and positional embeddings. Its attention processor
+pads heads when needed and calls `USP`. Each refinement phase gathers sequence
+outputs and removes padding before the next phase. After the final sequence gather
+and unpatchification, a CFG gather restores positive-first prediction order.
+Diffusers' original pipeline applies guidance and updates the latents.
 
-The example computes attention with `USP` from `xfuser.model_executor.layers.usp`, which reads the attention backend from xDiT's runtime state. Initialize it with the same layout before the first denoising step:
-
-```python
-from xfuser import xFuserArgs
-from xfuser.core.distributed import initialize_runtime_state
-engine_config, _ = xFuserArgs(
-    model=<checkpoint-path>,
-    ring_degree=<ring_degree>,
-    ulysses_degree=<ulysses_degree>,
-    use_cfg_parallel=True,
-).create_config()
-initialize_runtime_state(engine_config=engine_config)
-```
-
-Following this, both CFG parallelism and USP can be simultaneously implemented. For a comprehensive example script showcasing this approach, refer to [adding_model_cfg_usp.py](adding_model_cfg_usp.py).
+Keep branch and sequence groups distinct. A world-group gather would mix branches
+or replicas. Preserve branch order, token positions, masks, and padding when
+adapting another model. Validate CFG and USP separately, then together with the
+same inputs, seed, precision, and active guidance settings.

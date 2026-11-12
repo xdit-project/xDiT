@@ -92,3 +92,26 @@ def test_marking_a_component_twice_leaves_one_marker():
     model._mark_cudagraph_steps(transformer)
 
     assert len(transformer._forward_pre_hooks) == 1
+
+
+def test_sdma_ulysses_drops_cuda_graphs_for_the_transformer_only(monkeypatch):
+    """The SDMA copies are queued from the host: the transformer compiles without CUDA graphs,
+    the other components keep them."""
+    from xfuser.config.ulysses_a2a import UlyssesA2AConfig
+    from xfuser.core.distributed import runtime_state
+    from xfuser.model_executor.layers import usp_sdma
+
+    config = UlyssesA2AConfig("sdma", 2)
+    monkeypatch.setattr(runtime_state, "_RUNTIME", SimpleNamespace(runtime_config=SimpleNamespace(ulysses_a2a=config)))
+    monkeypatch.setattr(usp_sdma, "get_ulysses_parallel_world_size", lambda: 8)
+    model, transformer = _model("reduce-overhead", fully_shard_degree=1)
+    model.pipe.vae = vae = torch.nn.Linear(4, 4)
+    model.settings.transformer_attr_names = ["transformer"]
+    model._get_compiled_pipe_components = lambda: ["transformer", "vae"]
+    modes = {}
+    monkeypatch.setattr(torch, "compile", lambda module, **kwargs: modes.setdefault(id(module), kwargs["mode"]))
+
+    model._compile_model({"num_inference_steps": 4})
+
+    assert modes[id(transformer)] == "default"
+    assert modes[id(vae)] == "reduce-overhead"

@@ -3,6 +3,18 @@ import pytest
 from xfuser.config.args import FlexibleArgumentParser, xFuserArgs
 
 
+def test_dedicated_vae_ranks_fail_before_distributed_initialization(monkeypatch):
+    from xfuser.config import args as args_module
+
+    def unexpected_initialization(*args, **kwargs):
+        pytest.fail("Unsupported VAE topology must fail before distributed initialization")
+
+    monkeypatch.setattr(args_module, "init_distributed_environment", unexpected_initialization)
+
+    with pytest.raises(ValueError, match="Dedicated VAE ranks are no longer supported"):
+        xFuserArgs(use_parallel_vae=True, vae_parallel_size=1).create_config()
+
+
 def test_pipefusion_rejects_full_transformer_fsdp():
     with pytest.raises(ValueError, match="Full-transformer FSDP"):
         xFuserArgs(pipefusion_parallel_degree=2, fully_shard_degree=2)
@@ -18,9 +30,18 @@ def test_pipefusion_allows_targeted_fsdp_for_replicated_components():
     assert args.fully_shard_components == ["text_encoder"]
 
 
-def test_pipefusion_rejects_step_caching_until_patch_histories_are_supported():
-    with pytest.raises(ValueError, match="per-patch histories"):
+def test_pipefusion_rejects_non_native_step_cache_methods():
+    with pytest.raises(ValueError, match="requires --cache_method pipefusion"):
         xFuserArgs(pipefusion_parallel_degree=2, cache_method="fbcache")
+
+
+def test_pipefusion_accepts_its_patch_aware_cache_method():
+    args = xFuserArgs(
+        pipefusion_parallel_degree=2,
+        cache_method="pipefusion",
+    )
+
+    assert args.cache_method == "pipefusion"
 
 
 @pytest.mark.parametrize(

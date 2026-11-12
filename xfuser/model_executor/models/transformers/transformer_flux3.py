@@ -16,7 +16,8 @@ from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
 )
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
-from xfuser.model_executor.layers.usp import USP, attention
+from xfuser.model_executor.layers import usp_sdma
+from xfuser.model_executor.layers.usp import PROCESS_GROUP, USP, attention
 from xfuser.model_executor.models.transformers.transformers_utils import (
     chunk_and_pad_sequence,
     gather_and_unpad,
@@ -52,15 +53,7 @@ class xFuserFlux3AttnProcessor:
         query = query.unflatten(-1, (attn.heads, -1))
         key = key.unflatten(-1, (attn.heads, -1))
         value = value.unflatten(-1, (attn.heads, -1))
-
-        # QK norm and RoPE in fp32 with one cast back, as upstream.
-        query = attn.norm_q(query.float())
-        key = attn.norm_k(key.float())
-
-        if image_rotary_emb is not None:
-            query = apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
-            key = apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
-        query, key = query.to(value.dtype), key.to(value.dtype)
+        query, key, value = self._norm_rope(attn, query, key, value, image_rotary_emb)
 
         query = query.transpose(1, 2)
         key = key.transpose(1, 2)
@@ -80,6 +73,52 @@ class xFuserFlux3AttnProcessor:
         hidden_states = attn.to_out[0](hidden_states)
         hidden_states = attn.to_out[1](hidden_states)
         return hidden_states
+
+    @staticmethod
+    def _norm_rope(attn, query, key, value, image_rotary_emb):
+        """QK norm and RoPE of [b, s, heads, d] projections, for any subset of heads."""
+        # QK norm and RoPE in fp32 with one cast back, as upstream.
+        query = attn.norm_q(query.float())
+        key = attn.norm_k(key.float())
+
+        if image_rotary_emb is not None:
+            query = apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
+            key = apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
+        return query.to(value.dtype), key.to(value.dtype), value
+
+
+@usp_sdma.sdma_processor(xFuserFlux3AttnProcessor)
+class xFuserFlux3SdmaAttnProcessor(xFuserFlux3AttnProcessor):
+    """xFuserFlux3AttnProcessor under --ulysses_a2a sdma --ulysses_sdma_overlap_qkv.
+
+    The QK norm and RoPE act per head, so Q/K/V are projected one head group at a time and
+    each group's exchange overlaps the next group's projection
+    (usp_sdma.grouped_qkv_attention). Calls that path does not cover take the base path.
+    """
+
+    sdma_grouped_qkv = True
+
+    def __call__(
+        self,
+        attn: Flux3Attention,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> torch.Tensor:
+        if not self.local and attention_mask is None:
+            grouped = usp_sdma.grouped_qkv_attention(
+                attn,
+                hidden_states,
+                lambda q, k, v: self._norm_rope(attn, q, k, v, image_rotary_emb),
+                backend=None,
+                attention_kwargs=None if self.valid_kv_len is None else {"valid_kv_len": self.valid_kv_len},
+                group=PROCESS_GROUP.ULYSSES_PG,
+            )
+            if grouped is not None:
+                hidden_states = grouped.transpose(1, 2).flatten(2, 3).to(hidden_states.dtype)
+                hidden_states = attn.to_out[0](hidden_states)
+                return attn.to_out[1](hidden_states)
+        return super().__call__(attn, hidden_states, attention_mask, image_rotary_emb)
 
 
 def flux3_attn_modules(transformer) -> list[torch.nn.Module]:

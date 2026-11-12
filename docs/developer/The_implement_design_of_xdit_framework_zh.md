@@ -1,161 +1,56 @@
-# 框架设计与实现
+# 框架设计
 
-# 1.框架设计
+[English](The_implement_design_of_xdit_framework.md)
 
-## 1.0.设计哲学
+xDiT 的模型集成分为两层：runner 适配器定义用户接口和模型能力，模型及 pipeline 实现负责分布式执行。添加模型时，先阅读[模型集成指南](adding_models/readme.md)。
 
-整个框架的设计目标是，最小化模型改动与代码添加，尽量复用现有diffusers & transformers库中代码，尽量避免多余的代码拷贝，同时尽可能提供灵活的控制从而满足多种并行化逻辑的添加
+## Runner 适配器
 
-## 1.1.模型实现组织结构
+[xFuserModel](https://github.com/xdit-project/xDiT/blob/main/xfuser/model_executor/models/runner_models/base_model.py) 提供配置校验、初始化、预热、计时和输出处理。模型适配器声明 checkpoint 别名、`ModelCapabilities`、`DefaultInputValues`、`ModelSettings` 和 `LoadSupport`，并实现 `_load_model()` 与 `_run_pipe()`。能力声明只是校验依据，实际加载和执行代码仍须实现对应功能。
 
-对模型的修改位于`model_executor/`目录下:
+[FLUX.1-dev 适配器](https://github.com/xdit-project/xDiT/blob/main/xfuser/model_executor/models/runner_models/flux.py) 有两条执行路径：
 
-```
-xfuser/model_executor
-├── base_wrapper.py
-├── __init__.py
-├── layers
-│   ├── attention_processor.py
-│   ├── base_layer.py
-│   ├── conv.py
-│   ├── embeddings.py
-│   ├── __init__.py
-│   └── register.py
-├── models
-│   ├── base_model.py
-│   ├── __init__.py
-│   └── transformers
-│       ├── base_transformer.py
-│       ├── __init__.py
-│       ├── pixart_transformer_2d.py
-│       └── register.py
-├── pipelines
-│   ├── base_pipeline.py
-│   ├── __init__.py
-│   ├── pipeline_pixart_alpha.py
-│   ├── pipeline_pixart_sigma.py
-│   └── register.py
-└── schedulers
-    ├── base_scheduler.py
-    ├── __init__.py
-    ├── register.py
-    └── scheduling_dpmsolver_multistep.py
-```
+- 未启用 PipeFusion 时，使用 Diffusers `FluxPipeline` 和继承原始 transformer 的 `xFuserFlux1Transformer2DWrapper`，在 transformer 中实现序列并行。
+- 启用 PipeFusion 时，使用 `xFuserFluxPipeline` 和组合式 `xFuserFluxTransformer2DWrapper`，将 transformer 分配到多个 stage。
 
-### 1.1.1.类架构
+[Z-Image 适配器](https://github.com/xdit-project/xDiT/blob/main/xfuser/model_executor/models/runner_models/z_image.py) 保留原始 Diffusers pipeline，在 transformer 中实现 CFG 和序列划分。因此，新模型不一定需要编写 pipeline wrapper。应根据模型接口和并行需求选择实现方式。
 
-在xDiT框架中，使用wrapper方式修改模型需要的class，从而为原始diffusers中的class添加的并行能力，包括PipeFusion、序列并行，和二者混合方式。并wrapper中设置getattr使得wrapper中的函数可以直接使用原始模型中的属性与方法。通过此种方式可以直接复制原模型的任意代码在wrapper中使用，而不需修改与self有关的访问控制
+## 组件 Wrapper
 
-xDiT中模型相关文件的组织结构如下：
+[![组件 Wrapper 继承结构](../assets/wrapper-components.svg)](../assets/wrapper-components.svg)
 
-![class_structure.png](https://raw.githubusercontent.com/xdit-project/xdit_assets/main/developer/class_structure.png)
+此图只描述组合式 wrapper，不包含继承 Diffusers transformer 的实现或独立的 runner `xFuserModel`。
 
-- 所有模型类均会继承于基类`xFuserBaseWrapper`，用以提供基础的getattr和运行时条件检查等特性
-- 四个代表不同模型组分的类分别继承于`xFuserBaseWrapper`，其中：
-    - `xFuserPipelineBaseWrapper:` diffusion pipeline的基类，提供所有diffusion pipeline并行化均需要用到的特性，如data parallel装饰器，warmup函数prepare_run等。同时在`__init__`中提供pipeline转换流程的逻辑，将对pipeline内部的组成部分如backbone(transformer / unet)，scheduler，vae等进行并行化处理
-    - `xFuserModelBaseWrapper:` transformer / unet等模型的基类。__init__中提供对model中部分为了启用pipefusion/sequence parallel并行模式而需要改动的layer进行并行化的逻辑
-    - `xFuserLayerBaseWrapper:` 模型最底层的layer继承于该类，如Conv2d，embedding，linear等
-    - `xFuserSchedulerBaseWrapper:` scheduler的基类
-- 新添加的model只需要继承与对应的基类即可快捷的接入xDiT，启用混合并行
+| 组件 | 职责 | 源码 |
+| --- | --- | --- |
+| `xFuserBaseWrapper` | 转发原始模块属性并检查执行条件 | [Base wrapper](https://github.com/xdit-project/xDiT/blob/main/xfuser/model_executor/base_wrapper.py) |
+| `xFuserPipelineBaseWrapper` | 初始化 runtime、转换组件、处理 DP 装饰器及共享 patch/输出逻辑 | [Pipeline base](https://github.com/xdit-project/xDiT/blob/main/xfuser/model_executor/pipelines/base_pipeline.py) |
+| `xFuserTransformerBaseWrapper` | 划分 stage 的 block 列表，包装指定子模块 | [Transformer base](https://github.com/xdit-project/xDiT/blob/main/xfuser/model_executor/models/transformers/base_transformer.py) |
+| `xFuserLayerBaseWrapper` | Layer wrapper 的共享接口 | [Layer base](https://github.com/xdit-project/xDiT/blob/main/xfuser/model_executor/layers/base_layer.py) |
+| `xFuserSchedulerBaseWrapper` | Scheduler wrapper 的共享接口 | [Scheduler base](https://github.com/xdit-project/xDiT/blob/main/xfuser/model_executor/schedulers/base_scheduler.py) |
 
-### 2.2.2.自动wrap与注册机制
+各 registry 将 Diffusers 类型映射到对应 wrapper。新模型需要注册其实际使用的 pipeline、transformer、layer、scheduler 和 attention processor，并确保注册模块被导入。仅继承基类不能自动获得所有并行能力。
 
-xDiT使用wrap方式对huggingface diffusers的class做并行化改造，增加一些属性和并行通信的逻辑，并尽可能地复用diffusers原始库中的代码逻辑。从而在保证控制足够灵活的前提下，减少添加模型时的代码量。
+未注册的 scheduler 会保留原始实现并输出警告；这不代表它支持 PipeFusion 的 patch 更新。未支持的 attention processor 会报错，添加模型时应检查当前 [processor registry](https://github.com/xdit-project/xDiT/blob/main/xfuser/model_executor/layers/attention_processor.py)。
 
-此部分以pixart-alpha为例，介绍逐层wrap从而并行化的机制
+## 分布式状态
 
-对于一个新加入的pipeline，其wrapper初始化逻辑直接从父类`xFuserPipelineBaseWrapper`中继承即可，不需要单独写`__init__`函数
+| 源码 | 职责 |
+| --- | --- |
+| [parallel_state.py](https://github.com/xdit-project/xDiT/blob/main/xfuser/core/distributed/parallel_state.py) | 初始化 rank 和进程组，提供访问接口 |
+| [group_coordinator.py](https://github.com/xdit-project/xDiT/blob/main/xfuser/core/distributed/group_coordinator.py) | Tensor 通信操作 |
+| [runtime_state.py](https://github.com/xdit-project/xDiT/blob/main/xfuser/core/distributed/runtime_state.py) | 输入尺寸、patch 索引、attention 配置和执行元数据 |
+| [pipefusion/](https://github.com/xdit-project/xDiT/blob/main/xfuser/model_executor/pipefusion/__init__.py) | Patch layout、payload、transport、schedule 和编译辅助逻辑 |
 
-```python
-# file: xfuser/model_executor/pipelines/pipeline_pixart_alpha.py
+Runtime state 是进程内对象。每个 rank 必须初始化一致的布局，并以匹配的顺序调用 collective；读取 Python 全局变量不会同步进程。划分 tensor 前设置输入元数据，并按 schedule 顺序推进 patch 状态。
 
-@xFuserPipelineWrapperRegister.register(PixArtAlphaPipeline)
-class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
+## 验证
 
-    @classmethod
-    def from_pretrained(...
+保留模型输入输出、scheduler、位置编码、mask 和 callback 的语义。先比较原始 pipeline 与单设备路径，再在合适的硬件上验证分布式布局及声明支持的组合。测试范围遵循仓库的 [testing policy](https://github.com/xdit-project/xDiT/blob/main/.github/skills/testing/SKILL.md)。
 
-    @torch.no_grad()
-    @xFuserPipelineBaseWrapper.enable_data_parallel
-    @xFuserPipelineBaseWrapper.check_to_use_naive_forward
-    def __call__(...
-```
-
-- 以下是继承于`xFuserPipelineBaseWrapper`的__init__的初始化逻辑
-
-```python
-class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
-
-    def __init__(
-        self,
-        pipeline: DiffusionPipeline,
-        engine_config: EngineConfig,
-    ):
-        self.module: DiffusionPipeline
-        self._init_runtime_state(pipeline=pipeline, engine_config=engine_config)
-
-        # backbone
-        transformer = getattr(pipeline, "transformer", None)
-        unet = getattr(pipeline, "unet", None)
-        # vae
-        vae = getattr(pipeline, "vae", None)
-        # scheduler
-        scheduler = getattr(pipeline, "scheduler", None)
-
-        if transformer is not None:
-            pipeline.transformer = self._convert_transformer_backbone(transformer)
-        elif unet is not None:
-            pipeline.unet = self._convert_unet_backbone(unet)
-
-        if scheduler is not None:
-            pipeline.scheduler = self._convert_scheduler(scheduler)
-
-        super().__init__(module=pipeline)
-       
-       
-    def _convert_transformer_backbone(
-        self,
-        transformer: nn.Module,
-    ):
-				...
-	
-            logger.info("Transformer backbone found, paralleling transformer...")
-            wrapper = **xFuserTransformerWrappersRegister.get_wrapper(transformer)**
-            transformer = wrapper(transformer=transformer)
-        return transformer
-```
-
-pipeline初始化过程中调用了`_convert_transformer_backbone`函数与`_convert_scheduler`对于dit模型的backbone和scheduler分别进行处理。并使用了`xFuserTransformerWrappersRegister`的`get_wrapper`方法获取当前transformer backbone对应的wrapper，从而保证wrap后的并行逻辑与模型本身对应
-
-之所以可以直接通过get_wrapper从register中获取backbone / layer / scheduler与wrapper的对应关系，是因为在wrapper中使用了对应register的装饰器将wrapper注册进了register内部的字典中。例如pixart-alpha模型需要用到的backbone `PixArtTransformer2D`，在框架中引入pixart-alpha模型时需要在`xfuser/model_executor/models/transformers`中实现对应的wrapper类`xFuserPixArtTransformer2DWrapper`，这时仅需要在类定义前加上对应的register并指明原始类即可完成注册，之后该对应关系可以直接通过对应register的get_wrapper方法查到。从而使新加入的pipeline可以直接通过继承父类的初始化函数自动化的找到对应的backbone wrapper，scheduler wrapper等
-
-```python
-**@xFuserTransformerWrappersRegister.register(PixArtTransformer2DModel)**
-class xFuserPixArtTransformer2DWrapper(xFuserTransformerBaseWrapper):
-    def __init__(
-        self,
-        transformer: PixArtTransformer2DModel,
-    ):
-```
-
-同理，transformer backbone基类`xFuserTransformerBaseWrapper`中，也会在初始化函数`__init__`中使用同样的方式对其内部的layer进行处理，即通过`xFuserLayerWrappersRegister`获取layer对应的wrapper来对layer进行并行化。具体实现代码可参见`xfuser/model_executor/models/transformers/base_transformer.py #35` 与`xfuser/model_executor/models/base_model.py #53`，此处不再赘述
-
-## 2.2.运行时
-
-管理运行时的主要逻辑位于`distributed/`目录下
-
-```
-xfuser/distributed
-├── group_coordinator.py
-├── __init__.py
-├── parallel_state.py
-└── runtime_state.py
-```
-
-其中`parallel_state.py`管理分布式环境(rank, world_size, communication group, etc.)的的初始化和访问
-
-`group_coordinator.py`为communication group的wrapper，对特定的通信模式进行了封装，方便调用
-
-`runtime_state.py`管理了除通信以外的其他运行时元信息，包含对图片patch分块元数据，`runtime_config`，`input_config`等
-
-所有创建的运行时状态与communicator对象均为单例模式的global变量，所有模型均在运行时通过对这些全局变量的查询来获得所需元数据，从而保证全局信息的同步。
+<a id="1"></a>
+<a id="10"></a>
+<a id="11"></a>
+<a id="111"></a>
+<a id="222wrap"></a>
+<a id="22"></a>

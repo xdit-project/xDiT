@@ -280,9 +280,6 @@ class xFuserMiniMaxH3ImageModel(MiniMaxH3TextEncoderMixin, xFuserModel):
 
         transformer.forward = forward
 
-    def _get_runtime_state_pipeline(self):
-        return self.pipe
-
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         prompt = input_args["prompt"]
         if isinstance(prompt, list):

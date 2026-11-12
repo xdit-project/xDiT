@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+
+{# Keep the header focused on guides, search and contribution links. #}
+{% block next_prev %}{% endblock %}
+
+{% block site_name %}
+<a class="navbar-brand xdit-brand" href="{{ nav.homepage.url|url }}" aria-label="xDiT home">
+  <img src="{{ 'assets/xdit-logo.png'|url }}" alt="xDiT" width="80" height="35">
+</a>
+{% endblock %}
+
+{% block repo %}
+<li class="nav-item">
+  <a href="{{ config.repo_url }}" class="nav-link"><i class="fa-brands fa-github" aria-hidden="true"></i> Source</a>
+</li>
+{% endblock %}

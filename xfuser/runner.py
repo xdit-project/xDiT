@@ -55,7 +55,12 @@ def _select_output_owner(output: DiffusionOutput | None) -> int:
 
 
 class xFuserModelRunner:
-    """A generic model runner for models supported by xDiT"""
+    """Run a registered diffusion model from a configuration dictionary.
+
+    Construction validates configuration and initializes distributed state as
+    needed, but model weights are loaded by ``initialize``. Multi-rank callers
+    must launch each process with a matching parallel layout, usually torchrun.
+    """
 
     def __init__(self, config: dict) -> None:
         xfuser_config = xFuserArgs.from_runner_args(config)
@@ -74,7 +79,10 @@ class xFuserModelRunner:
         return model(config)
 
     def initialize(self, input_args: dict) -> None:
-        """Initialize the model and runtime state"""
+        """Load the model and runtime using preprocessed input arguments.
+
+        Repeated calls are ignored once initialization has completed.
+        """
         if self.is_initialized:
             log("Model already initialized, skipping...")
             return
@@ -86,7 +94,11 @@ class xFuserModelRunner:
         log("Model initialization complete.")
 
     def run(self, input_args: dict) -> Tuple[DiffusionOutput, list]:
-        """Run the model with given input arguments"""
+        """Generate outputs after initialization and return outputs and timings.
+
+        Timings are measured in seconds. Benchmark repetitions return the final
+        repetition's output; explicit batching records a timing for each batch.
+        """
         if not self.is_initialized:
             raise RuntimeError("ModelRunner not initialized. Call initialize() before run().")
 
@@ -95,7 +107,11 @@ class xFuserModelRunner:
         return output, timings
 
     def preprocess_args(self, input_args: dict) -> dict:
-        """Preprocess input arguments before passing them to the model"""
+        """Resolve model defaults, validate inputs, and load referenced images.
+
+        Returns a new dictionary for ``initialize``, ``run``, or ``profile``.
+        Dataset prompts replace supplied prompts when a dataset is configured.
+        """
         return self.model.preprocess_args(input_args)
 
     def profile(self, input_args: dict) -> Tuple[DiffusionOutput, list, torch.profiler.profiler.profile]:
@@ -110,7 +126,7 @@ class xFuserModelRunner:
             log(f"  {arg}: {value}")
 
     def cleanup(self) -> None:
-        """Cleanup resources after model execution"""
+        """Release the initialized pipeline, device caches, and distributed state."""
         torch.compiler.reset()
         torch.cuda.synchronize()
         del self.model.pipe
@@ -126,7 +142,12 @@ class xFuserModelRunner:
         profile: torch.profiler.profiler.profile = None,
         save_once: bool = True,
     ) -> None:
-        """Save model output, timings and profiles to file, if applicable"""
+        """Save available outputs, timings, and per-rank profiling traces.
+
+        By default only the selected output-owning rank saves outputs/timings.
+        Files use the configured output directory; profile traces are compressed
+        Chrome trace JSON files. Omitted payloads are not saved.
+        """
         if profile:
             self.model.save_profile(profile)
 

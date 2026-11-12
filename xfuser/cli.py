@@ -1,9 +1,9 @@
 """
 xDiT CLI entry point.
 
-This module provides a console script that launches xDiT with distributed
-training support, equivalent to:
-    torchrun --nproc_per_node=N xfuser/runner.py <args>
+This module provides a console script that launches distributed inference,
+equivalent to:
+    torchrun --nproc_per_node=N -m xfuser.runner <args>
 
 """
 
@@ -110,7 +110,7 @@ def main(args: Optional[List[str]] = None) -> None:
     """
     Main entry point for the xdit CLI.
 
-    Launches distributed training by wrapping torchrun as a subprocess.
+    Launches distributed inference by wrapping torchrun as a subprocess.
     """
     if args is None:
         args = sys.argv[1:]

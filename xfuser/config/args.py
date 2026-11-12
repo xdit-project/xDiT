@@ -235,9 +235,6 @@ class xFuserArgs:
     tensor_parallel_degree: int = 1
     text_encoder_tp_degree: int = 1
     split_scheme: Optional[str] = "row"
-    # ray arguments
-    use_ray: bool = False
-    ray_world_size: int = 1
     vae_parallel_size: int = 0
     dit_parallel_size: int = 0
     # pipefusion parallel
@@ -700,17 +697,6 @@ class xFuserArgs:
         _add_attention_a2a_args(runtime_group)
         # Parallel arguments
         parallel_group = parser.add_argument_group("Parallel Processing Options")
-        runtime_group.add_argument(
-            "--use_ray",
-            action="store_true",
-            help="Enable ray to run inference in multi-card",
-        )
-        parallel_group.add_argument(
-            "--ray_world_size",
-            type=int,
-            default=1,
-            help="The number of ray workers (world_size for ray)",
-        )
         parallel_group.add_argument(
             "--dit_parallel_size",
             type=int,
@@ -781,12 +767,6 @@ class xFuserArgs:
             type=str,
             default="row",
             help="Split scheme for tensor parallel.",
-        )
-        parallel_group.add_argument(
-            "--vae_parallel_size",
-            type=int,
-            default=0,
-            help="Number of processes for VAE parallelization. 0: no seperate process for VAE, 1: run VAE in a separate process, >1: distribute VAE across multiple processes.",
         )
 
         # Input arguments
@@ -1003,10 +983,15 @@ class xFuserArgs:
 
     @staticmethod
     def add_runner_args(parser: FlexibleArgumentParser):
+        """Register runner options; effective defaults and support depend on the model.
+
+        Registration does not parse arguments, initialize distributed state,
+        or load model weights. The checked-in CLI reference uses this parser.
+        """
         parser.add_argument(
             "--model",
             type=str,
-            help="Name or path of the huggingface model to use.",
+            help="Registered model alias or Hugging Face repository ID. Local checkpoint loading is model-specific.",
             required=True,
         )
         parser.add_argument(
@@ -1015,8 +1000,15 @@ class xFuserArgs:
             default=None,
             help="LoRA repository or local path to fuse at startup (supported runners only).",
         )
-        parser.add_argument("--lora_weight_name", type=nullable_str, default=None)
-        parser.add_argument("--lora_scale", type=float, default=1.0)
+        parser.add_argument(
+            "--lora_weight_name",
+            type=nullable_str,
+            default=None,
+            help="LoRA weight filename within --lora_path when it names a repository or directory.",
+        )
+        parser.add_argument(
+            "--lora_scale", type=float, default=1.0, help="Finite scale applied when fusing a startup LoRA adapter."
+        )
         parser.add_argument(
             "--vdn_transformer_dir",
             type=nullable_str,
@@ -1034,17 +1026,21 @@ class xFuserArgs:
             "derived from --attention_backend (SDPA->sdpa, AITER->aiter_ck, AITER_FP8->aiter_fp8); "
             "'aiter' selects AITER's Triton varlen bf16 kernel.",
         )
-        parser.add_argument("--use_parallel_vae", help="Enable parallel VAE.", action="store_true")
+        parser.add_argument(
+            "--use_parallel_vae",
+            help="Distribute supported VAE work across existing ranks. DistVAE uses row sharding by default; tiling can select tile dispatch.",
+            action="store_true",
+        )
         parser.add_argument(
             "--use_torch_compile",
             action="store_true",
-            help="Enable torch.compile to accelerate inference in a single card",
+            help="Compile supported model components with torch.compile, including supported parallel configurations.",
         )
         parser.add_argument(
             "--attention_backend",
             type=str,
             default=None,
-            help="Attention backend to use. If not specified, the best available backend will be selected automatically.",
+            help="Attention backend name. If omitted, use the model's preferred backend or automatic selection.",
         )
         parser.add_argument(
             "--cross_attention_backend",
@@ -1057,19 +1053,16 @@ class xFuserArgs:
             type=str,
             default="1",
             help=(
-                "Key ranges a dense AITER MHA v4 call is split into and merged by their LSE, which fills "
-                "the GPU when few heads per rank leave it idle (e.g. high Ulysses degrees). 1 (default) "
-                "never splits. 'auto' lets AITER pick per shape and runs unsplit wherever it cannot split "
-                "(MX formats, packed keys, gfx942); each split costs host time, so it pays off with "
-                "--use_torch_compile and slows eager runs. A larger count is passed as is and AITER "
-                "refuses calls it cannot serve."
+                "Dense AITER MHA v4 KV split count: 1 disables splitting; 'auto' delegates to AITER. "
+                "A larger count requires a compatible AITER kernel and shape. Tune with measured latency; "
+                "splitting adds host overhead and does not apply to every attention format."
             ),
         )
         _add_attention_a2a_args(parser)
         parser.add_argument(
             "--use_cfg_parallel",
             action="store_true",
-            help="Use split batch in classifier_free_guidance. cfg_degree will be 2 if set",
+            help="Split conditional and unconditional CFG branches across two ranks on supported models.",
         )
         parser.add_argument("--data_parallel_degree", type=int, default=1, help="Data parallel degree.")
         parser.add_argument(
@@ -1121,7 +1114,12 @@ class xFuserArgs:
             default=1,
             help="Tensor parallel degree for supported text encoders, reusing the existing model ranks.",
         )
-        parser.add_argument("--fully_shard_degree", type=int, default=1, help="Fully sharding (sharding) degree.")
+        parser.add_argument(
+            "--fully_shard_degree",
+            type=int,
+            default=1,
+            help="FSDP sharding group size for supported models. Does not add launcher ranks; 1 disables sharding.",
+        )
         parser.add_argument(
             "--fully_shard_components",
             nargs="+",
@@ -1153,27 +1151,25 @@ class xFuserArgs:
             "--memory_efficient_replicated_load",
             action="store_true",
             default=False,
-            help="Reduce peak host RAM when a model that fits one GPU is replicated across ranks "
-            "(pure sequence/CFG/data parallelism): rank0 loads the real weights and peers "
-            "build on meta and receive them over a GPU->GPU broadcast, so host peak is 1x the "
-            "model instead of Nx. Use if the load is OOM-killed on host as rank count grows. "
-            "No effect with weight-splitting parallelism (FSDP/PipeFusion/tensor parallel), "
-            "which loads per-rank weights anyway, or on a single rank.",
+            help="Reduce replicated-weight host memory on supported multi-rank layouts by loading "
+            "on rank 0 and broadcasting to peers built on meta. With supported PipeFusion runners, "
+            "stream only stage-local transformer blocks instead. Conflicts with transformer tensor "
+            "parallelism and untargeted FSDP; a single-rank run remains eager.",
         )
         parser.add_argument(
             "--height",
             type=int,
-            help="The height of image",
+            help="Output height in pixels.",
         )
         parser.add_argument(
             "--width",
             type=int,
-            help="The width of image",
+            help="Output width in pixels.",
         )
         parser.add_argument(
             "--num_frames",
             type=int,
-            help="The frames of video",
+            help="Number of output video frames.",
         )
         parser.add_argument(
             "--prompt",
@@ -1195,18 +1191,18 @@ class xFuserArgs:
         parser.add_argument(
             "--max_sequence_length",
             type=int,
-            help="Max sequence length of prompt",
+            help="Maximum prompt token length for supported text encoders.",
         )
         parser.add_argument("--seed", type=int, default=42, help="Random seed for operations.")
         parser.add_argument(
             "--guidance_scale",
             type=float,
-            help="Guidance scale for classifier free guidance.",
+            help="Model guidance scale; interpretation and default depend on the selected model.",
         )
         parser.add_argument(
             "--guidance_scale_2",
             type=float,
-            help="Guidance scale for classifier free guidance (second scale).",
+            help="Second guidance scale for models with a separate denoising stage.",
         )
         parser.add_argument(
             "--flow_shift",
@@ -1216,24 +1212,23 @@ class xFuserArgs:
         parser.add_argument(
             "--enable_sequential_cpu_offload",
             action="store_true",
-            help="Offloading the weights to the CPU.",
+            help="Move weights from CPU as individual submodules execute; saves device memory at a latency cost.",
         )
         parser.add_argument(
             "--enable_model_cpu_offload",
             action="store_true",
-            help="Offloading the weights to the CPU.",
+            help="Move whole pipeline components between CPU and device as needed on supported models.",
         )
         parser.add_argument(
             "--enable_group_cpu_offload",
             action="store_true",
-            help="Async leaf-level group CPU offload (streamed).",
+            help="Stream groups of weights from CPU: block-level for compiled components, leaf-level otherwise.",
         )
         parser.add_argument(
             "--group_offload_low_cpu_mem",
             action="store_true",
-            help="With --enable_group_cpu_offload, pin each tensor as it is offloaded instead of "
-            "pre-pinning whole components. Keeps host RAM flat on hosts where it is the "
-            "binding constraint, at some of the streaming speedup.",
+            help="With --enable_group_cpu_offload, pin tensors on demand instead of pre-pinning whole components. "
+            "Reduces pinned host memory at a possible latency cost.",
         )
         parser.add_argument(
             "--enable_tiling",
@@ -1280,37 +1275,35 @@ class xFuserArgs:
         parser.add_argument(
             "--use_int8_gemms",
             action="store_true",
-            help="Quantize the transformer linear layers (selected models only).",
+            help="[Deprecated] Use --gemm_quantization int8 for supported transformer targets.",
         )
         parser.add_argument(
             "--use_fp8_gemms",
             action="store_true",
-            help="Quantize the transformer linear layers (selected models only).",
+            help="[Deprecated] Use --gemm_quantization fp8 for supported transformer targets.",
         )
         parser.add_argument(
             "--use_fp8_text_encoder",
             action="store_true",
-            help="Also quantize the text encoder's linear layers to FP8 (selected models only). "
-            "Requires a GEMM profile containing FP8. Frees several GB "
-            "for large bf16 text encoders, at whatever output-quality cost FP8 carries for "
-            "the encoder; off by default because that is a quality trade-off, not a free win.",
+            help="Quantize supported text-encoder linear layers to FP8. Requires a GEMM profile containing FP8; "
+            "reduces weight memory and may change output quality.",
         )
         parser.add_argument(
             "--use_fp4_gemms",
             action="store_true",
-            help="Quantize the transformer linear layers (selected models only).",
+            help="[Deprecated] Use --gemm_quantization low=fp4,high=fp8 for supported transformer targets.",
         )
         parser.add_argument(
             "--fp8_precision_override_prefix_patterns",
             type=nullable_str,
             default=None,
-            help="Comma-delimited FQN prefix patterns to keep in FP8 during FP4 GEMMs.",
+            help="[Deprecated] Comma-delimited high-precision target prefixes for a tiered GEMM profile. Prefer --gemm_config.",
         )
         parser.add_argument(
             "--fp8_precision_override_suffix_patterns",
             type=nullable_str,
             default=None,
-            help="Comma-delimited FQN suffix patterns to keep in FP8 during FP4 GEMMs.",
+            help="[Deprecated] Comma-delimited high-precision target suffixes for a tiered GEMM profile. Prefer --gemm_config.",
         )
         parser.add_argument(
             "--ulysses_a2a",
@@ -1408,7 +1401,7 @@ class xFuserArgs:
         )
         parser.add_argument(
             "--warmup_calls",
-            help="The number of full pipe calls to warmup the model.",
+            help="Full untimed pipeline calls before measured iterations; separate from PipeFusion --warmup_steps.",
             default=0,
             type=int,
         )
@@ -1437,18 +1430,18 @@ class xFuserArgs:
             "--batch_size",
             default=None,
             type=int,
-            help="Batch size for inference. If not specified, defaults to 1.",
+            help="Split prompts into batches of this size. Required with --dataset_path; if omitted, run prompts together.",
         )
         parser.add_argument(
             "--dataset_path",
             default=None,
-            help="Path to a csv dataset file containing prompts. If specified, prompts will be loaded from the dataset. Consider using --batch_size accordingly.",
+            help="CSV file with a prompt column. Replaces --prompt and requires --batch_size.",
         )
         parser.add_argument(
             "--use_hybrid_attn_schedule",
             action="store_true",
             default=False,
-            help="Enable hybrid attention schedule for faster inference and improved quality.",
+            help="Switch attention backends during denoising on supported models. Performance and quality depend on the schedule.",
         )
         parser.add_argument(
             "--hybrid_attn_low_precision_backend",
@@ -1466,13 +1459,13 @@ class xFuserArgs:
             "--num_hybrid_attn_high_precision_steps",
             type=int,
             default=None,
-            help="Number of high-precision attention steps in hybrid schedule.",
+            help="High-precision denoising steps at both the start and end of the hybrid attention schedule.",
         )
         parser.add_argument(
             "--hybrid_attn_schedule",
             type=str,
             default=None,
-            help="An explicit comma-delimited string of attention backend names for the hybrid schedule. Example: 'FLASH_3,FLASH_3_FP8,FLASH_3_FP8,FLASH_3'. Use only if both low-precision and high-precision backends are not set.",
+            help="Comma-separated per-step attention backend names. Alternative to the low/high-precision backend pair.",
         )
         parser.add_argument(
             "--use_hybrid_gemm_schedule",
@@ -1665,7 +1658,7 @@ class xFuserArgs:
             type=str,
             default=None,
             choices=["teacache", "fbcache", "dbcache", "pipefusion"],
-            help="Step caching method.",
+            help="Step cache for supported models. pipefusion requires pipeline parallelism; other methods reject it.",
         )
         parser.add_argument(
             "--cache_config",
@@ -1674,7 +1667,7 @@ class xFuserArgs:
             help=(
                 "JSON string of advanced config overrides merged on top of preset defaults. "
                 'E.g. \'{"residual_diff_threshold": 0.5, "max_warmup_steps": 6}\'. '
-                "Keys must match DBCacheConfig fields (cache-dit)."
+                "Cache-DiT engines use DBCacheConfig fields; in-tree TeaCache/FBCache accept only residual_diff_threshold."
             ),
         )
         return parser
@@ -1757,13 +1750,14 @@ class xFuserArgs:
         self,
     ) -> Tuple[EngineConfig, InputConfig]:
         self._validate_gemm_quantization_flags()
-        if not self.use_ray and not torch.distributed.is_initialized():
+        if self.vae_parallel_size != 0:
+            raise ValueError(
+                "Dedicated VAE ranks are no longer supported. Use --use_parallel_vae with the existing model ranks."
+            )
+        if not torch.distributed.is_initialized():
             logger.warning("Distributed environment is not initialized. Initializing...")
             init_distributed_environment()
-        if self.use_ray:
-            self.world_size = self.ray_world_size
-        else:
-            self.world_size = torch.distributed.get_world_size()
+        self.world_size = torch.distributed.get_world_size()
 
         if self.dit_parallel_size == 0 and (not self.use_parallel_vae or self.vae_parallel_size == 0):
             self.dit_parallel_size = self.world_size

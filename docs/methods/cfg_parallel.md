@@ -1,6 +1,28 @@
-## Classifier-Free Guidance (CFG) Parallel 
-[Chinese Version](./cfg_parallel_zh.md)
+# CFG parallelism
 
-The Classifier-Free Guidance (CFG) has become an important trick  diffusion models by providing broader conditional control, reducing training burden, enhancing the quality and details of generated content, and improving the practicality and adaptability of the model.
+[中文](cfg_parallel_zh.md)
 
-For an input prompt, using CFG requires generating both unconditional guide and text guide simultaneously, which is equivalent to inputting input latents batch_size = 2 of DiT blocks. CFG Parallel separates the two latents for computation, and after each Diffusion Step forward is completed and before the Scheduler executes, it performs an Allgather operation on the latent space results. Its communication overhead is much smaller than Pipefusion and Sequence Parallel. Therefore, when using CFG, CFG Parallel must be used.
+Classifier-free guidance (CFG) combines positive and negative prompt predictions.
+`--use_cfg_parallel` assigns ranks to two prediction branches, then gathers their
+predictions before guidance and the scheduler step. Its degree is fixed at 2.
+
+[![Two CFG branches compute predictions separately, then gather before guidance](../assets/cfg-parallel.svg)](../assets/cfg-parallel.svg)
+
+Z-Image supports CFG parallelism and defaults to guidance scale 4:
+
+```bash
+xdit --model Z-Image --use_cfg_parallel \
+    --prompt "A cat running in a garden"
+```
+
+This command launches two ranks. For eight ranks, add `--ulysses_degree 4`.
+Each branch then uses four sequence-parallel ranks. See [hybrid layouts](hybrid.md) and the
+[model capability matrix](../runner/models.md) for supported combinations.
+
+Use CFG parallelism only while both prediction branches are active.
+Z-Image requires Diffusers 0.36 or newer. Z-Image-Turbo does not support CFG
+parallelism and disables CFG by default. FLUX.1-dev uses a guidance embedding
+instead of two branches and does not support CFG parallelism.
+
+Ordinary CFG also works on one rank. Parallelism benefits depend on the workload
+and communication cost.

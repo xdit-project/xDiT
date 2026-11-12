@@ -1,0 +1,32 @@
+## HunyuanVideo Performance Report
+
+Historical benchmark report: the results below apply to the listed models, hardware, and measurement settings. Performance with current software versions or other configurations may differ. See the [runner reference](../../runner/runner.md) for current runner usage and its supported models.
+
+This report measures [HunyuanVideo](https://github.com/Tencent/HunyuanVideo?tab=readme-ov-file#-parallel-inference-on-multiple-gpus-by-xdit) generation with Ulysses parallelism on H100, H20, and L20 GPUs. The tables below give the recorded latencies for each hardware configuration and resolution.
+
+The H100 and H20 performance benchmarks are done with the official HunyuanVideo repository. The L20 performance benchmarks are done with the `diffusers` implementation.
+The L20 performance benchmarks are measured using this [script](https://github.com/xdit-project/xDiT/blob/6ffc551265033abe6d45a7265d2f39fd5320b46c/examples/hunyuan_video_usp_example.py) (since replaced by the unified runner, `xdit --model HunyuanVideo`; see [the runner documentation](../../runner/runner.md)), along with `flash-attn==2.7.2.post1` and CUDA 12.4.
+
+### 1280x720 Resolution (129 frames, 50 steps) - Ulysses Latency (seconds)
+
+<center>
+
+| GPU Type | 1 GPU | 2 GPUs | 4 GPUs | 8 GPUs |
+| --- | --- | --- | --- | --- |
+| H100 | 1,904.08 | 925.04 | 514.08 | 337.58 |
+| H20 | 6,639.17 | 3,400.55 | 1,762.86 | 940.97 |
+| L20 | 6,043.88 | 3,271.44 | 2,080.05 | |
+
+</center>
+
+### 960x960 Resolution (129 frames, 50 steps) - Ulysses Latency (seconds)
+
+<center>
+
+| GPU Type | 1 GPU | 2 GPUs | 3 GPUs | 6 GPUs |
+| --- | --- | --- | --- | --- |
+| H100 | 1,735.01 | 934.09 | 645.45 | 367.02 |
+| H20 | 6,621.46 | 3,400.55 | 2,310.48 | 1,214.67 |
+| L20 | 6,039.08 | 3,260.62 | 2,284.74 | |
+
+</center>

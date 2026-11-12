@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" id="dark" width="1120" height="720" viewBox="0 0 1120 720" role="img" aria-labelledby="title description">
+  <title id="title">Eight-rank CFG and Ulysses layout</title>
+  <desc id="description">Z-Image uses conditional ranks zero through three and unconditional ranks four through seven. Each branch has four Ulysses ranks that exchange tokens and heads. CFG groups pair corresponding ranks across branches. After sequence and CFG gathers, the original pipeline applies guidance and updates latents.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M1 1 L7 4 L1 7" fill="none" stroke="#0ea9ff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <style>
+    :root { --background: #ffffff; --surface: #f7f9fb; --border: #dde4e9; --text: #3a3a3a; --body: #505b64; --detail: #606b74; --link: #006aa3; }
+    :root:target { --background: #181c20; --surface: #22282e; --border: #404a53; --text: #e7edf2; --body: #cad5de; --detail: #aebecb; --link: #67cdff; }
+    .background { fill: var(--background); } .panel { fill: var(--surface); stroke: var(--border); stroke-width: 2; }
+    .card { fill: var(--background); stroke: var(--border); stroke-width: 2; }
+    text { font-family: sans-serif; fill: var(--body); font-size: 20px; }
+    .title { fill: var(--text); font-size: 30px; font-weight: 700; }
+    .heading { fill: var(--text); font-size: 24px; font-weight: 700; }
+    .detail { fill: var(--detail); font-size: 18px; }
+    .flag { fill: var(--link); font-family: monospace; font-size: 19px; }
+    .arrow { fill: none; stroke: var(--link); stroke-width: 2.5; marker-end: url(#arrow); }
+    .exchange { fill: none; stroke: #0ea9ff; stroke-width: 2.5; marker-start: url(#arrow); marker-end: url(#arrow); }
+    .accent { fill: var(--background); stroke: #0ea9ff; stroke-width: 2.5; }
+    .warm { fill: var(--background); stroke: #ffb22e; stroke-width: 2.5; }
+  </style>
+  <rect width="1120" height="720" class="background"/>
+  <text x="40" y="55" class="title" text-anchor="start">Eight ranks: two CFG branches × four Ulysses ranks</text>
+  <text x="40" y="88" class="detail" text-anchor="start">Z-Image example · same transformer weights, different guidance branches and token shards</text>
+  <rect x="50" y="120" width="430" height="410" rx="10" class="panel"/>
+  <text x="74" y="159" class="heading" text-anchor="start">Conditional branch</text>
+  <rect x="74" y="186" width="382" height="63" rx="10" class="accent"/>
+  <text x="93" y="215" class="heading" text-anchor="start" style="font-size:20px">Rank 0 · Ulysses 0</text>
+  <text x="93" y="237" class="detail" text-anchor="start" style="font-size:16px">Local tokens; replicated transformer</text>
+  <rect x="74" y="259" width="382" height="63" rx="10" class="accent"/>
+  <text x="93" y="288" class="heading" text-anchor="start" style="font-size:20px">Rank 1 · Ulysses 1</text>
+  <text x="93" y="310" class="detail" text-anchor="start" style="font-size:16px">Local tokens; replicated transformer</text>
+  <rect x="74" y="332" width="382" height="63" rx="10" class="accent"/>
+  <text x="93" y="361" class="heading" text-anchor="start" style="font-size:20px">Rank 2 · Ulysses 2</text>
+  <text x="93" y="383" class="detail" text-anchor="start" style="font-size:16px">Local tokens; replicated transformer</text>
+  <rect x="74" y="405" width="382" height="63" rx="10" class="accent"/>
+  <text x="93" y="434" class="heading" text-anchor="start" style="font-size:20px">Rank 3 · Ulysses 3</text>
+  <text x="93" y="456" class="detail" text-anchor="start" style="font-size:16px">Local tokens; replicated transformer</text>
+  <text x="74" y="512" class="detail" text-anchor="start">Ulysses all-to-all inside this group</text>
+  <rect x="640" y="120" width="430" height="410" rx="10" class="panel"/>
+  <text x="664" y="159" class="heading" text-anchor="start">Unconditional branch</text>
+  <rect x="664" y="186" width="382" height="63" rx="10" class="warm"/>
+  <text x="683" y="215" class="heading" text-anchor="start" style="font-size:20px">Rank 4 · Ulysses 0</text>
+  <text x="683" y="237" class="detail" text-anchor="start" style="font-size:16px">Local tokens; replicated transformer</text>
+  <rect x="664" y="259" width="382" height="63" rx="10" class="warm"/>
+  <text x="683" y="288" class="heading" text-anchor="start" style="font-size:20px">Rank 5 · Ulysses 1</text>
+  <text x="683" y="310" class="detail" text-anchor="start" style="font-size:16px">Local tokens; replicated transformer</text>
+  <rect x="664" y="332" width="382" height="63" rx="10" class="warm"/>
+  <text x="683" y="361" class="heading" text-anchor="start" style="font-size:20px">Rank 6 · Ulysses 2</text>
+  <text x="683" y="383" class="detail" text-anchor="start" style="font-size:16px">Local tokens; replicated transformer</text>
+  <rect x="664" y="405" width="382" height="63" rx="10" class="warm"/>
+  <text x="683" y="434" class="heading" text-anchor="start" style="font-size:20px">Rank 7 · Ulysses 3</text>
+  <text x="683" y="456" class="detail" text-anchor="start" style="font-size:16px">Local tokens; replicated transformer</text>
+  <text x="664" y="512" class="detail" text-anchor="start">Ulysses all-to-all inside this group</text>
+  <path d="M492 216 L628 216" class="exchange"/>
+  <path d="M492 289 L628 289" class="exchange"/>
+  <path d="M492 362 L628 362" class="exchange"/>
+  <path d="M492 435 L628 435" class="exchange"/>
+  <text x="560" y="150" class="detail" text-anchor="middle">CFG gather</text>
+  <text x="560" y="174" class="detail" text-anchor="middle">matching ranks</text>
+  <rect x="50" y="562" width="1020" height="86" rx="10" class="card"/>
+  <text x="74" y="595" class="heading" text-anchor="start">Gather sequence shards, then CFG predictions.</text>
+  <text x="74" y="627" class="detail" text-anchor="start">Apply guidance and the scheduler. Parallel VAE can reuse all eight ranks for decoding.</text>
+  <text x="50" y="687" class="detail" text-anchor="start">Layout: CFG 2 × Ulysses 4 · Ring 1 · PipeFusion 1 · Data 1 · Transformer TP 1</text>
+</svg>

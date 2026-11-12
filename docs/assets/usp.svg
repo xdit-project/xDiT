@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" id="dark" width="1120" height="800" viewBox="0 0 1120 800" role="img" aria-labelledby="title description">
+  <title id="title">Ulysses collective exchanges within USP</title>
+  <desc id="description">With Ring degree one and two Ulysses ranks, each rank starts with half the tokens and all heads. Both ranks participate in Q K V all-to-all: each attention rank receives all tokens for half the heads. A second all-to-all returns attention output to its original token shards. Transformer weights remain replicated unless a separate weight-sharding method is used.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M1 1 L7 4 L1 7" fill="none" stroke="#0ea9ff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <style>
+    :root { --background: #ffffff; --surface: #f7f9fb; --border: #dde4e9; --text: #3a3a3a; --body: #505b64; --detail: #606b74; --link: #006aa3; }
+    :root:target { --background: #181c20; --surface: #22282e; --border: #404a53; --text: #e7edf2; --body: #cad5de; --detail: #aebecb; --link: #67cdff; }
+    .background { fill: var(--background); } .panel { fill: var(--surface); stroke: var(--border); stroke-width: 2; }
+    .card { fill: var(--background); stroke: var(--border); stroke-width: 2; }
+    text { font-family: sans-serif; fill: var(--body); font-size: 20px; }
+    .title { fill: var(--text); font-size: 30px; font-weight: 700; }
+    .heading { fill: var(--text); font-size: 24px; font-weight: 700; }
+    .detail { fill: var(--detail); font-size: 18px; }
+    .flag { fill: var(--link); font-family: monospace; font-size: 19px; }
+    .arrow { fill: none; stroke: var(--link); stroke-width: 2.5; marker-end: url(#arrow); }
+    .exchange { fill: none; stroke: #0ea9ff; stroke-width: 2.5; marker-start: url(#arrow); marker-end: url(#arrow); }
+    .accent { fill: var(--background); stroke: #0ea9ff; stroke-width: 2.5; }
+    .warm { fill: var(--background); stroke: #ffb22e; stroke-width: 2.5; }
+  </style>
+  <rect width="1120" height="800" class="background"/>
+  <text x="40" y="55" class="title" text-anchor="start">Ulysses: exchange token and head partitions</text>
+  <text x="40" y="88" class="detail" text-anchor="start">Two Ulysses ranks, Ring degree 1. Both ranks participate in each all-to-all exchange.</text>
+  <text x="50" y="145" class="heading" text-anchor="start">Before attention</text>
+  <text x="50" y="175" class="detail" text-anchor="start">Local tokens · all heads</text>
+  <text x="755" y="145" class="heading" text-anchor="start">Inside attention</text>
+  <text x="755" y="175" class="detail" text-anchor="start">All tokens · local heads</text>
+  <rect x="50" y="205" width="310" height="120" rx="10" class="panel"/>
+  <text x="72" y="240" class="detail" text-anchor="start">Rank 0</text>
+  <rect x="72" y="257" width="266" height="44" rx="10" class="accent"/>
+  <text x="205" y="286" class="detail" text-anchor="middle">Token shard 0 · all heads</text>
+  <rect x="755" y="205" width="315" height="120" rx="10" class="panel"/>
+  <text x="777" y="240" class="detail" text-anchor="start">Rank 0 · head shard 0</text>
+  <rect x="777" y="257" width="125" height="44" rx="10" class="accent"/>
+  <rect x="920" y="257" width="128" height="44" rx="10" class="warm"/>
+  <text x="839" y="286" class="detail" style="font-size:14px" text-anchor="middle">Token shard 0</text>
+  <text x="984" y="286" class="detail" style="font-size:14px" text-anchor="middle">Token shard 1</text>
+  <rect x="50" y="355" width="310" height="120" rx="10" class="panel"/>
+  <text x="72" y="390" class="detail" text-anchor="start">Rank 1</text>
+  <rect x="72" y="407" width="266" height="44" rx="10" class="warm"/>
+  <text x="205" y="436" class="detail" text-anchor="middle">Token shard 1 · all heads</text>
+  <rect x="755" y="355" width="315" height="120" rx="10" class="panel"/>
+  <text x="777" y="390" class="detail" text-anchor="start">Rank 1 · head shard 1</text>
+  <rect x="777" y="407" width="125" height="44" rx="10" class="accent"/>
+  <rect x="920" y="407" width="128" height="44" rx="10" class="warm"/>
+  <text x="839" y="436" class="detail" style="font-size:14px" text-anchor="middle">Token shard 0</text>
+  <text x="984" y="436" class="detail" style="font-size:14px" text-anchor="middle">Token shard 1</text>
+  <rect x="430" y="265" width="255" height="150" rx="10" class="card"/>
+  <text x="557" y="301" class="heading" text-anchor="middle">Q / K / V</text>
+  <text x="557" y="334" class="heading" text-anchor="middle">all-to-all</text>
+  <text x="557" y="367" class="detail" text-anchor="middle">Each rank sends and</text>
+  <text x="557" y="394" class="detail" text-anchor="middle">receives head partitions.</text>
+  <path d="M365 265 L423 308" class="arrow"/>
+  <path d="M365 415 L423 370" class="arrow"/>
+  <path d="M691 308 L749 265" class="arrow"/>
+  <path d="M691 370 L749 415" class="arrow"/>
+  <text x="557" y="507" class="heading" text-anchor="middle">Compute attention locally over the complete sequence.</text>
+  <rect x="50" y="550" width="310" height="105" rx="10" class="panel"/>
+  <rect x="430" y="550" width="255" height="105" rx="10" class="card"/>
+  <rect x="755" y="550" width="315" height="105" rx="10" class="panel"/>
+  <text x="205" y="594" class="heading" text-anchor="middle">Restore token shards</text>
+  <text x="205" y="630" class="detail" text-anchor="middle">All heads reassembled</text>
+  <text x="557" y="594" class="heading" text-anchor="middle">Output all-to-all</text>
+  <text x="557" y="630" class="detail" text-anchor="middle">Both ranks participate</text>
+  <text x="912" y="594" class="heading" text-anchor="middle">Attention outputs</text>
+  <text x="912" y="630" class="detail" text-anchor="middle">All tokens · local heads</text>
+  <path d="M749 603 L691 603" class="arrow"/>
+  <path d="M423 603 L366 603" class="arrow"/>
+  <text x="50" y="712" class="heading" text-anchor="start">Ulysses divides attention work. Weight sharding is a separate option.</text>
+  <text x="50" y="747" class="detail" text-anchor="start">Ring degree &gt; 1 adds KV exchanges between Ring peers, within each Ulysses head partition.</text>
+  <text x="50" y="776" class="detail" text-anchor="start">Supported FP8 communication quantizes Q/K/V before their Ulysses exchange; it does not quantize every collective.</text>
+</svg>

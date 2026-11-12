@@ -1,29 +1,46 @@
+# 混合并行
 
-## 混合并行设计
+[English Version](./hybrid.md)
 
-xDiT设计目标是扩展推理过程到超大规模，比如异构网络互联条件下多机多卡，比如以太网和PCIe。单一并行方式，比如PipeFusion或者SP，很难同时做到这两点，不同并行方式混合在一起变得尤为重要。
+在模型支持的前提下，xDiT 可以组合不同的并行方式。应根据模型、可用显存和
+设备互联选择布局，并实际测量任务：增加设备也会增加通信和同步开销。
 
-xDiT支持四种并行方式：PipeFusion、Sequence、Data和CFG Parallel。其中，Data和CFG Parallel在图像间并行相对简单，而PipeFusion和Sequence在图像内部的不同Patch间并行则较为复杂。能让着两种并行方式的混合使用，正式xDiT核心创新点之一。
+| 并行方式 | 分配的工作 | 运行器参数 |
+| --- | --- | --- |
+| 数据并行 | 将独立提示词分配到不同模型组 | `--data_parallel_degree` |
+| CFG 并行 | 条件与无条件预测分支 | `--use_cfg_parallel`，并行度为 2 |
+| Ulysses | 通过 all-to-all 交换注意力 token 与 head | `--ulysses_degree` |
+| Ring | 通过环形通信传递注意力 KV 块 | `--ring_degree` |
+| PipeFusion | Transformer 阶段处理 latent patch | `--pipefusion_parallel_degree` |
+| 张量并行 | 支持的 Transformer 计算 | `--tensor_parallel_degree` |
 
-PipeFusion利用Input Tempor Redundancy特点，使用过时的KV（Stale KV）进行Attention计算，这使得PipeFusion无法像大型语言模型（LLM）那样轻松地实现并行策略的混合。具体来说，使用标准的序列并行接口，如RingAttention、Ulysses或USP，无法满足SP与PipeFusion混合并行的需求。
+[![八个 rank：两个 CFG 分支，每个分支包含四个 Ulysses rank](../assets/parallel-layout.svg)](../assets/parallel-layout.svg)
 
-我们对这个问题具体说明，下图展示了pipe_degree=4，sp_degree=2的混合并行方法。设置`num_pipeline_patch`=4，图片切分为M=`num_pipeline_patch*sp_degree`=8个Patch，分别是P0~P7。
+## 配置 rank 数量
 
-<div align="center">
-    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/methods/hybrid_pp_scheme.png" alt="hybrid process group config"  width="60%">
-</div>
+启动进程数为数据、CFG、Ulysses、Ring、Transformer 张量并行和 PipeFusion
+并行度的乘积。未使用的并行度为 1。以下示例使用八个设备：两个 CFG
+分支，每个分支包含四个 Ulysses rank。
 
-Standard SP Attention实现，输入Q，K，V和输出O都是沿着序列维度切分，且切分方式一致。如果不同rank的输入patch没有重叠，每个micro step计算出fresh KV更新的位置在不同rank间也没有重叠。如下图所示，standard SP的KV Buffer中黄色部分是SP0 rank=0拥有的fresh KV，绿色部分是SP1 rank=1拥有的fresh KV，二者并不相同。在这个diffusion step内，device=0无法拿到P1,3,5,7的fresh KV进行计算，但是PipeFusion则需要在下一个diffusion step中，拥有上一个diffusion step全部的KV。standard SP只拥有1/sp_degree的fresh kv buffer，因此无法获得混合并行推理正确的结果。
+```bash
+xdit --model Z-Image \
+    --prompt "A cat running in a garden" \
+    --use_cfg_parallel --ulysses_degree 4
+```
 
-<div align="center">
-    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/methods/hybrid_workflow.png" alt="hybrid parallel workflow">
-</div>
+Z-Image 默认启用引导。Ulysses 在各分支内部交换 token 和 head；CFG
+在对应 rank 间收集预测。此示例的 Ring 和 PipeFusion 并行度均为 1。
+只有模型支持且生成设置启用了 CFG 时，CFG 并行才额外引入 2 倍的 rank 数。
+`--fully_shard_degree` 和 `--text_encoder_tp_degree` 复用已有模型 rank，
+不会增加启动进程数。多节点启动和 FSDP 限制见[运行器启动指南](../runner/runner.md#launch-and-parallel-configuration)。
 
+### 选择下一篇指南
 
+- [USP](usp.md)：Ulysses 和 Ring 的注意力 head 与后端限制。
+- [PipeFusion](pipefusion.md)：阶段负载、patch 数和组合限制。
+- [CFG 并行](cfg_parallel_zh.md)：拆分已启用的条件与无条件分支。
+- [并行 VAE](parallel_vae.md)：在 Transformer 去噪后分配 VAE 工作。
 
-xDiT专门定制了序列并行的实现方式，以适应这种混合并行的需求。xDiT使用`xFuserLongContextAttention`把SP的中间结果存在KV Buffer内。这样效果如下图，每个micro-step SP执行完毕后，SP Group内不同rank设备的fresh KV是replicate的。这样一个diffusion step后，SP Group所有设备的KV Buffer都更新成最新，供下一个Diffusion Step使用。
-
-
-<div align="center">
-    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/methods/kvbuffer_hybrid.png" alt="kvbuffer in hybrid parallel">
-</div>
+FSDP 在已有 rank 上分片指定组件的权重；Transformer 张量并行拆分支持的
+Transformer 计算。两者均要求模型支持。VAE 使用独立调度，不遵循
+Transformer 的 patch 流水线。

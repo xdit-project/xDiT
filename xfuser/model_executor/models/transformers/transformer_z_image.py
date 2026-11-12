@@ -2,7 +2,10 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 from typing import List, Optional
 
-from diffusers.models.transformers.transformer_z_image import ZImageTransformer2DModel
+from diffusers.models.transformers.transformer_z_image import (
+    ZImageTransformer2DModel,
+    ZImageTransformerBlock,
+)
 from diffusers.models.attention_processor import Attention
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.utils import apply_lora_scale
@@ -13,11 +16,15 @@ from xfuser.model_executor.models.transformers.transformers_utils import (
     chunk_and_pad_sequence,
     gather_and_unpad,
     local_sp_pad_rows,
+    zero_sp_pad_rows,
     zero_sp_pad_rows_hook,
 )
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
 from xfuser.model_executor.layers.fused_qk_rope_zimage_flydsl import (
     flydsl_fused_qk_norm_rope,
+)
+from xfuser.model_executor.layers.fused_gated_residual_norm_zimage import (
+    fused_gated_residual_norm,
 )
 
 from xfuser.core.distributed import (
@@ -31,6 +38,10 @@ from xfuser.core.distributed import (
 
 ADALN_EMBED_DIM = 256
 SEQ_MULTI_OF = 32
+
+# Captured before any patching so the fused block forward can defer to the
+# genuine upstream implementation on shapes it does not handle.
+_UPSTREAM_BLOCK_FORWARD = ZImageTransformerBlock.forward
 
 
 def _scatter_pad_token(x: torch.Tensor, mask: torch.Tensor, pad_token: torch.Tensor) -> torch.Tensor:
@@ -155,6 +166,186 @@ class xFuserZSingleStreamAttnProcessor:
         return output
 
 
+def _fused_block_forward(
+    self,
+    x: torch.Tensor,
+    attn_mask: torch.Tensor,
+    freqs_cis: torch.Tensor,
+    adaln_input: Optional[torch.Tensor] = None,
+    noise_mask: Optional[torch.Tensor] = None,
+    adaln_noisy: Optional[torch.Tensor] = None,
+    adaln_clean: Optional[torch.Tensor] = None,
+):
+    """``ZImageTransformerBlock.forward`` with the gated residual pair fused.
+
+    Identical dataflow to upstream; the only change is that
+
+        x = x + gate_msa * attention_norm2(attn_out)
+        <ffn_norm1(x) * scale_mlp>
+
+    is handed to one kernel instead of the three row-passes Inductor's
+    non-persistent reduction emits for it (see
+    ``fused_gated_residual_norm_zimage``).  The closing residual is left alone
+    on purpose: Inductor fuses it with the *next* block's opening norm into a
+    single kernel, and splitting that pair would cost more than it saves.
+
+    Anything outside the fused path's envelope -- per-token modulation, the
+    unmodulated context-refiner blocks, a grad-enabled call -- runs the upstream
+    expression unchanged via the wrapper's own fallback.
+    """
+    if noise_mask is not None:
+        return _UPSTREAM_BLOCK_FORWARD(
+            self,
+            x,
+            attn_mask,
+            freqs_cis,
+            adaln_input,
+            noise_mask,
+            adaln_noisy,
+            adaln_clean,
+        )
+    if not self.modulation:
+        return _UPSTREAM_BLOCK_FORWARD(self, x, attn_mask, freqs_cis, adaln_input)
+
+    mod = self.adaLN_modulation(adaln_input)
+    scale_msa, gate_msa, scale_mlp, gate_mlp = mod.unsqueeze(1).chunk(4, dim=2)
+    gate_msa, gate_mlp = gate_msa.tanh(), gate_mlp.tanh()
+    scale_msa, scale_mlp = 1.0 + scale_msa, 1.0 + scale_mlp
+
+    attn_out = self.attention(self.attention_norm1(x) * scale_msa, attention_mask=attn_mask, freqs_cis=freqs_cis)
+    x, h = fused_gated_residual_norm(x, attn_out, gate_msa, self.attention_norm2, self.ffn_norm1, scale_mlp)
+    return x + gate_mlp * self.ffn_norm2(self.feed_forward(h))
+
+
+def _stack_modulation(layers, adaln_input):
+    """``(scale_msa, gate_msa, scale_mlp, gate_mlp)`` for a whole stack at once.
+
+    Each is ``(L, B, 1, D)``, indexed by layer.  Two things are going on:
+
+    *Hoisting* -- the runner needs block ``i + 1``'s opening scale while it is
+    still closing block ``i``, so the modulation cannot stay inside the block.
+    It also has to be a real tensor: left as an expression, the ``tanh`` fuses
+    into whichever row kernel consumes it and is then re-evaluated once per
+    activation element (tens of millions) instead of once per channel (a few
+    thousand).
+
+    *Batching* -- done per layer this is ~4 launches x L per denoise step, each
+    moving a few KB, which is pure launch overhead.  Stacking first lets the
+    whole stack's ``chunk``/``tanh``/``1 +`` collapse into one kernel.  The
+    ``adaLN_modulation`` GEMMs stay per layer: folding those would mean carrying
+    a second, concatenated copy of every block's projection weight, and they are
+    only a fraction of what the pointwise tail costs.
+    """
+    mod = torch.stack([layer.adaLN_modulation(adaln_input) for layer in layers], dim=0)
+    num_layers, bsz, _ = mod.shape
+    # (L, B, 4, D) -> four (L, B, 1, D) views, contiguous in D so each layer's
+    # slice reshapes to the (B, D) the fused kernel wants without a copy.
+    mod = mod.view(num_layers, bsz, 4, -1)
+    scale_msa, gate_msa, scale_mlp, gate_mlp = (mod[:, :, i] for i in range(4))
+    return (
+        (1.0 + scale_msa).unsqueeze(2),
+        gate_msa.tanh().unsqueeze(2),
+        (1.0 + scale_mlp).unsqueeze(2),
+        gate_mlp.tanh().unsqueeze(2),
+    )
+
+
+def _stack_is_pipelinable(layers) -> bool:
+    """True when the runner may drive the blocks' internals directly.
+
+    Compiled blocks and blocks with Diffusers or Accelerate hook registries
+    use the per-layer loop. This preserves their compiled forward calls and
+    device-placement hooks.
+    """
+    return bool(layers) and all(
+        type(layer) is ZImageTransformerBlock
+        and getattr(layer, "modulation", False)
+        and not hasattr(layer, "_diffusers_hook")
+        and not hasattr(layer, "_hf_hook")
+        for layer in layers
+    )
+
+
+def _run_modulated_stack(layers, x, attn_mask, freqs_cis, adaln_input, pad_rows: int = 0):
+    """Run a stack of modulated blocks, software-pipelined by one norm.
+
+    A Z-Image block opens with ``attention_norm1(x) * scale_msa`` and closes
+    with ``x + gate_mlp * ffn_norm2(ffn_out)``.  Run block by block, those are
+    two separate trips over the residual stream per boundary.  They are really
+    one producer-consumer pair, so this runner rotates the opening norm of block
+    ``i + 1`` into the closing kernel of block ``i``: one fused
+    ``gated residual -> renorm`` launch per boundary instead of two row passes,
+    with the peeled first opening and last closing left to the ordinary path.
+
+    Falls back to the plain per-layer loop whenever the stack is not
+    pipelinable, so this changes the schedule, never the result.
+
+    ``pad_rows`` is this rank's trailing SP pad row count, and clearing those
+    rows is this runner's job rather than the hook's.  The wrapper hangs
+    ``zero_sp_pad_rows_hook`` on every block, but a hook only fires through
+    ``Module.__call__`` and the pipelined path never gets there -- it drives
+    ``layer.attention`` and ``layer.feed_forward`` directly.  So each block
+    output this loop produces is cleared here instead.
+
+    It matters because what a block leaves in its pad rows feeds per-tensor
+    statistics that real tokens share: FP8-comms calibration, the step cache's
+    residual, Sage / AITER FP8 query scales.
+
+    Clearing *after* the rotated call reaches the same values the hook would
+    have produced.  The unfused pair zeroes block ``i``'s output and then norms
+    it for block ``i + 1``, and ``RMSNorm(0) * scale`` is zero, so both outputs
+    of the rotated call are zero on a pad row -- computing them from stale data
+    and overwriting lands exactly on the reference.  The pair *inside* a block
+    is left alone: it crosses no block boundary, and upstream does not zero
+    between those two either.
+
+    Nothing here branches on the pad count, so every rank issues the same
+    sequence of launches and the collectives inside attention stay in lockstep.
+    """
+    if torch.is_grad_enabled() or not _stack_is_pipelinable(layers):
+        # This loop goes through layer.forward, so zero_sp_pad_rows_hook fires
+        # and owns the pad rows; clearing them again here would be redundant.
+        for layer in layers:
+            x = layer(x, attn_mask, freqs_cis, adaln_input)
+        return x
+
+    all_scale_msa, all_gate_msa, all_scale_mlp, all_gate_mlp = _stack_modulation(layers, adaln_input)
+    # Peeled prologue: the first block's opening norm has no predecessor.
+    h = layers[0].attention_norm1(x) * all_scale_msa[0]
+    last = len(layers) - 1
+
+    for i, layer in enumerate(layers):
+        attn_out = layer.attention(h, attention_mask=attn_mask, freqs_cis=freqs_cis)
+        x, h_ffn = fused_gated_residual_norm(
+            x,
+            attn_out,
+            all_gate_msa[i],
+            layer.attention_norm2,
+            layer.ffn_norm1,
+            all_scale_mlp[i],
+        )
+        ffn_out = layer.feed_forward(h_ffn)
+        if i < last:
+            x, h = fused_gated_residual_norm(
+                x,
+                ffn_out,
+                all_gate_mlp[i],
+                layer.ffn_norm2,
+                layers[i + 1].attention_norm1,
+                all_scale_msa[i + 1],
+            )
+            # ``x`` is block i's output -- the tensor the hook would have
+            # cleared -- and ``h`` is block i + 1's opening norm of it, zero on
+            # a pad row for the reason in the docstring.
+            zero_sp_pad_rows(x, pad_rows)
+            zero_sp_pad_rows(h, pad_rows)
+        else:
+            # Peeled epilogue: nothing left to pre-normalise for.
+            x = x + all_gate_mlp[i] * layer.ffn_norm2(ffn_out)
+            zero_sp_pad_rows(x, pad_rows)
+    return x
+
+
 def z_image_attn_modules(transformer) -> list[torch.nn.Module]:
     """Return every Z-Image attention module that executes USP."""
     return [
@@ -175,6 +366,10 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
         for layer in self.layers + self.context_refiner + self.noise_refiner:
             layer.attention.processor = xFuserZSingleStreamAttnProcessor(attention_kwargs=self._self_attn_kwargs)
             layer.register_forward_hook(zero_sp_pad_rows_hook(self._sp_pad))
+            # Bound per instance, so an unpatched ZImageTransformerBlock
+            # elsewhere in the process keeps upstream's forward.  Module.__call__
+            # resolves ``self.forward`` per call, so the hook above still runs.
+            layer.forward = _fused_block_forward.__get__(layer, type(layer))
         register_fp8_comms_eligible_modules(self, z_image_attn_modules(self))
 
     @apply_lora_scale("joint_attention_kwargs")
@@ -264,8 +459,14 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
             for layer in self.noise_refiner:
                 x = self._gradient_checkpointing_func(layer, x, x_attn_mask, x_freqs_cis_chunked, adaln_input)
         else:
-            for layer in self.noise_refiner:
-                x = layer(x, x_attn_mask, x_freqs_cis_chunked, adaln_input)
+            x = _run_modulated_stack(
+                self.noise_refiner,
+                x,
+                x_attn_mask,
+                x_freqs_cis_chunked,
+                adaln_input,
+                pad_rows=self._sp_pad["local_rows"],
+            )
 
         # Gather SP outputs and remove padding
         x = gather_and_unpad(x, pad_amount, dim=-2)
@@ -344,8 +545,14 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
                     layer, unified, unified_attn_mask, unified_freqs_cis, adaln_input
                 )
         else:
-            for layer in self.layers:
-                unified = layer(unified, unified_attn_mask, unified_freqs_cis, adaln_input)
+            unified = _run_modulated_stack(
+                self.layers,
+                unified,
+                unified_attn_mask,
+                unified_freqs_cis,
+                adaln_input,
+                pad_rows=self._sp_pad["local_rows"],
+            )
 
         # Gather SP outputs and remove padding
         unified = gather_and_unpad(unified, pad_amount, dim=-2)

@@ -22,7 +22,9 @@ def _tiny_vae():
     from diffusers import AutoencoderKL
     from xfuser import envs
 
-    envs.restore_torch_group_norm_for_distvae()
+    # The runner binds AITER's GroupNorm before it builds the model, and that kernel
+    # needs an accelerator. This VAE decodes on the CPU.
+    envs.bind_group_norm(use_aiter=False)
     torch.manual_seed(0)
     return AutoencoderKL(
         block_out_channels=(32,),

@@ -80,3 +80,21 @@ def test_flux2_pipefusion_accepts_parallel_vae(single_process, tmp_path, model_c
 
     assert runner.config.pipefusion_parallel_degree == 2
     assert runner.config.use_parallel_vae is True
+
+
+@pytest.mark.parametrize(
+    "model_cls",
+    [flux.xFuserFlux2Klein9BModel, flux.xFuserFlux2Klein4BModel],
+)
+def test_klein_compiles_the_text_encoder_but_offloads_it_leaf_level(model_cls):
+    """Compilation reaches the encoder's nested blocks; block-level grouping does not.
+
+    Klein declares its text-encoder blocks at ``model.layers``, which group
+    offload only reaches by recursing, so the two policies name different
+    components.
+    """
+    runner = object.__new__(model_cls)
+
+    assert "text_encoder" in runner._get_compiled_pipe_components()
+    assert runner._block_level_offload_components() == ["transformer"]
+    assert model_cls.settings.fsdp_strategy["text_encoder"]["wrap_attrs"] == ["model.layers"]

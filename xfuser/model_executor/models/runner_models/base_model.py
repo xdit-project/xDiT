@@ -651,15 +651,15 @@ class xFuserModel(abc.ABC):
     def _enable_cpu_offload(self) -> None:
         """Apply the CPU offload mode the config selects, if any."""
         if self.config.enable_group_cpu_offload:
-            # block_level groups only top-level ModuleLists: fits compiled transformers
-            # (blocks are top-level) and avoids the per-block-compile recompile storm that
-            # leaf-level hooks trigger. Eager components nest their layers (e.g. Mistral-3 at
-            # model.language_model.layers) where block_level cannot reach, leaving the whole
-            # component in one unmatched group and OOMing; they use leaf_level, which recurses.
+            # block_level groups only top-level ModuleLists, which also avoids the
+            # per-block-compile recompile storm that leaf-level hooks trigger. Components
+            # that nest their layers (e.g. Mistral-3 at model.language_model.layers) are out
+            # of its reach and would offload as one group, so they use leaf_level, which
+            # recurses. _block_level_offload_components names the ones it fits.
             from diffusers.hooks import apply_group_offloading
 
-            log("Enabling group CPU offload (transformer block-level, others leaf-level, streamed)...")
-            block_level_names = set(self._get_compiled_pipe_components())
+            log("Enabling group CPU offload (declared components block-level, others leaf-level, streamed)...")
+            block_level_names = set(self._block_level_offload_components())
             for name, component in self.pipe.components.items():
                 if not isinstance(component, torch.nn.Module):
                     continue
@@ -1024,6 +1024,17 @@ class xFuserModel(abc.ABC):
 
     def _get_compiled_pipe_components(self) -> List[str]:
         return ["transformer"]
+
+    def _block_level_offload_components(self) -> List[str]:
+        """Components that group CPU offload splits block by block.
+
+        ``block_level`` groups the ModuleLists that are direct children of a
+        component, which suits a transformer that holds its blocks there. A
+        component that nests its blocks deeper matches nothing, and group
+        offload then holds all of it on the device at once, so such a component
+        belongs on ``leaf_level``, which recurses.
+        """
+        return self._get_compiled_pipe_components()
 
     def _get_compile_warmup_steps(self, input_args: dict) -> Optional[int]:
         return 2  # None = skip step reduction, run full warmup cycle

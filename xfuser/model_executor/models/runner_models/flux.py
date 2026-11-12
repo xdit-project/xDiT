@@ -527,6 +527,14 @@ class xFuserFlux2Klein9BModel(xFuserModel):
     def _get_compiled_pipe_components(self) -> list[str]:
         return ["transformer", "text_encoder"]
 
+    def _block_level_offload_components(self) -> list[str]:
+        """Leave the text encoder on leaf-level offload.
+
+        Its blocks sit at ``model.layers``, one level below the component, where
+        block-level grouping does not reach them.
+        """
+        return ["transformer"]
+
     def _get_compile_mode(self) -> str:
         # CUDA graphs incompatible with cross-step caching, and
         # cause pathological re-captures on RDNA4.

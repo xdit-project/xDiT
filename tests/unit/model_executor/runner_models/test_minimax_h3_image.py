@@ -126,6 +126,35 @@ def test_wrapper_matches_diffusers_on_one_rank(single_rank, layout):
         torch.testing.assert_close(wrapped(**inputs).sample, expected)
 
 
+def test_wrapper_projects_each_timestep_modulation_once(single_rank):
+    """The AdaLN tables depend on the timestep alone, so a request repeating the grid reuses them."""
+    base, wrapped = _tiny_models()
+    projections = []
+    wrapped.time_embedder.register_forward_hook(lambda *args: projections.append(None))
+
+    with torch.no_grad():
+        for _ in range(2):
+            for step in range(_tiny_config()["num_pdd_heads"]):
+                inputs = _tiny_inputs(pdd_step_index=step)
+                inputs["timestep"] = torch.tensor([1.0 - 0.25 * step])
+                expected = base(**inputs).sample
+                torch.testing.assert_close(wrapped(**inputs).sample, expected, rtol=0, atol=0)
+
+    assert len(projections) == _tiny_config()["num_pdd_heads"]
+
+
+def test_wrapper_projects_the_modulation_under_autograd(single_rank):
+    _, wrapped = _tiny_models()
+    inputs = _tiny_inputs()
+    with torch.no_grad():
+        wrapped(**inputs)
+
+    wrapped(**inputs).sample.sum().backward()
+
+    assert wrapped.transformer_blocks[0].adaln_proj.linear.weight.grad is not None
+    assert wrapped.norm_out.linear.weight.grad is not None
+
+
 def test_wrapper_keeps_the_checkpoint_config_through_from_config(single_rank):
     from xfuser.model_executor.models.transformers.transformer_minimax_h3_image import (
         xFuserMiniMaxH3ImageTransformer2DWrapper,
@@ -301,3 +330,63 @@ def test_the_denoise_step_sees_the_layout_fields_of_a_wrapped_transformer(runner
     inputs = _tiny_inputs()
     with torch.no_grad():
         torch.testing.assert_close(transformer(**inputs).sample, wrapped(**inputs).sample)
+
+
+def _tiny_text_encoder():
+    from transformers import Qwen3VLConfig, Qwen3VLForConditionalGeneration
+
+    torch.manual_seed(0)
+    config = Qwen3VLConfig(
+        text_config={
+            "vocab_size": 64,
+            "hidden_size": 32,
+            "intermediate_size": 64,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "head_dim": 16,
+            "rope_scaling": {"rope_type": "default", "mrope_section": [4, 2, 2], "mrope_interleaved": True},
+        },
+        vision_config={"depth": 1, "hidden_size": 16, "intermediate_size": 32, "num_heads": 2, "out_hidden_size": 32},
+    )
+    return Qwen3VLForConditionalGeneration(config).eval()
+
+
+def _encode(text_encoder, num_tokens):
+    input_ids = torch.randint(1, 64, (1, num_tokens), generator=torch.Generator().manual_seed(num_tokens))
+    outputs = text_encoder.model(
+        input_ids=input_ids,
+        attention_mask=torch.ones_like(input_ids),
+        mm_token_type_ids=torch.zeros_like(input_ids),
+        use_cache=False,
+        output_hidden_states=True,
+    )
+    return outputs.hidden_states[1]
+
+
+def test_compiled_text_encoder_serves_every_prompt_length_with_one_graph(runner_env, monkeypatch):
+    """A recompile per prompt length would stall the first request of each length."""
+    from types import SimpleNamespace
+
+    from torch._dynamo.testing import CompileCounter
+
+    from xfuser import xFuserArgs
+    from xfuser.model_executor.models.runner_models.minimax_h3_image import xFuserMiniMaxH3ImageModel
+
+    counter = CompileCounter()
+    torch_compile = torch.compile
+    monkeypatch.setattr(torch, "compile", lambda *args, **kwargs: torch_compile(*args, **kwargs, backend=counter))
+    model = xFuserMiniMaxH3ImageModel(xFuserArgs(model="MiniMax-H3-Image"))
+    text_encoder = _tiny_text_encoder()
+    model.pipe = SimpleNamespace(text_encoder=text_encoder)
+    lengths = (5, 9, 17)
+    with torch.no_grad():
+        expected = [_encode(text_encoder, length) for length in lengths]
+        torch._dynamo.reset()
+        model._compile_text_encoder()
+        actual = [_encode(text_encoder, length) for length in lengths]
+    torch._dynamo.reset()
+
+    assert counter.frame_count == 1
+    for length, a, e in zip(lengths, actual, expected):
+        torch.testing.assert_close(a, e, rtol=0, atol=0, msg=lambda m: f"{length} tokens: {m}")

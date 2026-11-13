@@ -92,10 +92,12 @@ def _pre_quantized(query, key, value, call: AttnCall):
             "the indices_k mask would be silently dropped and dense attention "
             "would run over padded keys."
         )
-    q, k, v = to_bshd(query, key, value, contiguous=True)
+    mha_v4_packed_call = _mha_v4_eligible(query, call)
+    # MHA v4 reads strided operands with contiguous rows and writes into a strided out.
+    q, k, v = to_bshd(query, key, value, contiguous=call.seq_major_out is None or not mha_v4_packed_call)
     softmax_scale = q.shape[-1] ** -0.5
 
-    if _mha_v4_eligible(query, call):
+    if mha_v4_packed_call:
         # Already fp8 with per-tensor descales, which is exactly what the
         # packed entry point takes -- no quantisation step in between.
         fp8 = native_fp8_format()
@@ -114,19 +116,27 @@ def _pre_quantized(query, key, value, call: AttnCall):
             per_tensor,
             per_tensor,
             softmax_scale=softmax_scale,
+            out=call.seq_major_out,
         )
-    else:
-        out = aiter.flash_attn_fp8_pertensor_func(
-            q,
-            k,
-            v,
-            causal=call.is_causal,
-            softmax_scale=softmax_scale,
-            q_descale=kwargs["q_descale"],
-            k_descale=kwargs["k_descale"],
-            v_descale=kwargs["v_descale"],
-        )
-    return from_bshd(out), None
+        return from_bshd(out if call.seq_major_out is None else call.seq_major_out), None
+    out = aiter.flash_attn_fp8_pertensor_func(
+        q,
+        k,
+        v,
+        causal=call.is_causal,
+        softmax_scale=softmax_scale,
+        q_descale=kwargs["q_descale"],
+        k_descale=kwargs["k_descale"],
+        v_descale=kwargs["v_descale"],
+    )
+    return _into_seq_major_out(from_bshd(out), call), None
+
+
+def _into_seq_major_out(out, call: AttnCall):
+    """The BHSD ``out``, copied into the call's sequence-major output buffer when it has one."""
+    if call.seq_major_out is None:
+        return out
+    return from_bshd(call.seq_major_out.copy_(to_bshd(out)))
 
 
 def _mha_v4(query, key, value, call: AttnCall):
@@ -255,5 +265,7 @@ def aiter_fp8(query, key, value, call: AttnCall):
     if call.attention_kwargs.get("pre_quantized", False):
         return _pre_quantized(query, key, value, call)
     if _mha_v4_eligible(query, call):
-        return _mha_v4(query, key, value, call)
-    return _rotate_and_quantize(query, key, value, call)
+        out, lse = _mha_v4(query, key, value, call)
+    else:
+        out, lse = _rotate_and_quantize(query, key, value, call)
+    return _into_seq_major_out(out, call), lse

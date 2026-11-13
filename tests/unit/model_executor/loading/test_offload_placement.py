@@ -49,6 +49,7 @@ def _model(*, local_rank, monkeypatch, **offload_flags):
         _vae_manager=SimpleNamespace(enable_options=lambda vaes: None),
         _decoding_vaes=lambda: [],
         _get_compiled_pipe_components=lambda: [],
+        _get_block_offload_components=lambda: [],
     )
     model._local_onload_device = lambda: xFuserModel._local_onload_device(model)
     model._group_offload_kwargs = lambda offload_type: xFuserModel._group_offload_kwargs(model, offload_type)

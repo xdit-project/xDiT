@@ -482,13 +482,19 @@ def test_a_fallback_cycle_is_refused():
 
 @pytest.mark.parametrize(
     "field,value",
-    [("sparsity", Sparsity.SPARGE), ("head_balanced", True), ("accepts_prequantized", True)],
+    [
+        ("sparsity", Sparsity.SPARGE),
+        ("head_balanced", True),
+        ("accepts_prequantized", True),
+        ("reads_strided_bshd", True),
+    ],
 )
 def test_a_fallback_cannot_sit_beside_a_fact_it_would_route_around(field, value):
     """These are read from the *selected* spec elsewhere -- base_model gates on
     sparsity, usp on head_balanced, fp8_comms hands the kernel pre-quantized
-    Q/K/V on accepts_prequantized. A fallback kernel honours none of them, so
-    the combination is refused rather than documented."""
+    Q/K/V on accepts_prequantized, usp hands it an output buffer on
+    reads_strided_bshd. A fallback kernel honours none of them, so the
+    combination is refused rather than documented."""
     primary, fallback, _ = _pair(**{field: value})
     with pytest.raises(ValueError, match=field):
         registry.build_registry([_module("pkg.a", primary, fallback)])

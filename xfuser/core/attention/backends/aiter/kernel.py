@@ -103,8 +103,9 @@ def _varlen_fake(
 
 
 def aiter_attention(query, key, value, call: AttnCall):
-    """BSHD kernel; packs K/V when the model supplies varlen indices."""
-    q, k, v = to_bshd(query, key, value, contiguous=True)
+    """BSHD kernel; packs K/V when the model supplies varlen indices. The dense kernel reads
+    strided BSHD views with contiguous rows, which USP's sequence-major exchange passes."""
+    q, k, v = to_bshd(query, key, value, contiguous=call.seq_major_out is None or call.varlen is not None)
 
     if call.varlen is None:
         out, lse = _dense(q, k, v, call.dropout_p, call.is_causal)
@@ -125,4 +126,6 @@ def aiter_attention(query, key, value, call: AttnCall):
         out = p.unflatten(out)
         lse = lse.view(p.heads, p.batch, p.seq_len).permute(1, 0, 2).contiguous()
 
+    if call.seq_major_out is not None:
+        out = call.seq_major_out.copy_(out)
     return from_bshd(out), lse

@@ -982,6 +982,9 @@ class ExternalRuntimeState(RuntimeState):
     def _check_distributed_env(self, parallel_config):
         pass
 
+    def increment_step_counter(self):
+        """Components run outside an xDiT pipeline have no step schedule to advance."""
+
 
 def _default_engine_config() -> EngineConfig:
     """An engine config whose parallel degrees describe the processes in place.

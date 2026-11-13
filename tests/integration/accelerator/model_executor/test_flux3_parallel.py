@@ -1,5 +1,7 @@
 """FLUX.3 sequence- and CFG-parallel parity against stock diffusers on tiny random transformers."""
 
+import itertools
+
 import pytest
 
 pytest.importorskip(
@@ -23,7 +25,7 @@ EVEN_SHAPES = (16, (4, 8), ((2, 4), (2, 4)))
 LAYOUTS = {"padded": (TEXT_LEN, IMAGE_GRID, REFERENCE_GRIDS), "even": EVEN_SHAPES}
 
 
-def _tiny_model(device, flow_map=True):
+def _tiny_model(device, flow_map=True, head_dim=16):
     import torch
     from diffusers.models.transformers.transformer_flux3 import Flux3Transformer2DModel
 
@@ -34,11 +36,11 @@ def _tiny_model(device, flow_map=True):
             cond_in_channels=8,
             num_layers=2,
             num_single_layers=2,
-            attention_head_dim=16,
+            attention_head_dim=head_dim,
             num_attention_heads=NUM_HEADS,
             joint_attention_dim=32,
             timestep_channels=32,
-            axes_dims_rope=(4, 4, 4, 4),
+            axes_dims_rope=(head_dim // 4,) * 4,
             flow_map=flow_map,
         )
         .to(device)
@@ -84,7 +86,7 @@ def _inputs(device, layout, with_references):
     return {name: value.to(device) for name, value in inputs.items()}
 
 
-def _setup(rank, world_size, init_method, ulysses_degree, ring_degree=1, cfg_degree=1):
+def _setup(rank, world_size, init_method, ulysses_degree, ring_degree=1, cfg_degree=1, backend=BACKEND):
     import torch
 
     from xfuser.config.args import xFuserArgs
@@ -106,13 +108,13 @@ def _setup(rank, world_size, init_method, ulysses_degree, ring_degree=1, cfg_deg
         classifier_free_guidance_degree=cfg_degree, ulysses_degree=ulysses_degree, ring_degree=ring_degree
     )
     engine_config, _ = xFuserArgs(
-        attention_backend=BACKEND,
+        attention_backend=backend,
         ulysses_degree=ulysses_degree,
         ring_degree=ring_degree,
         use_cfg_parallel=cfg_degree > 1,
     ).create_config()
     initialize_runtime_state(engine_config=engine_config)
-    get_runtime_state().set_attention_backend(BACKEND)
+    get_runtime_state().set_attention_backend(backend)
     return torch.device(f"cuda:{rank}")
 
 
@@ -130,9 +132,17 @@ def _sp_worker(rank, world_size, init_method, ulysses_degree, ring_degree):
     from xfuser.core.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
 
     try:
+        from xfuser.model_executor.models.transformers.transformer_flux3 import (
+            fuse_block_input_projections,
+            fuse_block_output_projections,
+        )
+
         device = _setup(rank, world_size, init_method, ulysses_degree, ring_degree)
         stock = _tiny_model(device)
-        wrapper = _wrapper_of(stock, device)
+        wrappers = {name: _wrapper_of(stock, device) for name in ("separate", "fused", "fused input and output")}
+        for name in ("fused", "fused input and output"):
+            assert fuse_block_input_projections(wrappers[name]) == 2 + 2 + 2 + 2
+        assert fuse_block_output_projections(wrappers["fused input and output"]) == 2 + 2 + 2 + 2
 
         for layout in LAYOUTS:
             for with_references in (False, True):
@@ -140,7 +150,7 @@ def _sp_worker(rank, world_size, init_method, ulysses_degree, ring_degree):
                 with torch.no_grad():
                     reference = stock(**inputs).sample
                 # The text stream either runs whole on every rank or is sharded.
-                for replicate_text in (True, False):
+                for (projections, wrapper), replicate_text in itertools.product(wrappers.items(), (True, False)):
                     wrapper.replicate_text_max_tokens = 512 if replicate_text else 0
                     with torch.no_grad():
                         actual = wrapper(**inputs).sample
@@ -151,7 +161,8 @@ def _sp_worker(rank, world_size, init_method, ulysses_degree, ring_degree):
                         atol=1e-4,
                         msg=lambda m: (
                             f"Ulysses {ulysses_degree} x ring {ring_degree}, {layout} layout, "
-                            f"references={with_references}, replicated text={replicate_text}: {m}"
+                            f"references={with_references}, replicated text={replicate_text}, "
+                            f"{projections} input projections: {m}"
                         ),
                     )
     finally:
@@ -170,6 +181,121 @@ def test_sequence_parallel_matches_single_gpu_diffusers(accelerator_ranks, ulyss
         timeout=300,
         args=(ulysses_degree, ring_degree),
     )
+
+
+def _seq_major_worker(rank, world_size, init_method, ulysses_degree):
+    import torch
+
+    from xfuser.core.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
+    from xfuser.model_executor.models.transformers import transformer_flux3
+    from xfuser.model_executor.models.transformers.transformer_flux3 import xFuserFlux3AttnProcessor
+
+    try:
+        device = _setup(rank, world_size, init_method, ulysses_degree, backend="AITER")
+        # AITER's dense kernel takes bf16 and a head dimension of at least 64.
+        wrapper = _wrapper_of(_tiny_model(device, head_dim=64), device).to(torch.bfloat16)
+        plan = wrapper._joint_processor._seq_major_plan(wrapper.single_transformer_blocks[0].attn, None)
+        assert plan is not None and plan.fp8_comms is None
+
+        cases = itertools.product(LAYOUTS, (False, True), (True, False), (True, False))
+        for layout, with_references, replicate_text, fused in cases:
+            inputs = _inputs(device, layout, with_references)
+            for name in ("hidden_states", "encoder_hidden_states", "image_cond_hidden_states"):
+                if name in inputs:
+                    inputs[name] = inputs[name].to(torch.bfloat16)
+            wrapper.replicate_text_max_tokens = 512 if replicate_text else 0
+            # Without the fused q/k kernel, usp_seq_major_send packs the send buffer.
+            transformer_flux3.FUSED_QK_NORM_ROPE = fused
+            outputs = {}
+            for seq_major in (True, False):
+                xFuserFlux3AttnProcessor.seq_major_ulysses = seq_major
+                with torch.no_grad():
+                    outputs[seq_major] = wrapper(**inputs).sample
+            torch.testing.assert_close(
+                outputs[True],
+                outputs[False],
+                rtol=0,
+                atol=0,
+                msg=lambda m: (
+                    f"Ulysses {ulysses_degree}, {layout} layout, references={with_references}, "
+                    f"replicated text={replicate_text}, fused q/k={fused}: {m}"
+                ),
+            )
+    finally:
+        xFuserFlux3AttnProcessor.seq_major_ulysses = True
+        transformer_flux3.FUSED_QK_NORM_ROPE = True
+        destroy_model_parallel()
+        destroy_distributed_environment()
+
+
+@pytest.mark.parametrize("ulysses_degree", [2, 4, 8])
+def test_seq_major_ulysses_exchange_matches_usp_with_aiter(accelerator_ranks, ulysses_degree):
+    pytest.importorskip("aiter")
+    accelerator_ranks(_seq_major_worker, world_size=ulysses_degree, timeout=300, args=(ulysses_degree,))
+
+
+def _seq_major_fp8_worker(rank, world_size, init_method, ulysses_degree):
+    from types import SimpleNamespace
+
+    import torch
+
+    from xfuser.core.distributed import get_runtime_state
+    from xfuser.core.distributed.fp8_comms import Fp8CommsState, resolve_fp8_comms_eligible_modules
+    from xfuser.core.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
+    from xfuser.model_executor.models.transformers import transformer_flux3
+    from xfuser.model_executor.models.transformers.transformer_flux3 import xFuserFlux3AttnProcessor
+
+    try:
+        device = _setup(rank, world_size, init_method, ulysses_degree, backend="AITER_FP8")
+        # The fused FP8 send kernel takes a head dimension of 128.
+        wrapper = _wrapper_of(_tiny_model(device, head_dim=128), device).to(torch.bfloat16)
+        fp8_comms = Fp8CommsState()
+        get_runtime_state().fp8_comms = fp8_comms
+        fp8_comms.register_models(SimpleNamespace(transformer=wrapper))
+        # Distinct per-layer scales, so a layer reading another's scale shows.
+        for index, attn in enumerate(resolve_fp8_comms_eligible_modules(wrapper)):
+            for offset, name in enumerate(("fp8_q_scale", "fp8_k_scale", "fp8_v_scale", "fp8_o_scale")):
+                getattr(attn, name).fill_(0.004 * (1 + 0.1 * index + 0.03 * offset))
+        fp8_comms.get_model_state(wrapper).synced = True
+        plan = wrapper._joint_processor._seq_major_plan(wrapper.single_transformer_blocks[0].attn, None)
+        assert plan is not None and plan.fp8_comms is not None
+
+        for layout, with_references, fused in itertools.product(LAYOUTS, (False, True), (True, False)):
+            inputs = _inputs(device, layout, with_references)
+            for name in ("hidden_states", "encoder_hidden_states", "image_cond_hidden_states"):
+                if name in inputs:
+                    inputs[name] = inputs[name].to(torch.bfloat16)
+            # Without the fused q/k kernel, usp_seq_major_send rotates and quantizes as USP does.
+            transformer_flux3.FUSED_QK_NORM_ROPE = fused
+            outputs = {}
+            for seq_major in (True, False):
+                xFuserFlux3AttnProcessor.seq_major_ulysses = seq_major
+                with torch.no_grad():
+                    outputs[seq_major] = wrapper(**inputs).sample.float()
+            context = f"Ulysses {ulysses_degree}, {layout} layout, references={with_references}, fused q/k={fused}"
+            if not fused:
+                torch.testing.assert_close(
+                    outputs[True], outputs[False], rtol=0, atol=0, msg=lambda m: f"{context}: {m}"
+                )
+                continue
+            # The fused kernel's Hadamard rotation accumulates in another order than USP's
+            # GEMM, so a rare q or k element lands one FP8 step away.
+            difference = (outputs[True] - outputs[False]).abs()
+            scale = outputs[False].abs().mean()
+            assert difference.mean() <= 0.01 * scale, f"{context}: mean |diff| {difference.mean()} vs {scale}"
+            assert difference.max() <= 0.1 * outputs[False].abs().max(), f"{context}: max |diff| {difference.max()}"
+    finally:
+        xFuserFlux3AttnProcessor.seq_major_ulysses = True
+        transformer_flux3.FUSED_QK_NORM_ROPE = True
+        get_runtime_state().fp8_comms = None
+        destroy_model_parallel()
+        destroy_distributed_environment()
+
+
+@pytest.mark.parametrize("ulysses_degree", [2, 4, 8])
+def test_fp8_seq_major_ulysses_exchange_matches_usp_fp8_comms(accelerator_ranks, ulysses_degree):
+    pytest.importorskip("aiter")
+    accelerator_ranks(_seq_major_fp8_worker, world_size=ulysses_degree, timeout=300, args=(ulysses_degree,))
 
 
 def _cfg_worker(rank, world_size, init_method):

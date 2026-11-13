@@ -24,6 +24,7 @@ SPECS = [
         ring=NEVER,
         accepts_prequantized=True,
         prequant_rotate=hadamard.rotate_qk,
+        reads_strided_bshd=True,
         initializers=(hadamard.prepare,),
         # Both entry points: accepts does not refuse packed keys, so a build
         # with only the dense one would report itself available and then raise

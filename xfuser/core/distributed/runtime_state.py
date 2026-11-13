@@ -464,24 +464,14 @@ class DiTRuntimeState(RuntimeState):
             self._vsa_last_timestep = timestep
         return self._vsa_denoising_step, num_steps
 
-    _SCHEDULE_TOTAL_STEP_FIELDS = (
-        ("attention", "schedule_total_steps"),
-        ("GEMM", "gemm_schedule_total_steps"),
-    )
-
     def _get_active_total_steps(self) -> Optional[int]:
-        """The step count the counter wraps on, or None when nothing is scheduled.
-
-        Holds no comparison between the schedules' totals, which is not a simplification: these
-        are tensors, and reading one as a Python int runs inside the compiled transformer forward,
-        where it forces a host sync and breaks the graph once per forward. The totals cannot drift
-        apart after setup, so _check_schedule_total_steps compares them there instead.
-        """
-        for _, field in self._SCHEDULE_TOTAL_STEP_FIELDS:
-            steps = getattr(self, field)
-            if steps is not None:
-                return steps
-        return None
+        attn_steps = self.schedule_total_steps
+        gemm_steps = self.gemm_schedule_total_steps
+        if attn_steps is not None and gemm_steps is not None and attn_steps != gemm_steps:
+            raise RuntimeError(
+                f"Attention and GEMM schedules must use the same total steps; got {attn_steps} and {gemm_steps}."
+            )
+        return attn_steps or gemm_steps
 
     def track_steps(self) -> None:
         """Count transformer forwards from here on, for a consumer that reads the step.
@@ -489,9 +479,6 @@ class DiTRuntimeState(RuntimeState):
         Opt-in rather than always on: the advance runs inside the compiled transformer forward,
         and under CUDA graphs a counter written there is a graph output the next replay
         overwrites. A run that reads no step keeps a forward with no counter in it.
-
-        On the host. Choosing a backend or a GEMM precision reads it there, and a consumer on the
-        accelerator copies it over itself; inductor folds those copies into one per graph.
         """
         if self.step_counter is None:
             self.step_counter = torch.tensor(0, dtype=torch.int)
@@ -499,44 +486,23 @@ class DiTRuntimeState(RuntimeState):
     def current_step(self) -> Optional[torch.Tensor]:
         return self.forward_step
 
-    def _check_schedule_total_steps(self, kind: str, total_steps: int) -> None:
-        """Refuse a schedule whose length disagrees with one already installed.
-
-        They share a single step counter, so two lengths mean one of them is being read at the
-        wrong step for the whole run.
-        """
-        for other, field in self._SCHEDULE_TOTAL_STEP_FIELDS:
-            steps = getattr(self, field)
-            if other != kind and steps is not None and int(steps) != int(total_steps):
-                raise RuntimeError(
-                    f"Per-step schedules must all use the same total steps; the {other} schedule "
-                    f"has {int(steps)} and this {kind} schedule has {int(total_steps)}."
-                )
-
     def increment_step_counter(self):
         """
         Advance the step when something tracks it, and set per-step scheduled backends/modes.
-        With an attention or GEMM schedule the counter wraps on its length.
-
-        Called from the transformer forward, so under torch.compile this runs inside the compiled
-        region: every step's value read here that becomes a Python number breaks the graph, which
-        is why the wrap is arithmetic rather than a branch. A backend or GEMM-precision schedule
-        cannot avoid it -- picking a kernel or a precision is a host decision -- so those two still
-        cost one break per forward.
+        With an attention or GEMM schedule, the counter is reset to 0 at the end of the schedule.
         """
         if self.step_counter is None:
             return
 
-        self._apply_schedules_at(self.step_counter)
-        self.forward_step = self.step_counter
+        current_step = self.step_counter
+        self._apply_schedules_at(current_step)
+        self.forward_step = current_step
 
-        # Wrapped by remainder, not by comparing the counter against the total and assigning 0:
-        # that comparison is between two tensors and the branch on it reads the result on the host.
+        self.step_counter = self.step_counter + 1
+
         active_total_steps = self._get_active_total_steps()
-        if active_total_steps is None:
-            self.step_counter = self.step_counter + 1
-        else:
-            self.step_counter = (self.step_counter + 1) % active_total_steps
+        if active_total_steps is not None and self.step_counter >= active_total_steps:
+            self.step_counter = torch.zeros_like(self.step_counter)
 
     def _apply_schedules_at(self, step) -> None:
         """Point every active schedule at `step`."""
@@ -574,7 +540,6 @@ class DiTRuntimeState(RuntimeState):
             self._check_if_backend_compatible_with_current_configuration(backend)
             if self.runtime_config.attention_a2a.enabled:
                 self.runtime_config.attention_a2a.resolve_for_backend(backend)
-        self._check_schedule_total_steps("attention", total_steps)
         self.attention_schedule = attention_schedule
         self.schedule_total_steps = torch.tensor(total_steps, dtype=torch.int)
         self.track_steps()
@@ -595,7 +560,6 @@ class DiTRuntimeState(RuntimeState):
         Set a per-step GEMM precision schedule.
         When set, increment_step_counter() will update use_high_precision_gemm each step.
         """
-        self._check_schedule_total_steps("GEMM", total_steps)
         self.gemm_schedule = gemm_schedule
         self.gemm_schedule_total_steps = torch.tensor(total_steps, dtype=torch.int)
         self.track_steps()

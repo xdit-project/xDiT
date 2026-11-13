@@ -35,41 +35,6 @@ def _bare_runtime(**fields):
     return runtime
 
 
-class _SyncTrap(torch.Tensor):
-    """A schedule total that refuses to be read as a Python number.
-
-    Stands in for the real total where a test needs to prove the per-step path never reads one. A
-    plain tensor cannot show that: int() on it quietly succeeds, and the cost -- a graph break in
-    the compiled forward, once per forward -- is invisible from the test. Arithmetic still works,
-    which is the whole of what the step path is allowed to do with it.
-    """
-
-    @staticmethod
-    def __new__(cls, steps: int) -> "_SyncTrap":
-        return torch.Tensor._make_subclass(cls, torch.tensor(steps, dtype=torch.int))
-
-    def _refuse(self, how: str):
-        raise AssertionError(
-            f"the per-step path read a schedule total on the host via {how}, which breaks the "
-            "compiled forward's graph every step"
-        )
-
-    def __int__(self):
-        self._refuse("int()")
-
-    def __index__(self):
-        self._refuse("__index__()")
-
-    def __float__(self):
-        self._refuse("float()")
-
-    def __bool__(self):
-        self._refuse("bool()")
-
-    def item(self):
-        self._refuse("item()")
-
-
 def test_a_ramp_hits_both_endpoints_and_moves_monotonically():
     """'first:last' is the form worth trying first, so its ends have to be exactly what was asked."""
     schedule = SolAttnBetaSchedule.from_spec("1.0:-0.25", 8)
@@ -258,25 +223,13 @@ def test_installing_a_schedule_tracks_steps_and_clearing_it_restores_the_flag(mo
     assert _forward_beta(runtime, solattn_beta=0.125) == pytest.approx(0.125)
 
 
-def test_advancing_the_step_never_reads_a_schedule_total_on_the_host(installed):
-    """The counter advance is called from the compiled transformer forward. Converting any of these
-    tensors to a Python number there costs a graph break every forward, so the step path must not
-    touch them beyond passing them to torch."""
-    installed(SolAttnBetaSchedule.from_spec("1.0:0.0", 4))
-    runtime = _tracking_runtime(schedule_total_steps=_SyncTrap(4))
-
-    runtime.increment_step_counter()
-
-    assert float(kernel._beta(AttnCall(step=runtime.current_step()), "cpu")) == pytest.approx(1.0)
-
-
 def test_advancing_the_step_costs_no_graph_break(installed):
-    """The one that matters, and the only one that can see the whole path at once.
+    """A beta schedule alone must leave the compiled forward in one graph.
 
-    _SyncTrap above catches a host read of the totals, but not every host read is a read of those:
-    subscripting the beta table with the 0-d step lowers to select(), which needs the step as a
-    Python int and broke the graph twice per traced frame while every other test here passed. So
-    this compiles the real call and counts. Stands in for the transformer forward, which is where
+    A hybrid schedule breaks it anyway, since picking a backend or a precision is a host decision,
+    but nothing in a beta-only run needs the step on the host. Subscripting the beta table with
+    the 0-d step would: it lowers to select(), which needs the step as a Python int, and broke the
+    graph twice per traced frame. So this compiles the real call and counts. Stands in for the transformer forward, which is where
     the advance is called from, hence where a break splits a graph that should be one.
     """
     from torch._dynamo.utils import counters

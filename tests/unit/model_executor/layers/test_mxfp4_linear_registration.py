@@ -167,6 +167,128 @@ def test_managed_packed_parameter_rejects_both_state_layout_transitions(runtime,
         destination.load_state_dict(full_source.state_dict())
 
 
+def test_concatenated_stacks_packed_weights_and_scales(runtime, fake_aiter_quantization):
+    torch = runtime.torch
+    layers = [runtime.module.xFuserMXFP4Linear(8, n, bias=False) for n in (4, 6)]
+    for value, layer in enumerate(layers):
+        layer._quantize_weights()
+        with torch.no_grad():
+            layer.weight_shuffle.fill_(value)
+            layer.weight_scale.fill_(value + 0.5)
+
+    fused = runtime.module.xFuserMXFP4Linear.concatenated(layers)
+
+    assert (fused.in_features, fused.out_features) == (8, 10)
+    assert fused.weight is None and fused.bias is None
+    assert torch.equal(fused.weight_shuffle, torch.cat([layer.weight_shuffle for layer in layers]))
+    assert torch.equal(fused.weight_scale, torch.cat([layer.weight_scale for layer in layers]))
+    assert not fused.weight_shuffle.requires_grad
+    assert set(fused.state_dict()) == {"weight_shuffle", "weight_scale"}
+
+
+def test_concatenated_refuses_unquantized_or_biased_layers(runtime, fake_aiter_quantization):
+    unquantized = runtime.module.xFuserMXFP4Linear(8, 4, bias=False)
+    biased = runtime.module.xFuserMXFP4Linear(8, 4, bias=True)
+    biased._quantize_weights()
+
+    with pytest.raises(ValueError, match="Quantize"):
+        runtime.module.xFuserMXFP4Linear.concatenated([unquantized])
+    with pytest.raises(ValueError, match="bias-free"):
+        runtime.module.xFuserMXFP4Linear.concatenated([biased])
+
+
+def test_concatenated_refuses_padded_scales_before_the_last_layer(runtime, fake_aiter_quantization):
+    torch = runtime.torch
+    layers = [runtime.module.xFuserMXFP4Linear(8, 128, bias=False) for _ in range(2)]
+    for layer in layers:
+        layer._quantize_weights()
+        # AITER's shuffled scale has a multiple of 256 rows.
+        layer.weight_scale = torch.ones((256, 1), dtype=torch.uint8)
+
+    with pytest.raises(ValueError, match="padded scale rows"):
+        runtime.module.xFuserMXFP4Linear.concatenated(layers)
+
+    layers[0].weight_scale = torch.ones((128, 1), dtype=torch.uint8)
+    fused = runtime.module.xFuserMXFP4Linear.concatenated(layers)
+    assert fused.weight_scale.shape == (384, 1)
+
+
+@pytest.mark.accelerator
+def test_concatenated_matches_quantizing_the_stacked_weight():
+    # The packing and scale preshuffle must be local to row blocks for stacking to be exact.
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("aiter")
+    if not torch.cuda.is_available():
+        pytest.skip("AITER MXFP4 kernels need a GPU")
+    from xfuser.model_executor.layers.mxfp4_linear import xFuserMXFP4Linear
+
+    torch.manual_seed(0)
+    widths = (3072, 3072, 3072, 18432)
+    weights = [torch.randn(n, 3072, device="cuda", dtype=torch.bfloat16) for n in widths]
+    layers = []
+    for weight in weights:
+        layer = xFuserMXFP4Linear(3072, weight.shape[0], bias=False, device="cuda", dtype=torch.bfloat16)
+        layer.load_and_quantize_weights(weight)
+        layers.append(layer)
+    stacked = xFuserMXFP4Linear(3072, sum(widths), bias=False, device="cuda", dtype=torch.bfloat16)
+    stacked.load_and_quantize_weights(torch.cat(weights))
+
+    fused = xFuserMXFP4Linear.concatenated(layers)
+
+    assert torch.equal(fused.weight_shuffle, stacked.weight_shuffle)
+    assert torch.equal(fused.weight_scale, stacked.weight_scale)
+    x = torch.randn(522, 3072, device="cuda", dtype=torch.bfloat16)
+    actual = fused(x).float()
+    expected = torch.cat([layer(x) for layer in layers], dim=-1).float()
+    # Another GEMM tile may round some outputs one bf16 step differently.
+    assert ((actual - expected).norm() / expected.norm()).item() < 1e-3
+
+
+def test_stacked_along_input_refuses_layers_it_cannot_join(runtime, fake_aiter_quantization):
+    narrow = runtime.module.xFuserMXFP4Linear(8, 4, bias=False)
+    narrow._quantize_weights()
+    unquantized = runtime.module.xFuserMXFP4Linear(256, 4, bias=False)
+
+    with pytest.raises(ValueError, match="multiples of 256"):
+        runtime.module.xFuserMXFP4Linear.stacked_along_input([narrow, narrow])
+    with pytest.raises(ValueError, match="Quantize"):
+        runtime.module.xFuserMXFP4Linear.stacked_along_input([unquantized])
+    with pytest.raises(ValueError, match="same output width"):
+        runtime.module.xFuserMXFP4Linear.stacked_along_input([narrow, runtime.module.xFuserMXFP4Linear(8, 6)])
+
+
+@pytest.mark.accelerator
+def test_stacked_along_input_matches_quantizing_the_joined_weight():
+    # The packing and both preshuffles must keep each row block's K chunks in order.
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("aiter")
+    if not torch.cuda.is_available():
+        pytest.skip("AITER MXFP4 kernels need a GPU")
+    from xfuser.model_executor.layers.mxfp4_linear import xFuserMXFP4Linear
+
+    torch.manual_seed(0)
+    widths = (3072, 9216)
+    weights = [torch.randn(3072, k, device="cuda", dtype=torch.bfloat16) for k in widths]
+    layers = []
+    for weight in weights:
+        layer = xFuserMXFP4Linear(weight.shape[1], 3072, bias=False, device="cuda", dtype=torch.bfloat16)
+        layer.load_and_quantize_weights(weight)
+        layers.append(layer)
+    joined = xFuserMXFP4Linear(sum(widths), 3072, bias=False, device="cuda", dtype=torch.bfloat16)
+    joined.load_and_quantize_weights(torch.cat(weights, dim=1))
+
+    fused = xFuserMXFP4Linear.stacked_along_input(layers)
+
+    assert (fused.in_features, fused.out_features) == (sum(widths), 3072)
+    assert torch.equal(fused.weight_shuffle, joined.weight_shuffle)
+    assert torch.equal(fused.weight_scale, joined.weight_scale)
+    xs = [torch.randn(522, k, device="cuda", dtype=torch.bfloat16) for k in widths]
+    actual = fused(torch.cat(xs, dim=1)).float()
+    expected = sum(layer(x).float() for layer, x in zip(layers, xs))
+    # One GEMM accumulates in fp32 what the pair rounds to bf16 twice.
+    assert ((actual - expected).norm() / expected.norm()).item() < 1e-2
+
+
 def test_unquantized_state_dict_still_loads_strictly(runtime):
     torch = runtime.torch
     source = runtime.module.xFuserMXFP4Linear(8, 4, bias=True)

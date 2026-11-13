@@ -77,9 +77,10 @@ def _link_fallbacks(built: Dict[AttentionBackendType, Spec]) -> None:
     """
     # Facts a fallback would route around. base_model gates on sparsity, usp
     # on head_balanced, fp8_comms quantises Q/K/V before the call on
-    # accepts_prequantized -- all read from the *selected* spec, none of which
+    # accepts_prequantized, usp hands the kernel an output buffer on
+    # reads_strided_bshd -- all read from the *selected* spec, none of which
     # the fallback's kernel would honour.
-    exclusive = ("sparsity", "head_balanced", "accepts_prequantized")
+    exclusive = ("sparsity", "head_balanced", "accepts_prequantized", "reads_strided_bshd")
 
     for spec in built.values():
         if spec.fallback is None:

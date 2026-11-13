@@ -2,10 +2,12 @@ import functools
 import math
 from dataclasses import replace
 from types import SimpleNamespace
+from typing import Optional
 
 import torch
 
 from xfuser.config.args import xFuserArgs
+from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.core.utils.runner_utils import log, resize_and_crop_image
 from xfuser.envs import PACKAGES_CHECKER
 from xfuser.model_executor.models.runner_models.base_model import (
@@ -61,17 +63,26 @@ class _Flux3Model(xFuserModel):
         ring_degree=True,
         use_cfg_parallel=False,
         use_fp8_gemms=True,
+        use_fp4_gemms=True,
+        use_hybrid_gemm_schedule=True,
         use_fp8_comms=True,
         fully_shard_degree=True,
         enable_tiling=True,
         enable_slicing=True,
         use_parallel_vae=True,
+        split_parallel_vae_attention=True,
+        vae_dtype=True,
     )
     # Shared by both checkpoints, which add their model and output names with replace().
     settings = ModelSettings(
         model_output_type="image",
         mod_value=16,
         fp8_gemm_module_list=[
+            "transformer.txt_mode_blocks",
+            "transformer.mode_blocks",
+            "transformer.single_transformer_blocks",
+        ],
+        fp4_gemm_module_list=[
             "transformer.txt_mode_blocks",
             "transformer.mode_blocks",
             "transformer.single_transformer_blocks",
@@ -131,13 +142,41 @@ class _Flux3Model(xFuserModel):
         # By name: the checkpoints also list the prompt upsampler, a separate 9B model.
         pipe.load_components(names=["text_encoder", "tokenizer"], dtype=torch.bfloat16)
         trim_text_encoder(pipe.text_encoder, _deepest_text_encoder_layer(pipe.blocks))
-        # The VAE runs in fp32, as in BFL's reference and the diffusers FLUX.3 docs.
-        pipe.load_components(names=["vae"], dtype=torch.float32)
+        # The VAE runs in fp32 by default, as in BFL's reference and the diffusers FLUX.3 docs.
+        vae_dtype = torch.bfloat16 if self.config.vae_dtype == "bf16" else torch.float32
+        pipe.load_components(names=["vae"], dtype=vae_dtype)
         return pipe
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
+        self._check_fused_mxfp4_quant()
+        self._fuse_block_input_projections()
         self._expose_transformer_signature()
+
+    def _check_fused_mxfp4_quant(self) -> None:
+        from xfuser.model_executor.layers import mxfp4_fused_quant
+
+        if self.config.use_fp4_gemms and not mxfp4_fused_quant.MXFP4_FUSED_QUANT_AVAILABLE:
+            log(
+                "WARNING: FLUX.3 MXFP4 GEMMs run without the fused input quantization: FlyDSL or "
+                "AITER's FlyDSL MX helpers are unavailable, so each GEMM input is quantized "
+                "separately (slower, same result)."
+            )
+
+    def _fuse_block_input_projections(self) -> None:
+        # After the loader's FP8/FP4 swaps, which decide what can be stacked, and before
+        # compile. FSDP shards the separate weights, so sharded runs keep them.
+        if self.config.fully_shard_degree > 1:
+            return
+        from xfuser.model_executor.models.transformers.transformer_flux3 import (
+            fuse_block_input_projections,
+            fuse_block_output_projections,
+        )
+
+        fused = fuse_block_input_projections(self.pipe.transformer)
+        log(f"FLUX.3: one input GEMM for q, k, v and the feed-forward in {fused} blocks")
+        fused = fuse_block_output_projections(self.pipe.transformer)
+        log(f"FLUX.3: one output GEMM for the attention and the feed-forward in {fused} blocks")
 
     def _expose_transformer_signature(self) -> None:
         """Show the denoise step the transformer's real forward parameters.
@@ -163,12 +202,30 @@ class _Flux3Model(xFuserModel):
         # signature the denoise step reads, and leaves the SP shard and gather glue eager.
         return True
 
+    def _get_compiled_pipe_components(self) -> list[str]:
+        # Eager, the text encoder is launch-bound: about 2200 small kernels per prompt. Its
+        # decoder layers compile blockwise (fsdp_strategy wrap_attrs) like the transformer.
+        return ["transformer", "text_encoder"]
+
+    def _get_block_offload_components(self) -> list[str]:
+        # The text encoder's decoder layers nest at model.language_model.layers, out of reach
+        # of block-level grouping, which would offload the whole encoder as one group.
+        return ["transformer"]
+
     def _get_compile_mode(self) -> str:
         # A sharded forward is launch-bound: graphs cut a compiled u8 1024² forward on
         # MI350X from 22 to 17 ms. Graphs re-capture pathologically on RDNA4, as for FLUX.2.
         if PACKAGES_CHECKER._on_rdna4():
             return "default"
         return "reduce-overhead"
+
+    def _get_compile_warmup_steps(self, input_args: dict) -> Optional[int]:
+        # A per-step schedule's counter resets only after its last step, so a shortened
+        # warmup would start every later call partway through the schedule.
+        runtime_state = get_runtime_state()
+        if runtime_state.has_attention_schedule() or runtime_state.has_gemm_schedule():
+            return None
+        return 2
 
     def _get_runtime_state_pipeline(self):
         # The transformer takes tokens the pipeline already packed 2x2, so it has no
@@ -226,17 +283,23 @@ class _Flux3Model(xFuserModel):
             pipe_kwargs["max_sequence_length"] = input_args["max_sequence_length"]
 
         images, args_per_image = [], []
-        for prompt in prompts:
-            # The pipeline draws the noise in fp32 from a CPU generator, as in the model
-            # card, so a seed gives the same image as the documented diffusers usage.
-            image = self.pipe(
-                prompt=prompt,
-                generator=torch.Generator().manual_seed(input_args["seed"]),
-                **pipe_kwargs,
-            )[0]
-            images.append(image)
-            # Edits size the output from the reference unless told otherwise.
-            args_per_image.append({**input_args, "prompt": prompt, "height": image.height, "width": image.width})
+        try:
+            for prompt in prompts:
+                # The pipeline draws the noise in fp32 from a CPU generator, as in the model
+                # card, so a seed gives the same image as the documented diffusers usage.
+                image = self.pipe(
+                    prompt=prompt,
+                    generator=torch.Generator().manual_seed(input_args["seed"]),
+                    **pipe_kwargs,
+                )[0]
+                images.append(image)
+                # Edits size the output from the reference unless told otherwise.
+                args_per_image.append({**input_args, "prompt": prompt, "height": image.height, "width": image.width})
+        finally:
+            # The per-call cache holds the prompt embeddings and ids it was computed from.
+            step_constants = getattr(getattr(self.pipe, "transformer", None), "_step_constants", None)
+            if step_constants is not None:
+                step_constants.clear()
         return DiffusionOutput(images=images, pipe_args=args_per_image)
 
 
@@ -283,6 +346,14 @@ class xFuserFlux3KleinBaseModel(_Flux3Model):
         model_name="black-forest-labs/flux-3-image-klein-base",
         output_name="flux_3_image_klein_base",
     )
+
+    def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
+        # Without CFG parallel the guider calls the transformer once per branch; it turns
+        # guidance off only at a scale of 1 (math.isclose).
+        guidance_scale = input_args["guidance_scale"]
+        if guidance_scale is not None and not math.isclose(guidance_scale, 1.0) and not self.config.use_cfg_parallel:
+            return 2
+        return 1
 
     def _validate_args(self, input_args: dict) -> None:
         super()._validate_args(input_args)

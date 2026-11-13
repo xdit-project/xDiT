@@ -345,6 +345,7 @@ class xFuserArgs:
     memory_efficient_sharding: bool = False
     memory_efficient_replicated_load: bool = False
     use_vae_channels_last_format: bool = False
+    vae_dtype: Optional[str] = None
     # Hybrid attention schedule
     use_hybrid_attn_schedule: bool = False
     hybrid_attn_low_precision_backend: Optional[str] = None
@@ -1500,6 +1501,13 @@ class xFuserArgs:
             action="store_true",
             default=False,
             help="Use channels last memory format for the VAE.",
+        )
+        parser.add_argument(
+            "--vae_dtype",
+            choices=["bf16", "fp32"],
+            default=None,
+            help="Load the VAE in this dtype instead of the model's default. Faster in bf16, "
+            "at some image fidelity. Only for models that list it.",
         )
         parser.add_argument(
             "--use_ssta_sparse_text_to_image",

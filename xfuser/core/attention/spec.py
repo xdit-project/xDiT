@@ -127,6 +127,12 @@ class AttnCall:
 
     attention_kwargs: dict = field(default_factory=dict)
 
+    # Set by USP's sequence-major Ulysses exchange, and only for a spec with
+    # reads_strided_bshd: q, k and v are BHSD views of strided BSHD tensors
+    # with contiguous rows, and the kernel writes its BSHD output into this
+    # buffer (itself a strided view) and returns it.
+    seq_major_out: Optional[torch.Tensor] = None
+
 
 # (output, softmax_lse) -- lse is None when the backend does not produce one.
 AttnFn = Callable[[torch.Tensor, torch.Tensor, torch.Tensor, AttnCall], tuple]
@@ -203,6 +209,12 @@ class Spec:
     # calibration measures the distribution that is actually quantised.
     accepts_prequantized: bool = False
     prequant_rotate: Optional[Callable] = None
+
+    # The kernel takes AttnCall.seq_major_out: it reads BSHD q, k, v through
+    # their strides and writes its output into that buffer. usp's
+    # sequence-major Ulysses exchange runs only on such a backend, handing it
+    # views of the receive buffer instead of contiguous copies.
+    reads_strided_bshd: bool = False
 
     # Which calls the kernel can serve -- head dim, causality, varlen packing,
     # dropout, self- vs cross-attention. Enforced by run() before dispatch, so

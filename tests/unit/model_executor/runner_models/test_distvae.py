@@ -5,6 +5,7 @@ cover only the xDiT policy that discovers VAEs, selects its runtime group, forwa
 and presents decode failures.
 """
 
+import dataclasses
 from types import SimpleNamespace
 from unittest import mock
 
@@ -331,6 +332,29 @@ def test_parallel_setup_adapts_runtime_group_for_distvae():
         mock.call(tiled, device_group),
         mock.call(sharded, device_group),
     ]
+
+
+@pytest.mark.parametrize("split_attention", [False, True])
+def test_only_models_that_opt_in_split_the_parallel_decoders_attention(split_attention):
+    vae = SimpleNamespace()
+    coordinator = SimpleNamespace(device_group=object(), rank_in_group=0, world_size=2, ranks=[0, 1])
+    runner = _runner(use_parallel_vae=True)
+    runner.capabilities = dataclasses.replace(
+        runner.capabilities, use_parallel_vae_encoder=False, split_parallel_vae_attention=split_attention
+    )
+    runner._vae_manager = vae_manager.VAEManager(runner.config, runner.capabilities, runner.settings)
+
+    with (
+        mock.patch.object(vae_manager, "get_vae_parallel_group", return_value=coordinator),
+        mock.patch.object(torch.distributed, "get_world_size", return_value=2),
+        mock.patch.object(torch.distributed, "get_rank", return_value=0),
+        mock.patch.object(vae_manager.vae_tiling, "supports_tile_parallel", return_value=False),
+        mock.patch.object(vae_manager.vae_parallel, "parallelize_decoder", return_value="DecoderAdapter"),
+        mock.patch.object(vae_manager, "split_replicated_vae_attention", return_value=1) as split,
+    ):
+        runner._vae_manager.setup_parallel_vae([vae])
+
+    assert split.called == split_attention
 
 
 def test_tile_overlap_is_applied_through_distvae():
@@ -667,3 +691,65 @@ def test_aiter_replacement_blocks_recognition_until_xdit_restores_torch_norm():
         assert envs.restore_torch_group_norm_for_distvae() is True
         assert nn.GroupNorm is original
         assert parallel.decoder_adapter_name(vae) == "DecoderAdapter"
+
+
+def _mid_block_attention():
+    torch.manual_seed(0)
+    return _two_d_vae().decoder.mid_block.attentions[0].eval()
+
+
+@pytest.mark.parametrize(("start", "length"), [(0, 3), (3, 2), (5, 3)])
+def test_attention_rows_match_the_whole_attention_narrowed(start, length):
+    attn = _mid_block_attention()
+    x = torch.randn(2, 16, 8, 6)
+
+    with torch.no_grad():
+        expected = attn(x).narrow(2, start, length)
+        rows = vae_manager.attention_rows(attn, x, start, length)
+
+    torch.testing.assert_close(rows, expected)
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+def test_row_split_processor_rebuilds_the_whole_attention(rank):
+    attn = _mid_block_attention()
+    x = torch.randn(1, 16, 8, 4)
+    with torch.no_grad():
+        whole = attn(x)
+    sent = []
+
+    def all_gather_into_tensor(bands, local, group=None):
+        # The output every backend accepts (Gloo included): the inputs concatenated along dim 0.
+        assert bands.shape == (2 * local.shape[0], *local.shape[1:])
+        sent.append(local.clone())
+        bands.copy_(torch.cat(whole.chunk(2, dim=2)))
+        bands[rank * local.shape[0] : (rank + 1) * local.shape[0]] = local
+
+    context = ParallelContext(group=None, rank=rank, world_size=2, patch_dim=-2)
+    attn.set_processor(vae_manager.RowSplitAttnProcessor(context))
+    with torch.no_grad(), mock.patch.object(vae_manager.dist, "all_gather_into_tensor", all_gather_into_tensor):
+        out = attn(x, temb=None)
+        odd = attn(torch.randn(1, 16, 7, 4))
+
+    torch.testing.assert_close(sent[0], whole.chunk(2, dim=2)[rank])
+    torch.testing.assert_close(out, whole)
+    assert len(sent) == 1 and odd.shape == (1, 16, 7, 4)
+
+
+def test_only_a_replicated_mid_block_attention_is_split():
+    from distvae.modules.adapters.vae import decoder_adapters
+
+    context = ParallelContext(group=None, rank=0, world_size=2, patch_dim=-2)
+    with mock.patch.object(decoder_adapters, "parallel_context", return_value=context):
+        vae = _two_d_vae()
+        vae.decoder = decoder_adapters.DecoderAdapter(vae.decoder)
+        sharded = _two_d_vae()
+        sharded.decoder = decoder_adapters.DecoderAdapter(sharded.decoder)
+    mid_block = sharded.decoder.decoder.mid_block
+    mid_block.resnets[0] = nn.Sequential(mid_block.resnets[0])
+
+    assert vae_manager.split_replicated_vae_attention(vae) == 1
+    processor = vae.decoder.decoder.mid_block.attentions[0].processor
+    assert isinstance(processor, vae_manager.RowSplitAttnProcessor)
+    assert vae_manager.split_replicated_vae_attention(sharded) == 0
+    assert vae_manager.split_replicated_vae_attention(SimpleNamespace()) == 0

@@ -246,6 +246,9 @@ class ModelCapabilities:
     enable_slicing: bool = False
     enable_tiling: bool = False
     use_vae_channels_last_format: bool = True
+    vae_dtype: bool = False
+    # The parallel VAE decoder splits the mid-block attention DistVAE replicates by query rows.
+    split_parallel_vae_attention: bool = False
     # Other features
     use_int8_gemms: bool = False
     use_fp8_gemms: bool = False
@@ -676,7 +679,7 @@ class xFuserModel(abc.ABC):
             from diffusers.hooks import apply_group_offloading
 
             log("Enabling group CPU offload (transformer block-level, others leaf-level, streamed)...")
-            block_level_names = set(self._get_compiled_pipe_components())
+            block_level_names = set(self._get_block_offload_components())
             for name, component in self.pipe.components.items():
                 if not isinstance(component, torch.nn.Module):
                     continue
@@ -1018,6 +1021,10 @@ class xFuserModel(abc.ABC):
 
     def _get_compiled_pipe_components(self) -> List[str]:
         return ["transformer"]
+
+    def _get_block_offload_components(self) -> List[str]:
+        """Components whose group CPU offload groups top-level blocks; the rest offload leaf-level."""
+        return self._get_compiled_pipe_components()
 
     def _get_compile_warmup_steps(self, input_args: dict) -> Optional[int]:
         return 2  # None = skip step reduction, run full warmup cycle

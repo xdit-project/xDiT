@@ -601,7 +601,7 @@ def qk_first_attention(
         joint_strategy=None,
         fp8_comms=runtime.fp8_comms,
         has_kv_cache=False,
-        head_balanced=runtime.runtime_config.use_spargeattn_head_balance,
+        head_balanced=runtime.runtime_config.use_sparseattn_head_balance,
         attention_kwargs=attention_kwargs,
     )
     if reason is not None:
@@ -685,7 +685,7 @@ def grouped_qkv_attention(attn, hidden_states, norm_rope, *, backend, attention_
         joint_strategy=None,
         fp8_comms=runtime.fp8_comms,
         has_kv_cache=False,
-        head_balanced=runtime.runtime_config.use_spargeattn_head_balance,
+        head_balanced=runtime.runtime_config.use_sparseattn_head_balance,
         attention_kwargs=attention_kwargs,
     )
     if reason is not None:

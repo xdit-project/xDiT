@@ -92,7 +92,7 @@ def _wire_usp_to_gloo(torch, ulysses, ring):
     runtime_state = SimpleNamespace(
         fp8_comms=None,
         attention_backend=AttentionBackendType.SDPA_FLASH,
-        runtime_config=SimpleNamespace(use_spargeattn_head_balance=False),
+        runtime_config=SimpleNamespace(use_sparseattn_head_balance=False),
     )
     usp.PROCESS_GROUP = PROCESS_GROUP
     usp.get_sequence_parallel_world_size = lambda: ulysses * ring

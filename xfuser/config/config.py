@@ -70,11 +70,15 @@ class RuntimeConfig:
     use_spargeattn_static_block_mask: bool = True
     spargeattn_simthreshold: float = 0.3
     spargeattn_cdfthreshold: float = 0.92
-    use_spargeattn_head_balance: bool = False
+    use_sparseattn_head_balance: bool = False
     # Block-sparse tile as (q_tile, kv_tile). None takes each recipe's default.
     sparseattn_block_size: Optional[Tuple[int, int]] = None
-    # Sol-Attn. kv_splits "auto" is 4 on SM90 CuTe for sequences of at least
-    # 65536 tokens, and 1 otherwise. sink_start None keeps a sink on the suffix.
+    # AITER MHA v4 Sol-Attn (the AITER_*_SOL backends).
+    solattn_beta: float = 0.5
+    solattn_beta_schedule: Optional[str] = None
+    # NVIDIA Sol-Attn (the SOL_ATTN backend). kv_splits "auto" is 4 on SM90
+    # CuTe for sequences of at least 65536 tokens, and 1 otherwise. sink_start
+    # None keeps a sink on the suffix.
     sol_attn_tau: float = 0.2
     sol_attn_thresh_type: str = "exact"
     sol_attn_kv_splits: str = "auto"

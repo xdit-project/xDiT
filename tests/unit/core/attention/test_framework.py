@@ -1150,6 +1150,27 @@ def test_packed_keys_requires_the_longest_segment_to_be_the_valid_count():
     assert reason is not None and "max_seqlen_k" in reason
 
 
+def test_trailing_pad_keys_takes_a_dense_call_and_one_declared_pad():
+    from xfuser.core.attention.constraints import TRAILING_PAD_KEYS
+
+    t = torch.empty((1, 2, 8, 128))
+    assert TRAILING_PAD_KEYS.unmet(t, t, t, AttnCall()) is None
+    assert TRAILING_PAD_KEYS.unmet(t, t, t, _packed(4, valid_kv_len=4)) is None
+
+
+def test_trailing_pad_keys_refuses_what_only_a_gather_could_serve():
+    """Unlike PACKED_KEYS, there is no gather to fall back on: an undeclared
+    pack and a batch that one valid_kv_len cannot describe are both refused,
+    and a declared length is still checked."""
+    from xfuser.core.attention.constraints import TRAILING_PAD_KEYS
+
+    t = torch.empty((1, 2, 8, 128))
+    assert "valid_kv_len" in TRAILING_PAD_KEYS.unmet(t, t, t, _packed(4))
+    batch = torch.empty((2, 2, 8, 128))
+    assert "one sequence" in TRAILING_PAD_KEYS.unmet(batch, batch, batch, _packed(4, valid_kv_len=4))
+    assert "max_seqlen_k" in TRAILING_PAD_KEYS.unmet(t, t, t, _packed(6, valid_kv_len=4))
+
+
 def test_dense_mha_v4_serves_packed_keys_but_sparge_does_not():
     """Sparge needs the key length padded to its KV tile, which is exactly the
     alignment both a trailing-pad slice and a gather remove."""

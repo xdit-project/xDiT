@@ -59,6 +59,7 @@ from xfuser.core.distributed import (
 )
 from xfuser.core.attention import registry as attention_registry
 from xfuser.core.attention.backends.aiter_mha_v4.spec import SPARGE_FORMATS as MHA_V4_SPARGE_FORMATS
+from xfuser.core.attention.backends.aiter_sol.spec import SOL_RECIPES
 from xfuser.core.attention.spec import AttentionBackendType, Sparsity
 from xfuser.core.distributed.fp8_comms import setup_fp8_comms, validate_fp8_comms_config
 from xfuser.core.distributed.attention_schedule import (
@@ -101,15 +102,21 @@ def register_model(name: str) -> Callable:
 
 
 # Derived from the backend specs rather than listed here: each backend declares
-# its sparsity strategy, so adding one cannot miss these sets. SPARGE and VSA
-# are grouped because both need a separate, dense cross-attention backend.
+# its sparsity strategy, so adding one cannot miss these sets. SPARGE, VSA and
+# SOL are grouped because all three need a separate, dense cross-attention
+# backend. Sol-Attn routes over KV blocks, and a short text KV has too few.
 _SPARSE_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SSTA)
-_SPARGE_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SPARGE) | attention_registry.types_where(
-    sparsity=Sparsity.VSA
+_SPARGE_ATTENTION_BACKENDS = (
+    attention_registry.types_where(sparsity=Sparsity.SPARGE)
+    | attention_registry.types_where(sparsity=Sparsity.VSA)
+    | attention_registry.types_where(sparsity=Sparsity.SOL)
 )
 # Prism's block-sparse attention needs a token grid that only models declaring the
 # capability publish; anywhere else it would quietly run dense.
 _BSA_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.BSA)
+
+# A model opts into Sol-Attn separately from Sparge: support for one does not imply the other.
+_SOL_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SOL)
 
 
 def _parse_attention_backend(name: Optional[str], kind: str) -> Optional[AttentionBackendType]:
@@ -122,12 +129,12 @@ def _parse_attention_backend(name: Optional[str], kind: str) -> Optional[Attenti
 
 
 def _validate_cross_attention_for_sparge(config: xFuserArgs) -> None:
-    """Cross-attention must be set and must not itself be a Sparge backend
-    whenever Sparge Attention is in play (either as the explicit backend or
-    via the hybrid schedule)."""
+    """Cross-attention must be set and must not itself be a Sparge, VSA or Sol backend
+    whenever one of those is in play (either as the explicit backend or via the
+    hybrid schedule)."""
     if config.cross_attention_backend is None:
         raise ValueError(
-            "When Sparge Attention is used, --cross_attention_backend must be set to a non-Sparge backend."
+            "A Sparge, VSA or Sol attention backend needs --cross_attention_backend set to a dense backend."
         )
     cross = _parse_attention_backend(
         config.cross_attention_backend,
@@ -135,8 +142,8 @@ def _validate_cross_attention_for_sparge(config: xFuserArgs) -> None:
     )
     if cross in _SPARGE_ATTENTION_BACKENDS:
         raise ValueError(
-            f"--cross_attention_backend cannot be {cross.name} when Sparge "
-            f"Attention is used. Pick a non-Sparge cross attention backend."
+            f"--cross_attention_backend cannot be {cross.name}, a Sparge, VSA or Sol backend. "
+            f"Pick a dense cross attention backend."
         )
 
 
@@ -167,8 +174,18 @@ def _validate_sparseattn_block_size(config: xFuserArgs) -> None:
     """
     if config.sparseattn_block_size is None:
         return
-    if not any(b in MHA_V4_SPARGE_FORMATS for b in _selected_attention_backends(config)):
-        raise ValueError("--sparseattn_block_size applies only to the AITER MHA v4 Sparge attention backends.")
+    if not any(b in MHA_V4_SPARGE_FORMATS or b in SOL_RECIPES for b in _selected_attention_backends(config)):
+        raise ValueError(
+            "--sparseattn_block_size applies only to the AITER MHA v4 Sparge and AITER Sol attention backends."
+        )
+
+
+def _validate_solattn_beta_schedule(config: xFuserArgs) -> None:
+    """Refuse, before loading, a --solattn_beta_schedule no selected backend reads."""
+    if config.solattn_beta_schedule is None:
+        return
+    if not any(b in SOL_RECIPES for b in _selected_attention_backends(config)):
+        raise ValueError("--solattn_beta_schedule applies only to the AITER Sol attention backends.")
 
 
 def _validate_attention_head_dims(model: "xFuserModel", config: xFuserArgs) -> None:
@@ -264,6 +281,7 @@ class ModelCapabilities:
     cross_attention_backend: bool = False
     supports_sparse_attention_backends: bool = False
     supports_sparge_attention_backends: bool = False
+    supports_sol_attention_backends: bool = False
     supports_bsa_attention_backends: bool = False
     supports_distilled_weights: bool = False
     profile_capture_phase: bool = False
@@ -634,8 +652,8 @@ class xFuserModel(abc.ABC):
 
     def _enable_options(self) -> None:
         """Enable model options based on config"""
-        if getattr(self.config, "use_spargeattn_head_balance", False):
-            log("Enabling Sparge block-sparse head balancing...")
+        if getattr(self.config, "use_sparseattn_head_balance", False):
+            log("Enabling block-sparse head balancing...")
 
         self._vae_manager.enable_options(self._decoding_vaes())
         self._enable_cpu_offload()
@@ -869,6 +887,7 @@ class xFuserModel(abc.ABC):
 
         self._validate_supported_attn_backends(config)
         _validate_sparseattn_block_size(config)
+        _validate_solattn_beta_schedule(config)
 
         if not self.capabilities.supports_bsa_attention_backends:
             for value, label in (
@@ -887,6 +906,7 @@ class xFuserModel(abc.ABC):
         backend = _parse_attention_backend(config.attention_backend, "attention backend")
         supports_sparse = self.capabilities.supports_sparse_attention_backends
         supports_sparge = self.capabilities.supports_sparge_attention_backends
+        supports_sol = self.capabilities.supports_sol_attention_backends
 
         if backend is None:
             if supports_sparse:
@@ -906,6 +926,9 @@ class xFuserModel(abc.ABC):
                     config.hybrid_attn_high_precision_backend,
                     "hybrid high-precision attention backend",
                 )
+                if low in _SOL_ATTENTION_BACKENDS or high in _SOL_ATTENTION_BACKENDS:
+                    if not supports_sol:
+                        raise ValueError(f"Model {config.model} does not support Sol-Attn attention backends.")
                 if low in _SPARGE_ATTENTION_BACKENDS or high in _SPARGE_ATTENTION_BACKENDS:
                     _validate_cross_attention_for_sparge(config)
         else:
@@ -921,7 +944,10 @@ class xFuserModel(abc.ABC):
                     f"model equivalent."
                 )
             if backend in _SPARGE_ATTENTION_BACKENDS:
-                if not supports_sparge:
+                if backend in _SOL_ATTENTION_BACKENDS:
+                    if not supports_sol:
+                        raise ValueError(f"Model {config.model} does not support Sol-Attn attention backends.")
+                elif not supports_sparge:
                     raise ValueError(f"Model {config.model} does not support Sparge attention backend.")
                 if self.capabilities.cross_attention_backend:
                     _validate_cross_attention_for_sparge(config)
@@ -1483,6 +1509,9 @@ class xFuserModel(abc.ABC):
     def prepare_run(self, input_args: dict) -> None:
         """Prepare model state before a pipeline invocation."""
         self._vae_manager.prepare_run(self._decoding_vaes(), input_args)
+        # Warmups advance the step counter too, so each invocation starts the schedules at step 0.
+        if runtime_state_is_initialized():
+            get_runtime_state().reset_step_counter()
 
     def _run_timed_pipe(self, input_args: dict) -> Tuple[DiffusionOutput, float]:
         """Run the pipeline and time its latency from the synchronized across all ranks beginning
@@ -1562,6 +1591,9 @@ class xFuserModel(abc.ABC):
         if self.config.use_hybrid_gemm_schedule:
             self._setup_hybrid_gemm_schedule(input_args)
 
+        if getattr(self.config, "solattn_beta_schedule", None) is not None:
+            self._setup_solattn_beta_schedule(input_args)
+
         if self.config.use_vae_channels_last_format:
             self._convert_vae_to_channels_last()
 
@@ -1603,6 +1635,17 @@ class xFuserModel(abc.ABC):
         log("Enabling hybrid attention schedule")
         log(f"Hybrid attention schedule: {attention_schedule.backends}", debug=True)
         get_runtime_state().set_attention_schedule(attention_schedule, total_steps=total_steps)
+
+    def _setup_solattn_beta_schedule(self, input_args: dict) -> None:
+        """Hand --solattn_beta_schedule to the Sol backends, which _validate_config made sure are selected."""
+        from xfuser.core.attention.backends.aiter_sol import kernel as sol_kernel
+
+        beta_schedule = sol_kernel.install_beta_schedule(
+            self.config.solattn_beta_schedule,
+            input_args["num_inference_steps"],
+            self._calculate_hybrid_attention_step_multiplier(input_args),
+        )
+        log(f"Sol-Attn beta schedule: {beta_schedule.per_denoising_step}", debug=True)
 
     def _setup_hybrid_gemm_schedule(self, input_args: dict) -> None:
         """

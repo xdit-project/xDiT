@@ -34,7 +34,7 @@ def _model(*, local_rank, monkeypatch, **offload_flags):
         components={},
     )
     flags = {
-        "use_spargeattn_head_balance": False,
+        "use_sparseattn_head_balance": False,
         "enable_slicing": False,
         "enable_tiling": False,
         "enable_group_cpu_offload": False,

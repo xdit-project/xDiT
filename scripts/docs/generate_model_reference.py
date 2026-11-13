@@ -205,6 +205,7 @@ def render_models(entries: Sequence[ModelEntry]) -> str:
             for flag in (
                 "supports_sparse_attention_backends",
                 "supports_sparge_attention_backends",
+                "supports_sol_attention_backends",
                 "supports_bsa_attention_backends",
             )
         )

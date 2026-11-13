@@ -32,6 +32,8 @@ def build(monkeypatch):
         ("Qwen/Qwen-Image-Edit", "auto"),
         ("Qwen/Qwen-Image-2512", "auto"),
         ("black-forest-labs/FLUX.1-Kontext-dev", "auto"),
+        ("black-forest-labs/FLUX.2-klein-9B", "auto"),
+        ("black-forest-labs/FLUX.2-klein-4B", "auto"),
     ],
 )
 def test_default_is_mha_v4_with_the_model_split(build, name, splits):
@@ -61,9 +63,21 @@ def test_without_split_kv_the_global_default_stays(build):
 
 
 @pytest.mark.parametrize(
-    "name", ["Qwen/Qwen-Image-Edit", "Qwen/Qwen-Image-2512", "black-forest-labs/FLUX.1-Kontext-dev"]
+    "name",
+    [
+        "Qwen/Qwen-Image-Edit",
+        "Qwen/Qwen-Image-2512",
+        "black-forest-labs/FLUX.1-Kontext-dev",
+        "black-forest-labs/FLUX.2-klein-9B",
+    ],
 )
 def test_gfx942_keeps_the_global_default(build, name):
     config = build(name, mha_v4=True, arch="gfx942:sramecc+:xnack-")
+    assert config.attention_backend is None
+    assert config.mha_v4_kv_splits is None
+
+
+def test_flux2_klein_pipefusion_keeps_the_global_default(build):
+    config = build("black-forest-labs/FLUX.2-klein-9B", mha_v4=True, pipefusion_parallel_degree=2)
     assert config.attention_backend is None
     assert config.mha_v4_kv_splits is None

@@ -40,8 +40,12 @@ def test_explicit_choices_are_kept(build):
     assert config.attention_backend == AttentionBackendType.AITER_BF16.name
     assert config.mha_v4_kv_splits == 8
 
+    config = build("Qwen/Qwen-Image-Edit", mha_v4=True, mha_v4_kv_splits="1")
+    assert config.attention_backend == AttentionBackendType.AITER_BF16.name
+    assert config.mha_v4_kv_splits == 1
+
 
 def test_without_split_kv_the_global_default_stays(build):
     config = build("Qwen/Qwen-Image-Edit", mha_v4=False)
     assert config.attention_backend is None
-    assert config.mha_v4_kv_splits == 1
+    assert config.mha_v4_kv_splits is None

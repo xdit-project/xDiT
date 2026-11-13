@@ -784,7 +784,7 @@ class xFuserModel(abc.ABC):
         config.attention_backend = default
         log(f"--attention_backend not set, using {self.settings.model_name} default: {default}")
         splits = self.settings.default_mha_v4_kv_splits
-        if splits is not None and config.mha_v4_kv_splits == 1:
+        if splits is not None and config.mha_v4_kv_splits is None:
             config.mha_v4_kv_splits = splits
             log(f"--mha_v4_kv_splits not set, using {self.settings.model_name} default: {splits}")
 

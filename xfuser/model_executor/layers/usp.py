@@ -312,6 +312,66 @@ def _ft_c_output_all_to_all(x):
     return x
 
 
+def _packed_input_all_to_all(tensors):
+    """One Ulysses input exchange for several [b, h, s_i, d_i] tensors (s_i may differ)."""
+    world_size = get_ulysses_parallel_world_size()
+    chunks = [t.permute(1, 0, 2, 3).contiguous().reshape(world_size, -1) for t in tensors]
+    sizes = [c.shape[1] for c in chunks]
+    exchanged = _sdpa_all_to_all_single(torch.cat(chunks, dim=1))
+    outputs = []
+    for chunk, t in zip(exchanged.split(sizes, dim=1), tensors):
+        b, h, s, d = t.shape
+        outputs.append(
+            chunk.reshape(world_size, h // world_size, b, s, d)
+            .permute(2, 1, 0, 3, 4)
+            .reshape(b, h // world_size, -1, d)
+        )
+    return outputs
+
+
+def _packed_output_all_to_all(tensors):
+    """One Ulysses output exchange for several [b, h/P, S_i, d] tensors (S_i may differ)."""
+    world_size = get_ulysses_parallel_world_size()
+    chunks = [t.permute(2, 0, 1, 3).contiguous().reshape(world_size, -1) for t in tensors]
+    sizes = [c.shape[1] for c in chunks]
+    exchanged = _sdpa_all_to_all_single(torch.cat(chunks, dim=1))
+    outputs = []
+    for chunk, t in zip(exchanged.split(sizes, dim=1), tensors):
+        b, hl, s, d = t.shape
+        outputs.append(
+            chunk.reshape(world_size, s // world_size, b, hl, d)
+            .permute(2, 0, 3, 1, 4)
+            .reshape(b, -1, s // world_size, d)
+        )
+    return outputs
+
+
+def USP_pair(qkv_a, qkv_b, kwargs_a=None, kwargs_b=None):
+    """Ulysses-only attention for two independent sequences with one input and one
+    output all-to-all shared by both."""
+    if (
+        get_ulysses_parallel_world_size() <= 1
+        or get_ring_parallel_world_size() > 1
+        or _compile_capture_bypasses_attention()
+        or get_runtime_state().fp8_comms is not None
+    ):
+        return (
+            USP(*qkv_a, dropout_p=0.0, is_causal=False, attention_kwargs=kwargs_a, combine_qkv_a2a=True),
+            USP(*qkv_b, dropout_p=0.0, is_causal=False, attention_kwargs=kwargs_b, combine_qkv_a2a=True),
+        )
+    backend = get_runtime_state().attention_backend
+    attention_function = _get_attention_function(backend=None)
+    q_a, k_a, v_a, q_b, k_b, v_b = _packed_input_all_to_all((*qkv_a, *qkv_b))
+    outs = []
+    for q, k, v, kw in ((q_a, k_a, v_a, kwargs_a), (q_b, k_b, v_b, kwargs_b)):
+        k, v, kw = _trim_trailing_kv_padding(k, v, kw, backend)
+        out, _ = attention_function(
+            q, k, v, dropout_p=0.0, is_causal=False, joint_attn_kwargs=None, attention_kwargs=kw
+        )
+        outs.append(out)
+    return tuple(_packed_output_all_to_all(outs))
+
+
 def _preprocess_joint_tensors(joint_key, joint_value):
     """
     Preprocess the joint key and value tensors for Ulysses parallelism.

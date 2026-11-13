@@ -5,9 +5,14 @@ import torch
 
 pytest.importorskip("diffusers")
 
+from xfuser.model_executor.layers import fused_qk_rope_flydsl  # noqa: E402
+from xfuser.model_executor.models.transformers import transformer_moss_image  # noqa: E402
 from xfuser.model_executor.models.transformers.transformer_moss_image import (  # noqa: E402
     MOSSImageScheduler,
     MOSSImageTransformer,
+    RMSNorm,
+    _neox_rope_tables,
+    _rotate,
     validate_skip_layers,
 )
 from xfuser.model_executor.pipelines.pipeline_moss_image import (  # noqa: E402
@@ -73,6 +78,47 @@ def test_rope_frequencies_stay_fp32_when_the_module_is_cast():
     table = rope(height=2, width=2, text_length=3, device=torch.device("cpu"))
     assert table.shape == (1, 7, 16)
     assert table.dtype == torch.float32
+
+
+def test_rmsnorm_keeps_its_numerics_and_the_flydsl_rounding_schedule():
+    """The FlyDSL QK-norm kernel keys its bf16 rounding on the module type."""
+    norm = RMSNorm(16).to(torch.bfloat16)
+    with torch.no_grad():
+        norm.weight.copy_(torch.randn(16))
+    x = torch.randn(3, 16, dtype=torch.bfloat16)
+    y = x.float() * torch.rsqrt(x.float().square().mean(-1, keepdim=True) + 1e-6)
+    with torch.no_grad():
+        assert torch.equal(norm(x), y.to(x.dtype) * norm.weight)
+    assert fused_qk_rope_flydsl._norm_schedule(norm) == (True, True)
+    assert list(norm.state_dict()) == ["weight"]
+
+
+def test_neox_rope_tables_drive_the_fused_fallback_to_the_eager_rotation():
+    """MOSS's ``_rotate`` is rotate-half over the whole head, i.e. neox with rotary_dim == head_dim."""
+    pytest.importorskip("diffusers.models.transformers.transformer_minimax_h3")
+    rope = _tiny().rope(height=2, width=2, text_length=3, device=torch.device("cpu")).to(torch.bfloat16)
+    query = torch.randn(1, 7, 4, 16, dtype=torch.bfloat16)
+    key = torch.randn(1, 7, 4, 16, dtype=torch.bfloat16)
+    norm_q, norm_k = RMSNorm(16).to(torch.bfloat16), RMSNorm(16).to(torch.bfloat16)
+    cos, sin, cos_pad, sin_fold = _neox_rope_tables(rope)
+    with torch.no_grad():
+        got_q, got_k = fused_qk_rope_flydsl._reference_neox(query, key, norm_q, norm_k, (cos, sin))
+        assert torch.equal(got_q, _rotate(norm_q(query), rope))
+        assert torch.equal(got_k, _rotate(norm_k(key), rope))
+    assert cos_pad.shape == sin_fold.shape == (7, 16)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_context_carries_rope_tables_only_when_the_fused_prologue_is_on(enabled, monkeypatch):
+    monkeypatch.setattr(transformer_moss_image, "_FUSED_QK_PROLOGUE", enabled)
+    monkeypatch.setattr(transformer_moss_image, "_HAS_FLYDSL", True)
+    model = _tiny().eval()
+    text = torch.randn(1, 2, 32)
+    with torch.no_grad():
+        ((_, rope, tables),) = model.encode_context(text, None, 2, 2)
+    assert (tables is not None) == enabled
+    if enabled:
+        assert torch.equal(tables[0], _neox_rope_tables(rope)[0])
 
 
 def test_masked_text_tokens_do_not_change_the_sample():

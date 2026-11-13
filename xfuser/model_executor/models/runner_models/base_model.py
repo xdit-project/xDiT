@@ -5,7 +5,7 @@ import json
 import os
 from math import gcd
 from PIL.Image import Image
-from typing import Callable, List, Optional, Tuple, Generator
+from typing import Callable, List, Optional, Tuple, Generator, Union
 from dataclasses import dataclass, field, replace
 from torch.profiler import profile, record_function, ProfilerActivity
 import diffusers
@@ -343,6 +343,8 @@ class ModelSettings:
     # Attention backend used when --attention_backend is omitted. Leave None to
     # keep the global default.
     default_attention_backend: Optional[str] = None
+    # --mha_v4_kv_splits that comes with default_attention_backend, unless the CLI sets a split count.
+    default_mha_v4_kv_splits: Optional[Union[str, int]] = None
     resolution_divisor: Optional[int] = None
     transformer_attr_names: List[str] = field(default_factory=lambda: ["transformer"])
 
@@ -799,6 +801,10 @@ class xFuserModel(abc.ABC):
         _parse_attention_backend(default, f"default attention backend for {self.settings.model_name}")
         config.attention_backend = default
         log(f"--attention_backend not set, using {self.settings.model_name} default: {default}")
+        splits = self.settings.default_mha_v4_kv_splits
+        if splits is not None and config.mha_v4_kv_splits is None:
+            config.mha_v4_kv_splits = splits
+            log(f"--mha_v4_kv_splits not set, using {self.settings.model_name} default: {splits}")
 
     def _validate_supported_attn_backends(self, config: xFuserArgs) -> None:
         """Refuse backends this model is not known to be correct with.

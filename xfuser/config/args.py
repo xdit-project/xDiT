@@ -295,7 +295,7 @@ class xFuserArgs:
     shard_t5_encoder: bool = False
     attention_backend: Optional[str] = None
     cross_attention_backend: Optional[str] = None
-    mha_v4_kv_splits: Union[str, int] = 1
+    mha_v4_kv_splits: Union[str, int, None] = None
     gemm_quantization: Union[GemmQuantizationSpec, str, None] = None
     gemm_config: Optional[str] = None
     use_int8_gemms: bool = False
@@ -415,7 +415,8 @@ class xFuserArgs:
             )
             self.use_sparseattn_head_balance = True
         self._resolve_attention_a2a()
-        self.mha_v4_kv_splits = _normalize_mha_v4_kv_splits(self.mha_v4_kv_splits)
+        if self.mha_v4_kv_splits is not None:
+            self.mha_v4_kv_splits = _normalize_mha_v4_kv_splits(self.mha_v4_kv_splits)
         self._validate_ulysses_a2a()
         if self.warmup_steps < 0:
             raise ValueError("--warmup_steps must be greater than or equal to 0")
@@ -1081,9 +1082,10 @@ class xFuserArgs:
         parser.add_argument(
             "--mha_v4_kv_splits",
             type=str,
-            default="1",
+            default=None,
             help=(
                 "Dense AITER MHA v4 KV split count: 1 disables splitting; 'auto' delegates to AITER. "
+                "Unset means the model's default, else 1. "
                 "A larger count requires a compatible AITER kernel and shape. Tune with measured latency; "
                 "splitting adds host overhead and does not apply to every attention format."
             ),
@@ -1882,7 +1884,7 @@ class xFuserArgs:
             use_fp8_t5_encoder=self.use_fp8_t5_encoder,
             attention_backend=self.attention_backend,
             cross_attention_backend=self.cross_attention_backend,
-            mha_v4_kv_splits=self.mha_v4_kv_splits,
+            mha_v4_kv_splits=1 if self.mha_v4_kv_splits is None else self.mha_v4_kv_splits,
             spargeattn_reorder_sequence=self.spargeattn_reorder_sequence,
             use_spargeattn_static_block_mask=self.use_spargeattn_static_block_mask,
             spargeattn_simthreshold=self.spargeattn_simthreshold,

@@ -15,32 +15,15 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
     ModelSettings,
+    prefer_mha_v4,
 )
 from xfuser import xFuserArgs
-from xfuser.core.attention import registry as attention_registry
-from xfuser.core.attention.backends.aiter_mha_v4.spec import GFX950
-from xfuser.core.attention.requirements import PARAM
-from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.core.distributed import get_runtime_state
 from xfuser.core.utils.runner_utils import log
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     STANDARD_LOAD_ROUTES,
 )
-
-_MHA_V4_KV_SPLITS = PARAM("aiter.ops.mha_v4:mha_v4", "kv_splits")
-
-
-def _prefer_mha_v4(settings: ModelSettings, kv_splits) -> None:
-    """Default to AITER MHA v4 BF16 with split KV where the installed AITER can run it."""
-    # AITER refuses kv_splits > 1 where it does not export the MHA v4 LSE, which is everywhere but gfx950.
-    if (
-        GFX950.satisfied()
-        and attention_registry.available(AttentionBackendType.AITER_BF16) is None
-        and _MHA_V4_KV_SPLITS.satisfied()
-    ):
-        settings.default_attention_backend = AttentionBackendType.AITER_BF16.name
-        settings.default_mha_v4_kv_splits = kv_splits
 
 
 @register_model("Qwen/Qwen-Image-Edit-2511")
@@ -107,7 +90,7 @@ class xFuserQwenImageEditModel(xFuserModel):
 
     def _customize_settings(self, config: xFuserArgs) -> None:
         super()._customize_settings(config)
-        _prefer_mha_v4(self.settings, "auto")
+        prefer_mha_v4(self.settings, "auto")
         # 2509 and 2511 are Edit Plus checkpoints: diffusers loads them with
         # QwenImageEditPlusPipeline, which conditions on a list of images.
         self._is_edit_plus = False
@@ -233,7 +216,7 @@ class xFuserQwenImageModel(xFuserModel):
 
     def _customize_settings(self, config: xFuserArgs) -> None:
         super()._customize_settings(config)
-        _prefer_mha_v4(self.settings, "auto")
+        prefer_mha_v4(self.settings, "auto")
         if "2512" in config.model:
             self.settings.model_name = "Qwen/Qwen-Image-2512"
             self.settings.output_name = "qwen_image_2512"

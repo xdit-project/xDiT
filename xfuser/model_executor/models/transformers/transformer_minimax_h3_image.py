@@ -171,10 +171,12 @@ class xFuserMiniMaxH3ImageTransformer2DWrapper(MiniMaxH3ImageTransformer2DModel)
 
     @staticmethod
     def _project_block_modulation(block: torch.nn.Module, temb: torch.Tensor) -> torch.Tensor:
-        # FSDP gathers a block's weights only around its own forward. Compiling a
-        # sharded model wraps each FSDP unit in turn.
+        # FSDP gathers a block's weights only around its own forward. The runner
+        # compiles a sharded model block by block, so unwrap the compiled module first.
         block = getattr(block, "_orig_mod", block)
         if isinstance(block, FullyShardedDataParallel):
+            # This runs inside the root unit's forward, which torch documents as
+            # unsupported for summon_full_params; it checks only this block's state.
             with FullyShardedDataParallel.summon_full_params(block, recurse=False, writeback=False):
                 return block.adaln_proj.project(temb)
         if isinstance(block, FSDPModule):

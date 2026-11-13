@@ -379,6 +379,12 @@ class xFuserFlux2Model(xFuserModel):
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
 
+    def _customize_settings(self, config) -> None:
+        super()._customize_settings(config)
+        # Measured on the diffusers pipeline only, not the PipeFusion one.
+        if config.pipefusion_parallel_degree <= 1:
+            prefer_mha_v4(self.settings, "auto")
+
     def _get_compile_mode(self) -> str:
         # CUDA graphs incompatible with cross-step caching, and
         # cause pathological re-captures on RDNA4.

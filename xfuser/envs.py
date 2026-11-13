@@ -64,6 +64,13 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "XDIT_SDMA_LIB": lambda: os.environ.get("XDIT_SDMA_LIB", ""),
     "XDIT_SDMA_WAIT_S": lambda: os.environ.get("XDIT_SDMA_WAIT_S", "30"),
     "XDIT_SDMA_ALLOW_UNTESTED": lambda: os.environ.get("XDIT_SDMA_ALLOW_UNTESTED", "0"),
+    # FLUX.3's fused kernels and sequence-major Ulysses exchange, each on by default; 0, false
+    # or off selects the unfused path, for A/B runs and bisects. Read when the transformer
+    # module is imported.
+    "XFUSER_FLUX3_FUSED_MXFP4_QUANT": lambda: os.environ.get("XFUSER_FLUX3_FUSED_MXFP4_QUANT", "1"),
+    "XFUSER_FLUX3_FUSED_QK_NORM_ROPE": lambda: os.environ.get("XFUSER_FLUX3_FUSED_QK_NORM_ROPE", "1"),
+    "XFUSER_FLUX3_FUSED_BLOCK_RESIDUAL": lambda: os.environ.get("XFUSER_FLUX3_FUSED_BLOCK_RESIDUAL", "1"),
+    "XFUSER_FLUX3_SEQ_MAJOR_ULYSSES": lambda: os.environ.get("XFUSER_FLUX3_SEQ_MAJOR_ULYSSES", "1"),
 }
 
 

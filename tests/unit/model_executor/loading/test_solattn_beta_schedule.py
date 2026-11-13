@@ -284,6 +284,33 @@ def test_the_step_survives_cuda_graph_replay(installed):
     assert betas == pytest.approx(schedule.betas * 2 + schedule.betas[:1], abs=1e-4)
 
 
+@pytest.mark.accelerator
+def test_an_installed_schedule_compiles_the_forward_once(monkeypatch):
+    """The device's beta table has to exist before the forward is traced: one the forward creates
+    on its first call fails the guard the trace recorded, and every rank recompiles once."""
+    if not torch.cuda.is_available():
+        pytest.skip("needs an accelerator for the device table")
+    from torch._dynamo.utils import counters
+
+    runtime = _bare_runtime()
+    monkeypatch.setattr(kernel, "get_runtime_state", lambda: runtime)
+    monkeypatch.setattr(kernel, "_BETA_SCHEDULE", None)
+    kernel.install_beta_schedule("1.0:0.0", 4, forwards_per_step=1)
+
+    def forward(x):
+        runtime.increment_step_counter()
+        return x * 2 + kernel._beta(AttnCall(step=runtime.current_step()), x.device)
+
+    torch._dynamo.reset()
+    counters.clear()
+    compiled = torch.compile(forward)
+    x = torch.ones(4, device=torch.device("cuda", torch.cuda.current_device()))
+    betas = [float(compiled(x)[0]) - 2.0 for _ in range(4)]
+
+    assert counters["stats"]["unique_graphs"] == 1, "the forward was recompiled"
+    assert betas == pytest.approx([1.0, 2 / 3, 1 / 3, 0.0], abs=1e-6)
+
+
 def test_the_scheduled_beta_beats_the_callers_dict(installed):
     """The dict is built once per run from --solattn_beta, so if it won, every step would share a
     beta -- the thing the schedule exists to stop."""

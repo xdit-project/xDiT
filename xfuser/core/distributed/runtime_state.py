@@ -332,7 +332,7 @@ class RuntimeState(metaclass=ABCMeta):
         spec.validate(self.runtime_config)
 
     def current_step(self) -> Optional[torch.Tensor]:
-        """The running forward's index as a 0-d tensor, or None outside a tracked forward."""
+        """The running forward's index as a 0-d tensor, or None when nothing tracks steps."""
         return None
 
 
@@ -369,7 +369,7 @@ class DiTRuntimeState(RuntimeState):
     # Read by reset_step_counter() at every pipeline-run boundary, so it needs the same default.
     step_counter: Optional[torch.Tensor] = None
     # The step the running forward is at. step_counter has already moved past it by the time
-    # attention runs, because the advance happens at the top of the forward.
+    # attention runs, because the advance happens at the top of the forward. Set with it.
     forward_step: Optional[torch.Tensor] = None
 
     def __init__(self, pipeline: DiffusionPipeline, config: EngineConfig):
@@ -476,12 +476,11 @@ class DiTRuntimeState(RuntimeState):
     def track_steps(self) -> None:
         """Count transformer forwards from here on, for a consumer that reads the step.
 
-        Opt-in rather than always on: the advance runs inside the compiled transformer forward,
-        and under CUDA graphs a counter written there is a graph output the next replay
-        overwrites. A run that reads no step keeps a forward with no counter in it.
+        Opt-in, so a run that reads no step keeps a forward with no counter in it.
         """
         if self.step_counter is None:
             self.step_counter = torch.tensor(0, dtype=torch.int)
+            self.forward_step = torch.zeros_like(self.step_counter)
 
     def current_step(self) -> Optional[torch.Tensor]:
         return self.forward_step
@@ -490,19 +489,21 @@ class DiTRuntimeState(RuntimeState):
         """
         Advance the step when something tracks it, and set per-step scheduled backends/modes.
         With an attention or GEMM schedule, the counter is reset to 0 at the end of the schedule.
+
+        In place: this runs inside the compiled transformer forward, and under CUDA graphs a
+        counter rebound there would be a graph output, which the next replay overwrites.
         """
         if self.step_counter is None:
             return
 
-        current_step = self.step_counter
-        self._apply_schedules_at(current_step)
-        self.forward_step = current_step
+        self._apply_schedules_at(self.step_counter)
+        self.forward_step.copy_(self.step_counter)
 
-        self.step_counter = self.step_counter + 1
+        self.step_counter.add_(1)
 
         active_total_steps = self._get_active_total_steps()
         if active_total_steps is not None and self.step_counter >= active_total_steps:
-            self.step_counter = torch.zeros_like(self.step_counter)
+            self.step_counter.zero_()
 
     def _apply_schedules_at(self, step) -> None:
         """Point every active schedule at `step`."""
@@ -523,8 +524,8 @@ class DiTRuntimeState(RuntimeState):
         """
         if self.step_counter is None:
             return
-        self.step_counter = torch.zeros_like(self.step_counter)
-        self.forward_step = None
+        self.step_counter.zero_()
+        self.forward_step.zero_()
         self._apply_schedules_at(self.step_counter)
 
     def set_attention_schedule(

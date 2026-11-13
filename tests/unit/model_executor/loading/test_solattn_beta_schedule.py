@@ -182,7 +182,6 @@ def test_a_warmup_does_not_shift_the_schedule_the_measured_run_walks(installed):
         _forward_beta(runtime)
 
     runtime.reset_step_counter()
-    assert runtime.current_step() is None, "between runs there is no forward to read a step for"
 
     assert _forward_beta(runtime) == pytest.approx(schedule.get_beta(0))
 
@@ -256,6 +255,33 @@ def test_advancing_the_step_costs_no_graph_break(installed):
     )
     # Compiled and eager have to walk the same schedule, and wrap at the same place.
     assert betas == pytest.approx(SolAttnBetaSchedule.from_spec("1.0:0.0", 4).betas * 2)
+
+
+@pytest.mark.accelerator
+def test_the_step_survives_cuda_graph_replay(installed):
+    """Under CUDA graphs a counter rebound inside the compiled forward is an output of the graph,
+    and the next replay overwrites it before the forward after that reads it back. A beta-only run
+    compiles to one graph, so nothing else keeps the counter out of it; the advance must be in
+    place."""
+    if not torch.cuda.is_available():
+        pytest.skip("needs an accelerator for CUDA graphs")
+    schedule = SolAttnBetaSchedule.from_spec("1.0:0.0", 4)
+    installed(schedule)
+    runtime = _tracking_runtime()
+    weight = torch.randn(16, 16, device="cuda")
+
+    def forward(x):
+        runtime.increment_step_counter()
+        return x @ weight + kernel._beta(AttnCall(step=runtime.current_step()), x.device)
+
+    torch._dynamo.reset()
+    compiled = torch.compile(forward, mode="reduce-overhead")
+    x = torch.ones(4, 16, device="cuda")
+    betas = [float((compiled(x) - x @ weight)[0, 0]) for _ in range(8)]
+    runtime.reset_step_counter()
+    betas.append(float((compiled(x) - x @ weight)[0, 0]))
+
+    assert betas == pytest.approx(schedule.betas * 2 + schedule.betas[:1], abs=1e-4)
 
 
 def test_the_scheduled_beta_beats_the_callers_dict(installed):

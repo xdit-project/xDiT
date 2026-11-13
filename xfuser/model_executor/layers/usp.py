@@ -1,6 +1,6 @@
 # This file implements USP with torch version >= '2.5.0'
 import functools
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.distributed._functional_collectives as ft_c
@@ -479,6 +479,13 @@ def _parallel_degrees() -> Tuple[int, int]:
     return get_ulysses_parallel_world_size(), get_ring_parallel_world_size()
 
 
+def _current_step() -> Optional[torch.Tensor]:
+    """The runtime's step, or None when there is no runtime -- the same fallback as above."""
+    if not runtime_state_is_initialized():
+        return None
+    return get_runtime_state().current_step()
+
+
 def _spec_adapter(spec):
     """Present a Spec with the calling convention ring_attn and the direct
     call sites already use.
@@ -503,6 +510,7 @@ def _spec_adapter(spec):
                 varlen=VarlenPacking.from_kwargs(kwargs),
                 ulysses_world_size=ulysses_world_size,
                 ring_world_size=ring_world_size,
+                step=_current_step(),
                 attention_kwargs=kwargs,
             ),
         )

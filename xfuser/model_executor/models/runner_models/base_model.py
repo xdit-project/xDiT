@@ -65,7 +65,6 @@ from xfuser.core.distributed.fp8_comms import setup_fp8_comms, validate_fp8_comm
 from xfuser.core.distributed.attention_schedule import (
     AttentionSchedule,
     GemmPrecisionSchedule,
-    SolAttnBetaSchedule,
     create_hybrid_attn_schedule,
     create_hybrid_gemm_schedule,
 )
@@ -201,6 +200,14 @@ def _validate_sparseattn_block_size(config: xFuserArgs) -> None:
         raise ValueError(
             "--sparseattn_block_size applies only to the AITER MHA v4 Sparge and AITER Sol attention backends."
         )
+
+
+def _validate_solattn_beta_schedule(config: xFuserArgs) -> None:
+    """Refuse, before loading, a --solattn_beta_schedule no selected backend reads."""
+    if config.solattn_beta_schedule is None:
+        return
+    if not any(b in SOL_RECIPES for b in _selected_attention_backends(config)):
+        raise ValueError("--solattn_beta_schedule applies only to the AITER Sol attention backends.")
 
 
 def _validate_attention_head_dims(model: "xFuserModel", config: xFuserArgs) -> None:
@@ -902,6 +909,7 @@ class xFuserModel(abc.ABC):
 
         self._validate_supported_attn_backends(config)
         _validate_sparseattn_block_size(config)
+        _validate_solattn_beta_schedule(config)
 
         if not self.capabilities.supports_bsa_attention_backends:
             for value, label in (
@@ -1656,26 +1664,15 @@ class xFuserModel(abc.ABC):
         get_runtime_state().set_attention_schedule(attention_schedule, total_steps=total_steps)
 
     def _setup_solattn_beta_schedule(self, input_args: dict) -> None:
-        """
-        Setup a per-step Sol-Attn routing threshold from --solattn_beta_schedule.
+        """Hand --solattn_beta_schedule to the Sol backends, which _validate_config made sure are selected."""
+        from xfuser.core.attention.backends.aiter_sol import kernel as sol_kernel
 
-        The spec is read per denoising step and held across that step's forwards, which is the
-        same multiplier the hybrid schedules use. The step counter advances per forward, so the
-        expansion is what makes a step's conditional and unconditional branch share a beta;
-        spreading the ramp over forwards instead would route one branch more exactly than the
-        other for the whole run, and guidance subtracts the two rather than averaging them.
-        """
-        forwards_per_step = self._calculate_hybrid_attention_step_multiplier(input_args)
-        denoising_steps = input_args["num_inference_steps"]
-        beta_schedule = SolAttnBetaSchedule.from_spec(
+        beta_schedule = sol_kernel.install_beta_schedule(
             self.config.solattn_beta_schedule,
-            denoising_steps,
-            forwards_per_step=forwards_per_step,
+            input_args["num_inference_steps"],
+            self._calculate_hybrid_attention_step_multiplier(input_args),
         )
-
-        log("Enabling per-step Sol-Attn beta schedule")
         log(f"Sol-Attn beta schedule: {beta_schedule.per_denoising_step}", debug=True)
-        get_runtime_state().set_solattn_beta_schedule(beta_schedule, total_steps=denoising_steps * forwards_per_step)
 
     def _setup_hybrid_gemm_schedule(self, input_args: dict) -> None:
         """

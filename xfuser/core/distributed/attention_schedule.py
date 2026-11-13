@@ -225,8 +225,8 @@ class SolAttnBetaSchedule:
         as a constant, so the forward recompiles for every distinct beta the schedule holds -- a
         40-step ramp past the recompile limit, after which dynamo gives up and runs it eagerly.
 
-        For the same reason the range cannot be checked here. The counter wraps on total_steps
-        before this ever sees it, so an out-of-range step is not reachable.
+        For the same reason the range cannot be checked here, so the step wraps on total_steps
+        instead: the runtime's counter only wraps when a hybrid schedule gives it a length.
 
         index_select rather than self._betas_tensor[step], which is the same lookup but not the
         same cost: subscripting with a 0-d tensor lowers to select(), whose index is a Python int,
@@ -238,10 +238,10 @@ class SolAttnBetaSchedule:
         inductor fuses it into the routing kernel that consumes the beta -- the fused kernel's name
         carries both this index_select and the threshold's std -- and a Triton kernel cannot take a
         host pointer, so a host-resident table with a device step aborts the launch with "Pointer
-        argument cannot be accessed from Triton (cpu tensor?)". Hence the runtime puts the counter
-        on the device where the routing runs and the table follows it here.
+        argument cannot be accessed from Triton (cpu tensor?)". Hence the caller moves the step to
+        the device where the routing runs and the table follows it here.
         """
-        index = torch.as_tensor(step).reshape(1)
+        index = (torch.as_tensor(step) % self.total_steps).reshape(1)
         return self.betas_on(index.device).index_select(0, index).squeeze(0)
 
 

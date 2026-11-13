@@ -81,6 +81,7 @@ def single_rank(monkeypatch):
             fp8_comms=None,
             runtime_config=SimpleNamespace(use_sparseattn_head_balance=False),
             increment_step_counter=lambda: None,
+            current_step=lambda: None,
         )
         monkeypatch.setattr("xfuser.core.distributed.parallel_state._SP", sp_group)
         monkeypatch.setattr("xfuser.core.distributed.runtime_state._RUNTIME", runtime)

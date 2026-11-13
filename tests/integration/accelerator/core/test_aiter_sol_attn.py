@@ -62,10 +62,10 @@ def _require_sol_recipe(recipe):
     _require(_backend(recipe))
 
 
-def _run(backend, query, key, value, **attention_kwargs):
+def _run(backend, query, key, value, step=None, **attention_kwargs):
     spec = registry.get(backend)
     spec.resolved()
-    return spec.run(query, key, value, AttnCall(attention_kwargs=attention_kwargs))
+    return spec.run(query, key, value, AttnCall(step=step, attention_kwargs=attention_kwargs))
 
 
 def _recipes_on_this_device():
@@ -460,12 +460,12 @@ def test_sol_attn_is_equivariant_under_a_head_permutation():
 # ---------------------------------------------------------------------------
 
 
-def _selected_blocks(query, key, value, backend, **attention_kwargs):
+def _selected_blocks(query, key, value, backend, step=None, **attention_kwargs):
     from xfuser.core.attention.sparsity.head_balance import COST_SINK_KEY
 
     sink = torch.zeros(query.shape[1], device="cuda", dtype=torch.float32)
     with torch.no_grad():
-        out, _ = _run(backend, query, key, value, **attention_kwargs, **{COST_SINK_KEY: sink})
+        out, _ = _run(backend, query, key, value, step, **attention_kwargs, **{COST_SINK_KEY: sink})
     return out, sink
 
 
@@ -497,24 +497,24 @@ def test_a_scheduled_beta_routes_exactly_as_the_same_number_would(monkeypatch):
     distinct beta.
     """
     _require_sol_recipe("fp8")
-    from types import SimpleNamespace
-
-    from xfuser.core.distributed import runtime_state
+    from xfuser.core.attention.backends.aiter_sol import kernel
+    from xfuser.core.distributed.attention_schedule import SolAttnBetaSchedule
 
     query, key, value = _operands(sharpness=0.0)
 
     _use_block_size(monkeypatch, None)
 
-    def run(scheduled):
-        monkeypatch.setattr(runtime_state, "_RUNTIME", SimpleNamespace(scheduled_solattn_beta=scheduled), raising=False)
-        return _selected_blocks(query, key, value, AttentionBackendType.AITER_FP8_SOL, solattn_beta=0.25)
+    def run(schedule):
+        monkeypatch.setattr(kernel, "_BETA_SCHEDULE", schedule)
+        step = torch.tensor(0, dtype=torch.int)
+        return _selected_blocks(query, key, value, AttentionBackendType.AITER_FP8_SOL, step, solattn_beta=0.25)
 
     # The first Sol-Attn call of a process autotunes the pooling kernels, and a config picked on
     # timing noise moves a near-threshold block, which would read as a difference between the betas.
     run(None)
 
     from_flag, cost_from_flag = run(None)
-    from_schedule, cost_from_schedule = run(torch.tensor(0.25, dtype=torch.float32))
+    from_schedule, cost_from_schedule = run(SolAttnBetaSchedule([0.25]))
 
     assert torch.equal(cost_from_flag, cost_from_schedule), (
         "the scheduled beta selected a different number of blocks than the float: "

@@ -4,13 +4,15 @@ One beta for a whole run assumes every denoising step is equally approximable, a
 Wan 2.2 says it is not: at a matched selected-block density of about 0.44, one attention call's
 relative error against exact bf16 is 0.100 at step 0, 0.157 at step 20 and 0.172 at step 39, while
 a fixed beta drifts slightly sparser across that range. These pin down the plumbing that lets a
-run spend its density unevenly: the spec parses to one beta per step, the step counter walks it,
-and the Sol backends read the step's value rather than the flag.
+run spend its density unevenly: the spec parses to one beta per step, the runtime counts forwards,
+and the Sol backend reads the step's beta rather than the flag.
 """
 
 import pytest
 import torch
 
+from xfuser.core.attention.backends.aiter_sol import kernel
+from xfuser.core.attention.spec import AttnCall
 from xfuser.core.distributed.attention_schedule import SolAttnBetaSchedule
 from xfuser.core.distributed.runtime_state import DiTRuntimeState
 
@@ -26,10 +28,8 @@ def _bare_runtime(**fields):
     runtime.schedule_total_steps = None
     runtime.gemm_schedule = None
     runtime.gemm_schedule_total_steps = None
-    runtime.solattn_beta_schedule = None
-    runtime.solattn_beta_schedule_total_steps = None
-    runtime.scheduled_solattn_beta = None
     runtime.step_counter = None
+    runtime.forward_step = None
     for name, value in fields.items():
         setattr(runtime, name, value)
     return runtime
@@ -115,22 +115,47 @@ def test_an_explicit_list_is_read_per_step_not_per_forward():
         SolAttnBetaSchedule.from_spec("1.0,1.0,0.5,0.5,0.0,0.0", 3, forwards_per_step=2)
 
 
-def test_the_counter_walks_a_guided_schedule_one_forward_at_a_time():
+def _tracking_runtime(**fields):
+    runtime = _bare_runtime(**fields)
+    runtime.track_steps()
+    return runtime
+
+
+@pytest.fixture
+def installed(monkeypatch):
+    """Install a schedule on the Sol backend the way install_beta_schedule leaves it, minus the runtime."""
+
+    def install(schedule):
+        monkeypatch.setattr(kernel, "_BETA_SCHEDULE", schedule)
+
+    return install
+
+
+def _forward_beta(runtime, **attention_kwargs) -> float:
+    """One transformer forward as the Sol backend sees it: the advance, then an attention call."""
+    runtime.increment_step_counter()
+    call = AttnCall(step=runtime.current_step(), attention_kwargs=attention_kwargs)
+    return float(kernel._beta(call, "cpu"))
+
+
+def test_the_counter_walks_a_guided_schedule_one_forward_at_a_time(installed):
     """The expansion is only right if the counter still advances per forward: the two must agree,
     or a guided run would walk the schedule at half speed and never reach the last beta."""
-    schedule = SolAttnBetaSchedule.from_spec("1.0,0.0", 2, forwards_per_step=2)
-    runtime = _bare_runtime(
-        solattn_beta_schedule=schedule,
-        solattn_beta_schedule_total_steps=torch.tensor(4, dtype=torch.int),
-        step_counter=torch.tensor(0, dtype=torch.int),
-    )
+    installed(SolAttnBetaSchedule.from_spec("1.0,0.0", 2, forwards_per_step=2))
+    runtime = _tracking_runtime()
 
-    seen = []
-    for _ in range(4):
-        runtime.increment_step_counter()
-        seen.append(float(runtime.scheduled_solattn_beta))
+    assert [_forward_beta(runtime) for _ in range(4)] == pytest.approx([1.0, 1.0, 0.0, 0.0])
 
-    assert seen == pytest.approx([1.0, 1.0, 0.0, 0.0])
+
+def test_a_forward_reads_its_own_step_not_the_next_one(installed):
+    """The advance runs at the top of the forward, so by the time attention runs the counter has
+    already moved on. Reading it there would route forward 0 at forward 1's beta, and so on."""
+    installed(SolAttnBetaSchedule.from_spec("0.5,0.25,0.0", 3))
+    runtime = _tracking_runtime()
+
+    assert _forward_beta(runtime) == pytest.approx(0.5)
+    assert int(runtime.current_step()) == 0
+    assert int(runtime.step_counter) == 1
 
 
 def test_a_single_step_run_takes_the_first_beta():
@@ -154,135 +179,122 @@ def test_a_non_numeric_beta_is_named_in_the_error():
         SolAttnBetaSchedule.from_spec("abc:1.0", 3)
 
 
-def test_the_step_counter_walks_the_schedule_and_wraps():
-    """The backends read one scalar, so the counter is what makes it this step's beta."""
-    schedule = SolAttnBetaSchedule.from_spec("0.5,0.25,0.0", 3)
-    runtime = _bare_runtime(
-        solattn_beta_schedule=schedule,
-        solattn_beta_schedule_total_steps=torch.tensor(3, dtype=torch.int),
-        step_counter=torch.tensor(0, dtype=torch.int),
-    )
+def test_the_schedule_wraps_on_its_own_length(installed):
+    """Nothing else need be scheduled, and then the counter only climbs; the schedule has to wrap
+    it, as a second image in one process must begin at step 0 again rather than run off the end."""
+    installed(SolAttnBetaSchedule.from_spec("0.5,0.25,0.0", 3))
+    runtime = _tracking_runtime()
 
-    seen = []
-    for _ in range(5):
+    assert [_forward_beta(runtime) for _ in range(5)] == pytest.approx([0.5, 0.25, 0.0, 0.5, 0.25])
+    assert int(runtime.step_counter) == 5
+
+
+def test_a_hybrid_schedule_still_wraps_the_counter():
+    runtime = _tracking_runtime(schedule_total_steps=torch.tensor(2, dtype=torch.int))
+
+    for _ in range(3):
         runtime.increment_step_counter()
-        seen.append(runtime.scheduled_solattn_beta)
 
-    # Five advances over a three-step run: the schedule restarts, as a second image in one process
-    # has to begin at step 0 again rather than run off the end.
-    assert seen == [0.5, 0.25, 0.0, 0.5, 0.25]
+    assert int(runtime.current_step()) == 0
+    assert int(runtime.step_counter) == 1
 
 
-def test_a_beta_schedule_alone_advances_the_counter():
-    """Nothing else need be scheduled. The counter used to move only for a backend or GEMM
-    schedule, so a beta-only run would have sat on step 0's beta forever."""
-    runtime = _bare_runtime(
-        solattn_beta_schedule=SolAttnBetaSchedule.from_spec("1.0:0.0", 2),
-        solattn_beta_schedule_total_steps=torch.tensor(2, dtype=torch.int),
-        step_counter=torch.tensor(0, dtype=torch.int),
-    )
-
-    runtime.increment_step_counter()
-    runtime.increment_step_counter()
-
-    assert runtime.scheduled_solattn_beta == pytest.approx(0.0)
-
-
-def test_a_warmup_does_not_shift_the_schedule_the_measured_run_walks():
+def test_a_warmup_does_not_shift_the_schedule_the_measured_run_walks(installed):
     """Each pipeline invocation starts at the first beta, whatever the invocation before it spent.
 
-    The counter only advances, wrapping on the schedule length, and a compile warmup runs its own
-    forwards -- usually with a shortened step count. So the measured run used to start partway
-    along the ramp with its last steps wrapped back onto the beginning: silent, and in the worst
-    direction, since it hands every step a beta meant for a later one while the early steps are
-    the ones whose error propagates through the whole run. Wan 2.2 warmed up a full cycle and
-    landed back on zero by arithmetic, which is why this went unnoticed there.
+    The counter only advances, and a compile warmup runs its own forwards -- usually with a
+    shortened step count. So the measured run used to start partway along the ramp with its last
+    steps wrapped back onto the beginning: silent, and in the worst direction, since it hands every
+    step a beta meant for a later one while the early steps are the ones whose error propagates
+    through the whole run. Wan 2.2 warmed up a full cycle and landed back on zero by arithmetic,
+    which is why this went unnoticed there.
     """
     schedule = SolAttnBetaSchedule.from_spec("-0.5:1.0", 8)
-    runtime = _bare_runtime(
-        solattn_beta_schedule=schedule,
-        solattn_beta_schedule_total_steps=torch.tensor(8, dtype=torch.int),
-        step_counter=torch.tensor(0, dtype=torch.int),
-    )
+    installed(schedule)
+    runtime = _tracking_runtime()
 
     for _ in range(3):  # a three-step warmup before the real thing
-        runtime.increment_step_counter()
-    assert float(runtime.scheduled_solattn_beta) != pytest.approx(schedule.get_beta(0))
+        _forward_beta(runtime)
 
     runtime.reset_step_counter()
-    runtime.increment_step_counter()
+    assert runtime.current_step() is None, "between runs there is no forward to read a step for"
 
-    assert float(runtime.scheduled_solattn_beta) == pytest.approx(schedule.get_beta(0))
+    assert _forward_beta(runtime) == pytest.approx(schedule.get_beta(0))
 
 
-def test_resetting_the_counter_without_a_schedule_is_harmless():
-    """Every model calls this on every invocation, and most runs schedule nothing at all."""
+def test_nothing_is_counted_until_something_tracks_steps():
+    """Every model calls these on every forward and invocation, and most runs schedule nothing."""
     runtime = _bare_runtime()
 
+    runtime.increment_step_counter()
     runtime.reset_step_counter()
 
     assert runtime.step_counter is None
+    assert runtime.current_step() is None
 
 
-def test_schedules_that_disagree_about_the_step_count_are_refused():
-    """Two schedules on one counter have to be the same length or one of them is being misread.
-    Caught here at setup, not per step: the per-step path runs inside the compiled forward, where
-    reading these totals on the host would break the graph."""
-    runtime = _bare_runtime(schedule_total_steps=torch.tensor(8, dtype=torch.int))
+def test_tracking_twice_keeps_the_count():
+    """A beta schedule and a hybrid schedule share one counter; the second must not restart it."""
+    runtime = _tracking_runtime()
+    runtime.increment_step_counter()
 
-    with pytest.raises(RuntimeError, match="attention schedule has 8"):
-        runtime.set_solattn_beta_schedule(SolAttnBetaSchedule.from_spec("1.0:0.0", 4), total_steps=4)
+    runtime.track_steps()
+
+    assert int(runtime.step_counter) == 1
 
 
-def test_advancing_the_step_never_reads_a_schedule_total_on_the_host():
+def test_installing_a_schedule_tracks_steps_and_clearing_it_restores_the_flag(monkeypatch):
+    runtime = _bare_runtime()
+    monkeypatch.setattr(kernel, "get_runtime_state", lambda: runtime)
+    monkeypatch.setattr(kernel, "_BETA_SCHEDULE", None)
+
+    kernel.install_beta_schedule("1.0:0.0", 2, forwards_per_step=2)
+
+    assert runtime.step_counter is not None
+    assert kernel._BETA_SCHEDULE.betas == [1.0, 1.0, 0.0, 0.0]
+
+    kernel.clear_beta_schedule()
+
+    assert _forward_beta(runtime, solattn_beta=0.125) == pytest.approx(0.125)
+
+
+def test_advancing_the_step_never_reads_a_schedule_total_on_the_host(installed):
     """The counter advance is called from the compiled transformer forward. Converting any of these
     tensors to a Python number there costs a graph break every forward, so the step path must not
     touch them beyond passing them to torch."""
-    runtime = _bare_runtime(
-        solattn_beta_schedule=SolAttnBetaSchedule.from_spec("1.0:0.0", 4),
-        solattn_beta_schedule_total_steps=_SyncTrap(4),
-        schedule_total_steps=_SyncTrap(4),
-        step_counter=torch.tensor(0, dtype=torch.int),
-    )
+    installed(SolAttnBetaSchedule.from_spec("1.0:0.0", 4))
+    runtime = _tracking_runtime(schedule_total_steps=_SyncTrap(4))
 
     runtime.increment_step_counter()
 
-    assert runtime.scheduled_solattn_beta == pytest.approx(1.0)
+    assert float(kernel._beta(AttnCall(step=runtime.current_step()), "cpu")) == pytest.approx(1.0)
 
 
-def test_advancing_the_step_costs_no_graph_break():
+def test_advancing_the_step_costs_no_graph_break(installed):
     """The one that matters, and the only one that can see the whole path at once.
 
     _SyncTrap above catches a host read of the totals, but not every host read is a read of those:
-    subscripting the beta table with the 0-d step counter lowers to select(), which needs the step
-    as a Python int and broke the graph twice per traced frame while every other test here passed.
-    So this compiles the real call and counts. Stands in for the transformer forward, which is
-    where the advance is called from, hence where a break splits a graph that should be one.
+    subscripting the beta table with the 0-d step lowers to select(), which needs the step as a
+    Python int and broke the graph twice per traced frame while every other test here passed. So
+    this compiles the real call and counts. Stands in for the transformer forward, which is where
+    the advance is called from, hence where a break splits a graph that should be one.
     """
     from torch._dynamo.utils import counters
 
-    runtime = _bare_runtime()
-    # Installed the way a run installs it, rather than by setting the fields: which device the
-    # counter lands on is part of what is being tested, and that is the setter's decision.
-    runtime.set_solattn_beta_schedule(SolAttnBetaSchedule.from_spec("1.0:0.0", 4), total_steps=4)
-    if torch.cuda.is_available():
-        assert runtime.step_counter.is_cuda, (
-            "a beta schedule's counter belongs on the accelerator, or the lookup inductor fuses "
-            "into the routing kernel reads the schedule through a host pointer"
-        )
-    device = runtime.step_counter.device
+    installed(SolAttnBetaSchedule.from_spec("1.0:0.0", 4))
+    runtime = _tracking_runtime()
+    # The counter lives on the host and the lookup moves it to the routing's device, so a device
+    # here is the case that bites: a table or a step left on the host is a host pointer in the
+    # device kernel inductor fuses the lookup into -- an aborted launch, not a slow one.
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     def forward(x):
         runtime.increment_step_counter()
-        return x * 2 + runtime.scheduled_solattn_beta
+        return x * 2 + kernel._beta(AttnCall(step=runtime.current_step()), x.device)
 
     torch._dynamo.reset()
     counters.clear()
     compiled = torch.compile(forward)
-    # On the accelerator when there is one, which is the case that bites: the beta is consumed by
-    # the routing on the device, inductor fuses the schedule lookup into that kernel, and a table
-    # or a step left on the host is a host pointer in a device kernel -- an aborted launch, not a
-    # slow one. A CPU-only version of this test passes either way.
     betas = [float(compiled(torch.ones(4, device=device))[0]) - 2.0 for _ in range(8)]
 
     breaks = sum(counters["graph_break"].values())
@@ -293,45 +305,28 @@ def test_advancing_the_step_costs_no_graph_break():
     assert betas == pytest.approx(SolAttnBetaSchedule.from_spec("1.0:0.0", 4).betas * 2)
 
 
-def test_setting_a_schedule_of_the_wrong_length_is_refused():
-    runtime = _bare_runtime()
-    schedule = SolAttnBetaSchedule.from_spec("1.0:0.0", 4)
-
-    with pytest.raises(ValueError, match="covers 4 steps but the run has 40"):
-        runtime.set_solattn_beta_schedule(schedule, total_steps=40)
-
-
-def test_the_scheduled_beta_beats_the_callers_dict(monkeypatch):
+def test_the_scheduled_beta_beats_the_callers_dict(installed):
     """The dict is built once per run from --solattn_beta, so if it won, every step would share a
     beta -- the thing the schedule exists to stop."""
-    from types import SimpleNamespace
+    installed(SolAttnBetaSchedule.from_spec("-0.25", 1))
 
-    from xfuser.core.attention.backends.aiter_sol import kernel
-    from xfuser.core.distributed import runtime_state
+    call = AttnCall(step=torch.tensor(0, dtype=torch.int), attention_kwargs={"solattn_beta": 0.5})
 
-    monkeypatch.setattr(runtime_state, "_RUNTIME", SimpleNamespace(scheduled_solattn_beta=-0.25), raising=False)
-
-    assert kernel._beta({"solattn_beta": 0.5}) == pytest.approx(-0.25)
+    assert float(kernel._beta(call, "cpu")) == pytest.approx(-0.25)
 
 
-def test_without_a_schedule_the_flag_still_decides(monkeypatch):
-    from types import SimpleNamespace
+def test_without_a_schedule_the_flag_still_decides(installed):
+    installed(None)
 
-    from xfuser.core.attention.backends.aiter_sol import kernel
-    from xfuser.core.distributed import runtime_state
+    call = AttnCall(step=torch.tensor(3, dtype=torch.int), attention_kwargs={"solattn_beta": 0.125})
 
-    monkeypatch.setattr(runtime_state, "_RUNTIME", SimpleNamespace(scheduled_solattn_beta=None), raising=False)
-
-    assert kernel._beta({"solattn_beta": 0.125}) == pytest.approx(0.125)
+    assert kernel._beta(call, "cpu") == pytest.approx(0.125)
 
 
-def test_beta_resolves_without_a_runtime_at_all(monkeypatch):
-    """The attention functions are reached directly, from tests and kernel-level callers, and for
-    those "no schedule" is the answer rather than an assertion."""
-    from xfuser.core.attention.backends.aiter_sol import kernel
-    from xfuser.core.distributed import runtime_state
+def test_a_call_without_a_step_takes_the_flag(installed):
+    """The attention functions are reached directly, from tests and kernel-level callers, with no
+    runtime and so no step; for those "no schedule" is the answer rather than an assertion."""
+    installed(SolAttnBetaSchedule.from_spec("1.0:0.0", 4))
 
-    monkeypatch.setattr(runtime_state, "_RUNTIME", None, raising=False)
-
-    assert kernel._beta({"solattn_beta": 0.75}) == pytest.approx(0.75)
-    assert kernel._beta({}) == pytest.approx(0.5)
+    assert kernel._beta(AttnCall(attention_kwargs={"solattn_beta": 0.75}), "cpu") == pytest.approx(0.75)
+    assert kernel._beta(AttnCall(), "cpu") == pytest.approx(0.5)

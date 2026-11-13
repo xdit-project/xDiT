@@ -13,6 +13,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
     ModelSettings,
+    prefer_mha_v4,
 )
 from xfuser.envs import PACKAGES_CHECKER
 from xfuser.core.utils.runner_utils import (
@@ -229,6 +230,10 @@ class xFuserFluxKontextModel(xFuserModel):
             )
         },
     )
+
+    def _customize_settings(self, config) -> None:
+        super()._customize_settings(config)
+        prefer_mha_v4(self.settings, "auto")
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import FluxKontextPipeline

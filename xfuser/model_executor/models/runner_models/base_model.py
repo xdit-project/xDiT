@@ -58,7 +58,8 @@ from xfuser.core.distributed import (
     init_distributed_environment,
 )
 from xfuser.core.attention import registry as attention_registry
-from xfuser.core.attention.backends.aiter_mha_v4.spec import SPARGE_FORMATS as MHA_V4_SPARGE_FORMATS
+from xfuser.core.attention.backends.aiter_mha_v4.spec import GFX950, SPARGE_FORMATS as MHA_V4_SPARGE_FORMATS
+from xfuser.core.attention.requirements import PARAM
 from xfuser.core.attention.spec import AttentionBackendType, Sparsity
 from xfuser.core.distributed.fp8_comms import setup_fp8_comms, validate_fp8_comms_config
 from xfuser.core.distributed.attention_schedule import (
@@ -329,6 +330,21 @@ class ModelSettings:
     default_mha_v4_kv_splits: Optional[Union[str, int]] = None
     resolution_divisor: Optional[int] = None
     transformer_attr_names: List[str] = field(default_factory=lambda: ["transformer"])
+
+
+_MHA_V4_KV_SPLITS = PARAM("aiter.ops.mha_v4:mha_v4", "kv_splits")
+
+
+def prefer_mha_v4(settings: ModelSettings, kv_splits: Union[str, int]) -> None:
+    """Default to AITER MHA v4 BF16 with split KV where the installed AITER can run it."""
+    # AITER refuses kv_splits > 1 where it does not export the MHA v4 LSE, which is everywhere but gfx950.
+    if (
+        GFX950.satisfied()
+        and attention_registry.available(AttentionBackendType.AITER_BF16) is None
+        and _MHA_V4_KV_SPLITS.satisfied()
+    ):
+        settings.default_attention_backend = AttentionBackendType.AITER_BF16.name
+        settings.default_mha_v4_kv_splits = kv_splits
 
 
 class DiffusionOutput:

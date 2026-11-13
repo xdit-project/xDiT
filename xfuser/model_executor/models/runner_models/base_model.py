@@ -104,11 +104,7 @@ def register_model(name: str) -> Callable:
 # Derived from the backend specs rather than listed here: each backend declares
 # its sparsity strategy, so adding one cannot miss these sets. SPARGE, VSA and
 # SOL are grouped because all three need a separate, dense cross-attention
-# backend. For Sol-Attn the reason is its routing: cross-attention falls back to
-# the main backend when --cross_attention_backend is unset, and Wan's text KV is
-# 512 tokens, i.e. four KV blocks -- too few for a per-tile threshold to select
-# meaningfully and too few for a pooled correction to carry the mass it skips.
-# It would not fail, it would quietly answer with a worse number.
+# backend. Sol-Attn routes over KV blocks, and a short text KV has too few.
 _SPARSE_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SSTA)
 _SPARGE_ATTENTION_BACKENDS = (
     attention_registry.types_where(sparsity=Sparsity.SPARGE)
@@ -119,10 +115,7 @@ _SPARGE_ATTENTION_BACKENDS = (
 # capability publish; anywhere else it would quietly run dense.
 _BSA_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.BSA)
 
-# Which of those rows a model opts into is a separate question per family, though. "Wired for
-# Sparge" and "wired for Sol-Attn" are different claims: Sparge builds a mask from the operands,
-# Sol-Attn routes its own and needs a long KV to route over. A model that has been checked for one
-# should not silently acquire the other, which is what a single shared capability would give it.
+# A model opts into Sol-Attn separately from Sparge: support for one does not imply the other.
 _SOL_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SOL)
 
 
@@ -136,12 +129,10 @@ def _parse_attention_backend(name: Optional[str], kind: str) -> Optional[Attenti
 
 
 def _validate_ring_for_sol(config: xFuserArgs) -> None:
-    """Sol-Attn cannot be a ring rank, so say so here rather than at the first attention call.
+    """Refuse Ring for Sol-Attn before loading rather than at the first attention call.
 
-    Ring merges each rank's partial output by its LSE, which stops being valid once a rank has
-    folded in a pooled correction for the blocks it skipped: the correction is not in the LSE.
-    sol_attn_bhsd refuses this too, but that fires deep in the denoise loop after the model is
-    loaded, and several models that can serve Sol-Attn also advertise ring_degree.
+    Its routing threshold is taken over the KV blocks one rank holds, so the selection would
+    depend on how Ring splits the keys.
     """
     if (config.ring_degree or 1) > 1:
         raise ValueError(
@@ -1533,10 +1524,7 @@ class xFuserModel(abc.ABC):
     def prepare_run(self, input_args: dict) -> None:
         """Prepare model state before a pipeline invocation."""
         self._vae_manager.prepare_run(self._decoding_vaes(), input_args)
-        # Each invocation starts the per-step schedules at their first step. Compile warmups and
-        # warmup calls spend forwards of their own, often with a shortened step count, and the
-        # counter only advances -- so without this a measured run picks up wherever the warmup
-        # stopped and every step reads a beta meant for a later one.
+        # Warmups advance the step counter too, so each invocation starts the schedules at step 0.
         if runtime_state_is_initialized():
             get_runtime_state().reset_step_counter()
 

@@ -1854,9 +1854,7 @@ class xFuserArgs:
                 )
 
         if self.solattn_beta_schedule is not None:
-            # Parsing needs the step count, which is an input rather than an engine setting, so the
-            # spec is only turned into betas at model setup. Catch the shape of it here anyway:
-            # a typo in a 40-entry list should not surface after the weights have loaded.
+            # The step count is only known at model setup; check the syntax before loading.
             SolAttnBetaSchedule.from_spec(
                 self.solattn_beta_schedule,
                 len(self.solattn_beta_schedule.split(",")) if ":" not in self.solattn_beta_schedule else 2,

@@ -369,7 +369,7 @@ class DiTRuntimeState(RuntimeState):
     # Read by reset_step_counter() at every pipeline-run boundary, so it needs the same default.
     step_counter: Optional[torch.Tensor] = None
     # The step the running forward is at. step_counter has already moved past it by the time
-    # attention runs, because the advance happens at the top of the forward. Set with it.
+    # attention runs, because the advance happens at the top of the forward.
     forward_step: Optional[torch.Tensor] = None
 
     def __init__(self, pipeline: DiffusionPipeline, config: EngineConfig):
@@ -520,11 +520,8 @@ class DiTRuntimeState(RuntimeState):
     def reset_step_counter(self) -> None:
         """Send the per-step schedules back to their first step, at a pipeline-run boundary.
 
-        The counter only ever advances, so any forward spent outside the run being measured leaves
-        it mid-schedule. A compile warmup of three steps starts the real run on the fourth step's
-        settings and wraps its last three steps back onto the schedule's beginning -- silently.
-        Wan 2.2 hid this by warming up a full cycle, which lands back on zero by arithmetic;
-        MiniMax-H3 warms up three steps and does not.
+        Warmup forwards advance the counter too, and a warmup shorter than the schedule would
+        otherwise start the measured run mid-schedule.
         """
         if self.step_counter is None:
             return

@@ -82,42 +82,24 @@ def create_hybrid_attn_schedule(
 
 class SolAttnBetaSchedule:
     """
-    Per-step Sol-Attn routing threshold, defined by an explicit list of betas.
-    betas[i] is the beta used at step i; len(betas) equals total_steps.
+    Per-step Sol-Attn routing threshold. betas[i] is the beta of transformer forward i, and
+    total_steps counts forwards: a denoising step spends forwards_per_step of them.
 
-    Beta trades exactness for speed within a single attention call: tau = mean_j(proxy) + beta *
-    std_j(proxy), so a lower beta admits more KV blocks into the exact pass. A single value spends
-    the same everywhere, which is only right if every denoising step is equally approximable.
-    Measured on Wan 2.2 at 1104x832, it is not: at a matched selected-block density of about 0.44,
-    the relative error of one attention call against exact bf16 is 0.100 at step 0, 0.157 at step
-    20 and 0.172 at step 39, while a fixed beta drifts slightly SPARSER over the same range. The
-    steps that approximate worst are being given the least help.
-
-    Which end of the run deserves the density is not settled by that, though, and cannot be: an
-    early error is carried through every step that follows it, a late one is not, and per-call
-    error cannot weigh those against each other. Hence a schedule rather than a fixed direction.
+    tau = mean_j(proxy) + beta * std_j(proxy), so a lower beta computes more KV blocks exactly.
     """
 
     def __init__(self, betas: List[float], forwards_per_step: int = 1):
         if not betas:
             raise ValueError("SolAttnBetaSchedule requires at least one step.")
         self.betas = [float(beta) for beta in betas]
-        # Counted in forwards, because that is what the step counter counts: it advances once per
-        # transformer forward, and a denoising step is forwards_per_step of them.
         self.total_steps = len(self.betas)
         self.forwards_per_step = forwards_per_step
         self._betas_tensor = torch.tensor(self.betas, dtype=torch.float32)
-        # One copy per device that asks, because the schedule cannot know at construction which
-        # device will walk it, and the table is total_steps floats.
         self._device_tables: Dict[torch.device, torch.Tensor] = {}
 
     @property
     def per_denoising_step(self) -> List[float]:
-        """One beta per denoising step, dropping the repeats -- the schedule as it was asked for.
-
-        For logging and reporting: the expanded list is the right thing to index per forward and
-        the wrong thing to read, since under CFG it prints every beta twice.
-        """
+        """One beta per denoising step, as the schedule was given. For logging."""
         return self.betas[:: self.forwards_per_step]
 
     def betas_on(self, device) -> torch.Tensor:
@@ -132,29 +114,13 @@ class SolAttnBetaSchedule:
         cls: Type["SolAttnBetaSchedule"], spec: str, total_steps: int, forwards_per_step: int = 1
     ) -> "SolAttnBetaSchedule":
         """
-        Parse a schedule spec into one beta per DENOISING STEP, held across that step's forwards.
+        Parse a schedule spec into one beta per denoising step, held across that step's forwards.
 
-        "first:last" ramps linearly from first at step 0 to last at the final step, which is the
-        shape worth trying first and unreasonable to write out by hand for a 40-step run.
-        "b0,b1,..." lists every step explicitly, for any shape that is not a ramp; its length must
-        be total_steps, because a list that silently stopped short would leave the rest of the run
-        on a beta nobody chose.
+        "first:last" ramps linearly from first at step 0 to last at the final step. "b0,b1,..."
+        lists every step and must have total_steps entries.
 
-        forwards_per_step is how many transformer forwards one denoising step costs -- 2 under
-        classifier-free guidance, one for the conditional branch and one for the unconditional.
-        The step counter advances on each forward, so each beta is repeated that many times, which
-        is what makes a step's two branches share one. Interpolating over forwards instead would
-        put the two branches one increment apart, and not symmetrically: on an ascending ramp the
-        conditional branch would take the lower beta at every step of the run, so it would be
-        routed more exactly than the unconditional one throughout, and guidance subtracts them --
-        it does not average the bias away. Measured on a real Wan 2.2 step, one increment of a
-        -0.5:0.0 ramp moves selected-block density 0.44% and flips 0.29% of routing decisions,
-        against the 39.6% that differ between the branches anyway because their operands differ.
-        So this is a correctness fix with a small effect, not a quality fix.
-
-        The hybrid attention and GEMM schedules arrive at the same place from the other direction:
-        they multiply their high-precision step COUNT by the same factor, which makes them
-        piecewise constant in blocks of forwards_per_step and their branches agree by construction.
+        forwards_per_step is 2 under sequential classifier-free guidance. Each beta is repeated
+        that many times so a step's two branches share it, as the hybrid schedules do.
         """
         if total_steps <= 0:
             raise ValueError(f"total_steps must be positive, got {total_steps}.")
@@ -217,29 +183,13 @@ class SolAttnBetaSchedule:
         return self.betas[step]
 
     def get_beta_tensor(self, step) -> torch.Tensor:
-        """This step's beta as a 0-d tensor, indexed by a step that may itself be a tensor.
+        """This step's beta as a 0-d tensor, for the compiled forward.
 
-        The per-step read runs inside the compiled transformer forward, and this keeps both the step
-        and the beta inside the graph. Returning a Python float there costs twice over: reading the
-        step counter on the host breaks the graph once per forward, and the float is then baked in
-        as a constant, so the forward recompiles for every distinct beta the schedule holds -- a
-        40-step ramp past the recompile limit, after which dynamo gives up and runs it eagerly.
-
-        For the same reason the range cannot be checked here, so the step wraps on total_steps
-        instead: the runtime's counter only wraps when a hybrid schedule gives it a length.
-
-        index_select rather than self._betas_tensor[step], which is the same lookup but not the
-        same cost: subscripting with a 0-d tensor lowers to select(), whose index is a Python int,
-        so it reads the step on the host and breaks the graph -- measured at 2 breaks per traced
-        frame against 0 for this. as_tensor leaves a tensor step alone and lifts the plain int that
-        setup passes.
-
-        Read from the table on the STEP's device, which is what keeps the lookup single-device.
-        inductor fuses it into the routing kernel that consumes the beta -- the fused kernel's name
-        carries both this index_select and the threshold's std -- and a Triton kernel cannot take a
-        host pointer, so a host-resident table with a device step aborts the launch with "Pointer
-        argument cannot be accessed from Triton (cpu tensor?)". Hence the caller moves the step to
-        the device where the routing runs and the table follows it here.
+        A float would be read on the host, which breaks the graph and recompiles it for every beta.
+        The step cannot be range-checked here, so it wraps on total_steps. index_select rather than
+        subscripting, which lowers to select() with a host index. The table is read on the step's
+        device because inductor fuses the lookup into a Triton kernel, which cannot take a host
+        pointer.
         """
         index = (torch.as_tensor(step) % self.total_steps).reshape(1)
         return self.betas_on(index.device).index_select(0, index).squeeze(0)

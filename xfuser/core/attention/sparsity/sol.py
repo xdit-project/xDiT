@@ -23,9 +23,8 @@ class SolAttnUnsupported(RuntimeError):
 def _keep_bf16(tensor):
     """Pass a BF16 operand through unquantized, in the (tensor, descale) shape the others return.
 
-    The BF16 rows carry a NONE scale mode, so the kernel never reads the descale. aiter's own
-    mha_v4 hands the tensor itself back as the placeholder rather than a unit scalar, and this
-    matches that so the packed path here cannot disagree with the raw one about what it sent.
+    The NONE scale mode makes the kernel ignore the descale; the tensor is the placeholder, as in
+    aiter's mha_v4.
     """
     return tensor, tensor
 
@@ -33,10 +32,8 @@ def _keep_bf16(tensor):
 def _probe_aiter():
     """aiter's Sol-Attn entry points, or None when this build does not ship them.
 
-    Resolved at import. This module is imported lazily, only once the backend is selected, so builds
-    that never touch Sol-Attn pay nothing; binding the entry points once also keeps repeated imports
-    out of any traced graph. native_fp8_format is held as a function rather than called here because
-    it queries the device, which import time is too early for.
+    Bound once at import so no import runs inside a traced graph. native_fp8_format is held as a
+    function because it queries the device, which import time is too early for.
     """
     try:
         from aiter.ops.mha_v4 import (
@@ -112,11 +109,8 @@ def _probe_aiter():
 
 
 def _probe_ragged_kv():
-    """aiter's per-row ragged-KV query, or None on a build that predates it.
-
-    Optional rather than part of _probe_aiter: without it every row is treated as needing its key
-    length padded to the tile, which is what every row needed before the ragged ones shipped.
-    """
+    """aiter's per-row ragged-KV query, or None on a build that predates it, where every row
+    has its key length padded to the tile."""
     try:
         from aiter.ops.mha_v4 import mha_v4_ragged_kv
     except ImportError:
@@ -127,12 +121,8 @@ def _probe_ragged_kv():
 _AITER = _probe_aiter()
 SOL_ATTN_AVAILABLE = _AITER is not None
 
-# Held as module globals rather than _AITER fields, which is not a style choice. aiter decorates
-# its geometry queries with functools.cache, so each name is an _lru_cache_wrapper -- a C object
-# that implements the descriptor protocol. Reached through an attribute Dynamo binds the owner as
-# self and the call dies with "Too many positional arguments", which under fullgraph=True is a hard
-# error and otherwise a graph break in the middle of every attention layer. Eager does not bind
-# (SimpleNamespace holds it in an instance dict) so this shows up only compiled.
+# Module globals, not _AITER fields: these are functools.cache wrappers, and Dynamo binds one
+# reached through an attribute as a method, which fails with "Too many positional arguments".
 _default_block_tile = _AITER.block_tile if _AITER is not None else None
 _kv_tile_for_q_tile = _AITER.kv_tile_for_q_tile if _AITER is not None else None
 _ragged_kv = _probe_ragged_kv() if _AITER is not None else None
@@ -141,18 +131,9 @@ _ragged_kv = _probe_ragged_kv() if _AITER is not None else None
 def sol_attn_block_tile(recipe, block_tile=None):
     """The (q_tile, kv_tile) a call routes, pools and dispatches `recipe` at.
 
-    One source for all three. They are not independently choosable: the LUT and the selection
-    bitmap are in units of kv_tile, the pooled K/V are one row per kv_tile tokens, and the kernel
-    folds log2(kv_tile) into its softmax bias as a build-time constant. A mismatch between any two
-    is silently wrong rather than an error, which is why every site below reads it from here.
-
-    block_tile is --sparseattn_block_size when the run sets one, which check_sol_attn_recipe has
-    already checked against the recipe's row. Unset, the recipe picks the default, and it has to:
-    the gfx950 rows do not agree on the KV tile at a 256-row query tile, since BF16 and BF16/FP8
-    route on 64 tokens and the rest on 128.
-
-    Deliberately not cached: the aiter query is cached and torch_compile_guard'd on its side, so
-    this body is a tuple return that Dynamo folds away.
+    Routing, pooling and dispatch must agree on it, and a mismatch is silently wrong, so all three
+    read it from here. block_tile is --sparseattn_block_size, already checked against the recipe's
+    row; None takes the recipe's default, which differs between rows.
     """
     if block_tile is not None:
         return tuple(block_tile)
@@ -162,11 +143,9 @@ def sol_attn_block_tile(recipe, block_tile=None):
 class _Recipe(NamedTuple):
     """One mode-2 manifest row: its formats, its quantizers, and how its scales survive pooling.
 
-    The recipes divide on one question, which is whether an operand's scale varies along the
-    sequence axis pooling reduces. A per-tensor descale does not, nor does a per-channel one, so
-    the pooled operand reuses it and the kernel's pooled-scale slots stay empty; an unscaled BF16
-    operand has nothing to reuse and behaves the same way. An E8M0 1x32 scale does vary, so that
-    operand pools in dequantized space and hands the kernel a pooled scale of its own.
+    A per-tensor or per-channel scale does not vary along the pooled sequence axis, so the pooled
+    operand reuses it. An E8M0 1x32 scale does, so that operand pools in dequantized space and hands
+    the kernel a pooled scale of its own.
 
     quantize_q takes a multiplier because the MX quantizers fold softmax_scale * log2(e) into Q;
     the per-tensor ones ignore it and the kernel applies the scale itself.
@@ -180,10 +159,8 @@ class _Recipe(NamedTuple):
     quantize_v: str = "quantize_fp8"
     v_format: str = "native"
     v_scale_mode: str = "per_tensor"  # or "none", "per_channel" or "block"
-    # Set when that operand's stored codes are sub-byte and permuted into the ASM's tile order,
-    # naming the packing as sol_prepare does. Such an operand cannot be pooled from its codes at
-    # all, so pooling works from the BF16 source and its own scale must not be handed over. A
-    # packed Q/K is not addressable for routing either, so it routes on the BF16 Q as well.
+    # Set, with sol_prepare's name for the packing, when that operand's codes are sub-byte and in
+    # tile order. They cannot be pooled or routed on, so both use the BF16 source.
     k_packed: Optional[str] = None
     v_packed: Optional[str] = None
 
@@ -194,13 +171,8 @@ class _Recipe(NamedTuple):
 
     @property
     def routes_through_raw(self) -> bool:
-        """Whether mha_v4_sol can serve this row, or it has to go packed.
-
-        mha_v4_sol serves every row here but one: an addressable block-scaled K, which is MXFP8,
-        pools in dequantized space from a scale it would have to be handed, and the raw entry
-        point has no way to take one. MXFP8 reaches the same kernel through mha_v4_packed with
-        operands quantized here.
-        """
+        """Whether mha_v4_sol serves this row. MXFP8's addressable block-scaled K needs its scale
+        handed to the pooling, which the raw entry point cannot take, so it goes packed."""
         return not (self.qk_scale_mode == "block" and self.k_packed is None)
 
 
@@ -217,14 +189,11 @@ _RECIPES = {
             v_format="BF16",
             v_scale_mode="none",
         ),
-        # Q/K stay BF16 and only V drops to FP8, which halves the traffic on the operand the
-        # correction pass reads once per KV block while leaving the scores exact.
         _Recipe("bf16fp8", "BF16", "none", "quantize_bf16", "quantize_bf16"),
         _Recipe("fp8", "native", "per_tensor", "quantize_fp8_rotated", "quantize_fp8_rotated"),
         _Recipe("i8fp8", "INT8", "per_tensor", "quantize_int8", "quantize_int8"),
         _Recipe("mxfp8", "native", "block", "quantize_mxfp8_q", "quantize_mxfp8_k"),
-        # The MX-V rows, all on the FP6-P layout: V is stored in the order the kernel's FP6 P
-        # operand reads it, which is what lets them return an LSE and take a ragged KV.
+        # The MX-V rows store V in the order the kernel's FP6 P operand reads it.
         _Recipe(
             "f8f6",
             "native",
@@ -236,8 +205,6 @@ _RECIPES = {
             v_scale_mode="block",
             v_packed="mxfp6_fp6_p",
         ),
-        # The one MX Q/K row whose V is addressable: FP8, scaled per channel, so it pools on its
-        # codes like the per-tensor rows and needs no FP6-P layout.
         _Recipe(
             "mxfp6",
             "MXFP6",
@@ -293,9 +260,7 @@ SOL_ATTN_RECIPES = tuple(_RECIPES)
 def check_sol_attn_device(device=None):
     """Raise unless this build and device can run Sol-Attn. Defaults to the current CUDA device.
 
-    Both facts are fixed for the process, so runtime_state calls this once during backend setup and
-    the per-call path does not repeat it. Callers reaching sol_attn_bhsd directly, outside xDiT's
-    setup, should call it themselves.
+    Checked once at backend setup, not per call; direct callers of sol_attn_bhsd check it themselves.
     """
     if not SOL_ATTN_AVAILABLE:
         raise SolAttnUnsupported("Sol-Attn requires aiter with mha_v4_sol and sol_prepare; please update AITER")
@@ -326,11 +291,7 @@ def _device_arch(device=None):
 def check_sol_attn_recipe(recipe_id, device=None, block_tile=None):
     """Raise unless this device has a Sol-Attn manifest row for recipe_id, at block_tile if given.
 
-    Separate from check_sol_attn_device because the answer is per recipe, read from aiter's
-    manifest, so selecting a recipe the device has no row for fails at setup with the reason rather
-    than at the first launch with a missing-kernel error. block_tile is --sparseattn_block_size:
-    a geometry need not exist in every precision, so it is valid only for the recipes whose own
-    row serves it.
+    block_tile is --sparseattn_block_size, which is valid only where the recipe's own row serves it.
     """
     check_sol_attn_device(device)
     recipe = _resolve_recipe(recipe_id)
@@ -368,8 +329,7 @@ def _serves_recipe(recipe):
 def _recipe_operands(recipe):
     """The seven manifest values identifying `recipe`'s row, for aiter's geometry queries.
 
-    Resolved per device, since a recipe's format may be "native". V's pack is one of them: the
-    FP6-P rows share their formats and scale modes with rows of the default layout.
+    Resolved per device, since a recipe's format may be "native".
     """
     qk_format, v_format = _format(recipe.qk_format), _format(recipe.v_format)
     qk_scale, v_scale = _scale_mode(recipe.qk_scale_mode), _scale_mode(recipe.v_scale_mode)
@@ -379,11 +339,8 @@ def _recipe_operands(recipe):
 
 
 def _takes_ragged_kv(recipe, block_tile):
-    """Whether `recipe`'s row at `block_tile` masks a short last KV block itself.
-
-    Every gfx950 Sol row does today, so it is handed the true key length; a row that does not needs
-    K/V padded to a whole number of blocks.
-    """
+    """Whether `recipe`'s row at `block_tile` masks a short last KV block itself. A row that
+    does not needs K/V padded to a whole number of blocks."""
     if _ragged_kv is None:
         return False
     return _ragged_kv(_recipe_operands(recipe), _AITER.sol_mode, block_tile)
@@ -437,15 +394,12 @@ def _scale_mode(name):
 def _quantize(recipe, query, key, value, softmax_scale):
     """Quantize BSHD bf16 Q/K/V for one recipe, returning (tensor, descale, source) per operand.
 
-    Exactly as mha_v4_sol quantizes the same row, so that asking for the head cost moves a call
-    onto the packed API without changing its output. The MX quantizers fold
-    softmax_scale * log2(e) into Q, which is why the scale has to be resolved before quantizing
-    rather than left for the kernel. The per-tensor quantizers take no multiplier and the kernel
-    applies the scale itself, so it is passed on either way.
+    As mha_v4_sol quantizes the same row, except that K is not smoothed: once K's shared component
+    passes aiter's smoothing gate, this path's output differs from the raw one. The MX quantizers
+    fold softmax_scale * log2(e) into Q; the per-tensor ones leave the scale to the kernel.
 
-    source is the pre-quantization tensor, kept only for a packed operand: its codes are sub-byte
-    and permuted into tile order, so neither pooling nor routing can read them back. A packed K
-    keeps Q's source too, because a packed Q is no more addressable for routing.
+    source is the BF16 input, kept only for a packed operand, whose codes pooling and routing
+    cannot read.
     """
     multiplier = _AITER.q_multiplier(softmax_scale)
 
@@ -455,8 +409,7 @@ def _quantize(recipe, query, key, value, softmax_scale):
         q, q_descale = getattr(_AITER, recipe.quantize_q)(query)
 
     k, k_descale = getattr(_AITER, recipe.quantize_k)(key)
-    # These packers emit a flat backing buffer plus its scale; the kernel wants the strided view
-    # over that buffer, so build it here exactly as aiter's own recipe does.
+    # The packers return a flat buffer; the kernel takes the strided view aiter builds over it.
     if recipe.k_packed == "mxfp4":
         k = _AITER.mxfp4_k_view(k, k_descale)
     elif recipe.k_packed == "mxfp6":
@@ -477,32 +430,23 @@ def _quantize(recipe, query, key, value, softmax_scale):
 def sol_attn_routing_for(q, k, v, beta, recipe=_RECIPES["fp8"], block_attn_mask=None, block_tile=None):
     """Pooled K/V, ragged LUT and selection bitmap for one call, as the kernel consumes them.
 
-    q/k/v are the (tensor, descale, source) triples _quantize returns. num_heads is passed
-    explicitly because the routing is per query head under GQA, while the pooled K/V it returns
-    carry the KV head count instead.
-
-    block_attn_mask supplies an already chosen selection instead of routing from beta, which is
-    what lets a caller measure some other rule's selection through this same kernel and pooled
-    correction. Pass exactly one of it and beta.
+    q/k/v are the (tensor, descale, source) triples _quantize returns. block_attn_mask supplies an
+    already chosen selection instead of routing from beta; pass exactly one of the two.
     """
     qk_packed = recipe.k_packed is not None
-    # An addressable E8M0-scaled operand: its codes are not proportional to the values, since the
-    # scale varies per token and channel group, so routing and pooling are handed the scale.
+    # An addressable E8M0-scaled operand's codes are not proportional to its values, so routing
+    # and pooling are handed the scale.
     qk_block_scaled = recipe.qk_scale_mode == "block" and not qk_packed
     v_block_scaled = recipe.v_scale_mode == "block" and recipe.v_packed is None
-    # Routing scores Q, and a packed Q is no more addressable than a packed K, so a packed recipe
-    # routes on its source. Routing is scale invariant, which is what makes the two
-    # interchangeable, and the packers' Hadamard rotation is orthogonal so it drops out too.
+    # A packed recipe routes on the BF16 Q. Routing is invariant to the scale and to the packers'
+    # orthogonal rotation.
     q_routing = q[2] if qk_packed else q[0]
     return _AITER.prepare(
         q_routing,
         k[0],
         v[0],
         beta,
-        # Not aiter's SOL_ATTN_TS_QO/TS_KV defaults, which are the gfx950 256x128 row: the BF16
-        # rows pool 64 keys per block, and an opted-in run may be on a 64x64 row. Pooling at the
-        # wrong tile is not a rounding difference, it hands the kernel pooled tensors of the wrong
-        # height. The dispatch reads the same source, which keeps the two from drifting apart.
+        # Not sol_prepare's default tile, which is only one of the rows' tiles.
         *sol_attn_block_tile(recipe, block_tile),
         num_heads=q_routing.shape[2],
         k_scale=k[1] if qk_block_scaled else None,
@@ -522,25 +466,13 @@ def _head_cost_from_routing(routing):
     return mask.sum(dim=(0, 2, 3), dtype=torch.float32)
 
 
-# Below this many KV blocks, routing has too few samples to say anything. tau is a mean plus a
-# multiple of a standard deviation taken across the blocks, so with a handful of them the
-# threshold is noise, and whatever it does not select is replaced by block means that are then a
-# large fraction of the whole sequence. 16 is a judgement call, not a measured cliff.
+# Below this many KV blocks the threshold's mean and standard deviation are noise. A heuristic.
 _MIN_USEFUL_KV_BLOCKS = 16
 _short_kv_warned = set()
 
 
 def _warn_if_kv_too_short(seqlen_k, kv_tile):
-    """Say something when a call is too short for Sol-Attn to be worth routing.
-
-    This is the failure mode that does not announce itself: nothing raises, the answer is just
-    quietly worse than the dense backend would have given, which is easy to ship by accident when
-    a model turns out to have a second attention site on a short sequence.
-
-    Skipped under torch.compile. The branch folds away at trace time, which keeps the warning from
-    being a side effect in a traced region -- so a fully compiled run will not see it, and this is
-    a backstop for eager runs rather than a guarantee.
-    """
+    """Warn, in eager runs only, when a call is too short for Sol-Attn to route usefully."""
     if torch.compiler.is_compiling():
         return
     blocks = -(-seqlen_k // kv_tile)
@@ -562,25 +494,14 @@ def _warn_if_kv_too_short(seqlen_k, kv_tile):
 
 
 def _pad_kv_to_tile(key, value, recipe, block_tile):
-    """Right-pad BSHD K/V with zero tokens to a whole number of KV blocks, where the row needs it.
+    """Right-pad BSHD K/V with zero tokens to a whole number of KV blocks, unless the row is ragged.
 
-    A ragged row masks the keys past the end of a short last block, so it is handed the true key
-    length and nothing here runs. That is every gfx950 Sol row, which matters because Wan lands on
-    a short block at every standard size -- 720p is 21 latent frames x 80 x 45 = 75600 tokens,
-    which is 590.6 blocks of 128.
-
-    A row that indexes KV in whole tiles makes aiter reject a ragged seqlen_k, so this pads.
-    Zero tokens are not free: a zero key scores q . 0 = 0 rather than -inf, so the pad draws
-    softmax weight exp(-max) per token instead of none, and its zero value pulls the row toward
-    the origin by that weight. The pad is at most one block and the mass it takes is
-    exponentially small in the row max, which is why this is a pad and not a mask. Q is
-    deliberately left alone: nothing constrains seqlen_q, and padding it would only add rows to
-    slice back off the output.
+    A zero key scores 0 rather than -inf, so the pad draws a little softmax weight: at most one
+    block's worth, exponentially small in the row max.
     """
     pad = -key.shape[1] % block_tile[1]
     if pad == 0 or _takes_ragged_kv(recipe, block_tile):
         return key, value
-    # BSHD, so the seqlen axis is the second of four and F.pad counts from the last.
     widths = (0, 0, 0, 0, 0, pad)
     return (torch.nn.functional.pad(key, widths), torch.nn.functional.pad(value, widths))
 
@@ -607,19 +528,12 @@ def sol_attn_bhsd(
     rows this build ships.
 
     return_head_cost asks for the per-head count of exactly-computed KV blocks, float32 (nheads_q,),
-    which the Ulysses head balancer consumes. On a per-tensor recipe it is opt-in rather than free:
-    the routing dict it reduces is internal to the raw entrypoint, so asking for it moves the call
-    onto aiter's packed API and makes quantization and routing explicit here. MXFP8 has no raw
-    entrypoint and takes that path always. A caller-supplied `routing` also forces it. Every path is
-    traceable; none graph-break.
+    for the Ulysses head balancer. The raw entry point keeps its routing internal, so asking for it
+    moves the call onto aiter's packed API with quantization and routing done here. MXFP8 and a
+    caller-supplied `routing` always take that path.
 
-    key_seqlen is the number of real KV tokens when the caller has already padded the sequence for
-    its own alignment. Sol-Attn takes no attention mask, so the padded tail is dropped here rather
-    than attended: left in, it would draw softmax weight and also enter the routing threshold's
-    per-tile mean and standard deviation, which is a quieter error than the weight itself. Defaults
-    to the whole tensor. What remains is handed over as it is on a row that takes a ragged KV, so
-    the kernel attends exactly key_seqlen keys; only a row that cannot is padded back up to its
-    tile.
+    key_seqlen is the number of real KV tokens when the caller has padded the sequence. Sol-Attn
+    takes no mask, so the tail is dropped rather than attended.
 
     block_tile is the (q_tile, kv_tile) to route and dispatch at, from --sparseattn_block_size.
     None takes the recipe's default.
@@ -634,9 +548,7 @@ def sol_attn_bhsd(
     key = key.permute(0, 2, 1, 3).contiguous()
     value = value.permute(0, 2, 1, 3).contiguous()
 
-    # Before the tile pad, so the two do not stack: the caller's alignment is dropped, and only a
-    # row that cannot take a ragged KV has its own remainder padded back, at most one block of zero
-    # tokens.
+    # Before the tile pad, so the caller's pad and the tile pad do not stack.
     if key_seqlen is not None and key_seqlen < key.shape[1]:
         key, value = key[:, :key_seqlen], value[:, :key_seqlen]
     key, value = _pad_kv_to_tile(key, value, recipe, block_tile)
@@ -645,7 +557,6 @@ def sol_attn_bhsd(
     if softmax_scale is None:
         softmax_scale = query.shape[-1] ** -0.5
 
-    # The raw entrypoint routes internally from beta alone, so it cannot be asked for the head cost.
     if routing is None and not return_head_cost and recipe.routes_through_raw:
         qk, v_fmt = _format(recipe.qk_format), _format(recipe.v_format)
         out = _AITER.sol(
@@ -653,11 +564,6 @@ def sol_attn_bhsd(
         )
         return out.permute(0, 2, 1, 3), None
 
-    # Quantize exactly as the raw entrypoint would. On the fp8 row that means quantize_fp8_rotated
-    # for Q/K: rotating both by the same orthonormal matrix leaves Q @ K.T alone while spreading the
-    # outliers that dominate fp8 error, and V is not rotated because nothing cancels a rotation of
-    # it. Reusing aiter's fused rotation rather than doing a second one here is what keeps this path
-    # numerically identical to the raw one, so asking for the head cost cannot change the output.
     q, k, v = _quantize(recipe, query, key, value, softmax_scale)
     if routing is None:
         routing = sol_attn_routing_for(q, k, v, beta, recipe, block_tile=block_tile)
@@ -683,14 +589,9 @@ def sol_attn_bhsd(
         mean_k=routing["mean_k"],
         mean_v=routing["mean_v"],
         block_bitmap=routing["block_bitmap"],
-        # None on the per-tensor rows, where the pooled operand reuses the source descale. The MX
-        # rows pool in dequantized space and requantize, so the pooled tensor has a scale of its own
-        # and the kernel has to be told about it or it reads the approximate branch at the wrong
-        # magnitude.
+        # None where the pooled operand reuses the source descale.
         mean_k_scale=routing["mean_k_scale"],
         mean_v_scale=routing["mean_v_scale"],
-        # The row to dispatch, not a preference: routing above already pooled and packed for this
-        # geometry, so the kernel has to be the one that reads it that way.
         block_tile=block_tile,
         v_pack=getattr(_AITER.pack, recipe.v_pack),
     )

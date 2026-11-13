@@ -23,11 +23,8 @@ _BETA_SCHEDULE: Optional[SolAttnBetaSchedule] = None
 def install_beta_schedule(spec: str, denoising_steps: int, forwards_per_step: int) -> SolAttnBetaSchedule:
     """Route each forward at its step's beta from `spec`, in place of --solattn_beta.
 
-    The spec is read per denoising step and held across that step's forwards_per_step forwards,
-    the same multiplier the hybrid schedules use. The step counter advances per forward, so the
-    expansion is what makes a step's conditional and unconditional branch share a beta; spreading
-    the ramp over forwards instead would route one branch more exactly than the other for the
-    whole run, and guidance subtracts the two rather than averaging them.
+    Each beta is held across its step's forwards_per_step forwards, so a guided step's conditional
+    and unconditional branches share it.
     """
     global _BETA_SCHEDULE
     schedule = SolAttnBetaSchedule.from_spec(spec, denoising_steps, forwards_per_step=forwards_per_step)
@@ -53,18 +50,13 @@ def clear_beta_schedule() -> None:
 
 
 def _beta(call: AttnCall, device):
-    """This call's routing threshold: the step's scheduled beta if one is driving it, else the flag.
+    """This call's routing threshold: the step's scheduled beta if one is installed, else the flag.
 
-    The schedule wins over the caller's dict rather than the other way round, because the dict is
-    built once per run from --solattn_beta and would otherwise pin every step to the same value --
-    the very thing a schedule exists to stop. A call with no step, from outside a pipeline run,
-    takes the flag.
+    A call with no step, from outside a pipeline run, takes the flag.
     """
     schedule = _BETA_SCHEDULE
     if schedule is not None and call.step is not None:
-        # Handed on as a 0-d tensor on the routing's device. float() here would read it on the host
-        # inside the compiled forward, which both breaks the graph and pins this step's beta into
-        # the graph as a constant, recompiling for every beta the schedule holds.
+        # Kept a tensor: a Python float would break the graph and recompile it for every beta.
         return schedule.get_beta_tensor(call.step.to(device))
     return float(call.attention_kwargs.get("solattn_beta", 0.5))
 
@@ -90,13 +82,8 @@ def check_sparse_block_size(runtime_config, *, recipe: str) -> None:
 def sol(query, key, value, call: AttnCall, *, recipe: str):
     """Sol-Attn on the mode-2 row for `recipe`.
 
-    Unlike the Sparge backends this builds no block mask: the adaptive-threshold routing is part of
-    the algorithm, and aiter derives the LUT, the pooled K/V and the selection bitmap together from
-    one mask so they cannot disagree.
-
-    A declared trailing key pad, which `accepts` has checked, is dropped by length rather than
-    gathered. The kernels take the remaining key count as it is, so a sequence that is no multiple
-    of the KV tile is attended exactly as long as it is.
+    Builds no block mask: the routing selects the blocks itself. A declared trailing key pad, which
+    `accepts` has checked, is dropped by length.
     """
     kwargs = call.attention_kwargs
     cost_sink = kwargs.get(COST_SINK_KEY)

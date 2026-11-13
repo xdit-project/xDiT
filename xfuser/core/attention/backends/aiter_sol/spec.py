@@ -17,8 +17,7 @@ from xfuser.core.attention.constraints import (
     HEAD_DIM,
     NO_DROPOUT,
     NON_CAUSAL,
-    PACKED_KEYS,
-    CallConstraint,
+    TRAILING_PAD_KEYS,
 )
 from xfuser.core.attention.requirements import ARCH, NEVER, SYMBOL, Requirement
 from xfuser.core.attention.spec import AttentionBackendType, Impl, Sparsity, Spec
@@ -74,28 +73,8 @@ class _SolRow(Requirement):
         return None
 
 
-class _TrailingPadKeys(CallConstraint):
-    """Packed keys only as one sequence's declared trailing pad.
-
-    Sol-Attn has no mask, so the pad is dropped from K/V rather than attended,
-    and every row this backend runs takes the shorter length as it is. Keys
-    gathered from anywhere else -- several segments, or a pad that is not a
-    trailing block -- would be attended across their boundaries, and the pooled
-    blocks would straddle them too.
-    """
-
-    def unmet(self, query, key, value, call) -> Optional[str]:
-        if call.varlen is None:
-            return None
-        if call.attention_kwargs.get("valid_kv_len") is None:
-            return "serves packed keys only as a trailing pad declared through valid_kv_len"
-        if key.shape[0] != 1:
-            return f"serves a trailing key pad on one sequence only, got batch size {key.shape[0]}"
-        return PACKED_KEYS.unmet(query, key, value, call)
-
-
-TRAILING_PAD_KEYS = _TrailingPadKeys()
-
+# Sol-Attn has no mask, so a packed call's pad is dropped from K/V by length
+# rather than attended, and the pooled blocks would straddle any other boundary.
 CALLS = NO_DROPOUT & NON_CAUSAL & BF16 & HEAD_DIM(128) & TRAILING_PAD_KEYS
 
 

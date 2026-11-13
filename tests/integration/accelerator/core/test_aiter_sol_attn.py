@@ -526,6 +526,49 @@ def test_a_scheduled_beta_routes_exactly_as_the_same_number_would(monkeypatch):
     assert torch.equal(from_flag, from_schedule), "same threshold, so the output must be identical"
 
 
+@pytest.mark.parametrize("recipe", ["fp8", "mxfp6"])
+def test_a_scheduled_beta_reaches_the_raw_entry_point_as_the_float_would(monkeypatch, recipe):
+    """With no cost sink the call goes to aiter's raw mha_v4_sol, which then takes the scheduled
+    beta as a 0-d device tensor. Eager and under fullgraph it has to route as the float does, and
+    every step has to share one graph."""
+    _require_sol_recipe(recipe)
+    from torch._dynamo.utils import counters
+
+    from xfuser.core.attention.backends.aiter_sol import kernel
+    from xfuser.core.distributed.attention_schedule import SolAttnBetaSchedule
+
+    query, key, value = _operands(sharpness=0.0)
+    _use_block_size(monkeypatch, None)
+    betas = [0.0, 1.5]
+
+    def run(q, k, v, call):
+        out, _ = kernel.sol(q, k, v, call, recipe=recipe)
+        return out
+
+    def scheduled(q, k, v, step):
+        return run(q, k, v, AttnCall(step=step))
+
+    monkeypatch.setattr(kernel, "_BETA_SCHEDULE", None)
+    with torch.no_grad():
+        # The first call autotunes the pooling kernels; see the test above.
+        run(query, key, value, AttnCall(attention_kwargs={"solattn_beta": betas[0]}))
+        from_flag = [run(query, key, value, AttnCall(attention_kwargs={"solattn_beta": beta})) for beta in betas]
+    assert not torch.equal(from_flag[0], from_flag[1]), "the betas must route differently to tell them apart"
+
+    monkeypatch.setattr(kernel, "_BETA_SCHEDULE", SolAttnBetaSchedule(betas))
+    steps = [torch.tensor(index, dtype=torch.int, device="cuda") for index in range(len(betas))]
+    torch._dynamo.reset()
+    counters.clear()
+    compiled = torch.compile(scheduled, fullgraph=True)
+    with torch.no_grad():
+        for step, expected in zip(steps, from_flag):
+            eager = scheduled(query, key, value, step)
+            assert torch.equal(eager, expected), f"step {int(step)} routed differently from its float beta"
+            assert torch.equal(compiled(query, key, value, step), eager), "compiling must not change the result"
+
+    assert counters["stats"]["unique_graphs"] == 1, "a new step must not recompile"
+
+
 # ---------------------------------------------------------------------------
 # the block tile
 # ---------------------------------------------------------------------------

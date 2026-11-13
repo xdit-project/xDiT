@@ -50,21 +50,8 @@ def test_sol_needs_a_dense_cross_attention_backend(model, extra):
 
 
 @pytest.mark.parametrize("model,extra", MODELS)
-def test_sol_refuses_ring_parallelism_at_config_time(model, extra):
-    """Sol-Attn cannot be a ring rank, and finding that out mid-denoise is too late."""
-    with pytest.raises(ValueError, match="does not support ring parallelism"):
-        _build(
-            model,
-            attention_backend="aiter_fp8_sol",
-            cross_attention_backend="aiter_bf16",
-            ring_degree=2,
-            **extra,
-        )
-
-
-@pytest.mark.parametrize("model,extra", MODELS)
 def test_ulysses_stays_available(model, extra):
-    """Ulysses is the sequence parallelism Sol-Attn does support, so it must survive the ring check."""
+    """Ulysses is the sequence parallelism Sol-Attn supports."""
     _build(
         model,
         attention_backend="aiter_fp8_sol",
@@ -74,15 +61,24 @@ def test_ulysses_stays_available(model, extra):
     )
 
 
-def test_a_hybrid_schedule_on_sol_is_gated_like_an_explicit_backend():
-    with pytest.raises(ValueError, match="does not support ring parallelism"):
+def test_a_hybrid_schedule_on_sol_is_gated_like_an_explicit_backend(monkeypatch):
+    import dataclasses
+
+    from xfuser.model_executor.models.runner_models import wan
+    from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY
+
+    model = MODEL_REGISTRY["Wan2.2-T2V"]
+    assert issubclass(model, wan.xFuserWanModel)
+    monkeypatch.setattr(
+        model, "capabilities", dataclasses.replace(model.capabilities, supports_sol_attention_backends=False)
+    )
+    with pytest.raises(ValueError, match="does not support Sol-Attn"):
         _build(
             "Wan2.2-T2V",
             use_hybrid_attn_schedule=True,
             hybrid_attn_low_precision_backend="aiter_fp8_sol",
             hybrid_attn_high_precision_backend="aiter_bf16",
             cross_attention_backend="aiter_bf16",
-            ring_degree=2,
         )
 
 

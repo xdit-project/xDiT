@@ -128,19 +128,6 @@ def _parse_attention_backend(name: Optional[str], kind: str) -> Optional[Attenti
         raise ValueError(f"Invalid {kind}: {name}")
 
 
-def _validate_ring_for_sol(config: xFuserArgs) -> None:
-    """Refuse Ring for Sol-Attn before loading rather than at the first attention call.
-
-    Its routing threshold is taken over the KV blocks one rank holds, so the selection would
-    depend on how Ring splits the keys.
-    """
-    if (config.ring_degree or 1) > 1:
-        raise ValueError(
-            f"Sol-Attn does not support ring parallelism, got --ring_degree "
-            f"{config.ring_degree}. Use --ulysses_degree for sequence parallelism instead."
-        )
-
-
 def _validate_cross_attention_for_sparge(config: xFuserArgs) -> None:
     """Cross-attention must be set and must not itself be a Sparge, VSA or Sol backend
     whenever one of those is in play (either as the explicit backend or via the
@@ -942,7 +929,6 @@ class xFuserModel(abc.ABC):
                 if low in _SOL_ATTENTION_BACKENDS or high in _SOL_ATTENTION_BACKENDS:
                     if not supports_sol:
                         raise ValueError(f"Model {config.model} does not support Sol-Attn attention backends.")
-                    _validate_ring_for_sol(config)
                 if low in _SPARGE_ATTENTION_BACKENDS or high in _SPARGE_ATTENTION_BACKENDS:
                     _validate_cross_attention_for_sparge(config)
         else:
@@ -961,7 +947,6 @@ class xFuserModel(abc.ABC):
                 if backend in _SOL_ATTENTION_BACKENDS:
                     if not supports_sol:
                         raise ValueError(f"Model {config.model} does not support Sol-Attn attention backends.")
-                    _validate_ring_for_sol(config)
                 elif not supports_sparge:
                     raise ValueError(f"Model {config.model} does not support Sparge attention backend.")
                 if self.capabilities.cross_attention_backend:

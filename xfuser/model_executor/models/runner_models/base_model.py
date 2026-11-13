@@ -151,12 +151,12 @@ def _validate_ring_for_sol(config: xFuserArgs) -> None:
 
 
 def _validate_cross_attention_for_sparge(config: xFuserArgs) -> None:
-    """Cross-attention must be set and must not itself be a Sparge backend
-    whenever Sparge Attention is in play (either as the explicit backend or
-    via the hybrid schedule)."""
+    """Cross-attention must be set and must not itself be a Sparge, VSA or Sol backend
+    whenever one of those is in play (either as the explicit backend or via the
+    hybrid schedule)."""
     if config.cross_attention_backend is None:
         raise ValueError(
-            "When Sparge Attention is used, --cross_attention_backend must be set to a non-Sparge backend."
+            "A Sparge, VSA or Sol attention backend needs --cross_attention_backend set to a dense backend."
         )
     cross = _parse_attention_backend(
         config.cross_attention_backend,
@@ -164,8 +164,8 @@ def _validate_cross_attention_for_sparge(config: xFuserArgs) -> None:
     )
     if cross in _SPARGE_ATTENTION_BACKENDS:
         raise ValueError(
-            f"--cross_attention_backend cannot be {cross.name} when Sparge "
-            f"Attention is used. Pick a non-Sparge cross attention backend."
+            f"--cross_attention_backend cannot be {cross.name}, a Sparge, VSA or Sol backend. "
+            f"Pick a dense cross attention backend."
         )
 
 

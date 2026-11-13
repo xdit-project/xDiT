@@ -43,7 +43,7 @@ def test_sol_backends_are_accepted_with_a_dense_cross_attention_backend(model, e
 def test_sol_needs_a_dense_cross_attention_backend(model, extra):
     """Unset, cross-attention would fall back to Sol on Wan's 512 text tokens: four KV blocks, too
     few for the routing threshold to mean anything. It would not fail, just answer worse."""
-    with pytest.raises(ValueError, match="--cross_attention_backend must be set"):
+    with pytest.raises(ValueError, match="needs --cross_attention_backend set to a dense backend"):
         _build(model, attention_backend="aiter_fp8_sol", **extra)
     with pytest.raises(ValueError, match="cannot be AITER_FP8_SOL"):
         _build(model, attention_backend="aiter_fp8_sol", cross_attention_backend="aiter_fp8_sol", **extra)

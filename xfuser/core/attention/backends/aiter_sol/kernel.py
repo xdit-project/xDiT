@@ -31,11 +31,11 @@ def install_beta_schedule(spec: str, denoising_steps: int, forwards_per_step: in
     """
     global _BETA_SCHEDULE
     schedule = SolAttnBetaSchedule.from_spec(spec, denoising_steps, forwards_per_step=forwards_per_step)
-    if torch.cuda.is_available():
-        # Built now rather than on first use: a table the compiled forward creates changes what
-        # its guard saw, which recompiles the forward once.
-        schedule.betas_on(torch.device("cuda", torch.cuda.current_device()))
-    get_runtime_state().track_steps()
+    device = torch.device("cuda", torch.cuda.current_device()) if torch.cuda.is_available() else None
+    if device is not None:
+        # A table first built inside the compiled forward fails the guard its trace recorded.
+        schedule.betas_on(device)
+    get_runtime_state().track_steps(device)
     _BETA_SCHEDULE = schedule
     logger.warning(
         "Per-step Sol-Attn beta schedule enabled (%d steps, beta %.4f to %.4f).",

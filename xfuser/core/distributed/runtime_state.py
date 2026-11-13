@@ -473,14 +473,18 @@ class DiTRuntimeState(RuntimeState):
             )
         return attn_steps or gemm_steps
 
-    def track_steps(self) -> None:
+    def track_steps(self, device: Optional[torch.device] = None) -> None:
         """Count transformer forwards from here on, for a consumer that reads the step.
 
-        Opt-in, so a run that reads no step keeps a forward with no counter in it.
+        Opt-in, so a run that reads no step keeps a forward with no counter in it. `device` is
+        where current_step() is read: the counter stays on the host for the schedules, and the
+        forward's step is copied to `device` once per forward rather than once per attention call.
         """
         if self.step_counter is None:
             self.step_counter = torch.tensor(0, dtype=torch.int)
             self.forward_step = torch.zeros_like(self.step_counter)
+        if device is not None:
+            self.forward_step = self.forward_step.to(device)
 
     def current_step(self) -> Optional[torch.Tensor]:
         return self.forward_step

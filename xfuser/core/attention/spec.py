@@ -139,7 +139,7 @@ class AttnCall:
     ulysses_world_size: int = 1
     ring_world_size: int = 1
 
-    # The transformer forward's index in the run, as a 0-d host tensor, for a
+    # The transformer forward's index in the run, as a 0-d tensor, for a
     # backend that varies per step. None when nothing tracks steps.
     step: Optional[torch.Tensor] = None
 

@@ -330,3 +330,63 @@ def test_the_denoise_step_sees_the_layout_fields_of_a_wrapped_transformer(runner
     inputs = _tiny_inputs()
     with torch.no_grad():
         torch.testing.assert_close(transformer(**inputs).sample, wrapped(**inputs).sample)
+
+
+def _tiny_text_encoder():
+    from transformers import Qwen3VLConfig, Qwen3VLForConditionalGeneration
+
+    torch.manual_seed(0)
+    config = Qwen3VLConfig(
+        text_config={
+            "vocab_size": 64,
+            "hidden_size": 32,
+            "intermediate_size": 64,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "head_dim": 16,
+            "rope_scaling": {"rope_type": "default", "mrope_section": [4, 2, 2], "mrope_interleaved": True},
+        },
+        vision_config={"depth": 1, "hidden_size": 16, "intermediate_size": 32, "num_heads": 2, "out_hidden_size": 32},
+    )
+    return Qwen3VLForConditionalGeneration(config).eval()
+
+
+def _encode(text_encoder, num_tokens):
+    input_ids = torch.randint(1, 64, (1, num_tokens), generator=torch.Generator().manual_seed(num_tokens))
+    outputs = text_encoder.model(
+        input_ids=input_ids,
+        attention_mask=torch.ones_like(input_ids),
+        mm_token_type_ids=torch.zeros_like(input_ids),
+        use_cache=False,
+        output_hidden_states=True,
+    )
+    return outputs.hidden_states[1]
+
+
+def test_compiled_text_encoder_serves_every_prompt_length_with_one_graph(runner_env, monkeypatch):
+    """A recompile per prompt length would stall the first request of each length."""
+    from types import SimpleNamespace
+
+    from torch._dynamo.testing import CompileCounter
+
+    from xfuser import xFuserArgs
+    from xfuser.model_executor.models.runner_models.minimax_h3_image import xFuserMiniMaxH3ImageModel
+
+    counter = CompileCounter()
+    torch_compile = torch.compile
+    monkeypatch.setattr(torch, "compile", lambda *args, **kwargs: torch_compile(*args, **kwargs, backend=counter))
+    model = xFuserMiniMaxH3ImageModel(xFuserArgs(model="MiniMax-H3-Image"))
+    text_encoder = _tiny_text_encoder()
+    model.pipe = SimpleNamespace(text_encoder=text_encoder)
+    lengths = (5, 9, 17)
+    with torch.no_grad():
+        expected = [_encode(text_encoder, length) for length in lengths]
+        torch._dynamo.reset()
+        model._compile_text_encoder()
+        actual = [_encode(text_encoder, length) for length in lengths]
+    torch._dynamo.reset()
+
+    assert counter.frame_count == 1
+    for length, a, e in zip(lengths, actual, expected):
+        torch.testing.assert_close(a, e, rtol=0, atol=0, msg=lambda m: f"{length} tokens: {m}")

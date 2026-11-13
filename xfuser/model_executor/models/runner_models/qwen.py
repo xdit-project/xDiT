@@ -107,8 +107,7 @@ class xFuserQwenImageEditModel(xFuserModel):
 
     def _customize_settings(self, config: xFuserArgs) -> None:
         super()._customize_settings(config)
-        # The joint edit sequence leaves too few query tiles for the split "auto" picks.
-        _prefer_mha_v4(self.settings, 4)
+        _prefer_mha_v4(self.settings, "auto")
         # 2509 and 2511 are Edit Plus checkpoints: diffusers loads them with
         # QwenImageEditPlusPipeline, which conditions on a list of images.
         self._is_edit_plus = False

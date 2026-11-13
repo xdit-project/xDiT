@@ -26,7 +26,7 @@ def build(monkeypatch):
     return _build
 
 
-@pytest.mark.parametrize(("name", "splits"), [("Qwen/Qwen-Image-Edit", 4), ("Qwen/Qwen-Image-2512", "auto")])
+@pytest.mark.parametrize(("name", "splits"), [("Qwen/Qwen-Image-Edit", "auto"), ("Qwen/Qwen-Image-2512", "auto")])
 def test_default_is_mha_v4_with_the_model_split(build, name, splits):
     config = build(name, mha_v4=True)
     assert config.attention_backend == AttentionBackendType.AITER_BF16.name

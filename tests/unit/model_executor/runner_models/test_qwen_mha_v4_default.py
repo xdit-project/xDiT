@@ -1,0 +1,47 @@
+"""Qwen-Image runners default to AITER MHA v4 BF16 with split KV where AITER can run it."""
+
+import pytest
+
+from xfuser.core.attention.spec import AttentionBackendType
+
+
+@pytest.fixture
+def build(monkeypatch):
+    from xfuser import xFuserArgs
+    from xfuser.model_executor.models.runner_models import qwen
+    from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY
+
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "1")
+
+    def _build(name, mha_v4, **cli):
+        monkeypatch.setattr(qwen.attention_registry, "available", lambda backend: None if mha_v4 else "absent")
+        monkeypatch.setattr(type(qwen._MHA_V4_KV_SPLITS), "satisfied", lambda self: mha_v4)
+        config = xFuserArgs(model=name, **cli)
+        MODEL_REGISTRY[name](config)
+        return config
+
+    return _build
+
+
+@pytest.mark.parametrize(("name", "splits"), [("Qwen/Qwen-Image-Edit", 4), ("Qwen/Qwen-Image-2512", "auto")])
+def test_default_is_mha_v4_with_the_model_split(build, name, splits):
+    config = build(name, mha_v4=True)
+    assert config.attention_backend == AttentionBackendType.AITER_BF16.name
+    assert config.mha_v4_kv_splits == splits
+
+
+def test_explicit_choices_are_kept(build):
+    config = build("Qwen/Qwen-Image-Edit", mha_v4=True, attention_backend="AITER", mha_v4_kv_splits="2")
+    assert config.attention_backend == "AITER"
+    assert config.mha_v4_kv_splits == 2
+
+    config = build("Qwen/Qwen-Image-Edit", mha_v4=True, mha_v4_kv_splits="8")
+    assert config.attention_backend == AttentionBackendType.AITER_BF16.name
+    assert config.mha_v4_kv_splits == 8
+
+
+def test_without_split_kv_the_global_default_stays(build):
+    config = build("Qwen/Qwen-Image-Edit", mha_v4=False)
+    assert config.attention_backend is None
+    assert config.mha_v4_kv_splits == 1

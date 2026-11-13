@@ -126,6 +126,35 @@ def test_wrapper_matches_diffusers_on_one_rank(single_rank, layout):
         torch.testing.assert_close(wrapped(**inputs).sample, expected)
 
 
+def test_wrapper_projects_each_timestep_modulation_once(single_rank):
+    """The AdaLN tables depend on the timestep alone, so a request repeating the grid reuses them."""
+    base, wrapped = _tiny_models()
+    projections = []
+    wrapped.time_embedder.register_forward_hook(lambda *args: projections.append(None))
+
+    with torch.no_grad():
+        for _ in range(2):
+            for step in range(_tiny_config()["num_pdd_heads"]):
+                inputs = _tiny_inputs(pdd_step_index=step)
+                inputs["timestep"] = torch.tensor([1.0 - 0.25 * step])
+                expected = base(**inputs).sample
+                torch.testing.assert_close(wrapped(**inputs).sample, expected, rtol=0, atol=0)
+
+    assert len(projections) == _tiny_config()["num_pdd_heads"]
+
+
+def test_wrapper_projects_the_modulation_under_autograd(single_rank):
+    _, wrapped = _tiny_models()
+    inputs = _tiny_inputs()
+    with torch.no_grad():
+        wrapped(**inputs)
+
+    wrapped(**inputs).sample.sum().backward()
+
+    assert wrapped.transformer_blocks[0].adaln_proj.linear.weight.grad is not None
+    assert wrapped.norm_out.linear.weight.grad is not None
+
+
 def test_wrapper_keeps_the_checkpoint_config_through_from_config(single_rank):
     from xfuser.model_executor.models.transformers.transformer_minimax_h3_image import (
         xFuserMiniMaxH3ImageTransformer2DWrapper,

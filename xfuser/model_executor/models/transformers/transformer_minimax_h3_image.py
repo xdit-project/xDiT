@@ -3,10 +3,14 @@ from __future__ import annotations
 from typing import Any
 
 import torch
+from torch.distributed.fsdp import FSDPModule, FullyShardedDataParallel
 
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
+from diffusers.models.modeling_utils import get_parameter_dtype
 from diffusers.models.transformers.transformer_minimax_h3_image import (
     MINIMAX_H3_MODALITY_NUM,
+    MiniMaxH3ImageAdaLayerNormModulation,
+    MiniMaxH3ImageAdaLayerNormOut,
     MiniMaxH3ImageTransformer2DModel,
 )
 
@@ -25,6 +29,42 @@ from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
     xFuserMiniMaxH3AttnProcessor,
 )
 
+# Distinct timestep sets whose modulation the wrapper keeps. The sampling grid is
+# fixed, so a T2I request uses 6 and an edit another 6; the bound only stops a
+# caller sweeping arbitrary timesteps from growing the cache without limit.
+_MODULATION_CACHE_SIZE = 32
+
+
+class _CachedAdaLNModulation(MiniMaxH3ImageAdaLayerNormModulation):
+    """A block's AdaLN modulation, read from a table projected ahead of the block.
+
+    ``project`` is the stock projection, its six chunks concatenated back into one
+    ``(num_timesteps * MINIMAX_H3_MODALITY_NUM, 6 * hidden_size)`` table; ``forward``
+    takes that table in place of ``temb`` and chunks it as the stock module does,
+    so the block's own forward runs unchanged.
+    """
+
+    def project(self, temb: torch.Tensor) -> torch.Tensor:
+        return torch.cat(super().forward(temb), dim=-1)
+
+    def forward(self, modulation: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        return modulation.chunk(6, dim=-1)
+
+
+class _CachedAdaLayerNormOut(MiniMaxH3ImageAdaLayerNormOut):
+    """The output norm, modulated by a ``(num_timesteps, 2 * hidden_size)`` table
+    from ``project`` in place of ``temb``."""
+
+    def project(self, temb: torch.Tensor) -> torch.Tensor:
+        return self.linear(torch.nn.functional.silu(temb).to(get_parameter_dtype(self.linear)))
+
+    def forward(
+        self, hidden_states: torch.Tensor, modulation: torch.Tensor, timestep_indices: torch.Tensor
+    ) -> torch.Tensor:
+        shift, scale = modulation.chunk(2, dim=-1)
+        hidden_states = self.norm(hidden_states)
+        return hidden_states * (1.0 + scale.index_select(0, timestep_indices)) + shift.index_select(0, timestep_indices)
+
 
 class xFuserMiniMaxH3ImageTransformer2DWrapper(MiniMaxH3ImageTransformer2DModel):
     """MiniMax-H3-Image transformer with Ulysses sequence parallelism.
@@ -39,6 +79,12 @@ class xFuserMiniMaxH3ImageTransformer2DWrapper(MiniMaxH3ImageTransformer2DModel)
     norm and is what the runner compiles, and the per-step output head, which
     stays outside the graph: ``pdd_step_index`` is a Python int and would
     otherwise specialize one graph per sampling step.
+
+    The AdaLN modulation of every block and of the output norm depends on the
+    timestep alone, and the sampler visits the same fixed grid in every request.
+    ``forward`` therefore projects each distinct timestep set once, at inference,
+    and hands the blocks the projected tables. The block projections are about
+    40% of the checkpoint, so this skips reading them on every step.
     """
 
     def __init__(
@@ -116,14 +162,62 @@ class xFuserMiniMaxH3ImageTransformer2DWrapper(MiniMaxH3ImageTransformer2DModel)
                     backend=self.attention_backend,
                 )
             )
+            # The state dict keys stay those of the stock module.
+            block.adaln_proj.__class__ = _CachedAdaLNModulation
+        self.norm_out.__class__ = _CachedAdaLayerNormOut
+        self._modulation_cache: dict[tuple[float, ...], tuple[torch.Tensor, torch.Tensor]] = {}
 
         self.register_forward_pre_hook(lambda module, args: get_runtime_state().increment_step_counter())
+
+    @staticmethod
+    def _project_block_modulation(block: torch.nn.Module, temb: torch.Tensor) -> torch.Tensor:
+        # FSDP gathers a block's weights only around its own forward. Compiling a
+        # sharded model wraps each FSDP unit in turn.
+        block = getattr(block, "_orig_mod", block)
+        if isinstance(block, FullyShardedDataParallel):
+            with FullyShardedDataParallel.summon_full_params(block, recurse=False, writeback=False):
+                return block.adaln_proj.project(temb)
+        if isinstance(block, FSDPModule):
+            block.unshard()
+            try:
+                return block.adaln_proj.project(temb)
+            finally:
+                block.reshard()
+        return block.adaln_proj.project(temb)
+
+    def _modulation(self, timestep: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """The AdaLN tables of ``timestep``: ``(num_layers, num_timesteps *
+        MINIMAX_H3_MODALITY_NUM, 6 * hidden_size)`` for the blocks and
+        ``(num_timesteps, 2 * hidden_size)`` for the output norm.
+
+        Cached by timestep value at inference; with autograd on they are projected
+        every call, so gradients still reach the projections.
+        """
+        key = None
+        if not torch.is_grad_enabled():
+            key = tuple(timestep.tolist())
+            cached = self._modulation_cache.get(key)
+            if cached is not None:
+                return cached
+
+        temb = self.time_proj(timestep)
+        temb = self.time_embedder(temb.to(self.time_embedder.linear_1.weight.dtype))
+        modulation = (
+            torch.stack([self._project_block_modulation(block, temb) for block in self.transformer_blocks]),
+            self.norm_out.project(temb),
+        )
+        if key is not None:
+            if len(self._modulation_cache) >= _MODULATION_CACHE_SIZE:
+                self._modulation_cache.clear()
+            self._modulation_cache[key] = modulation
+        return modulation
 
     def _forward_body(
         self,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
-        timestep: torch.Tensor,
+        block_modulation: torch.Tensor,
+        output_modulation: torch.Tensor,
         timestep_indices: torch.Tensor,
         token_tags: torch.Tensor,
         position_ids: torch.Tensor,
@@ -132,7 +226,9 @@ class xFuserMiniMaxH3ImageTransformer2DWrapper(MiniMaxH3ImageTransformer2DModel)
     ) -> torch.Tensor:
         """Run this rank's slice of the packed sequence up to the output norm.
 
-        Returns the normalized rows of the slice, in the output heads' dtype.
+        ``block_modulation`` and ``output_modulation`` are the tables of
+        ``_modulation``. Returns the normalized rows of the slice, in the output
+        heads' dtype.
         """
         sequence_length = position_ids.shape[0]
 
@@ -143,9 +239,6 @@ class xFuserMiniMaxH3ImageTransformer2DWrapper(MiniMaxH3ImageTransformer2DModel)
         packed_hidden_states = text_embeds.new_zeros((text_embeds.shape[0], sequence_length, text_embeds.shape[-1]))
         packed_hidden_states = packed_hidden_states.index_copy(1, text_indices, text_embeds)
         packed_hidden_states = packed_hidden_states.index_copy(1, image_indices, image_embeds.to(text_embeds.dtype))
-
-        temb = self.time_proj(timestep)
-        temb = self.time_embedder(temb.to(self.time_embedder.linear_1.weight.dtype))
 
         (
             packed_hidden_states,
@@ -203,15 +296,17 @@ class xFuserMiniMaxH3ImageTransformer2DWrapper(MiniMaxH3ImageTransformer2DModel)
             }
         )
 
-        for block in self.transformer_blocks:
+        for block, modulation in zip(self.transformer_blocks, block_modulation):
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 packed_hidden_states = self._gradient_checkpointing_func(
-                    block, packed_hidden_states, temb, adaln_indices, rotary_emb
+                    block, packed_hidden_states, modulation, adaln_indices, rotary_emb
                 )
             else:
-                packed_hidden_states = block(packed_hidden_states, temb, adaln_indices, rotary_emb)
+                packed_hidden_states = block(packed_hidden_states, modulation, adaln_indices, rotary_emb)
 
-        return self.norm_out(packed_hidden_states, temb, local_timestep_indices).to(self.pdd_proj_out[0].weight.dtype)
+        return self.norm_out(packed_hidden_states, output_modulation, local_timestep_indices).to(
+            self.pdd_proj_out[0].weight.dtype
+        )
 
     def forward(
         self,
@@ -236,10 +331,12 @@ class xFuserMiniMaxH3ImageTransformer2DWrapper(MiniMaxH3ImageTransformer2DModel)
                 f"and {list(timestep_indices.shape)} for seq_len={sequence_length}."
             )
 
+        block_modulation, output_modulation = self._modulation(timestep)
         local_hidden_states = self._forward_body(
             hidden_states,
             encoder_hidden_states,
-            timestep,
+            block_modulation,
+            output_modulation,
             timestep_indices,
             token_tags,
             position_ids,

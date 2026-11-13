@@ -2,6 +2,7 @@ import functools
 
 import torch
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
+from xfuser.envs import PACKAGES_CHECKER
 from xfuser.model_executor.cache import (
     DBCachePreset,
     CacheDitAdapterConfig,
@@ -172,6 +173,13 @@ class xFuserZImageModel(xFuserModel):
             self.settings.int8_gemm_module_list = [
                 m for m in self.settings.int8_gemm_module_list if m != "transformer.context_refiner"
             ]
+
+    def _get_compile_mode(self) -> str:
+        # The pipeline batches both CFG branches into one transformer pass per step,
+        # so CUDA graphs replay safely. They re-capture pathologically on RDNA4.
+        if PACKAGES_CHECKER._on_rdna4() or self.config.cache_method:
+            return "default"
+        return "reduce-overhead"
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import ZImagePipeline

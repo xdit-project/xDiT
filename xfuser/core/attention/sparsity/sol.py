@@ -70,6 +70,11 @@ def _probe_aiter():
         from aiter.ops.triton.attention.utils import sol_prepare
     except ImportError:
         return None
+    try:
+        from aiter.ops.mha_v4 import quantize_v_fp8
+    except ImportError:
+        # Predates the MXFP6 Q/K, FP8 V row, which is then reported as not served.
+        quantize_v_fp8 = None
     return SimpleNamespace(
         sol=mha_v4_sol,
         packed=mha_v4_packed,
@@ -92,6 +97,7 @@ def _probe_aiter():
         quantize_mxfp6_k=quantize_mxfp6_k,
         quantize_v_mxfp4_fp6_p=quantize_v_mxfp4_fp6_p,
         quantize_v_mxfp6_fp6_p=quantize_v_mxfp6_fp6_p,
+        quantize_v_fp8=quantize_v_fp8,
         mxfp4_k_view=mxfp4_k_view,
         mxfp4_v_view=mxfp4_v_view,
         mxfp6_k_view=mxfp6_k_view,
@@ -100,6 +106,7 @@ def _probe_aiter():
         pack=AttentionPack,
         no_scale=AttentionScaleMode.NONE,
         per_tensor_scale=AttentionScaleMode.F32_PER_TENSOR,
+        per_channel_scale=AttentionScaleMode.F32_PER_CHANNEL,
         block_scale=AttentionScaleMode.E8M0_PER_1X32,
     )
 
@@ -156,10 +163,10 @@ class _Recipe(NamedTuple):
     """One mode-2 manifest row: its formats, its quantizers, and how its scales survive pooling.
 
     The recipes divide on one question, which is whether an operand's scale varies along the
-    sequence axis pooling reduces. A per-tensor descale does not, so the pooled operand reuses it
-    and the kernel's pooled-scale slots stay empty; an unscaled BF16 operand has nothing to reuse
-    and behaves the same way. An E8M0 1x32 scale does vary, so that operand pools in dequantized
-    space and hands the kernel a pooled scale of its own.
+    sequence axis pooling reduces. A per-tensor descale does not, nor does a per-channel one, so
+    the pooled operand reuses it and the kernel's pooled-scale slots stay empty; an unscaled BF16
+    operand has nothing to reuse and behaves the same way. An E8M0 1x32 scale does vary, so that
+    operand pools in dequantized space and hands the kernel a pooled scale of its own.
 
     quantize_q takes a multiplier because the MX quantizers fold softmax_scale * log2(e) into Q;
     the per-tensor ones ignore it and the kernel applies the scale itself.
@@ -172,7 +179,7 @@ class _Recipe(NamedTuple):
     quantize_k: str
     quantize_v: str = "quantize_fp8"
     v_format: str = "native"
-    v_scale_mode: str = "per_tensor"
+    v_scale_mode: str = "per_tensor"  # or "none", "per_channel" or "block"
     # Set when that operand's stored codes are sub-byte and permuted into the ASM's tile order,
     # naming the packing as sol_prepare does. Such an operand cannot be pooled from its codes at
     # all, so pooling works from the BF16 source and its own scale must not be handed over. A
@@ -228,6 +235,18 @@ _RECIPES = {
             v_format="MXFP6",
             v_scale_mode="block",
             v_packed="mxfp6_fp6_p",
+        ),
+        # The one MX Q/K row whose V is addressable: FP8, scaled per channel, so it pools on its
+        # codes like the per-tensor rows and needs no FP6-P layout.
+        _Recipe(
+            "mxfp6",
+            "MXFP6",
+            "block",
+            "quantize_mxfp6_q",
+            "quantize_mxfp6_k",
+            quantize_v="quantize_v_fp8",
+            v_scale_mode="per_channel",
+            k_packed="mxfp6",
         ),
         _Recipe(
             "f6f6",
@@ -341,6 +360,8 @@ def sol_attn_recipes_served():
 
 def _serves_recipe(recipe):
     """Whether the active device's manifest has a mode-2 row, at any geometry, for `recipe`."""
+    if getattr(_AITER, recipe.quantize_v) is None:
+        return False
     return bool(_AITER.block_tiles(_recipe_operands(recipe), _AITER.sol_mode))
 
 
@@ -405,9 +426,12 @@ def _format(name):
 
 
 def _scale_mode(name):
-    if name == "none":
-        return _AITER.no_scale
-    return _AITER.per_tensor_scale if name == "per_tensor" else _AITER.block_scale
+    return {
+        "none": _AITER.no_scale,
+        "per_tensor": _AITER.per_tensor_scale,
+        "per_channel": _AITER.per_channel_scale,
+        "block": _AITER.block_scale,
+    }[name]
 
 
 def _quantize(recipe, query, key, value, softmax_scale):

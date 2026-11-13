@@ -4,8 +4,9 @@ Sol-Attn (arXiv 2607.24027) runs an AITER MHA v4 mode-2 row over the KV blocks i
 and recovers the rest from pooled per-block K/V under the same online softmax, so a dropped block
 costs its higher-order terms rather than all of its mass.
 
-Nine rows are built, differing only in how Q/K/V are quantized: bf16, bf16fp8, fp8, i8fp8 and
-mxfp8, and the four MX-V rows f8f6, f6f6, f6f4 and mxfp4 on gfx950's FP6-P kernels. Where a test is
+Ten rows are built, differing only in how Q/K/V are quantized: bf16, bf16fp8, fp8, i8fp8, mxfp8,
+mxfp6 (MXFP6 Q/K with FP8 V), and the four MX-V rows f8f6, f6f6, f6f4 and mxfp4 on gfx950's FP6-P
+kernels. Where a test is
 about the mechanism rather than one row's precision it is parametrized over all of them, because
 the rows reach the kernel by different routes: MXFP8 has no raw entry point, and the block-scaled
 rows pool in dequantized space and hand the kernel a pooled scale of their own.
@@ -23,11 +24,11 @@ from xfuser.core.attention.spec import AttentionBackendType, AttnCall
 
 pytestmark = pytest.mark.rocm
 
-ALL_RECIPES = ["bf16", "bf16fp8", "fp8", "i8fp8", "mxfp8", "f8f6", "f6f6", "f6f4", "mxfp4"]
+ALL_RECIPES = ["bf16", "bf16fp8", "fp8", "i8fp8", "mxfp8", "f8f6", "mxfp6", "f6f6", "f6f4", "mxfp4"]
 
 # Each recipe's dense MHA v4 row: the same quantization over every block, so what is left in the
 # gap is the routing plus the pooled correction. f6f6 has none -- the dense table's MXFP6 row keeps
-# V in FP8 -- so it is graded against fp32 only.
+# V in FP8, which is the mxfp6 row here -- so it is graded against fp32 only.
 DENSE_SIBLING = {
     "bf16": "AITER_BF16",
     "bf16fp8": "AITER_BF16FP8",
@@ -35,6 +36,7 @@ DENSE_SIBLING = {
     "i8fp8": "AITER_I8FP8",
     "mxfp8": "AITER_MXFP8",
     "f8f6": "AITER_F8F6",
+    "mxfp6": "AITER_MXFP6",
     "f6f4": "AITER_F6F4",
     "mxfp4": "AITER_MXFP4",
 }
@@ -277,6 +279,7 @@ _DENSE_SIBLING_TOLERANCE = {
     "i8fp8": 2e-3,
     "mxfp8": 2e-3,
     "f8f6": 2e-3,
+    "mxfp6": 2e-3,
     "f6f4": 2e-2,
     "mxfp4": 2e-2,
 }

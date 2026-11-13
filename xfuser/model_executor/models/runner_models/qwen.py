@@ -15,6 +15,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
     ModelSettings,
+    prefer_mha_v4,
 )
 from xfuser import xFuserArgs
 from xfuser.core.distributed import get_runtime_state
@@ -89,6 +90,8 @@ class xFuserQwenImageEditModel(xFuserModel):
 
     def _customize_settings(self, config: xFuserArgs) -> None:
         super()._customize_settings(config)
+        # The joint edit sequence leaves too few query tiles for the split "auto" picks.
+        prefer_mha_v4(self.settings, 4)
         # 2509 and 2511 are Edit Plus checkpoints: diffusers loads them with
         # QwenImageEditPlusPipeline, which conditions on a list of images.
         self._is_edit_plus = False
@@ -214,6 +217,7 @@ class xFuserQwenImageModel(xFuserModel):
 
     def _customize_settings(self, config: xFuserArgs) -> None:
         super()._customize_settings(config)
+        prefer_mha_v4(self.settings, "auto")
         if "2512" in config.model:
             self.settings.model_name = "Qwen/Qwen-Image-2512"
             self.settings.output_name = "qwen_image_2512"

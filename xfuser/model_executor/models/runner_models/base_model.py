@@ -5,7 +5,7 @@ import json
 import os
 from math import gcd
 from PIL.Image import Image
-from typing import Callable, List, Optional, Tuple, Generator
+from typing import Callable, List, Optional, Tuple, Generator, Union
 from dataclasses import dataclass, field, replace
 from torch.profiler import profile, record_function, ProfilerActivity
 import diffusers
@@ -58,7 +58,8 @@ from xfuser.core.distributed import (
     init_distributed_environment,
 )
 from xfuser.core.attention import registry as attention_registry
-from xfuser.core.attention.backends.aiter_mha_v4.spec import SPARGE_FORMATS as MHA_V4_SPARGE_FORMATS
+from xfuser.core.attention.backends.aiter_mha_v4.spec import GFX950, SPARGE_FORMATS as MHA_V4_SPARGE_FORMATS
+from xfuser.core.attention.requirements import PARAM
 from xfuser.core.attention.spec import AttentionBackendType, Sparsity
 from xfuser.core.distributed.fp8_comms import setup_fp8_comms, validate_fp8_comms_config
 from xfuser.core.distributed.attention_schedule import (
@@ -325,8 +326,25 @@ class ModelSettings:
     # Attention backend used when --attention_backend is omitted. Leave None to
     # keep the global default.
     default_attention_backend: Optional[str] = None
+    # --mha_v4_kv_splits that comes with default_attention_backend, unless the CLI sets a split count.
+    default_mha_v4_kv_splits: Optional[Union[str, int]] = None
     resolution_divisor: Optional[int] = None
     transformer_attr_names: List[str] = field(default_factory=lambda: ["transformer"])
+
+
+_MHA_V4_KV_SPLITS = PARAM("aiter.ops.mha_v4:mha_v4", "kv_splits")
+
+
+def prefer_mha_v4(settings: ModelSettings, kv_splits: Union[str, int]) -> None:
+    """Default to AITER MHA v4 BF16 with split KV where the installed AITER can run it."""
+    # AITER refuses kv_splits > 1 where it does not export the MHA v4 LSE, which is everywhere but gfx950.
+    if (
+        GFX950.satisfied()
+        and attention_registry.available(AttentionBackendType.AITER_BF16) is None
+        and _MHA_V4_KV_SPLITS.satisfied()
+    ):
+        settings.default_attention_backend = AttentionBackendType.AITER_BF16.name
+        settings.default_mha_v4_kv_splits = kv_splits
 
 
 class DiffusionOutput:
@@ -781,6 +799,10 @@ class xFuserModel(abc.ABC):
         _parse_attention_backend(default, f"default attention backend for {self.settings.model_name}")
         config.attention_backend = default
         log(f"--attention_backend not set, using {self.settings.model_name} default: {default}")
+        splits = self.settings.default_mha_v4_kv_splits
+        if splits is not None and config.mha_v4_kv_splits is None:
+            config.mha_v4_kv_splits = splits
+            log(f"--mha_v4_kv_splits not set, using {self.settings.model_name} default: {splits}")
 
     def _validate_supported_attn_backends(self, config: xFuserArgs) -> None:
         """Refuse backends this model is not known to be correct with.

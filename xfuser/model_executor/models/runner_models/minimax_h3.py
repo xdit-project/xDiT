@@ -30,6 +30,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     ModelCapabilities,
     ModelSettings,
     _parse_attention_backend,
+    prefer_mha_v4,
     register_model,
     xFuserModel,
 )
@@ -646,6 +647,12 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
     _warmup_num_inference_steps = 3
     _enable_fasth3_vsa = False
     supported_attn_backends = _SUPPORTED_ATTN_BACKENDS
+
+    def _customize_settings(self, config) -> None:
+        super()._customize_settings(config)
+        # Measured on the base checkpoint only; the hybrid schedule refuses a set --attention_backend.
+        if type(self) is xFuserMiniMaxH3Model and not config.use_hybrid_attn_schedule:
+            prefer_mha_v4(self.settings, "auto")
 
     def _get_runtime_state_pipeline(self):
         if self._transformer_component_name == "transformer":

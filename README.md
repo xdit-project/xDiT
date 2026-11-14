@@ -52,6 +52,7 @@ Accept the checkpoint's license and authenticate with Hugging Face if required.
 The first run downloads the weights. To distribute attention across eight GPUs:
 
 ```bash
+<<<<<<< HEAD
 xdit --model FLUX.1-dev --ulysses_degree 8 \
     --prompt "A cat running in a garden"
 ```
@@ -59,6 +60,23 @@ xdit --model FLUX.1-dev --ulysses_degree 8 \
 The launcher infers the process count from the parallel degrees. See
 [launching](docs/runner/launching.md), [legacy pipeline examples](docs/runner/examples.md#dedicated-pipeline-examples),
 and the [CLI reference](docs/runner/cli.md) for other workflows and options.
+=======
+torchrun --nproc_per_node=8 \
+examples/pixartalpha_example.py \
+--model models/PixArt-XL-2-1024-MS \
+--pipefusion_parallel_degree 2 \
+--ulysses_degree 2 \
+--num_inference_steps 20 \
+--warmup_steps 1 \
+--prompt "A cute dog" \
+--use_cfg_parallel
+```
+
+⚠️ Applying PipeFusion requires setting `warmup_steps`, also required in DistriFusion, typically set to a small number compared with `num_inference_steps`.
+The warmup step impacts the efficiency of PipeFusion as it cannot be executed in parallel, thus degrading to a serial execution.
+PipeFusion needs at least one warmup step (`--warmup_steps 0` is rejected when `--pipefusion_parallel_degree` is greater than 1).
+Users can tune this value according to their specific tasks.
+>>>>>>> fdd13df (fix(config): require a warmup step for PipeFusion)
 
 <h2 id="secrets">Choose capabilities</h2>
 

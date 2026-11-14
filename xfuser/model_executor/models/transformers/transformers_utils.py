@@ -33,6 +33,51 @@ def gather_and_unpad(x: torch.Tensor, pad_amount: int, dim: int) -> torch.Tensor
     return x.narrow(dim=dim, start=0, length=size - pad_amount)
 
 
+def prefix_key_mask(_key, lengths: tuple[int, ...], keys: int, device: torch.device) -> torch.Tensor:
+    """The ``[batch, keys]`` bool mask of the first ``lengths[i]`` keys of each row.
+
+    Filled in place rather than compared against a tensor of the lengths, whose
+    copy to the device would wait for the queued work. ``_key`` is the mask cache's
+    key, None for lengths known on the host (see ``usp.key_padding_mask``).
+    """
+    mask = torch.zeros((len(lengths), keys), dtype=torch.bool, device=device)
+    for row, length in enumerate(lengths):
+        mask[row, :length] = True
+    return mask
+
+
+def text_image_key_mask(
+    text_mask: torch.Tensor,
+    image_tokens: int,
+    sp_pad: int = 0,
+    sp_world_size: int = 1,
+    joint_strategy: str | None = None,
+) -> torch.Tensor:
+    """The ``[batch, keys]`` mask a prompt next to the image gives USP, in the order the backend sees the keys.
+
+    ``text_mask`` is the prompt's ``[batch, text]`` mask; the image tokens are
+    attended and the ``sp_pad`` rows that pad the image to a multiple of
+    ``sp_world_size`` are not. USP keeps those rows in K when the call has a
+    mask (``usp.key_padding_attention_kwargs``), so the mask covers them.
+
+    - ``joint_strategy=None``: the prompt is sharded (text divisible by the degree). Each rank holds
+      ``[text_r, image_r]``, so the gathered keys are ``[text_0, image_0, text_1, image_1, ...]``,
+      with the padding at the end of the padded image.
+    - ``"front"`` / ``"rear"``: every rank holds the whole prompt and USP joins it as joint tokens,
+      ahead of or behind the gathered image keys and their padding.
+    """
+    text_mask = text_mask.to(torch.bool)
+    batch_size = text_mask.shape[0]
+    image_mask = torch.cat(
+        [text_mask.new_ones((batch_size, image_tokens)), text_mask.new_zeros((batch_size, sp_pad))], dim=1
+    )
+    if joint_strategy is not None:
+        return torch.cat([text_mask, image_mask] if joint_strategy == "front" else [image_mask, text_mask], dim=1)
+    return torch.cat(
+        [text_mask.view(batch_size, sp_world_size, -1), image_mask.view(batch_size, sp_world_size, -1)], dim=2
+    ).flatten(1)
+
+
 def local_sp_pad_rows(seq_len: int, local_len: int, sp_rank: int) -> int:
     """How many of this rank's `local_len` rows are SP pad, for a real length `seq_len`.
 

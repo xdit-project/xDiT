@@ -133,19 +133,17 @@ def test_sequence_parallel_patch_update_uses_the_module_cache_buffer(
     manager = cache_manager.CacheManager()
     layer = torch.nn.Linear(2, 2)
     initial = torch.arange(8).reshape(1, 8, 1)
+    stored = initial[:, [0, 1, 4, 5, 2, 3, 6, 7], :]
 
     manager.register_cache_entry(layer, "attn", "sequence_parallel_attn_cache")
-    assert torch.equal(
-        manager.update_and_get_kv_cache(initial, layer),
-        initial,
-    )
+    assert torch.equal(manager.update_and_get_kv_cache(initial, layer), stored)
 
     state.patch_mode = True
     state.pipeline_patch_idx = 1
     patch = torch.full((1, 4, 1), 99)
     updated = manager.update_and_get_kv_cache(patch, layer)
 
-    assert torch.equal(updated[:, :4], initial[:, :4])
+    assert torch.equal(updated[:, :4], stored[:, :4])
     assert torch.equal(updated[:, 4:], patch)
     assert layer._xdit_kv_cache is updated
 
@@ -244,6 +242,7 @@ def test_compiled_sequence_parallel_patch_update_reuses_graph(monkeypatch):
     manager = cache_manager.CacheManager()
     layer = torch.nn.Linear(2, 2)
     initial = torch.arange(8).reshape(1, 8, 1)
+    stored = initial[:, [0, 1, 4, 5, 2, 3, 6, 7], :]
     manager.register_cache_entry(layer, "attn", "sequence_parallel_attn_cache")
     manager.update_and_get_kv_cache(initial, layer)
 
@@ -260,7 +259,7 @@ def test_compiled_sequence_parallel_patch_update_reuses_graph(monkeypatch):
     with torch._dynamo.config.patch(error_on_recompile=True):
         updated = update(second_patch)
 
-    assert torch.equal(updated[:, :4], initial[:, :4])
+    assert torch.equal(updated[:, :4], stored[:, :4])
     assert torch.equal(updated[:, 4:], second_patch)
     assert layer._xdit_kv_cache is updated
 

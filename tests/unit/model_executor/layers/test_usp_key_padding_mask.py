@@ -59,7 +59,7 @@ def runtime(monkeypatch):
         state = SimpleNamespace(
             fp8_comms=fp8_comms,
             attention_backend=backend,
-            runtime_config=SimpleNamespace(use_spargeattn_head_balance=False),
+            runtime_config=SimpleNamespace(use_sparseattn_head_balance=False),
         )
         monkeypatch.setattr(usp, "get_runtime_state", lambda: state)
         monkeypatch.setattr(usp, "get_ring_parallel_world_size", lambda: ring_degree)

@@ -202,6 +202,9 @@ class _TrailingPadKeys(CallConstraint):
     their boundaries.
     """
 
+    def attends_packed_keys(self) -> bool:
+        return False
+
     def unmet(self, query, key, value, call) -> Optional[str]:
         if call.varlen is None:
             return None

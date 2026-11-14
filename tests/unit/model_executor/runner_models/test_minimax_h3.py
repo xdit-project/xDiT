@@ -122,6 +122,9 @@ def _patch_minimax_runtime_state(monkeypatch, *, track_steps=False, attention_ba
             if track_steps:
                 calls.append(True)
 
+        def current_step(self):
+            return None
+
     runtime_state = _RuntimeState()
 
     def getter():

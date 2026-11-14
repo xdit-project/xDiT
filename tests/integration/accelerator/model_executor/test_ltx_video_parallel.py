@@ -86,7 +86,7 @@ def _ltx_video_worker(rank, world_size, init_method, cfg_degree, ulysses_degree)
 
         runtime = SimpleNamespace(
             attention_backend=AttentionBackendType.SDPA,
-            runtime_config=SimpleNamespace(use_spargeattn_head_balance=False),
+            runtime_config=SimpleNamespace(use_sparseattn_head_balance=False),
             fp8_comms=None,
         )
         with patch("xfuser.model_executor.layers.usp.get_runtime_state", return_value=runtime), torch.no_grad():

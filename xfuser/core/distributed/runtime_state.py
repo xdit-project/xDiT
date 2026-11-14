@@ -331,6 +331,10 @@ class RuntimeState(metaclass=ABCMeta):
         spec.resolved()
         spec.validate(self.runtime_config)
 
+    def current_step(self) -> Optional[torch.Tensor]:
+        """The running forward's index as a 0-d tensor, or None when nothing tracks steps."""
+        return None
+
 
 class UnetRuntimeState(RuntimeState):
     def __init__(self, pipeline: DiffusionPipeline, config: EngineConfig):
@@ -362,6 +366,11 @@ class DiTRuntimeState(RuntimeState):
     # Class-level default so states built without __init__ (as some tests do) can still
     # call set_input_parameters.
     split_latents_by_rows: bool = True
+    # Read by reset_step_counter() at every pipeline-run boundary, so it needs the same default.
+    step_counter: Optional[torch.Tensor] = None
+    # The step the running forward is at. step_counter has already moved past it by the time
+    # attention runs, because the advance happens at the top of the forward.
+    forward_step: Optional[torch.Tensor] = None
 
     def __init__(self, pipeline: DiffusionPipeline, config: EngineConfig):
         self.attention_schedule: Optional[AttentionSchedule] = None
@@ -369,7 +378,8 @@ class DiTRuntimeState(RuntimeState):
         self.gemm_schedule: Optional[GemmPrecisionSchedule] = None
         self.gemm_schedule_total_steps: Optional[int] = None
         self.use_high_precision_gemm: bool = True
-        self.step_counter: Optional[int] = None
+        self.step_counter: Optional[torch.Tensor] = None
+        self.forward_step: Optional[torch.Tensor] = None
         self._vsa_denoising_step = -1
         self._vsa_last_timestep: Optional[float] = None
         self._vsa_num_steps: Optional[int] = None
@@ -463,29 +473,61 @@ class DiTRuntimeState(RuntimeState):
             )
         return attn_steps or gemm_steps
 
+    def track_steps(self, device: Optional[torch.device] = None) -> None:
+        """Count transformer forwards from here on, for a consumer that reads the step.
+
+        Opt-in, so a run that reads no step keeps a forward with no counter in it. `device` is
+        where current_step() is read: the counter stays on the host for the schedules, and the
+        forward's step is copied to `device` once per forward rather than once per attention call.
+        """
+        if self.step_counter is None:
+            self.step_counter = torch.tensor(0, dtype=torch.int)
+            self.forward_step = torch.zeros_like(self.step_counter)
+        if device is not None:
+            self.forward_step = self.forward_step.to(device)
+
+    def current_step(self) -> Optional[torch.Tensor]:
+        return self.forward_step
+
     def increment_step_counter(self):
         """
-        Advance the denoising step and set per-step scheduled backends/modes when active.
-        When the entire denoising process is over, the step counter is reset to 0.
+        Advance the step when something tracks it, and set per-step scheduled backends/modes.
+        With an attention or GEMM schedule, the counter is reset to 0 at the end of the schedule.
+
+        In place: this runs inside the compiled transformer forward, and under CUDA graphs a
+        counter rebound there would be a graph output, which the next replay overwrites.
         """
         if self.step_counter is None:
             return
 
-        active_total_steps = self._get_active_total_steps()
-        if active_total_steps is None:
-            return
+        self._apply_schedules_at(self.step_counter)
+        self.forward_step.copy_(self.step_counter)
 
-        current_step = self.step_counter
+        self.step_counter.add_(1)
+
+        active_total_steps = self._get_active_total_steps()
+        if active_total_steps is not None and self.step_counter >= active_total_steps:
+            self.step_counter.zero_()
+
+    def _apply_schedules_at(self, step) -> None:
+        """Point every active schedule at `step`."""
         if self.attention_schedule is not None:
-            self.attention_backend = self.attention_schedule.get_backend(current_step)
+            self.attention_backend = self.attention_schedule.get_backend(step)
             activate_attention_a2a_backend(self.attention_backend)
         if self.gemm_schedule is not None:
-            self.use_high_precision_gemm = self.gemm_schedule.is_high_precision(current_step)
+            self.use_high_precision_gemm = self.gemm_schedule.is_high_precision(step)
 
-        self.step_counter = self.step_counter + 1
+    def reset_step_counter(self) -> None:
+        """Send the per-step schedules back to their first step, at a pipeline-run boundary.
 
-        if self.step_counter >= active_total_steps:
-            self.step_counter = 0
+        Warmup forwards advance the counter too, and a warmup shorter than the schedule would
+        otherwise start the measured run mid-schedule.
+        """
+        if self.step_counter is None:
+            return
+        self.step_counter.zero_()
+        self.forward_step.zero_()
+        self._apply_schedules_at(self.step_counter)
 
     def set_attention_schedule(
         self,
@@ -502,7 +544,7 @@ class DiTRuntimeState(RuntimeState):
                 self.runtime_config.attention_a2a.resolve_for_backend(backend)
         self.attention_schedule = attention_schedule
         self.schedule_total_steps = torch.tensor(total_steps, dtype=torch.int)
-        self.step_counter = torch.tensor(0, dtype=torch.int)
+        self.track_steps()
         warn_once(
             logger,
             "Per-step attention schedule over %d steps: %s.",
@@ -522,7 +564,7 @@ class DiTRuntimeState(RuntimeState):
         """
         self.gemm_schedule = gemm_schedule
         self.gemm_schedule_total_steps = torch.tensor(total_steps, dtype=torch.int)
-        self.step_counter = torch.tensor(0, dtype=torch.int)
+        self.track_steps()
         warn_once(logger, "Per-step GEMM schedule enabled (total_steps=%d).", total_steps)
 
     def set_input_parameters(

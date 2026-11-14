@@ -203,16 +203,37 @@ def _block_size_config(**kwargs):
     return xFuserArgs(model="m", sparseattn_block_size=(64, 64), **kwargs)
 
 
-def test_a_block_size_is_accepted_when_a_scheduled_backend_is_mha_v4_sparge():
-    config = _block_size_config(use_hybrid_attn_schedule=True, hybrid_attn_schedule="AITER_BF16,AITER_FP8_SPARGE")
+@pytest.mark.parametrize("scheduled", ["AITER_BF16,AITER_FP8_SPARGE", "AITER_BF16,AITER_F6F4_SOL"])
+def test_a_block_size_is_accepted_when_a_scheduled_backend_reads_it(scheduled):
+    config = _block_size_config(use_hybrid_attn_schedule=True, hybrid_attn_schedule=scheduled)
 
     base_model._validate_sparseattn_block_size(config)
 
 
 @pytest.mark.parametrize("backend", ["AITER_BF16", "FLEX_BLOCK_SPARGE"])
-def test_a_block_size_without_an_mha_v4_sparge_backend_is_refused(backend):
-    with pytest.raises(ValueError, match="applies only to the AITER MHA v4 Sparge"):
+def test_a_block_size_without_a_backend_that_reads_it_is_refused(backend):
+    with pytest.raises(ValueError, match="applies only to the AITER MHA v4 Sparge and AITER Sol"):
         base_model._validate_sparseattn_block_size(_block_size_config(attention_backend=backend))
+
+
+def test_a_beta_schedule_is_accepted_when_a_scheduled_backend_is_sol():
+    config = xFuserArgs(
+        model="m",
+        solattn_beta_schedule="1.0:0.0",
+        use_hybrid_attn_schedule=True,
+        hybrid_attn_schedule="AITER_BF16,AITER_F6F4_SOL",
+    )
+
+    base_model._validate_solattn_beta_schedule(config)
+
+
+@pytest.mark.parametrize("backend", ["AITER_BF16", "AITER_FP8_SPARGE"])
+def test_a_beta_schedule_without_a_sol_backend_is_refused(backend):
+    """No Sol backend would read it, so the run would quietly route nothing by it."""
+    config = xFuserArgs(model="m", solattn_beta_schedule="1.0:0.0", attention_backend=backend)
+
+    with pytest.raises(ValueError, match="applies only to the AITER Sol"):
+        base_model._validate_solattn_beta_schedule(config)
 
 
 def _gather_dp_outputs(monkeypatch, *, dp_degree, legacy_pipe, rank=0, sp_rank=0):

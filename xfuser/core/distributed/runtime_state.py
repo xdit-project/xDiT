@@ -335,6 +335,9 @@ class RuntimeState(metaclass=ABCMeta):
         """The running forward's index as a 0-d tensor, or None when nothing tracks steps."""
         return None
 
+    def reset_step_counter(self) -> None:
+        """Only DiTRuntimeState has a per-step schedule to restart."""
+
 
 class UnetRuntimeState(RuntimeState):
     def __init__(self, pipeline: DiffusionPipeline, config: EngineConfig):

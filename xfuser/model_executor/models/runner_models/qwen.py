@@ -19,6 +19,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
 from xfuser import xFuserArgs
 from xfuser.core.distributed import get_runtime_state
 from xfuser.core.utils.runner_utils import log
+from xfuser.envs import PACKAGES_CHECKER
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     STANDARD_LOAD_ROUTES,
@@ -100,6 +101,12 @@ class xFuserQwenImageEditModel(xFuserModel):
             self.settings.model_name = "Qwen/Qwen-Image-Edit-2509"
             self.settings.output_name = "qwen_image_edit_2509"
             self._is_edit_plus = True
+
+    def _get_compile_mode(self) -> str:
+        # CUDA graphs are incompatible with cross-step caching and re-capture pathologically on RDNA4.
+        if self.config.cache_method or PACKAGES_CHECKER._on_rdna4():
+            return "default"
+        return "reduce-overhead"
 
     def _load_model(self) -> DiffusionPipeline:
         from xfuser.model_executor.pipelines.pipeline_qwen_image_edit import (
@@ -217,6 +224,12 @@ class xFuserQwenImageModel(xFuserModel):
         if "2512" in config.model:
             self.settings.model_name = "Qwen/Qwen-Image-2512"
             self.settings.output_name = "qwen_image_2512"
+
+    def _get_compile_mode(self) -> str:
+        # CUDA graphs are incompatible with cross-step caching and re-capture pathologically on RDNA4.
+        if self.config.cache_method or PACKAGES_CHECKER._on_rdna4():
+            return "default"
+        return "reduce-overhead"
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import QwenImagePipeline

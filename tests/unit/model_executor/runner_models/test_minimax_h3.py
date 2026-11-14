@@ -1721,6 +1721,41 @@ def test_minimax_h3_compile_preserves_forward_signature(monkeypatch):
     assert compile_calls == [{"mode": "default", "fullgraph": False}]
 
 
+@pytest.mark.parametrize(
+    ("runner", "rdna4", "transformer_mode"),
+    [
+        ("xFuserMiniMaxH3Model", False, "reduce-overhead"),
+        ("xFuserMiniMaxH3Model", True, "default"),
+        ("xFuserFastH3Model", False, "default"),
+    ],
+)
+def test_minimax_h3_takes_cuda_graphs_for_the_transformer_only(monkeypatch, runner, rdna4, transformer_mode):
+    """The video VAE decoder reads graph outputs across calls, so it keeps the runner's mode."""
+    from xfuser.envs import PACKAGES_CHECKER
+    from xfuser.model_executor.models.runner_models import minimax_h3
+
+    _patch_minimax_runtime_state(monkeypatch)
+    monkeypatch.setattr(PACKAGES_CHECKER, "_on_rdna4", lambda: rdna4)
+    modes = []
+    monkeypatch.setattr(minimax_h3.torch, "compile", lambda fn, **kwargs: modes.append(kwargs["mode"]) or fn)
+    monkeypatch.setattr(minimax_h3, "log", lambda message: None)
+    model = object.__new__(getattr(minimax_h3, runner))
+    model.config = SimpleNamespace(fully_shard_degree=1)
+    vae_calls = []
+    transformer = torch.nn.Linear(2, 2)
+    model.pipe = SimpleNamespace(
+        transformer=transformer, vae=SimpleNamespace(compile_repeated_blocks=lambda **kwargs: vae_calls.append(kwargs))
+    )
+    model._enable_compute_comm_overlap = lambda: None
+    model._get_compile_mode = lambda: "default"
+    model._run_timed_pipe = lambda input_args: None
+
+    model._compile_model({"num_inference_steps": 50})
+
+    assert vae_calls == [{"mode": "default", "fullgraph": False}]
+    assert modes == [transformer_mode]
+
+
 def test_fasth3_warmup_uses_four_forward_schedule(monkeypatch):
     from xfuser.model_executor.models.runner_models.minimax_h3 import (
         xFuserFastH3Model,

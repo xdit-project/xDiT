@@ -8,8 +8,18 @@ def test_row_split_keeps_rejecting_heights_the_ranks_cannot_share(flux_runtime_s
         state.set_input_parameters(height=1040, width=1040, batch_size=1, num_inference_steps=4)
 
 
-def test_token_sharding_callers_accept_heights_the_ranks_cannot_share_by_row(flux_runtime_state):
-    state = flux_runtime_state(sp_degree=2)
+@pytest.mark.parametrize(
+    "geometry",
+    [
+        {},
+        # Krea-2: 8 pixels per latent row and 2x2 patches. 1040 pixels is 130 latent rows,
+        # which 2 ranks can share, but 65 rows each is not a whole number of patch rows.
+        {"vae_scale_factor": 8, "backbone_patch_size": 2},
+    ],
+    ids=["flux", "krea2"],
+)
+def test_token_sharding_callers_accept_heights_the_ranks_cannot_share_by_row(flux_runtime_state, geometry):
+    state = flux_runtime_state(sp_degree=2, **geometry)
 
     state.set_input_parameters(
         height=1040,
@@ -35,7 +45,7 @@ def test_switching_to_row_split_revalidates_an_unchanged_size(flux_runtime_state
 def test_row_split_metadata_follows_the_requested_height(flux_runtime_state):
     state = flux_runtime_state(sp_degree=3)
 
-    state.set_input_parameters(height=1056, width=1056, batch_size=1, split_latents_by_rows=False)
+    state.set_input_parameters(height=1056, width=1056, batch_size=1)
 
     # 66 token rows over 3 ranks.
     assert state.pp_patches_height == [22]

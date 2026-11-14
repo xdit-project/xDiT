@@ -23,7 +23,11 @@ def state(monkeypatch):
     state.gemm_schedule = None
     state.gemm_schedule_total_steps = None
     state.step_counter = None
+    state.forward_step = None
     state.attention_backend = HIGH
+    state.runtime_config = SimpleNamespace(
+        attention_a2a=SimpleNamespace(enabled=False, resolve_for_backend=lambda backend: None),
+    )
     state._check_if_backend_compatible_with_current_configuration = lambda backend: None
     monkeypatch.setattr(base_model, "get_runtime_state", lambda: state)
     monkeypatch.setenv("RANK", "0")

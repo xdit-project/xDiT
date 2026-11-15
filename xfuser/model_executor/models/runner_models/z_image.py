@@ -14,6 +14,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
     ModelCapabilities,
     ModelSettings,
+    prefer_mha_v4,
 )
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
@@ -167,6 +168,7 @@ class xFuserZImageModel(xFuserModel):
         after SP chunking each GPU may see M <= 16, which is below the minimum
         M required by the ``torch._int_mm`` kernel used by torch.compile.
         """
+        prefer_mha_v4(self.settings, "auto")
         sp_world_size = (config.ulysses_degree or 1) * (config.ring_degree or 1)
         if sp_world_size > 1 and config.use_int8_gemms:
             self.settings.int8_gemm_module_list = [

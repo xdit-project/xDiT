@@ -1,4 +1,12 @@
-"""Z-Image refreshes its SP length and pad rows for each of its three stages."""
+"""Z-Image refreshes its SP length and pad rows for each of its three stages.
+
+This covers the per-layer path, where ``zero_sp_pad_rows_hook`` clears each
+block's pad rows.  The stack runner's pipelined path bypasses ``layer.forward``
+-- and therefore the hook -- and clears them itself; that path is covered by
+``test_z_image_sp_pad_fusion.py``.  The stub blocks below only run at all on the
+per-layer path, so the runner is pinned to it explicitly rather than by
+accident.
+"""
 
 from types import SimpleNamespace
 
@@ -24,6 +32,11 @@ def test_all_three_stages_publish_their_own_lengths_and_clear_each_blocks_pad_ro
         axes_dims=[2, 2, 4],
         axes_lens=[128, 16, 16],
     ).eval()
+    # These blocks' forwards are stubs, so this test needs the schedule that
+    # calls them.  Without this the noise and unified stacks pipeline, drive
+    # layer.attention directly past the stub, and fault on an SP group no unit
+    # test initialises.
+    monkeypatch.setattr(z_image, "_stack_is_pipelinable", lambda layers: False)
     monkeypatch.setattr(z_image, "get_sequence_parallel_rank", lambda: 4)
     monkeypatch.setattr(z_image, "get_sequence_parallel_world_size", lambda: 5)
     monkeypatch.setattr(z_image, "get_classifier_free_guidance_world_size", lambda: 1)

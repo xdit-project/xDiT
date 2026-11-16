@@ -9,7 +9,6 @@ skip-layer pass stays on the positive rank.
 from __future__ import annotations
 
 import math
-import os
 from pathlib import Path
 
 import torch
@@ -24,9 +23,11 @@ from xfuser.model_executor.models.transformers.transformer_moss_image import (
     validate_skip_layers,
 )
 
-_MARK_CUDAGRAPH_STEPS = os.environ.get("XDIT_COMPILE_MODE", "default") in ("reduce-overhead", "max-autotune")
-# Serial CFG: run the conditional and unconditional passes in one interleaved transformer call.
-_INTERLEAVE_CFG = os.environ.get("MOSS_INTERLEAVE_CFG", "0") == "1"
+
+def _mark_step():
+    # Each transformer call is one step: lets a CUDA-graph replay reuse the previous
+    # step's output buffers. Only bumps a counter when no graphs are recorded.
+    torch.compiler.cudagraph_mark_step_begin()
 
 
 def skip_window_active(step_index, num_steps, slg_start, slg_stop) -> bool:
@@ -82,8 +83,14 @@ class xFuserMOSSImagePipeline(DiffusionPipeline):
 
     @classmethod
     def from_pretrained(
-        cls, pretrained_model_name_or_path, torch_dtype=torch.bfloat16, vae_dtype=torch.float32, **kwargs
+        cls,
+        pretrained_model_name_or_path,
+        torch_dtype=torch.bfloat16,
+        vae_dtype=torch.float32,
+        fuse_projections=None,
+        **kwargs,
     ):
+        """``fuse_projections`` names the DiT projections merged into one GEMM, e.g. ``("q", "k", "v")``."""
         cache_dir = kwargs.get("cache_dir")
         transformer = MOSSImageTransformer.from_pretrained(
             pretrained_model_name_or_path,
@@ -92,11 +99,8 @@ class xFuserMOSSImagePipeline(DiffusionPipeline):
             low_cpu_mem_usage=True,
             cache_dir=cache_dir,
         ).eval()
-        # With a single q,k,v all-to-all nothing overlaps the v GEMM, so fusing all three wins.
-        combined_a2a = os.environ.get("MOSS_COMBINE_QKV_A2A", "0") == "1"
-        fuse = os.environ.get("XDIT_MOSS_FUSE_QKV", "qkv" if combined_a2a else "qk")
-        if fuse in ("qk", "qkv"):
-            transformer.fuse_qkv_projections(tuple(fuse))
+        if fuse_projections:
+            transformer.fuse_qkv_projections(tuple(fuse_projections))
         # Runtime Ulysses checks read num_attention_heads. This checkpoint publishes num_heads.
         transformer.register_to_config(num_attention_heads=transformer.config.num_heads)
         tokenizer = _load_tokenizer(pretrained_model_name_or_path, cache_dir)
@@ -340,11 +344,10 @@ def _serial_prediction(
     slg_scale,
     slg_active,
 ):
-    if _INTERLEAVE_CFG and do_cfg and latents.shape[0] == 1:
+    if do_cfg and latents.shape[0] == 1:
         context = _context(transformer, latents, positive, positive_mask)
         pair_context = _context(transformer, latents, negative, negative_mask)
-        if _MARK_CUDAGRAPH_STEPS:
-            torch.compiler.cudagraph_mark_step_begin()
+        _mark_step()
         conditional, uncond = (
             transformer(
                 latents,
@@ -451,8 +454,6 @@ _CONTEXTS = {}
 
 def _context(transformer, latents, embeds, mask):
     """The text refiner and RoPE do not depend on the step: compute them once per prompt."""
-    if os.environ.get("MOSS_CACHE_TEXT_CONTEXT", "1") != "1":
-        return None
     grid = tuple(latents.shape[-2:])
     entry = _CONTEXTS.get(id(embeds))
     if entry is None or entry[0] is not embeds or entry[1] != grid:
@@ -463,11 +464,8 @@ def _context(transformer, latents, embeds, mask):
 
 def _forward(transformer, latents, timestep, embeds, mask, skip_layers=None):
     kwargs = {"skip_layers": skip_layers} if skip_layers else {}
-    context = _context(transformer, latents, embeds, mask)
-    if context is not None:
-        kwargs["context"] = context
-    if _MARK_CUDAGRAPH_STEPS:
-        torch.compiler.cudagraph_mark_step_begin()
+    kwargs["context"] = _context(transformer, latents, embeds, mask)
+    _mark_step()
     return transformer(latents, timestep, embeds, mask, **kwargs).sample.float()
 
 
@@ -484,7 +482,7 @@ def _cfg_layout():
 
 
 def _split_encode_group():
-    if os.environ.get("MOSS_SPLIT_PROMPT_ENCODE", "1") != "1" or not _parallel_ready():
+    if not _parallel_ready():
         return None
     from xfuser.core.distributed import get_model_replica_group
 
@@ -572,10 +570,9 @@ def _load_tokenizer(repo, cache_dir):
 def _load_text_encoder(repo, dtype, cache_dir):
     from transformers import AutoModel
 
-    if os.environ.get("MOSS_FAST_DELTA_RULE", "1") == "1":
-        from xfuser.model_executor.layers.gated_delta_rule import patch_qwen3_5_gated_delta
+    from xfuser.model_executor.layers.gated_delta_rule import patch_qwen3_5_gated_delta
 
-        patch_qwen3_5_gated_delta()
+    patch_qwen3_5_gated_delta()
 
     kwargs = dict(subfolder="text_encoder", cache_dir=cache_dir)
     try:
@@ -599,31 +596,4 @@ def _load_vae(repo, dtype, cache_dir):
         # Latent BatchNorm statistics stay FP32; only the conv stack runs in the reduced dtype.
         vae.to(dtype)
         vae.bn.float()
-    if os.environ.get("MOSS_VAE_ATTN_TF32", "0") == "1":
-        vae.set_attn_processor(_TF32AttnProcessor())
     return vae
-
-
-class _TF32AttnProcessor:
-    """fp32 VAE mid-block attention (one head, 16K tokens x 512) through TF32
-    GEMMs. ROCm has no fp32 flash kernel; its AOTriton memory-efficient path
-    takes ~10 ms here, the math path with TF32 matmuls ~2 ms at ~1e-6 error."""
-
-    def __init__(self):
-        from diffusers.models.attention_processor import AttnProcessor2_0
-
-        self._inner = AttnProcessor2_0()
-
-    def __call__(self, *args, **kwargs):
-        from torch.nn.attention import SDPBackend, sdpa_kernel
-
-        hidden_states = args[1] if len(args) > 1 else kwargs["hidden_states"]
-        if hidden_states.dtype != torch.float32:
-            return self._inner(*args, **kwargs)
-        previous = torch.backends.cuda.matmul.allow_tf32
-        torch.backends.cuda.matmul.allow_tf32 = True
-        try:
-            with sdpa_kernel(SDPBackend.MATH):
-                return self._inner(*args, **kwargs)
-        finally:
-            torch.backends.cuda.matmul.allow_tf32 = previous

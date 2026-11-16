@@ -2,20 +2,19 @@
 
 The serving recipe matches the model card: 1024², 50 steps, flow shift 5,
 CFG 3, and unconditional block 22 skipped from the first step
-(``slg_start=0.0``). Weights are BF16 for the DiT and Qwen3.5 encoder, and
-FP32 for the FLUX.2 VAE. Image editing is not implemented.
+(``slg_start=0.0``). Weights are BF16 for the DiT, the Qwen3.5 encoder, and the
+FLUX.2 VAE convolutions; the VAE's latent BatchNorm stays FP32. Image editing
+is not implemented.
 
 Sequence parallelism shards the joint DiT sequence. Ulysses degree must divide
 the 24 heads. The text refiner stays replicated. ``--use_cfg_parallel`` runs
 the positive and negative passes on two ranks.
 """
 
-import ast
-import os
-
 import torch
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
+from xfuser.envs import PACKAGES_CHECKER
 from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
@@ -25,13 +24,6 @@ from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
 )
 from xfuser.model_executor.models.runner_models.loading.contracts import LoadRoute, LoadSupport
-
-
-def _vae_dtype():
-    # BF16 decode is ~3x faster than FP32 on MI355 (MIOpen FP32 convs are slow) at ~56 dB PSNR.
-    return {"fp32": torch.float32, "bf16": torch.bfloat16, "fp16": torch.float16}[
-        os.environ.get("MOSS_VAE_DTYPE", "bf16")
-    ]
 
 
 @register_model("OpenMOSS-Team/MOSS-Image-Base")
@@ -75,15 +67,10 @@ class xFuserMOSSImageModel(xFuserModel):
     )
 
     def _get_compile_mode(self) -> str:
-        return os.environ.get("XDIT_COMPILE_MODE", "default")
-
-    def _enable_compute_comm_overlap(self) -> None:
-        super()._enable_compute_comm_overlap()
-        # XDIT_INDUCTOR_OVERRIDES="key=pyliteral;key2=pyliteral" applied to torch._inductor.config.
-        overrides = os.environ.get("XDIT_INDUCTOR_OVERRIDES", "")
-        for item in filter(None, overrides.split(";")):
-            key, value = item.split("=", 1)
-            torch._inductor.config.__setattr__(key.strip(), ast.literal_eval(value.strip()))
+        # CUDA graphs are incompatible with cross-step caching and slow on RDNA4.
+        if self.config.cache_method or PACKAGES_CHECKER._on_rdna4():
+            return "default"
+        return "reduce-overhead"
 
     def _load_model(self) -> DiffusionPipeline:
         from xfuser.model_executor.pipelines.pipeline_moss_image import xFuserMOSSImagePipeline
@@ -91,16 +78,18 @@ class xFuserMOSSImageModel(xFuserModel):
         return xFuserMOSSImagePipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
-            vae_dtype=_vae_dtype(),
+            # BF16 decode is ~3x faster than FP32 on MI355 (MIOpen FP32 convs are slow) at ~56 dB PSNR.
+            vae_dtype=torch.bfloat16,
+            # With CFG parallel each rank runs one sequence and the separate v GEMM overlaps the
+            # q/k all-to-all; the serial CFG pair shares one exchange, so fusing all three wins.
+            fuse_projections=("q", "k") if self.config.use_cfg_parallel else ("q", "k", "v"),
             cache_dir=self.config.download_dir,
         )
 
     def _get_compiled_pipe_components(self):
         # The eager Qwen3.5 encoder is launch bound (~7.8k kernels for prompt + negative);
         # compiled it encodes ~3x faster. Prompts are re-encoded on every call, inside the timed region.
-        if os.environ.get("MOSS_COMPILE_TEXT_ENCODER", "1") == "1":
-            return ["transformer", "text_encoder"]
-        return ["transformer"]
+        return ["transformer", "text_encoder"]
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         negative = input_args.get("negative_prompt")

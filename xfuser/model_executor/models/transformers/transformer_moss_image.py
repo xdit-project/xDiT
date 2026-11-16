@@ -8,8 +8,6 @@ parallelism; the two text-refiner blocks stay replicated on every rank.
 
 from __future__ import annotations
 
-import os
-
 import torch
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
@@ -26,14 +24,6 @@ from xfuser.model_executor.layers.fused_qk_rope_flydsl import (
     flydsl_fused_qk_norm_rope,
     prepare_neox_rope_tables,
 )
-
-_COMBINE_QKV_A2A = os.environ.get("MOSS_COMBINE_QKV_A2A", "0") == "1"
-# One compiled graph for the whole layer stack instead of one per block.
-_FUSED_LAYER_LOOP = os.environ.get("MOSS_FUSED_LAYER_LOOP", "0") == "1"
-# Paired (CFG-interleaved) passes share token-wise GEMMs/FFN on the concatenated sequences.
-_PAIR_BATCH = os.environ.get("MOSS_PAIR_BATCH", "0") == "1"
-# With _PAIR_BATCH: one Ulysses input and one output all-to-all shared by both sequences.
-_PAIR_A2A = os.environ.get("MOSS_PAIR_A2A", "0") == "1"
 
 
 class RMSNorm(_DiffusersRMSNorm):
@@ -87,16 +77,10 @@ def _sequence_parallel_world_size():
     return get_sequence_parallel_world_size()
 
 
-_ULYSSES_BSHD = os.environ.get("MOSS_ULYSSES_BSHD", "0") == "1"
-_FUSED_QK_PROLOGUE = os.environ.get("MOSS_FUSED_QK_ROPE", "0") == "1"
-
-
-def _ulysses_bshd_enabled(x):
-    if not (_ULYSSES_BSHD and x.shape[0] == 1 and _sequence_parallel_world_size() > 1):
-        return False
-    from xfuser.core.distributed import get_ring_parallel_world_size
-
-    return get_ring_parallel_world_size() == 1
+def _send_layout_world(x):
+    """Sequence-parallel degree when ``x`` can go through ``USP_bshd`` (batch 1), else 0."""
+    world = _sequence_parallel_world_size()
+    return world if world > 1 and x.shape[0] == 1 else 0
 
 
 def _to_send_layout(x, world):
@@ -105,40 +89,20 @@ def _to_send_layout(x, world):
     return x.view(local_len, world, heads // world, head_dim).transpose(0, 1).contiguous()
 
 
-def _ulysses_bshd_attention(query, key, value, valid_kv_len):
-    """Ulysses attention exchanging token-major [P, S/P, H/P, D] chunks.
-
-    The input all-to-all then lands as one BSHD [1, S, H/P, D] tensor that the
-    kernel reads in place, and the kernel's BSHD output is already the output
-    all-to-all's send buffer, so only the pre-exchange permute and the final
-    head regroup copy remain. Inputs are send buffers [P, S/P, H/P, D]; the
-    output is [1, S/P, H*D].
-    """
-    from xfuser.model_executor.layers.usp import _sdpa_all_to_all_single, attention
-
-    world, local_len, local_heads, head_dim = query.shape
-
-    def exchange_in(x):
-        return _sdpa_all_to_all_single(x).view(1, world * local_len, local_heads, head_dim)
-
-    query, key, value = exchange_in(query), exchange_in(key), exchange_in(value)
-    if valid_kv_len:
-        key, value = key[:, :valid_kv_len], value[:, :valid_kv_len]
-    hidden = attention(
-        query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), dropout_p=0.0, is_causal=False
-    )
-    hidden = hidden.transpose(1, 2).contiguous().view(world, local_len, local_heads, head_dim)
-    hidden = _sdpa_all_to_all_single(hidden)
-    return hidden.transpose(0, 1).reshape(1, local_len, world * local_heads * head_dim)
+def _attention_kwargs(valid_kv_len):
+    return {"valid_kv_len": valid_kv_len} if valid_kv_len else None
 
 
 def _attend(q, k, v, rope, heads, *, shard_sequence, valid_kv_len):
     shape = (*q.shape[:2], heads, q.shape[-1] // heads)
-    if shard_sequence and _ulysses_bshd_enabled(q):
-        world = _sequence_parallel_world_size()
+    world = _send_layout_world(q) if shard_sequence else 0
+    if world:
+        from xfuser.model_executor.layers.usp import USP_bshd
+
         query = _to_send_layout(_rotate(q.reshape(shape), rope).to(v.dtype), world)
         key = _to_send_layout(_rotate(k.reshape(shape), rope).to(v.dtype), world)
-        return _ulysses_bshd_attention(query, key, _to_send_layout(v.reshape(shape), world), valid_kv_len)
+        value = _to_send_layout(v.reshape(shape), world)
+        return USP_bshd(query, key, value, _attention_kwargs(valid_kv_len))
     query = _rotate(q.reshape(shape), rope).transpose(1, 2)
     key = _rotate(k.reshape(shape), rope).transpose(1, 2)
     value = v.reshape(shape).transpose(1, 2)
@@ -147,15 +111,14 @@ def _attend(q, k, v, rope, heads, *, shard_sequence, valid_kv_len):
     if shard_sequence and _sequence_parallel_world_size() > 1:
         from xfuser.model_executor.layers.usp import USP
 
-        kwargs = {"valid_kv_len": valid_kv_len} if valid_kv_len else None
         hidden = USP(
             query,
             key,
             value,
             dropout_p=0.0,
             is_causal=False,
-            attention_kwargs=kwargs,
-            combine_qkv_a2a=_COMBINE_QKV_A2A,
+            attention_kwargs=_attention_kwargs(valid_kv_len),
+            combine_qkv_a2a=True,
         )
     else:
         from xfuser.core.distributed import runtime_state_is_initialized
@@ -178,7 +141,7 @@ def _attend_pair(inputs_a, inputs_b, heads):
         value = v.reshape(shape).transpose(1, 2)
         query = _rotate(q.reshape(shape), rope).transpose(1, 2).to(value.dtype)
         key = _rotate(k.reshape(shape), rope).transpose(1, 2).to(value.dtype)
-        prepared.append(((query, key, value), {"valid_kv_len": valid_kv_len} if valid_kv_len else None))
+        prepared.append(((query, key, value), _attention_kwargs(valid_kv_len)))
     hidden_a, hidden_b = USP_pair(prepared[0][0], prepared[1][0], prepared[0][1], prepared[1][1])
     return hidden_a.transpose(1, 2).flatten(2), hidden_b.transpose(1, 2).flatten(2)
 
@@ -231,7 +194,7 @@ class _Block(nn.Module):
         y = self.norm1(x) * (1 + scale_a[:, None]) + shift_a[:, None]
         dtype = self.proj["o"].weight.dtype
         y = y.to(dtype)
-        if rope_tables is not None and dtype == torch.bfloat16 and _ulysses_bshd_enabled(y):
+        if rope_tables is not None and dtype == torch.bfloat16 and _send_layout_world(y):
             attended = self._fused_attend(y, rope_tables, valid_kv_len)
         else:
             q, k, v = self._project_qkv(y)
@@ -263,7 +226,7 @@ class _Block(nn.Module):
         q, k, v = self._project_qkv(y)
         q = self.q_norm(q.unflatten(-1, (self.heads, -1))).flatten(2)
         k = self.k_norm(k.unflatten(-1, (self.heads, -1))).flatten(2)
-        if _PAIR_A2A and _sequence_parallel_world_size() > 1:
+        if _sequence_parallel_world_size() > 1:
             attn_a, attn_b = _attend_pair(
                 (q[:, :split], k[:, :split], v[:, :split], rope_a, valid_a),
                 (q[:, split:], k[:, split:], v[:, split:], rope_b, valid_b),
@@ -283,7 +246,9 @@ class _Block(nn.Module):
         return x[:, :split], x[:, split:]
 
     def _fused_attend(self, y, rope_tables, valid_kv_len):
-        world = _sequence_parallel_world_size()
+        from xfuser.model_executor.layers.usp import USP_bshd
+
+        world = _send_layout_world(y)
         q, k, value = self._project_qkv(y)
         cos, sin, cos_pad, sin_fold = rope_tables
         query, key = flydsl_fused_qk_norm_rope(
@@ -298,7 +263,7 @@ class _Block(nn.Module):
             send_world=world,
         )
         value = _to_send_layout(value.unflatten(-1, (self.heads, -1)), world)
-        return _ulysses_bshd_attention(query, key, value, valid_kv_len)
+        return USP_bshd(query, key, value, _attention_kwargs(valid_kv_len))
 
     @torch.no_grad()
     def fuse_qkv_projections(self, names=("q", "k", "v")):
@@ -437,7 +402,7 @@ class MOSSImageTransformer(ModelMixin, ConfigMixin):
             text = self.text_embedder(context, rope[:, height * width :])
             # This rank's shard of the joint-sequence RoPE, materialized once.
             rope = _shard_sequence(rope, None)[0].contiguous()
-            rope_tables = _neox_rope_tables(rope) if _FUSED_QK_PROLOGUE and _HAS_FLYDSL else None
+            rope_tables = _neox_rope_tables(rope) if _HAS_FLYDSL else None
             contexts.append((text, rope, rope_tables))
         return tuple(contexts)
 
@@ -508,6 +473,8 @@ class MOSSImageTransformer(ModelMixin, ConfigMixin):
             return Transformer2DModelOutput(sample=sample) if return_dict else (sample,)
         outputs = []
         for index in range(batch):
+            # Kept inline rather than via _embed_sample/_finalize_sample: moving these steps into
+            # helpers changes how Dynamo splits forward and produces noise under Ulysses 4 + CFG.
             text, rope, rope_tables = context[index]
             video = hidden_states[index : index + 1].flatten(2).transpose(1, 2)
             video = self.video_embedder(video.to(self.video_embedder.weight.dtype).contiguous())
@@ -518,12 +485,7 @@ class MOSSImageTransformer(ModelMixin, ConfigMixin):
             # it after sharding keeps the result correct.
             torch._dynamo.graph_break()
             sample_mod = mod[index : index + 1]
-            if _FUSED_LAYER_LOOP:
-                tokens = self._run_layers(tokens, rope, rope_tables, sample_mod, valid_length, skip_layers)
-            else:
-                for layer_index, layer in enumerate(self.layers):
-                    if layer_index not in skip_layers:
-                        tokens = layer(tokens, rope, sample_mod, valid_kv_len=valid_length, rope_tables=rope_tables)
+            tokens = self._run_layers(tokens, rope, rope_tables, sample_mod, valid_length, skip_layers)
             tokens = _gather_sequence(tokens, valid_length)
             tokens = self.final_norm_video(tokens[:, : height * width].to(self.final_norm_video.weight.dtype))
             tokens = tokens * (1 + head[index : index + 1, 1, None]) + head[index : index + 1, 0, None]
@@ -561,7 +523,7 @@ class MOSSImageTransformer(ModelMixin, ConfigMixin):
         for layer_index, layer in enumerate(self.layers):
             run_a = layer_index not in skip_a
             run_b = layer_index not in skip_b
-            if _PAIR_BATCH and run_a and run_b:
+            if run_a and run_b:
                 tokens_a, tokens_b = layer.forward_pair(
                     tokens_a, tokens_b, rope_a, rope_b, sample_mod, valid_a, valid_b
                 )

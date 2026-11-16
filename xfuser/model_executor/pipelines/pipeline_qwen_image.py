@@ -200,7 +200,8 @@ class QwenPipeFusionMixin:
 
     def _pipefusion_update_qwen_patch(self, work, timestep, noise_pred, previous):
         if noise_pred.shape[1] == 0:
-            return previous
+            # Advance the scheduler with the latent batch size, even for pure CFG.
+            return self._scheduler_step(noise_pred[: previous.shape[0]], previous, timestep)
         return self._pipefusion_update_patch(work, timestep, self._cfg_prediction(noise_pred), previous)
 
     def _sync_qwen_pipeline(

@@ -321,20 +321,3 @@ def test_parallel_vae_decode_returns_on_the_wrapper_output_rank(monkeypatch, out
     assert result == ((("image", (1, 3, 4, 4)),) if output_owner else None)
     assert released == [True]
     assert pipe._qwen_branch_kv is None
-
-
-def test_reference_only_patch_skips_scheduler():
-    pipe = SimpleNamespace(
-        _pipefusion_update_patch=lambda *_args: (_ for _ in ()).throw(AssertionError("scheduler called")),
-    )
-    previous = torch.empty(1, 0, 2)
-
-    actual = QwenPipeFusionMixin._pipefusion_update_qwen_patch(
-        pipe,
-        SimpleNamespace(),
-        torch.tensor(1),
-        torch.empty_like(previous),
-        previous,
-    )
-
-    assert actual is previous

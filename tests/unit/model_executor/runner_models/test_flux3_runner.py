@@ -236,7 +236,7 @@ def test_fp4_without_the_fused_quant_is_reported(build_flux3, monkeypatch, use_f
 def test_block_fusion_is_skipped_where_the_separate_projections_are_needed(
     build_flux3, monkeypatch, fully_shard_degree, overlap_qkv, reason
 ):
-    from xfuser.model_executor.models.transformers import transformer_flux3
+    transformer_flux3 = pytest.importorskip("xfuser.model_executor.models.transformers.transformer_flux3")
 
     model = build_flux3()
     model.config.fully_shard_degree = fully_shard_degree

@@ -3,7 +3,7 @@ op, a collective or a separately compiled block.
 
 - ``qk_norm_rope_seq_major_send``: the q/k RMSNorm and RoPE of a block's projected q, k, v,
   written straight into the Ulysses sequence-major send buffer ``[P, s, b, 3, h/P, d]``
-  (see ``usp._seq_major_qkv_send``) with v copied alongside, instead of a norm kernel and a
+  (see ``usp_seq_major._qkv_send``) with v copied alongside, instead of a norm kernel and a
   pack kernel.
 - ``qk_norm_rope_seq_major_send_fp8``: the same send buffer in FP8 for FP8 Ulysses comms,
   with q and k Hadamard-rotated and q, k, v quantized by their calibrated per-tensor scales,

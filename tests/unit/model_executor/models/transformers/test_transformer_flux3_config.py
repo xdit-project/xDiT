@@ -38,23 +38,6 @@ def test_from_config_keeps_every_checkpoint_setting(flow_map):
     assert wrapper.state_dict().keys() == stock.state_dict().keys()
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        "XFUSER_FLUX3_FUSED_MXFP4_QUANT",
-        "XFUSER_FLUX3_FUSED_QK_NORM_ROPE",
-        "XFUSER_FLUX3_FUSED_BLOCK_RESIDUAL",
-        "XFUSER_FLUX3_SEQ_MAJOR_ULYSSES",
-    ],
-)
-def test_environment_switches_each_fusion_off(monkeypatch, name):
-    monkeypatch.delenv(name, raising=False)
-    assert transformer_flux3._env_flag(name)
-    for value, enabled in [("1", True), (" on ", True), ("0", False), ("false", False), ("OFF", False)]:
-        monkeypatch.setenv(name, value)
-        assert transformer_flux3._env_flag(name) is enabled
-
-
 def test_each_transformer_call_advances_the_step_schedule(monkeypatch):
     # The hybrid GEMM schedule switches precision per step from this counter.
     calls = []
@@ -177,19 +160,39 @@ def test_step_constants_recompute_for_a_new_or_modified_source():
         assert wrapper._step_constant("ids", inference_ids, compute) is first and len(calls) == 6
 
 
-@pytest.mark.parametrize(("change", "asks"), [({}, True), ({"local": True}, False), ({"disabled": True}, False)])
-def test_the_processor_takes_usps_seq_major_plan_unless_local_or_switched_off(monkeypatch, change, asks):
+def test_step_constants_serve_both_cfg_branches():
+    import torch
+
+    wrapper = transformer_flux3.xFuserFlux3Transformer2DWrapper(**TINY, flow_map=True)
+    calls = []
+
+    def compute(x):
+        calls.append(1)
+        return x * 2
+
+    conditional, unconditional, third = torch.ones(3), torch.zeros(3), torch.ones(4)
+    with torch.no_grad():
+        results = [wrapper._step_constant("context", source, compute) for source in (conditional, unconditional) * 3]
+        assert len(calls) == 2
+        assert results[4] is results[0] and results[5] is results[1]
+        wrapper._step_constant("context", third, compute)
+        wrapper._step_constant("context", unconditional, compute)
+        assert len(calls) == 3  # the third source evicted the oldest entry only
+        wrapper._step_constant("context", conditional, compute)
+        assert len(calls) == 4
+
+
+@pytest.mark.parametrize(("local", "asks"), [(False, True), (True, False)])
+def test_the_processor_takes_the_seq_major_plan_unless_local(monkeypatch, local, asks):
     plan = object()
     calls = []
     monkeypatch.setattr(
-        transformer_flux3,
-        "usp_seq_major_plan",
+        transformer_flux3.usp_seq_major,
+        "plan",
         lambda attn, heads, attention_kwargs: calls.append((attn, heads, attention_kwargs)) or plan,
     )
     processor = transformer_flux3.xFuserFlux3AttnProcessor()
-    processor.local = change.get("local", False)
-    if change.get("disabled"):
-        processor.seq_major_ulysses = False
+    processor.local = local
     attn = SimpleNamespace(heads=8)
     attention_kwargs = {"valid_kv_len": 5}
 

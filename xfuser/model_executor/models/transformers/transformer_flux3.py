@@ -14,7 +14,6 @@ from diffusers.models.transformers.transformer_flux3 import (
     _get_qkv_projections,
 )
 
-from xfuser import envs
 from xfuser.core.attention.numerics import hadamard
 from xfuser.core.distributed import (
     get_runtime_state,
@@ -25,46 +24,25 @@ from xfuser.core.distributed.fp8_comms import (
     _FP8_DTYPE as FP8_COMMS_DTYPE,
     register_fp8_comms_eligible_modules,
 )
-from xfuser.model_executor.layers import fused_block_ops, mxfp4_fused_quant, usp_sdma
+from xfuser.model_executor.layers import fused_block_ops, mxfp4_fused_quant, usp_sdma, usp_seq_major
 from xfuser.model_executor.layers.mxfp4_linear import xFuserMXFP4Linear
-from xfuser.model_executor.layers.usp import (
-    PROCESS_GROUP,
-    USP,
-    attention,
-    SeqMajorOutput,
-    SeqMajorPlan,
-    usp_seq_major,
-    usp_seq_major_plan,
-    usp_seq_major_send,
-)
+from xfuser.model_executor.layers.usp import PROCESS_GROUP, USP, attention
+from xfuser.model_executor.layers.usp_seq_major import SeqMajorOutput, SeqMajorPlan
 from xfuser.model_executor.models.transformers.transformers_utils import (
     chunk_and_pad_sequence,
     gather_and_unpad,
 )
 
 
-def _env_flag(name: str) -> bool:
-    return getattr(envs, name).strip().lower() not in ("0", "false", "off")
-
-
-# The FP4 GEMM inputs are quantized by the kernels producing them (see mxfp4_fused_quant).
-FUSED_MXFP4_QUANT = _env_flag("XFUSER_FLUX3_FUSED_MXFP4_QUANT")
-
-
-# q/k RMSNorm and RoPE run in one kernel that also packs the Ulysses send buffer, and each
-# block's gated residual runs in the next block's LayerNorm kernel (see fused_block_ops).
-FUSED_QK_NORM_ROPE = _env_flag("XFUSER_FLUX3_FUSED_QK_NORM_ROPE")
-FUSED_BLOCK_RESIDUAL = _env_flag("XFUSER_FLUX3_FUSED_BLOCK_RESIDUAL")
-
-
 def _takes_quantized_input(layer: torch.nn.Module) -> bool:
-    return FUSED_MXFP4_QUANT and mxfp4_fused_quant.MXFP4_FUSED_QUANT_AVAILABLE and type(layer) is xFuserMXFP4Linear
+    """Whether ``layer``'s input is quantized by the kernel producing it (see mxfp4_fused_quant)."""
+    return mxfp4_fused_quant.MXFP4_FUSED_QUANT_AVAILABLE and type(layer) is xFuserMXFP4Linear
 
 
 def _fused_qk_norm_rope_args(attn: Flux3Attention, query, key, value, image_rotary_emb):
     """The q/k weights, eps, cos and sin of ``fused_block_ops``' q/k kernel, or None when it
     cannot stand in for upstream's norms and RoPE on these inputs."""
-    if not (FUSED_QK_NORM_ROPE and fused_block_ops.FUSED_BLOCK_OPS_AVAILABLE and query.is_cuda):
+    if not (fused_block_ops.FUSED_BLOCK_OPS_AVAILABLE and query.is_cuda):
         return None
     if image_rotary_emb is None:
         return None
@@ -96,18 +74,15 @@ class xFuserFlux3AttnProcessor:
     every rank holds the whole stream, so attention runs without collectives.
     """
 
-    # Ulysses-only calls take USP's sequence-major exchange where it applies (see usp_seq_major_plan).
-    seq_major_ulysses = _env_flag("XFUSER_FLUX3_SEQ_MAJOR_ULYSSES")
-
     def __init__(self):
         self.valid_kv_len: Optional[int] = None
         self.local = False
 
     def _seq_major_plan(self, attn: Flux3Attention, attention_kwargs: Optional[dict]) -> Optional[SeqMajorPlan]:
-        """USP's plan when this call takes the sequence-major exchange, else None."""
-        if self.local or not self.seq_major_ulysses:
+        """The plan when this call takes the sequence-major exchange (see usp_seq_major.plan), else None."""
+        if self.local:
             return None
-        return usp_seq_major_plan(attn, attn.heads, attention_kwargs)
+        return usp_seq_major.plan(attn, attn.heads, attention_kwargs)
 
     def __call__(
         self,
@@ -157,7 +132,7 @@ class xFuserFlux3AttnProcessor:
         plan = self._seq_major_plan(attn, attention_kwargs)
         if plan is not None:
             send = self._seq_major_send(attn, plan, query, key, value, image_rotary_emb, fused_args)
-            return usp_seq_major(send, plan)
+            return usp_seq_major.attention(send, plan)
 
         query, key, value = self._qk_norm_rope(attn, query, key, value, image_rotary_emb, fused_args)
         query = query.transpose(1, 2)
@@ -185,7 +160,7 @@ class xFuserFlux3AttnProcessor:
         return self._norm_rope(attn, query, key, value, image_rotary_emb)
 
     def _seq_major_send(self, attn, plan, query, key, value, image_rotary_emb, fused_args):
-        """``usp_seq_major``'s send buffer, written by the q/k norm + RoPE kernel where it can."""
+        """``usp_seq_major.attention``'s send buffer, written by the q/k norm + RoPE kernel where it can."""
         if fused_args is not None and plan.fp8_comms is None:
             return torch.ops.xfuser.qk_norm_rope_seq_major_send(
                 query, key, value, *fused_args, attn.heads, plan.world_size
@@ -205,7 +180,7 @@ class xFuserFlux3AttnProcessor:
                 plan.fp8_comms.v_scale,
                 FP8_COMMS_DTYPE,
             )
-        return usp_seq_major_send(*self._qk_norm_rope(attn, query, key, value, image_rotary_emb, fused_args), plan)
+        return usp_seq_major.send(*self._qk_norm_rope(attn, query, key, value, image_rotary_emb, fused_args), plan)
 
     @staticmethod
     def _norm_rope(attn, query, key, value, image_rotary_emb):
@@ -314,12 +289,10 @@ def _modulated_input_projection(block, segments):
 
 def _fuses_block_residual(block: torch.nn.Module) -> bool:
     """Whether ``block`` (compiled or not) can take the previous block's branch outputs and
-    apply its gated residual in the kernel computing its own input."""
+    apply its gated residual in the kernel computing its own input (see fused_block_ops)."""
     block = getattr(block, "_orig_mod", block)
-    return (
-        FUSED_BLOCK_RESIDUAL
-        and fused_block_ops.FUSED_BLOCK_OPS_AVAILABLE
-        and isinstance(block, (_FusedFlux3ModeTransformerBlock, _FusedFlux3SingleTransformerBlock))
+    return fused_block_ops.FUSED_BLOCK_OPS_AVAILABLE and isinstance(
+        block, (_FusedFlux3ModeTransformerBlock, _FusedFlux3SingleTransformerBlock)
     )
 
 
@@ -422,12 +395,17 @@ _FUSED_BLOCK_CLASSES = {
 }
 
 
-def _concatenated_linear(layers) -> Optional[torch.nn.Module]:
-    """One layer equal to the given layers' outputs concatenated, or None if their kind
-    cannot be stacked (FP8 tensor subclasses, the hybrid FP4 layer, bias, padded MXFP4 scales)."""
+def _stacked_linear(layers, dim: int) -> Optional[torch.nn.Module]:
+    """One layer of the given layers' weights stacked along ``dim``, or None if their kind
+    cannot be stacked (FP8 tensor subclasses, the hybrid FP4 layer, bias, padded MXFP4 scales).
+
+    Along dim 0 it returns their outputs concatenated; along dim 1 it takes their inputs
+    concatenated and returns the sum of their outputs.
+    """
     if all(type(layer) is xFuserMXFP4Linear for layer in layers):
+        stack = xFuserMXFP4Linear.concatenated if dim == 0 else xFuserMXFP4Linear.stacked_along_input
         try:
-            return xFuserMXFP4Linear.concatenated(layers)
+            return stack(layers)
         except ValueError:
             return None
     plain = all(
@@ -436,13 +414,9 @@ def _concatenated_linear(layers) -> Optional[torch.nn.Module]:
     )
     if not plain:
         return None
-    fused = torch.nn.Linear(
-        layers[0].in_features,
-        sum(layer.out_features for layer in layers),
-        bias=False,
-        device="meta",
-    )
-    fused.weight = torch.nn.Parameter(torch.cat([layer.weight.data for layer in layers]), requires_grad=False)
+    weight = torch.cat([layer.weight.data for layer in layers], dim=dim)
+    fused = torch.nn.Linear(weight.shape[1], weight.shape[0], bias=False, device="meta")
+    fused.weight = torch.nn.Parameter(weight, requires_grad=False)
     return fused
 
 
@@ -468,7 +442,7 @@ def fuse_block_input_projections(transformer) -> int:
         if fused_class is None:
             continue
         layers = (block.attn.to_q, block.attn.to_k, block.attn.to_v, block.ff.linear_in)
-        fused = _concatenated_linear(layers)
+        fused = _stacked_linear(layers, dim=0)
         if fused is None:
             continue
         block.fused_in = fused
@@ -477,30 +451,6 @@ def fuse_block_input_projections(transformer) -> int:
         block.__class__ = fused_class
         fused_blocks += 1
     return fused_blocks
-
-
-def _input_stacked_linear(layers) -> Optional[torch.nn.Module]:
-    """One layer equal to the sum of the given layers' outputs, taking their inputs
-    concatenated, or None if their kind cannot be stacked (as ``_concatenated_linear``)."""
-    if all(type(layer) is xFuserMXFP4Linear for layer in layers):
-        try:
-            return xFuserMXFP4Linear.stacked_along_input(layers)
-        except ValueError:
-            return None
-    plain = all(
-        type(layer) is torch.nn.Linear and layer.bias is None and type(layer.weight.data) is torch.Tensor
-        for layer in layers
-    )
-    if not plain:
-        return None
-    fused = torch.nn.Linear(
-        sum(layer.in_features for layer in layers),
-        layers[0].out_features,
-        bias=False,
-        device="meta",
-    )
-    fused.weight = torch.nn.Parameter(torch.cat([layer.weight.data for layer in layers], dim=1), requires_grad=False)
-    return fused
 
 
 def fuse_block_output_projections(transformer) -> int:
@@ -515,7 +465,7 @@ def fuse_block_output_projections(transformer) -> int:
             continue
         if not isinstance(block.attn.to_out[1], torch.nn.Dropout) or block.attn.to_out[1].p:
             continue
-        fused = _input_stacked_linear((block.attn.to_out[0], block.ff.linear_out))
+        fused = _stacked_linear((block.attn.to_out[0], block.ff.linear_out), dim=1)
         if fused is None:
             continue
         block.fused_out = fused
@@ -567,7 +517,7 @@ class xFuserFlux3Transformer2DWrapper(Flux3Transformer2DModel):
                 block.attn.processor = processor
         register_fp8_comms_eligible_modules(self, flux3_attn_modules(self))
         self._block_input_buffers: Dict[tuple, torch.Tensor] = {}
-        self._step_constants: Dict[str, tuple] = {}
+        self._step_constants: Dict[str, list] = {}
         # One transformer call per scheduled step: the hybrid GEMM and attention schedules
         # pick the step's precision before the blocks run.
         self.register_forward_pre_hook(lambda module, args: get_runtime_state().increment_step_counter())
@@ -590,24 +540,29 @@ class xFuserFlux3Transformer2DWrapper(Flux3Transformer2DModel):
         buffer.copy_(tensor)
         return buffer
 
+    # Sources kept per name: CFG alternates the conditional and unconditional branch's.
+    step_constant_entries = 2
+
     def _step_constant(self, name: str, source: torch.Tensor, compute) -> Any:
         """``compute(source)``, reused while the steps pass the same, unmodified ``source``.
 
         The denoise loop hands every step of a call the same ids and prompt embeddings, so
         their RoPE tables (built in float64 from many small kernels) and text projection need
-        computing once per call. The entry holds ``source``, so a later tensor cannot
-        reuse its identity; in-place writes bump its version. Inference tensors have no
-        version counter, so for them identity alone decides: the pipeline never writes its
-        conditioning in place. Autograd always recomputes.
+        computing once per call, or once per branch under CFG. Each entry holds its ``source``,
+        so a later tensor cannot reuse its identity; in-place writes bump its version.
+        Inference tensors have no version counter, so for them identity alone decides: the
+        pipeline never writes its conditioning in place. Autograd always recomputes.
         """
         if torch.is_grad_enabled():
             return compute(source)
         version = None if source.is_inference() else source._version
-        cached = self._step_constants.get(name)
-        if cached is not None and cached[0] is source and cached[1] == version:
-            return cached[2]
+        entries = self._step_constants.setdefault(name, [])
+        for cached_source, cached_version, result in entries:
+            if cached_source is source and cached_version == version:
+                return result
         result = compute(source)
-        self._step_constants[name] = (source, version, result)
+        kept = [entry for entry in entries if entry[0] is not source]
+        entries[:] = [*kept[max(0, len(kept) + 1 - self.step_constant_entries) :], (source, version, result)]
         return result
 
     def _modulation(self, name: str, mod_row: torch.Tensor, seq_len: int) -> torch.Tensor:

@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 
 fused_block_ops = pytest.importorskip("xfuser.model_executor.layers.fused_block_ops")
-from xfuser.model_executor.layers.usp import _seq_major_qkv_send  # noqa: E402
+from xfuser.model_executor.layers.usp_seq_major import _qkv_send  # noqa: E402
 
 if not fused_block_ops.FUSED_BLOCK_OPS_AVAILABLE:
     pytest.skip("FlyDSL is unavailable.", allow_module_level=True)
@@ -60,7 +60,7 @@ def test_qk_norm_rope_matches_upstream(rows, world_size, dtype):
     qk = torch.ops.xfuser.qk_norm_rope(q, k, *weights, EPS, cos, sin, HEADS)
     send = torch.ops.xfuser.qk_norm_rope_seq_major_send(q, k, v, *weights, EPS, cos, sin, HEADS, world_size)
 
-    reference_send = _seq_major_qkv_send(ref_q, ref_k, v.unflatten(-1, (HEADS, -1)), world_size)
+    reference_send = _qkv_send(ref_q, ref_k, v.unflatten(-1, (HEADS, -1)), world_size)
     torch.testing.assert_close(send[:, :, :, 2], reference_send[:, :, :, 2], rtol=0, atol=0)
     for fused, reference in ((qk[:, :, 0], ref_q), (qk[:, :, 1], ref_k), (send, reference_send)):
         _assert_rounds_like(fused, reference)
@@ -88,7 +88,7 @@ def test_fp8_send_matches_usp_fp8_comms_quantization(rows, world_size):
 
     qk = torch.ops.xfuser.qk_norm_rope(q, k, *weights, EPS, cos, sin, HEADS)
     rotated_q, rotated_k = hadamard.rotate_qk(qk[:, :, 0], qk[:, :, 1])
-    bf16_send = _seq_major_qkv_send(rotated_q, rotated_k, v.unflatten(-1, (HEADS, -1)), world_size)
+    bf16_send = _qkv_send(rotated_q, rotated_k, v.unflatten(-1, (HEADS, -1)), world_size)
     for which, scale in enumerate(scales):
         fused = send[:, :, :, which].float()
         reference = _per_tensor_quant(bf16_send[:, :, :, which], scale)[0].float()

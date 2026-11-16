@@ -183,12 +183,29 @@ def test_sequence_parallel_matches_single_gpu_diffusers(accelerator_ranks, ulyss
     )
 
 
+class _Paths:
+    """Switches the fused q/k kernel and the sequence-major exchange for A/B runs, and
+    restores both on exit."""
+
+    def __enter__(self):
+        from xfuser.model_executor.layers import fused_block_ops, usp_seq_major
+
+        self._fused_block_ops, self._usp_seq_major = fused_block_ops, usp_seq_major
+        self._available, self._plan = fused_block_ops.FUSED_BLOCK_OPS_AVAILABLE, usp_seq_major.plan
+        return self
+
+    def set(self, fused, seq_major):
+        self._fused_block_ops.FUSED_BLOCK_OPS_AVAILABLE = self._available and fused
+        self._usp_seq_major.plan = self._plan if seq_major else lambda *args, **kwargs: None
+
+    def __exit__(self, *exc_info):
+        self.set(True, True)
+
+
 def _seq_major_worker(rank, world_size, init_method, ulysses_degree):
     import torch
 
     from xfuser.core.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
-    from xfuser.model_executor.models.transformers import transformer_flux3
-    from xfuser.model_executor.models.transformers.transformer_flux3 import xFuserFlux3AttnProcessor
 
     try:
         device = _setup(rank, world_size, init_method, ulysses_degree, backend="AITER")
@@ -198,32 +215,30 @@ def _seq_major_worker(rank, world_size, init_method, ulysses_degree):
         assert plan is not None and plan.fp8_comms is None
 
         cases = itertools.product(LAYOUTS, (False, True), (True, False), (True, False))
-        for layout, with_references, replicate_text, fused in cases:
-            inputs = _inputs(device, layout, with_references)
-            for name in ("hidden_states", "encoder_hidden_states", "image_cond_hidden_states"):
-                if name in inputs:
-                    inputs[name] = inputs[name].to(torch.bfloat16)
-            wrapper.replicate_text_max_tokens = 512 if replicate_text else 0
-            # Without the fused q/k kernel, usp_seq_major_send packs the send buffer.
-            transformer_flux3.FUSED_QK_NORM_ROPE = fused
-            outputs = {}
-            for seq_major in (True, False):
-                xFuserFlux3AttnProcessor.seq_major_ulysses = seq_major
-                with torch.no_grad():
-                    outputs[seq_major] = wrapper(**inputs).sample
-            torch.testing.assert_close(
-                outputs[True],
-                outputs[False],
-                rtol=0,
-                atol=0,
-                msg=lambda m: (
-                    f"Ulysses {ulysses_degree}, {layout} layout, references={with_references}, "
-                    f"replicated text={replicate_text}, fused q/k={fused}: {m}"
-                ),
-            )
+        with _Paths() as paths:
+            for layout, with_references, replicate_text, fused in cases:
+                inputs = _inputs(device, layout, with_references)
+                for name in ("hidden_states", "encoder_hidden_states", "image_cond_hidden_states"):
+                    if name in inputs:
+                        inputs[name] = inputs[name].to(torch.bfloat16)
+                wrapper.replicate_text_max_tokens = 512 if replicate_text else 0
+                outputs = {}
+                for seq_major in (True, False):
+                    # Without the fused q/k kernel, usp_seq_major.send packs the send buffer.
+                    paths.set(fused, seq_major)
+                    with torch.no_grad():
+                        outputs[seq_major] = wrapper(**inputs).sample
+                torch.testing.assert_close(
+                    outputs[True],
+                    outputs[False],
+                    rtol=0,
+                    atol=0,
+                    msg=lambda m: (
+                        f"Ulysses {ulysses_degree}, {layout} layout, references={with_references}, "
+                        f"replicated text={replicate_text}, fused q/k={fused}: {m}"
+                    ),
+                )
     finally:
-        xFuserFlux3AttnProcessor.seq_major_ulysses = True
-        transformer_flux3.FUSED_QK_NORM_ROPE = True
         destroy_model_parallel()
         destroy_distributed_environment()
 
@@ -242,8 +257,6 @@ def _seq_major_fp8_worker(rank, world_size, init_method, ulysses_degree):
     from xfuser.core.distributed import get_runtime_state
     from xfuser.core.distributed.fp8_comms import Fp8CommsState, resolve_fp8_comms_eligible_modules
     from xfuser.core.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
-    from xfuser.model_executor.models.transformers import transformer_flux3
-    from xfuser.model_executor.models.transformers.transformer_flux3 import xFuserFlux3AttnProcessor
 
     try:
         device = _setup(rank, world_size, init_method, ulysses_degree, backend="AITER_FP8")
@@ -260,33 +273,31 @@ def _seq_major_fp8_worker(rank, world_size, init_method, ulysses_degree):
         plan = wrapper._joint_processor._seq_major_plan(wrapper.single_transformer_blocks[0].attn, None)
         assert plan is not None and plan.fp8_comms is not None
 
-        for layout, with_references, fused in itertools.product(LAYOUTS, (False, True), (True, False)):
-            inputs = _inputs(device, layout, with_references)
-            for name in ("hidden_states", "encoder_hidden_states", "image_cond_hidden_states"):
-                if name in inputs:
-                    inputs[name] = inputs[name].to(torch.bfloat16)
-            # Without the fused q/k kernel, usp_seq_major_send rotates and quantizes as USP does.
-            transformer_flux3.FUSED_QK_NORM_ROPE = fused
-            outputs = {}
-            for seq_major in (True, False):
-                xFuserFlux3AttnProcessor.seq_major_ulysses = seq_major
-                with torch.no_grad():
-                    outputs[seq_major] = wrapper(**inputs).sample.float()
-            context = f"Ulysses {ulysses_degree}, {layout} layout, references={with_references}, fused q/k={fused}"
-            if not fused:
-                torch.testing.assert_close(
-                    outputs[True], outputs[False], rtol=0, atol=0, msg=lambda m: f"{context}: {m}"
-                )
-                continue
-            # The fused kernel's Hadamard rotation accumulates in another order than USP's
-            # GEMM, so a rare q or k element lands one FP8 step away.
-            difference = (outputs[True] - outputs[False]).abs()
-            scale = outputs[False].abs().mean()
-            assert difference.mean() <= 0.01 * scale, f"{context}: mean |diff| {difference.mean()} vs {scale}"
-            assert difference.max() <= 0.1 * outputs[False].abs().max(), f"{context}: max |diff| {difference.max()}"
+        with _Paths() as paths:
+            for layout, with_references, fused in itertools.product(LAYOUTS, (False, True), (True, False)):
+                inputs = _inputs(device, layout, with_references)
+                for name in ("hidden_states", "encoder_hidden_states", "image_cond_hidden_states"):
+                    if name in inputs:
+                        inputs[name] = inputs[name].to(torch.bfloat16)
+                outputs = {}
+                for seq_major in (True, False):
+                    # Without the fused q/k kernel, usp_seq_major.send rotates and quantizes as USP does.
+                    paths.set(fused, seq_major)
+                    with torch.no_grad():
+                        outputs[seq_major] = wrapper(**inputs).sample.float()
+                context = f"Ulysses {ulysses_degree}, {layout} layout, references={with_references}, fused q/k={fused}"
+                if not fused:
+                    torch.testing.assert_close(
+                        outputs[True], outputs[False], rtol=0, atol=0, msg=lambda m: f"{context}: {m}"
+                    )
+                    continue
+                # The fused kernel's Hadamard rotation accumulates in another order than USP's
+                # GEMM, so a rare q or k element lands one FP8 step away.
+                difference = (outputs[True] - outputs[False]).abs()
+                scale = outputs[False].abs().mean()
+                assert difference.mean() <= 0.01 * scale, f"{context}: mean |diff| {difference.mean()} vs {scale}"
+                assert difference.max() <= 0.1 * outputs[False].abs().max(), f"{context}: max |diff| {difference.max()}"
     finally:
-        xFuserFlux3AttnProcessor.seq_major_ulysses = True
-        transformer_flux3.FUSED_QK_NORM_ROPE = True
         get_runtime_state().fp8_comms = None
         destroy_model_parallel()
         destroy_distributed_environment()

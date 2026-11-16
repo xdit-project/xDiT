@@ -3,6 +3,8 @@
 This specification describes version 1 of a test harness for components of xDiT diffusion models. Start here. The
 child documents in section 8 give the details.
 
+Before proceeding, read [use-cases and high-level requirements](./requirements.md) description. They take priority over the specification text. Several contradictions are known to exist and are currently being fixed.
+
 ## 1. Priority over the testing skill
 
 Where this specification conflicts with the testing skill in
@@ -146,6 +148,7 @@ Where this specification conflicts with the testing skill in
 
 ## 8. Document map
 
+0. [requirements.md](./requirements.md): description of use-cases and high-level requirements.
 1. [test_definition.md](test_definition.md): test modules, the configuration call, the merged entry and its
    overrides, the parameters of B, tolerances, output names, deadlines, the configuration name.
 2. [component_paths.md](component_paths.md): path syntax, path elements, resolution, hooks, call addresses, case

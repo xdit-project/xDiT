@@ -17,7 +17,6 @@ from xfuser.core.utils.runner_utils import (
     convert_model_convs_to_channels_last,
     log,
 )
-from xfuser.envs import restore_torch_group_norm_for_distvae
 
 
 def _validate_vae_tile_pair(config, capabilities, settings, kind, minimum, constraint) -> None:
@@ -44,13 +43,6 @@ def _validate_vae_tile_pair(config, capabilities, settings, kind, minimum, const
 
 def validate_vae_config(config, capabilities, settings) -> None:
     """Validate VAE-specific runner configuration without runner state."""
-    if config.use_parallel_vae:
-        if restore_torch_group_norm_for_distvae():
-            log(
-                "AITER GroupNorm cannot be sharded. Restoring torch GroupNorm so DistVAE can "
-                "identify and shard the GroupNorm layers."
-            )
-
     _validate_vae_tile_pair(config, capabilities, settings, "size", 1, "positive")
     _validate_vae_tile_pair(config, capabilities, settings, "overlap", 0, "non-negative")
 
@@ -191,6 +183,36 @@ class VAEManager:
 
         vae.decode = decode_wrapper
         vae._xfuser_decode_channels_last = True
+
+    def _compilable_decoders(self, vaes):
+        """Yield ``(vae, decoder)`` for each decoder the compile policy covers.
+
+        ``torch.compile(vae)`` would be a no-op: pipelines call ``vae.decode``,
+        not ``vae.forward``, so the compiled wrapper is never entered.  The
+        decoder submodule is the thing whose ``forward`` actually runs.
+
+        Yields nothing under ``--use_parallel_vae``, which shards the decoder
+        across ranks and owns its execution, and passes over a decoder that is
+        compiled already.
+        """
+        if self.config.use_parallel_vae:
+            return
+        for vae in vaes:
+            decoder = getattr(vae, "decoder", None)
+            if decoder is None or isinstance(decoder, torch._dynamo.OptimizedModule):
+                continue
+            yield vae, decoder
+
+    def compile_decoders(self, vaes, mode: str = "default") -> None:
+        """Compile each VAE's decoder.
+
+        ``mode`` defaults to "default" rather than the caller's compile mode on
+        purpose: under CUDA Graphs the decoded image would live in the graph's
+        buffer pool and be valid only until the next replay, and the transformer
+        replays many times between one decode and the next.
+        """
+        for vae, decoder in self._compilable_decoders(vaes):
+            vae.decoder = torch.compile(decoder, mode=mode)
 
     def _requested_vae_tile_shape(self) -> Optional[Tuple[int, int]]:
         height = getattr(self.config, "vae_tile_size_height", None)

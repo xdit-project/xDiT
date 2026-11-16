@@ -51,6 +51,21 @@ def sp_pad_spans_ranks(seq_len: int, sp_size: int) -> bool:
     return (-seq_len) % sp_size > -(-seq_len // sp_size)
 
 
+def zero_sp_pad_rows(tensor: torch.Tensor, rows: int) -> None:
+    """Clear a tensor's trailing `rows` SP pad rows in place; a no-op when `rows` is 0.
+
+    The pad trails the token dimension, which is the second-to-last one of a
+    [batch, tokens, hidden] or [tokens, hidden] stream.
+
+    Shared by :func:`zero_sp_pad_rows_hook` and by callers that bypass the hook
+    because they drive a block's internals rather than its forward -- Z-Image's
+    pipelined stack runner is the one such caller today. Keeping the definition
+    in one place means what "zeroed" means cannot drift between them.
+    """
+    if rows:
+        tensor.narrow(-2, tensor.shape[-2] - rows, rows).zero_()
+
+
 def zero_sp_pad_rows_hook(sp_pad: dict, index: int | None = None):
     """Forward hook keeping the SP pad rows of a block's output at zero.
 
@@ -76,6 +91,11 @@ def zero_sp_pad_rows_hook(sp_pad: dict, index: int | None = None):
     default every tensor a block returns is cleared (a VACE block returns its
     conditioning states with its control states, and both are added to the main
     stream), and a tensor that is None is skipped.
+
+    A hook only fires for callers that go through ``Module.__call__``. A runner
+    that drives a block's internals directly steps around it and has to clear
+    the pad rows itself with :func:`zero_sp_pad_rows` -- see
+    ``_run_modulated_stack`` in the Z-Image transformer.
     """
 
     def hook(module, args, output):
@@ -88,6 +108,6 @@ def zero_sp_pad_rows_hook(sp_pad: dict, index: int | None = None):
             tensors = output if isinstance(output, tuple) else (output,)
         for tensor in tensors:
             if tensor is not None:
-                tensor.narrow(-2, tensor.shape[-2] - rows, rows).zero_()
+                zero_sp_pad_rows(tensor, rows)
 
     return hook

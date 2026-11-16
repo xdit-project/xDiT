@@ -79,11 +79,12 @@ Instance A runs the components as production runs them. It runs in eager mode.
 2. If they are equal, the fidelity check passes.
 3. If they are not equal, replay the call a second time. Compare the two replay outputs.
    1. If the two replays differ, the status is NON_DETERMINISTIC_A.
-      1. Without the determinism override of A, the case fails at once.
-      2. With the override, the case continues with a warning. The warning also says that the fidelity of this call
-         is unknown. Two different replays cannot show whether hidden state is also missing.
+      1. If the determinism policy of the case for A requires determinism ([checks.md](checks.md), section 3), the
+         case fails at once.
+      2. If the policy permits nondeterminism, the case continues with a warning. The warning also says that the
+         fidelity of this call is unknown. Two different replays cannot show whether hidden state is also missing.
    2. If the two replays are equal, but differ from the capture, the status is REPLAY_MISMATCH_A. The case fails at
-      once. The determinism override does not change this.
+      once. The determinism policy does not change this.
 4. Edge case: if the nondeterminism of a component is rare, two replays can be equal by chance. The result is then a
    REPLAY_MISMATCH_A that is really nondeterminism. The error is a false failure, never a hidden failure.
 
@@ -96,8 +97,8 @@ Instance A runs the components as production runs them. It runs in eager mode.
 ## 5. The output that the test compares
 
 The test compares the captured output of A with the output of B. When the fidelity check passes, the replay output
-of A is bitwise equal to the captured output. Under the determinism override, the captured output is what
-production actually computed.
+of A is bitwise equal to the captured output. If the determinism policy of the case for A permits nondeterminism,
+the captured output is what production actually computed.
 
 ## 6. Statuses that A can set
 

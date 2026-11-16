@@ -115,7 +115,7 @@ The default is `sdpa_math`. Cross-attention in Wan has 512 text keys, so the ful
    hooks capture the calls of the listed components, as in A.
 8. **Fidelity check of B.** Replay the calls that B captured, with the algorithm of A
    ([instance_a.md](instance_a.md), section 4.3). The statuses are NON_DETERMINISTIC_B and REPLAY_MISMATCH_B. The
-   determinism override of B applies.
+   determinism policy of the case for B applies ([checks.md](checks.md), section 3).
 9. **Replays of the inputs of A.** For each selected case, call and rank:
    1. load the inputs that A captured on the same rank;
    2. convert floating-point tensors with a dtype below the reference dtype to the reference dtype; keep integer and

@@ -1,25 +1,16 @@
 # Requirements and use cases of the component test harness
 
-This document lists the use cases and the requirements of the xDiT component test harness. It has three parts:
+This document lists the use cases and the requirements of the xDiT component test harness.
 
-1. **User statements and confirmed proposals.** The statements of the user, and the proposals that the user
-   confirmed explicitly.
-2. **Approved through "do it".** Decisions that the user approved only as part of a plan, with "do it".
-3. **Not confirmed.** All other statements. The user did not confirm them.
+Each item has an identifier: `UC` for use cases, `R` for requirements.
 
-Each item has an identifier: `UC` for use cases, `R` for part 1, `D` for part 2 and `N` for part 3. A rationale
-follows an item only if the discussion gave one.
-
-## User statements and confirmed proposals
-
-### 1. Use cases
+## Use cases
 
 **UC1. Check that a component works correctly.** A developer asks: "Does this component of this model
 configuration work correctly?" The harness runs the component as production runs it (instance A) and as an eager
 reference in high precision (instance B). It then compares the outputs against tolerances. Requirements: R1–R6,
 R23–R28, R36–R40, R60–R75.
-*Rationale:* some operations of xDiT diffusion models can be flaky. Tests of single components are decoupled from
-the whole model.
+*Rationale:* some operations of xDiT diffusion models can be flaky (produce wrong numerics, or cause hangs or crashes). Tests of single components are decoupled from the whole model.
 
 **UC2. Find flaky kernels.** A test shows a deviation beyond the tolerance, nondeterminism, a crash or a hang. The
 report names the instance, the component, the call and the rank. Requirements: R6, R63–R65, R72, R76–R94.
@@ -49,15 +40,17 @@ Requirements: R45, R58.
 *Rationale:* xDiT changes fast, and its components get new augmentations all the time. Hard-coded tests become
 obsolete.
 
-**UC10. Accept nondeterminism that is valid.** A per-instance override changes the result of nondeterminism from a
-failure to a warning. Requirements: R64, R65.
-*Rationale:* some operations are validly nondeterministic.
+**UC10. Accept nondeterminism that is valid.** An override of one test changes the result of nondeterminism in that
+test from a failure to a warning. The determinism checks of all other tests stay active. B should have its own
+override. Requirements: R64, R65.
+*Rationale:* some operations are validly nondeterministic. A model can have one nondeterministic component among
+many, and that component must be testable. Instance B generally use different kernels that might have other determinism expectations.
 
 **UC11. Later use cases.** Compiled mode, a reference at world size 1 (B1), several input sets, MI300X and other
 hardware, and benchmark and determinism scripts that use the foundation of the harness. Requirements: R11, R13,
 R17, R18, R108–R114.
 
-### 2. Purpose and principles
+### Requirements
 
 **R1.** The harness tests individual components of xDiT diffusion models, for example a VAE, a transformer, a
 transformer block, an attention module, a text encoder, or a method such as the VAE decode. It uses exactly the
@@ -72,8 +65,7 @@ the VAE of `diffusers`, a DistVAE, or something else. Also, xDiT changes fast (U
 quantized GEMMs and others. The tests do not depend on them. The tests are generic, so that they can run every
 configuration. The configuration identifier is one parameter among many.
 
-**R4.** The reference is the same xDiT component, built by the xDiT runner. It is not a `diffusers`
-implementation.
+**R4.** The reference is the same xDiT component, built by the xDiT runner, run with extended precision (fp32 by default). It is not a `diffusers` implementation.
 *Rationale:* a comparison with `diffusers` forbids all customizations of xDiT. xDiT has reasons for its own
 implementations.
 
@@ -145,8 +137,7 @@ components, and the tolerances for each output of each component. Each configura
 definition can move to a YAML file later.
 
 **R24.** The interface of a test module is:
-1. `harness.Configuration(yaml_path, entry, overrides, reference, components, expect_deterministic_a,
-   expect_deterministic_b)` for one configuration;
+1. `harness.Configuration(yaml_path, entry, overrides, reference, components)` for one configuration;
 2. `harness.Reference(dtype, self_attention_backend, cross_attention_backend)` for the parameters of B;
 3. `harness.Tolerance(max_abs, rel_l2)` for the tolerance of one output;
 4. `components`: a dictionary from a component path to a dictionary from an output name to a `Tolerance`;
@@ -321,10 +312,19 @@ equals the captured output bit for bit, the fidelity check passes. Otherwise it 
 
 Rare nondeterminism can give a false REPLAY_MISMATCH. This is a false failure, never a hidden one.
 
-**R64.** By default, each component must be deterministic. Each instance has its own determinism override.
-1. Without the override, NON_DETERMINISTIC fails the test at once.
-2. With the override, the harness prints a warning and continues to the tolerance checks.
-3. The bitwise checks always run, also with the override.
+**R64.** By default, each test must be deterministic in A and in B. A test is one case: all calls or the selected
+calls of one component path (R45, R52). Each test can have two determinism overrides:
+1. The general override sets the policy for A. It also sets the policy for B if the test has no B override.
+2. The B override sets the policy for B only. If it is set, it takes precedence over the general override.
+
+The policy that applies to an instance decides the result of nondeterminism in that instance:
+1. If the policy requires determinism, NON_DETERMINISTIC fails the test at once.
+2. If the policy permits nondeterminism, the harness prints a warning and continues to the tolerance checks.
+3. The bitwise checks always run, whatever the policy is.
+
+*Rationale:* a model can have one nondeterministic component among many. That component must be testable, and
+the determinism checks must stay active for all other tests. B has its own override because B generally runs
+other kernels than A.
 
 **R65.** REPLAY_MISMATCH always fails the test at once.
 *Rationale for R64 and R65:* nondeterminism and a replay mismatch show that something is seriously wrong. Without

@@ -84,8 +84,8 @@ limitation of version 1 and how the future work removes it.
 
 ### 2.7 Fidelity check with a tolerance for nondeterministic components
 
-1. **Limitation.** Under the determinism override, two different replays cannot show whether hidden state is also
-   missing. The fidelity of such a call is unknown ([../instance_a.md](../instance_a.md), section 4.3).
+1. **Limitation.** When the determinism policy of a case permits nondeterminism, two different replays cannot show
+   whether hidden state is also missing. The fidelity of such a call is unknown ([../instance_a.md](../instance_a.md), section 4.3).
 2. **Solution.** Measure the spread between replays. Then compare the replay with the capture against a tolerance
    derived from that spread. A deviation much larger than the spread shows missing hidden state.
 

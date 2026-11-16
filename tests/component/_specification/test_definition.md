@@ -58,8 +58,6 @@ BF16_ATTN = harness.Configuration(
     entry="wan2_2.quantgemm_quantattn_bf16.gfx950",
     overrides=FEW_STEPS,
     reference=REFERENCE,
-    expect_deterministic_a=True,
-    expect_deterministic_b=True,
     components=COMPONENTS,
 )
 
@@ -75,9 +73,8 @@ test_component = harness.make_test(QUANT_ATTN, BF16_ATTN)
 3. `overrides`: a mapping with the structure of a YAML entry. It changes the entry. See section 3.1. The overrides
    apply to A and to B.
 4. `reference`: the parameters of B. See section 4.
-5. `expect_deterministic_a` and `expect_deterministic_b`: the determinism expectation of each instance. The
-   default is `True`. `False` is the determinism override of that instance. See [checks.md](checks.md),
-   section 3.
+5. The determinism overrides of each case ([checks.md](checks.md), section 3). How a test definition sets them is
+   an open question ([index.md](index.md), section 6).
 6. `components`: a mapping from a component path to the tolerances of its outputs. Each path is one case. See
    [component_paths.md](component_paths.md) and section 5.
 7. `deadlines`: optional changes to the default deadlines. See section 6.

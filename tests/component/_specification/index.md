@@ -82,8 +82,8 @@ Where this specification conflicts with the testing skill in
 9. **Replay.** A new execution of a component with the captured inputs, outside the pipeline run.
 10. **Fidelity check.** A bitwise comparison of a replay output with the captured output of the same instance.
 11. **Determinism check.** A bitwise comparison of two replay outputs of the same instance.
-12. **Determinism override.** A per-instance setting that permits nondeterminism. See
-    [checks.md](checks.md), section 3.
+12. **Determinism override.** A setting of one case that sets its determinism policy for A and B, or for B only.
+    See [checks.md](checks.md), section 3.
 13. **Reference dtype.** The dtype of B. The default is fp32.
 14. **Launcher.** The process that runs one instance. It starts torchrun and survives crashes and hangs of the
     workers. See [processes.md](processes.md).
@@ -123,8 +123,8 @@ Where this specification conflicts with the testing skill in
    4. replays the inputs that A captured, at least two times, and dumps the outputs.
 5. **Test function** ([checks.md](checks.md)). For each case, it does these steps:
    1. It reads the case state.
-   2. It stops at once for a status without data, for nondeterminism without an override, and for a replay
-      mismatch.
+   2. It stops at once for a status without data, for nondeterminism that the policy of the case does not permit,
+      and for a replay mismatch.
    3. It computes the metrics for each call, output and rank, and checks them against the tolerances.
    4. It writes the metrics to the metrics file.
    5. It deletes the files of the case if the case passed.
@@ -133,7 +133,9 @@ Where this specification conflicts with the testing skill in
 
 1. **Default self-attention backend of B (Not confirmed).** Version 1 has no confirmed default. See
    [instance_b.md](instance_b.md), section 3.2.
-2. Other statements marked "Not confirmed" in the child documents are proposals. The user did not confirm them.
+2. **Interface of the determinism overrides (Not confirmed).** Each case can have a general override and a B
+   override ([checks.md](checks.md), section 3). How a test definition sets them is not defined.
+3. Other statements marked "Not confirmed" in the child documents are proposals. The user did not confirm them.
 
 ## 7. Conventions in this specification
 

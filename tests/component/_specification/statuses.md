@@ -14,7 +14,7 @@ human-readable messages instead.
 | CRASHED_A, CRASHED_B | launcher | The instance crashed while it replayed this case. | no | failed |
 | HUNG_A, HUNG_B | launcher | The instance missed a deadline while it replayed this case. | no | failed |
 | ERROR_A, ERROR_B | worker | An exception ended the instance while it replayed this case. The state holds the traceback. | no | failed |
-| NON_DETERMINISTIC_A, NON_DETERMINISTIC_B | worker | Two replays of one call gave different outputs. | yes | failed at once without the override; warning with the override |
+| NON_DETERMINISTIC_A, NON_DETERMINISTIC_B | worker | Two replays of one call gave different outputs. | yes | failed at once if the determinism policy requires determinism; warning if it permits nondeterminism ([checks.md](checks.md), section 3) |
 | REPLAY_MISMATCH_A, REPLAY_MISMATCH_B | worker | Two replays agree, but differ from the capture. | yes, not trusted | failed at once |
 | NOT_REACHED_B (Not confirmed) | worker of B | The call addresses of B differ from those of A. | partly | failed at once |
 | DATA_COMPLETE | worker of B | A and B finished the case. The test function can compare. | yes | from the checks |
@@ -50,8 +50,8 @@ whether to start B.
 
 ## 4. Mapping to pytest outcomes
 
-1. **failed:** tolerance failures and the other deferred checks; NON_DETERMINISTIC without the override;
-   REPLAY_MISMATCH; NOT_REACHED_B; CRASHED, HUNG and ERROR of A or B.
+1. **failed:** tolerance failures and the other deferred checks; NON_DETERMINISTIC if the determinism policy
+   requires determinism; REPLAY_MISMATCH; NOT_REACHED_B; CRASHED, HUNG and ERROR of A or B.
 2. **error:** FAILED_TO_START; ABOUT_TO_START in a reuse run; a case that was not in the original run.
 3. **skipped:** UNSUPPORTED; PASSED in a reuse run.
 

@@ -870,6 +870,12 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
             return mode
         return usp_sdma.compile_mode("reduce-overhead")
 
+    def _records_cudagraphs(self) -> bool:
+        if self.config.fully_shard_degree > 1:
+            return super()._records_cudagraphs()
+        mode = self._transformer_compile_mode(self._get_compile_mode(), get_runtime_state().has_attention_schedule())
+        return mode in self.CUDAGRAPH_COMPILE_MODES
+
     def _run_warmup_calls(self, input_args: dict) -> None:
         if not self.config.warmup_calls:
             return
@@ -1123,6 +1129,9 @@ class xFuserVDNMiniMaxH3Model(xFuserMiniMaxH3Model):
     transformer block (fullgraph=True); the packed-layout geometry is primed from
     position_ids in an eager forward pre-hook outside the compiled blocks.
     """
+
+    # Compiles its blocks in _compile_model below, outside _transformer_compile_mode.
+    transformer_cudagraphs = False
 
     default_input_values = DefaultInputValues(
         height=768,

@@ -1,4 +1,5 @@
-I found **nine issues** in version 1. The most serious are distributed replay coordination, conflicting component-path rules, and the unresolved reference backend. I excluded future work.
+0. instances have pretty complex rules ensuring correct cross-rank behaviour. The implementation must have a test set ensuring that however a component behaves (fails non-determinism or fidelity checks, hangs or crashes) - the instance and the launcher handle this correctly (as specification required). The specification should have an explicit list of test needed to verify that.
+
 
 4. **High — Configuration-name validation permits paths outside the configuration directory.**
 
@@ -7,6 +8,22 @@ I found **nine issues** in version 1. The most serious are distributed replay co
    Both `.` and `..` satisfy those rules. They resolve respectively to the shared `_data` directory and the test-module directory, rather than separate configuration directories. This breaks the isolation assumed by cleanup and locking. The marker check can reject some situations, but it does not make these names valid.
 
    Explicitly rejecting `.` and `..`, and checking resolved-path containment, would close this gap.
+
+
+
+## 4. Section 2.2 has no element kind for a plain Python object that is not a module, a container or a method. Section 3, item 3 has no path error for such an element.
+
+1. **Use case:** a path to a method of an object that is not an `nn.Module`. Real calls in the Wan pipeline:
+   1. `pipe.scheduler.step`: `latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]` at [pipeline_wan_i2v.py:237](xDiT/xfuser/model_executor/pipelines/pipeline_wan_i2v.py#L237-L238).
+      1. `UniPCMultistepScheduler(SchedulerMixin, ConfigMixin)` is at [scheduling_unipc_multistep.py:123](external/diffusers/src/diffusers/schedulers/scheduling_unipc_multistep.py#L123-L124).
+      2. `SchedulerMixin(PushToHubMixin)` is at [scheduling_utils.py:79](external/diffusers/src/diffusers/schedulers/scheduling_utils.py#L79-L80).
+      3. I did not read `PushToHubMixin`.
+   2. `pipe.video_processor.postprocess_video` at [pipeline_wan_i2v.py:273](xDiT/xfuser/model_executor/pipelines/pipeline_wan_i2v.py#L273-L274). `VideoProcessor` derives from `VaeImageProcessor(ConfigMixin)` ([image_processor.py:82](external/diffusers/src/diffusers/image_processor.py#L82-L83)).
+2. **The gap.** Section 2.2, item 4 lists only "a method of a module". Section 3, item 3 has no path error for a method of an object that is not a module. So the specification does not say whether such a path is valid or a path error.
+3. **Middle elements.** I did not search for an object in the middle of a path that is not a module but holds modules.
+
+
+
 
 5. **Medium — B disables GEMM quantization but retains settings that require it.**
 
@@ -81,11 +98,3 @@ These findings have high confidence as specification contradictions or omissions
    The actual pipeline statement is `video = self.vae.decode(latents, return_dict=False)[0]` at [pipeline_wan_i2v.py:272](/app/xDiT/xfuser/model_executor/pipelines/pipeline_wan_i2v.py:272). The `vae` module itself is not called. Applied literally, the ancestor rule rejects the specification’s own `pipe.vae.decode` case.
 
    The rule needs to distinguish the immediate path parent from the nearest ancestor that actually participates in call counting.
-
-6. **Medium — Directory cleanup can invalidate the locking guarantee.**
-
-   [files.md:53](/app/xDiT/tests/component/_specification/files.md:53) requires cleanup before a fresh run. [files.md:65](/app/xDiT/tests/component/_specification/files.md:65) permits directory deletion while placing the session’s lock file inside that directory.
-
-   If cleanup removes and recreates the lock file, the first session retains a lock on the old file, while another session can lock the replacement. I confirmed this behavior with a small CPU-only probe: both exclusive locks succeeded.
-
-   The specification needs to define lock acquisition before state inspection and preserve the locked file throughout cleanup, or place the lock outside the cleaned directory.

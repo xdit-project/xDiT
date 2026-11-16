@@ -291,7 +291,7 @@ def usp_seq_major_plan(attn_layer, heads, attention_kwargs=None, backend=None) -
     spec = attention_registry.find(backend)
     if spec is None or not spec.reads_strided_bshd or _has_kv_cache(attn_layer):
         return None
-    if spec.head_balanced and runtime_state.runtime_config.use_spargeattn_head_balance:
+    if spec.head_balanced and runtime_state.runtime_config.use_sparseattn_head_balance:
         return None
     model_state = _fp8_comms_model_state(runtime_state.fp8_comms, attn_layer)
     if model_state is not None and not model_state.synced:
@@ -351,7 +351,12 @@ def usp_seq_major(send, plan: SeqMajorPlan) -> SeqMajorOutput:
     dtype = torch.bfloat16 if fp8_comms is not None else query.dtype
     # The output send buffer: chunk p holds rank p's tokens.
     out = torch.empty(seq_len, batch, heads, head_dim, dtype=dtype, device=query.device)
-    call = AttnCall(ulysses_world_size=plan.world_size, attention_kwargs=kwargs, seq_major_out=out.transpose(0, 1))
+    call = AttnCall(
+        ulysses_world_size=plan.world_size,
+        step=_current_step(),
+        attention_kwargs=kwargs,
+        seq_major_out=out.transpose(0, 1),
+    )
     plan.spec.run(query, key, value, call)
     descale = None
     if fp8_comms is not None:

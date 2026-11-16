@@ -145,7 +145,7 @@ def _seq_major_plan(monkeypatch, change):
     state = SimpleNamespace(
         attention_backend=AttentionBackendType[settings["backend"]],
         fp8_comms=settings["fp8_comms"],
-        runtime_config=SimpleNamespace(use_spargeattn_head_balance=False),
+        runtime_config=SimpleNamespace(use_sparseattn_head_balance=False),
     )
     monkeypatch.setattr(usp, "get_runtime_state", lambda: state)
     monkeypatch.setattr(usp, "_parallel_degrees", lambda: (settings["ulysses"], settings["ring"]))

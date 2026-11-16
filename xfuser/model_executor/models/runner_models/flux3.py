@@ -10,6 +10,7 @@ from xfuser.config.args import xFuserArgs
 from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.core.utils.runner_utils import log, resize_and_crop_image
 from xfuser.envs import PACKAGES_CHECKER
+from xfuser.model_executor.layers import usp_sdma
 from xfuser.model_executor.models.runner_models.base_model import (
     DIFFUSERS_FROM_SOURCE,
     DefaultInputValues,
@@ -165,8 +166,13 @@ class _Flux3Model(xFuserModel):
 
     def _fuse_block_input_projections(self) -> None:
         # After the loader's FP8/FP4 swaps, which decide what can be stacked, and before
-        # compile. FSDP shards the separate weights, so sharded runs keep them.
+        # compile. FSDP shards the separate weights, and --ulysses_sdma_overlap_qkv projects
+        # Q/K/V one head group at a time from them, so both keep them.
         if self.config.fully_shard_degree > 1:
+            log("FLUX.3: block fusion skipped: FSDP shards the separate projections")
+            return
+        if usp_sdma.overlap_qkv():
+            log("FLUX.3: block fusion skipped: --ulysses_sdma_overlap_qkv projects Q/K/V per head group")
             return
         from xfuser.model_executor.models.transformers.transformer_flux3 import (
             fuse_block_input_projections,

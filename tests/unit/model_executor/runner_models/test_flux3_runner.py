@@ -225,6 +225,35 @@ def test_fp4_without_the_fused_quant_is_reported(build_flux3, monkeypatch, use_f
     assert any("without the fused input quantization" in m for m in messages) == warned
 
 
+@pytest.mark.parametrize(
+    ("fully_shard_degree", "overlap_qkv", "reason"),
+    [
+        (1, False, None),
+        (2, False, "FSDP shards the separate projections"),
+        (1, True, "--ulysses_sdma_overlap_qkv projects Q/K/V per head group"),
+    ],
+)
+def test_block_fusion_is_skipped_where_the_separate_projections_are_needed(
+    build_flux3, monkeypatch, fully_shard_degree, overlap_qkv, reason
+):
+    from xfuser.model_executor.models.transformers import transformer_flux3
+
+    model = build_flux3()
+    model.config.fully_shard_degree = fully_shard_degree
+    model.pipe = SimpleNamespace(transformer=torch.nn.Module())
+    monkeypatch.setattr("xfuser.model_executor.models.runner_models.flux3.usp_sdma.overlap_qkv", lambda: overlap_qkv)
+    fused = []
+    monkeypatch.setattr(transformer_flux3, "fuse_block_input_projections", lambda t: fused.append("in") or 0)
+    monkeypatch.setattr(transformer_flux3, "fuse_block_output_projections", lambda t: fused.append("out") or 0)
+    messages = []
+    monkeypatch.setattr("xfuser.model_executor.models.runner_models.flux3.log", messages.append)
+
+    model._fuse_block_input_projections()
+
+    assert fused == ([] if reason else ["in", "out"])
+    assert any(f"block fusion skipped: {reason}" in m for m in messages) == (reason is not None)
+
+
 def test_the_base_model_runs_the_requested_guidance_and_negative_prompt(build_flux3):
     model = build_flux3("FLUX.3-image-klein-base")
     pipe = _RecordingPipe((1024, 1024))

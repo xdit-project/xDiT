@@ -16,23 +16,34 @@ metric.
 1. **Statuses without data.** The case gets the outcome from [statuses.md](statuses.md) at once. Examples:
    UNSUPPORTED, FAILED_TO_START, CRASHED_A, HUNG_B, ERROR_A.
 2. **NON_DETERMINISTIC_A or NON_DETERMINISTIC_B.**
-   1. Without the determinism override of that instance, the test fails at once.
-   2. With the override, the test prints a warning and continues with section 4. The warning reminds the user that
-      the override is active. It also lists the calls whose fidelity is unknown.
-3. **REPLAY_MISMATCH_A or REPLAY_MISMATCH_B.** The test fails at once, with or without the override.
+   1. If the determinism policy of the case for that instance requires determinism (section 3), the test fails at
+      once.
+   2. If the policy permits nondeterminism, the test prints a warning and continues with section 4. The warning
+      reminds the user that the policy permits nondeterminism. It also lists the calls whose fidelity is unknown.
+3. **REPLAY_MISMATCH_A or REPLAY_MISMATCH_B.** The test fails at once, whatever the policy is.
 4. **NOT_REACHED_B.** The test fails at once.
 5. **Message.** The instance knows these statuses before the test function starts. The failure message therefore
    lists every call and rank that has one of these statuses.
 6. **Metrics file.** A case that stops here writes one line with its outcome and no metric values
    ([files.md](files.md), section 9).
 
-## 3. The determinism override
+## 3. The determinism overrides
 
-1. Each instance has its own override: `expect_deterministic_a` and `expect_deterministic_b`
-   ([test_definition.md](test_definition.md), section 2.2).
-2. The bitwise checks always run, also with the override.
-3. The override changes only one result: nondeterminism gives a warning instead of a failure.
-4. REPLAY_MISMATCH always fails.
+1. By default, each case must be deterministic in A and in B. A case is all calls or the selected calls of one
+   component path ([component_paths.md](component_paths.md)).
+2. Each case can have two overrides:
+   1. The general override sets the determinism policy of the case for A. It also sets the policy for B if the case
+      has no B override.
+   2. The B override sets the policy for B only. If it is set, it takes precedence over the general override. It
+      can set either policy, independently of the general override. Example: the general override permits
+      nondeterminism, and the B override requires determinism. Reason: B generally runs other kernels than A.
+3. A policy requires determinism or permits nondeterminism. It changes only one result: nondeterminism in that
+   instance gives a warning instead of a failure.
+4. The bitwise checks always run, whatever the policy is.
+5. REPLAY_MISMATCH always fails.
+6. Reason for overrides per case: a model can have one nondeterministic component among many. That component must
+   be testable, and the other cases keep their determinism checks.
+7. How a test definition sets the overrides is an open question ([index.md](index.md), section 6).
 
 ## 4. Deferred checks
 
@@ -83,8 +94,8 @@ For each selected call of the case:
 1. **`record_property`.** For each call, output and metric, the test function adds one property with the values of
    all ranks. JUnit XML then contains the metrics. The case status is also a property.
 2. **Metrics file.** The test function appends the metrics to the metrics file ([files.md](files.md), section 9).
-3. **Warnings.** The test function prints the warnings of the dtype audit of B and the reminder of an active
-   determinism override.
+3. **Warnings.** The test function prints the warnings of the dtype audit of B and the reminder that the policy of
+   the case permits nondeterminism (section 3).
 
 ## 7. End of the test function
 

@@ -186,7 +186,12 @@ class xFuserSkyReelsV2I2VModel(xFuserSkyReelsV2Model):
         image = input_args["input_images"][0]
         width, height = input_args["width"], input_args["height"]
         if input_args.get("resize_input_images", False):
-            image = resize_and_crop_image(image, width, height, self.settings.mod_value)
+            image = resize_and_crop_image(
+                image,
+                target_height=height,
+                target_width=width,
+                mod_value=self.settings.mod_value,
+            )
         else:
             image = resize_image_to_max_area(image, height, width, self.settings.mod_value)
         input_args["height"] = image.height

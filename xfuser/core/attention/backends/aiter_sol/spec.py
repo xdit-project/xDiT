@@ -24,6 +24,10 @@ from xfuser.core.attention.spec import AttentionBackendType, Impl, Sparsity, Spe
 
 GFX950 = ARCH("gfx950")
 
+# attention_kwargs key for a (seqlen_k,) bool mask, or longer by a trailing pad: the KV blocks
+# holding a flagged token are computed exactly for every query, on top of what routing selects.
+EXACT_TOKENS_KEY = "sol_exact_tokens"
+
 
 @dataclass(frozen=True)
 class SolRecipe:

@@ -64,6 +64,11 @@ _SUPPORTED_ATTN_BACKENDS = frozenset(
     }
 ) | (AITER_MHA_V4_ONLY_BACKEND_SET - _UNSERVED_MHA_V4_BACKENDS)
 _FASTH3_ATTN_BACKENDS = VSA_H3_BACKENDS
+# MiniMax-H3 attends text, video and audio as one long packed sequence, the shape Sol-Attn's
+# routing is for. Its alignment pad is declared through valid_kv_len and valid_q_len, and the
+# text and audio rows are forced exact; see the transformer wrapper.
+_SOL_ATTN_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SOL)
+_H3_ATTN_BACKENDS = _SUPPORTED_ATTN_BACKENDS | _SOL_ATTN_BACKENDS
 # VDN-H3's window varlen executor only implements these three; it does not use
 # the CUDNN / NVTE_FP8 / MHA-v4 paths the base H3 advertises.
 _VDN_SUPPORTED_ATTN_BACKENDS = frozenset(
@@ -642,18 +647,28 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
         use_fp8_gemms=True,
         use_fp4_gemms=True,
         use_hybrid_attn_schedule=True,
+        supports_sol_attention_backends=True,
         enable_slicing=False,
         enable_tiling=False,
     )
     _transformer_component_name = "transformer"
     _warmup_num_inference_steps = 3
     _enable_fasth3_vsa = False
-    supported_attn_backends = _SUPPORTED_ATTN_BACKENDS
+    supported_attn_backends = _H3_ATTN_BACKENDS
 
     def _get_runtime_state_pipeline(self):
         if self._transformer_component_name == "transformer":
             return self.pipe
         return SimpleNamespace(transformer=getattr(self.pipe, self._transformer_component_name))
+
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        # Under a Sol backend the token refiner runs on dense AITER (see the transformer wrapper).
+        # Select it here, outside the compiled forward, which cannot import its kernel.
+        runtime = get_runtime_state()
+        scheduled = runtime.attention_schedule.backends if runtime.has_attention_schedule() else ()
+        if {runtime.attention_backend, *scheduled} & _SOL_ATTN_BACKENDS:
+            runtime._check_if_backend_compatible_with_current_configuration(AttentionBackendType.AITER)
 
     def _validate_config(self, config) -> None:
         if config.task is None:
@@ -970,7 +985,7 @@ class xFuserFastH3Model(xFuserMiniMaxH3Model):
 
     _warmup_num_inference_steps = 4
     _enable_fasth3_vsa = True
-    supported_attn_backends = _SUPPORTED_ATTN_BACKENDS | _FASTH3_ATTN_BACKENDS
+    supported_attn_backends = _H3_ATTN_BACKENDS | _FASTH3_ATTN_BACKENDS
 
     def _customize_settings(self, config) -> None:
         super()._customize_settings(config)
@@ -1013,7 +1028,7 @@ class xFuserFastH3DenseModel(xFuserFastH3Model):
     settings.default_attention_backend = None
 
     _enable_fasth3_vsa = False
-    supported_attn_backends = _SUPPORTED_ATTN_BACKENDS
+    supported_attn_backends = _H3_ATTN_BACKENDS
 
     def _validate_config(self, config) -> None:
         # Skip V1's VSA/hybrid-schedule check: no VSA backend is supported here,

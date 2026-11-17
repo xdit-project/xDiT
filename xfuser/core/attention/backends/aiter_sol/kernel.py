@@ -4,6 +4,7 @@ from typing import Optional
 
 import torch
 
+from xfuser.core.attention.backends.aiter_sol.spec import EXACT_TOKENS_KEY
 from xfuser.core.attention.sparsity.head_balance import COST_SINK_KEY
 from xfuser.core.attention.sparsity.sol import SolAttnUnsupported, check_sol_attn_recipe, sol_attn_bhsd
 from xfuser.core.attention.spec import AttnCall
@@ -65,13 +66,17 @@ def clear_beta_schedule() -> None:
 def _beta(call: AttnCall, device):
     """This call's routing threshold: the step's scheduled beta if one is installed, else the flag.
 
-    A call with no step, from outside a pipeline run, takes the flag.
+    A call with no step, from outside a pipeline run, takes the flag. The flag is the caller's
+    `solattn_beta`, else --solattn_beta from the run's config, so a model need not pass it.
     """
     schedule = _BETA_SCHEDULE
     if schedule is not None and call.step is not None:
         # Kept a tensor: a Python float would break the graph and recompile it for every beta.
         return schedule.get_beta_tensor(call.step.to(device))
-    return float(call.attention_kwargs.get("solattn_beta", 0.5))
+    beta = call.attention_kwargs.get("solattn_beta")
+    if beta is None:
+        beta = get_runtime_state().runtime_config.solattn_beta if runtime_state_is_initialized() else 0.5
+    return float(beta)
 
 
 def _block_tile():
@@ -96,9 +101,11 @@ def sol(query, key, value, call: AttnCall, *, recipe: str):
     """Sol-Attn on the mode-2 row for `recipe`.
 
     Builds no block mask: the routing selects the blocks itself. A declared trailing key pad, which
-    `accepts` has checked, is dropped by length.
+    `accepts` has checked, is dropped by length, and so is a query pad the caller declares as
+    `valid_q_len`. EXACT_TOKENS_KEY names keys whose blocks are always computed exactly.
     """
     kwargs = call.attention_kwargs
+    valid_q_len = kwargs.get("valid_q_len") if call.varlen is not None else None
     cost_sink = kwargs.get(COST_SINK_KEY)
     output, head_cost = sol_attn_bhsd(
         query,
@@ -111,6 +118,8 @@ def sol(query, key, value, call: AttnCall, *, recipe: str):
         recipe=recipe,
         key_seqlen=None if call.varlen is None else int(kwargs["valid_kv_len"]),
         block_tile=_block_tile(),
+        query_seqlen=None if valid_q_len is None else int(valid_q_len),
+        exact_tokens=kwargs.get(EXACT_TOKENS_KEY),
     )
     if cost_sink is not None:
         cost_sink.copy_(head_cost)

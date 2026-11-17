@@ -189,6 +189,92 @@ def test_sol_attn_drops_a_caller_alignment_pad():
         assert torch.equal(dropped, unpadded), f"dropping a {fill} pad did not reproduce attention over the real tokens"
 
 
+@pytest.mark.parametrize("recipe", ["bf16", "fp8", "mxfp6"])
+def test_sol_attn_drops_a_query_pad_and_returns_zero_rows_for_it(recipe):
+    """MiniMax-H3 pads its packed sequence on both sides. Its pad query rows share a tile with real
+    rows, and routing picks one selection per tile, so they must not take part. The real rows have
+    to match a call that never saw the pad."""
+    _require_sol_recipe(recipe)
+    from xfuser.core.attention.sparsity.sol import sol_attn_bhsd
+
+    real, padded = 1000, 1024
+    query, key, value = _operands(seqlen=padded)
+    with torch.no_grad():
+        out, _ = sol_attn_bhsd(query, key, value, beta=0.5, recipe=recipe, key_seqlen=real, query_seqlen=real)
+        unpadded, _ = sol_attn_bhsd(query[:, :, :real], key[:, :, :real], value[:, :, :real], beta=0.5, recipe=recipe)
+
+    assert out.shape == query.shape
+    assert torch.equal(out[:, :, :real], unpadded)
+    assert not out[:, :, real:].any(), "pad rows come back as zeros"
+
+
+def test_exact_tokens_force_their_blocks_for_every_query_tile():
+    """A flagged key's block is computed exactly for every query, on top of what routing picks."""
+    _require_sol_recipe("fp8")
+    from xfuser.core.attention.sparsity import sol
+
+    recipe = sol._RECIPES["fp8"]
+    kv_tile = sol.sol_attn_block_tile(recipe)[1]
+    query, key, value = _operands(seqlen=1024)
+    exact = torch.zeros(1024, dtype=torch.bool, device="cuda")
+    exact[[2 * kv_tile + 5, 1023]] = True
+
+    def selection(force):
+        bshd = [t.permute(0, 2, 1, 3).contiguous() for t in (query, key, value)]
+        q, k, v = sol._quantize(recipe, *bshd, query.shape[-1] ** -0.5)
+        return sol.sol_attn_routing_for(q, k, v, 0.5, recipe, force_block_mask=force)["block_attn_mask"]
+
+    with torch.no_grad():
+        routed = selection(None)
+        forced = selection(sol._force_blocks_from_tokens(exact, 1024, kv_tile))
+
+    last = forced.shape[-1] - 1
+    assert forced[..., 2].all() and forced[..., last].all()
+    assert torch.equal(forced & routed, routed), "forcing adds blocks and drops none"
+    assert torch.equal(forced[..., [b for b in range(last) if b != 2]], routed[..., [b for b in range(last) if b != 2]])
+
+
+@pytest.mark.parametrize("recipe", ["bf16", "fp8"])
+def test_the_backend_hands_exact_tokens_to_the_routing(recipe):
+    """Every key flagged makes every block exact: the same output as a threshold nothing passes."""
+    _require_sol_recipe(recipe)
+    from xfuser.core.attention.backends.aiter_sol.spec import EXACT_TOKENS_KEY
+
+    backend = _backend(recipe)
+    query, key, value = _operands(seqlen=1024)
+    every_key = torch.ones(1024, dtype=torch.bool, device="cuda")
+    with torch.no_grad():
+        forced, _ = _run(backend, query, key, value, solattn_beta=0.5, **{EXACT_TOKENS_KEY: every_key})
+        all_exact, _ = _selected_blocks(query, key, value, backend, solattn_beta=-100.0)
+
+    assert torch.equal(forced, all_exact)
+
+
+@pytest.mark.parametrize("recipe", ["bf16", "fp8"])
+def test_a_padded_call_with_exact_tokens_holds_one_graph(recipe):
+    """MiniMax-H3's call: query and key pad dropped, text and audio blocks forced."""
+    _require_sol_recipe(recipe)
+    from xfuser.core.attention.sparsity.sol import sol_attn_bhsd
+
+    real = 1000
+    query, key, value = _operands(seqlen=1024)
+    exact = torch.zeros(1024, dtype=torch.bool, device="cuda")
+    exact[:40] = True
+
+    def run(q, k, v, tokens):
+        out, _ = sol_attn_bhsd(
+            q, k, v, beta=0.5, recipe=recipe, key_seqlen=real, query_seqlen=real, exact_tokens=tokens
+        )
+        return out
+
+    torch._dynamo.reset()
+    with torch.no_grad():
+        compiled = torch.compile(run, fullgraph=True)(query, key, value, exact)
+        eager = run(query, key, value, exact)
+
+    assert torch.equal(compiled, eager)
+
+
 @pytest.mark.parametrize("recipe", ALL_RECIPES)
 @pytest.mark.parametrize("seqlen", [1023, 1008, 960, 897])
 def test_sol_attn_takes_a_seqlen_that_is_not_a_whole_number_of_kv_blocks(recipe, seqlen):

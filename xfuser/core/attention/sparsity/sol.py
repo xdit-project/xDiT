@@ -443,11 +443,14 @@ def _quantize(recipe, query, key, value, softmax_scale):
     )
 
 
-def sol_attn_routing_for(q, k, v, beta, recipe=_RECIPES["fp8"], block_attn_mask=None, block_tile=None):
+def sol_attn_routing_for(
+    q, k, v, beta, recipe=_RECIPES["fp8"], block_attn_mask=None, block_tile=None, force_block_mask=None
+):
     """Pooled K/V, ragged LUT and selection bitmap for one call, as the kernel consumes them.
 
     q/k/v are the (tensor, descale, source) triples _quantize returns. block_attn_mask supplies an
     already chosen selection instead of routing from beta; pass exactly one of the two.
+    force_block_mask, ending in num_kv_blocks, is OR-ed into the selection either way.
     """
     qk_packed = recipe.k_packed is not None
     # An addressable E8M0-scaled operand's codes are not proportional to its values, so routing
@@ -472,6 +475,7 @@ def sol_attn_routing_for(q, k, v, beta, recipe=_RECIPES["fp8"], block_attn_mask=
         k_packed_format=recipe.k_packed,
         v_packed_format=recipe.v_packed,
         block_attn_mask=block_attn_mask,
+        force_block_mask=force_block_mask,
         q_scale=q[1] if qk_block_scaled else None,
     )
 
@@ -523,6 +527,19 @@ def _warn_if_kv_too_short(seqlen_k, kv_tile):
     )
 
 
+def _force_blocks_from_tokens(exact_tokens, seqlen_k, kv_tile):
+    """(num_kv_blocks,) bool: the KV blocks holding any token `exact_tokens` flags.
+
+    exact_tokens covers at least the call's seqlen_k keys; anything past them is the caller's pad,
+    already dropped from K/V.
+    """
+    exact_tokens = exact_tokens[:seqlen_k]
+    pad = -seqlen_k % kv_tile
+    if pad:
+        exact_tokens = torch.nn.functional.pad(exact_tokens, (0, pad))
+    return exact_tokens.reshape(-1, kv_tile).any(dim=1)
+
+
 def _pad_kv_to_tile(key, value, recipe, block_tile):
     """Right-pad BSHD K/V with zero tokens to a whole number of KV blocks, unless the row is ragged.
 
@@ -549,6 +566,8 @@ def sol_attn_bhsd(
     recipe="fp8",
     key_seqlen=None,
     block_tile=None,
+    query_seqlen=None,
+    exact_tokens=None,
 ):
     """Sol-Attn over BHSD tensors, returning (BHSD bf16 output, per-head cost or None).
 
@@ -565,6 +584,15 @@ def sol_attn_bhsd(
     key_seqlen is the number of real KV tokens when the caller has padded the sequence. Sol-Attn
     takes no mask, so the tail is dropped rather than attended.
 
+    query_seqlen is the same for the query rows. Routing takes one selection per query tile, so
+    pad rows left in would vote on the selection of the real rows sharing their tile. They are
+    dropped before the call and come back as zero rows.
+
+    exact_tokens is a (seqlen_k,) bool mask, or longer by the caller's pad: every KV block holding
+    a flagged token is computed exactly for every query, on top of what routing selects. For a
+    sequence whose minority -- a modality, say -- would otherwise be routed against a threshold
+    the majority sets. It moves the call onto the packed API.
+
     block_tile is the (q_tile, kv_tile) to route and dispatch at, from --sparseattn_block_size.
     None takes the recipe's default.
     """
@@ -578,25 +606,32 @@ def sol_attn_bhsd(
     key = key.permute(0, 2, 1, 3).contiguous()
     value = value.permute(0, 2, 1, 3).contiguous()
 
+    query_pad = 0
+    if query_seqlen is not None and query_seqlen < query.shape[1]:
+        query_pad = query.shape[1] - query_seqlen
+        query = query[:, :query_seqlen]
     # Before the tile pad, so the caller's pad and the tile pad do not stack.
     if key_seqlen is not None and key_seqlen < key.shape[1]:
         key, value = key[:, :key_seqlen], value[:, :key_seqlen]
+    force_blocks = (
+        None if exact_tokens is None else _force_blocks_from_tokens(exact_tokens, key.shape[1], block_tile[1])
+    )
     key, value = _pad_kv_to_tile(key, value, recipe, block_tile)
     _warn_if_kv_too_short(key.shape[1], block_tile[1])
 
     if softmax_scale is None:
         softmax_scale = query.shape[-1] ** -0.5
 
-    if routing is None and not return_head_cost and recipe.routes_through_raw:
+    if routing is None and not return_head_cost and force_blocks is None and recipe.routes_through_raw:
         qk, v_fmt = _format(recipe.qk_format), _format(recipe.v_format)
         out = _AITER.sol(
             query, key, value, qk, qk, v_fmt, beta=beta, softmax_scale=softmax_scale, block_tile=block_tile
         )
-        return out.permute(0, 2, 1, 3), None
+        return _restore_pad_rows(out, query_pad).permute(0, 2, 1, 3), None
 
     q, k, v = _quantize(recipe, query, key, value, softmax_scale)
     if routing is None:
-        routing = sol_attn_routing_for(q, k, v, beta, recipe, block_tile=block_tile)
+        routing = sol_attn_routing_for(q, k, v, beta, recipe, block_tile=block_tile, force_block_mask=force_blocks)
     qk_fmt, v_fmt = _format(recipe.qk_format), _format(recipe.v_format)
     qk_scale, v_scale = _scale_mode(recipe.qk_scale_mode), _scale_mode(recipe.v_scale_mode)
     out = _AITER.packed(
@@ -629,4 +664,11 @@ def sol_attn_bhsd(
         block_tile=block_tile,
         v_pack=getattr(_AITER.pack, recipe.v_pack),
     )
-    return out.permute(0, 2, 1, 3), _head_cost_from_routing(routing)
+    return _restore_pad_rows(out, query_pad).permute(0, 2, 1, 3), _head_cost_from_routing(routing)
+
+
+def _restore_pad_rows(out, pad):
+    """Put back, as zeros, the `pad` query rows a BSHD output was computed without."""
+    if pad == 0:
+        return out
+    return torch.nn.functional.pad(out, (0, 0, 0, 0, 0, pad))

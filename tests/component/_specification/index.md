@@ -3,9 +3,9 @@
 This specification describes version 1 of a test harness for components of xDiT diffusion models. Start here. The
 child documents in section 8 give the details.
 
-Before proceeding, read [use-cases and high-level requirements](./requirements.md) description. They take priority over the specification text. Several contradictions are known to exist and are currently being fixed.
+## 1. Priorities
 
-## 1. Priority over the testing skill
+[Use-cases and high-level requirements](./requirements.md) have an absolute priority over the specification text. Several contradictions between the requirements and the specification are known to exist and are currently being fixed.
 
 Where this specification conflicts with the testing skill in
 [SKILL.md](../../../.github/skills/testing/SKILL.md), this specification takes priority.

@@ -92,17 +92,12 @@ class xFuserLumina2AttnProcessor2_0(Lumina2AttnProcessor2_0):
                 if attention_mask is not None
                 else local_sequence_length * get_sequence_parallel_world_size()
             )
-            softmax_scale = (
-                math.sqrt(math.log(global_sequence_length, base_sequence_length))
-                * attn.scale
-            )
+            softmax_scale = math.sqrt(math.log(global_sequence_length, base_sequence_length)) * attn.scale
             query = query * (softmax_scale / attn.scale)
 
         attention_kwargs = None
         if attention_mask is not None:
-            attention_kwargs = {
-                "attn_mask": attention_mask.bool().view(batch_size, 1, 1, -1)
-            }
+            attention_kwargs = {"attn_mask": attention_mask.bool().view(batch_size, 1, 1, -1)}
         backend = masked_attention_backend(query, key, value, attention_kwargs)
 
         # Keep the eight KV heads compact through all-to-all; USP repeats each
@@ -118,9 +113,7 @@ class xFuserLumina2AttnProcessor2_0(Lumina2AttnProcessor2_0):
             backend=backend,
             attention_kwargs=attention_kwargs,
         )
-        hidden_states = hidden_states.transpose(1, 2).reshape(
-            batch_size, -1, attn.heads * head_dim
-        )
+        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
         hidden_states = hidden_states.to(activation_dtype)
         hidden_states = attn.to_out[0](hidden_states)
         hidden_states = attn.to_out[1](hidden_states)
@@ -189,15 +182,10 @@ class xFuserLumina2Transformer2DWrapper(xFuserTransformerBaseWrapper):
         if USE_PEFT_BACKEND:
             scale_lora_layers(self.module, lora_scale)
         elif attention_kwargs is not None and attention_kwargs.get("scale") is not None:
-            logger.warning(
-                "Passing `scale` via `attention_kwargs` without the PEFT backend "
-                "has no effect."
-            )
+            logger.warning("Passing `scale` via `attention_kwargs` without the PEFT backend has no effect.")
 
         batch_size, _, height, width = hidden_states.shape
-        temb, encoder_hidden_states = self.module.time_caption_embed(
-            hidden_states, timestep, encoder_hidden_states
-        )
+        temb, encoder_hidden_states = self.module.time_caption_embed(hidden_states, timestep, encoder_hidden_states)
         (
             hidden_states,
             context_rotary_emb,
@@ -212,26 +200,16 @@ class xFuserLumina2Transformer2DWrapper(xFuserTransformerBaseWrapper):
         # text-image sequence is worth sharding, and their native processors
         # avoid unnecessary collectives here.
         for layer in self.module.context_refiner:
-            encoder_hidden_states = layer(
-                encoder_hidden_states, encoder_attention_mask, context_rotary_emb
-            )
+            encoder_hidden_states = layer(encoder_hidden_states, encoder_attention_mask, context_rotary_emb)
         for layer in self.module.noise_refiner:
             hidden_states = layer(hidden_states, None, noise_rotary_emb, temb)
 
         max_seq_len = max(seq_lengths)
-        attention_mask = hidden_states.new_zeros(
-            batch_size, max_seq_len, dtype=torch.bool
-        )
-        joint_hidden_states = hidden_states.new_zeros(
-            batch_size, max_seq_len, self.module.config.hidden_size
-        )
-        for i, (encoder_seq_len, seq_len) in enumerate(
-            zip(encoder_seq_lengths, seq_lengths)
-        ):
+        attention_mask = hidden_states.new_zeros(batch_size, max_seq_len, dtype=torch.bool)
+        joint_hidden_states = hidden_states.new_zeros(batch_size, max_seq_len, self.module.config.hidden_size)
+        for i, (encoder_seq_len, seq_len) in enumerate(zip(encoder_seq_lengths, seq_lengths)):
             attention_mask[i, :seq_len] = True
-            joint_hidden_states[i, :encoder_seq_len] = encoder_hidden_states[
-                i, :encoder_seq_len
-            ]
+            joint_hidden_states[i, :encoder_seq_len] = encoder_hidden_states[i, :encoder_seq_len]
             joint_hidden_states[i, encoder_seq_len:seq_len] = hidden_states[i]
 
         sp_world_size = get_sequence_parallel_world_size()
@@ -294,9 +272,7 @@ class xFuserLumina2Transformer2DWrapper(xFuserTransformerBaseWrapper):
 
         p = self.module.config.patch_size
         output = []
-        for i, (encoder_seq_len, seq_len) in enumerate(
-            zip(encoder_seq_lengths, seq_lengths)
-        ):
+        for i, (encoder_seq_len, seq_len) in enumerate(zip(encoder_seq_lengths, seq_lengths)):
             output.append(
                 hidden_states[i][encoder_seq_len:seq_len]
                 .view(height // p, width // p, p, p, self.module.out_channels)

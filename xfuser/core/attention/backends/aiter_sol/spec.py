@@ -52,10 +52,6 @@ RECIPES = [
 ]
 # fmt: on
 
-# The Sol rows by backend, for checking --sparseattn_block_size against the
-# recipe a selected backend dispatches.
-SOL_RECIPES = {AttentionBackendType[f"AITER_{row.name}_SOL"]: row.recipe for row in RECIPES}
-
 
 @dataclass(frozen=True)
 class _SolRow(Requirement):
@@ -97,6 +93,8 @@ def _spec(row: SolRecipe) -> Spec:
             & _SolRow(row.recipe)
         ),
         validates=Impl("kernel:check_sparse_block_size", {"recipe": row.recipe}),
+        options=("solattn_beta", "solattn_beta_schedule", "sparseattn_block_size"),
+        configures=Impl("kernel:configure_run"),
     )
 
 

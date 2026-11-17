@@ -494,6 +494,22 @@ def test_a_fallback_cannot_sit_beside_a_fact_it_would_route_around(field, value)
         registry.build_registry([_module("pkg.a", primary, fallback)])
 
 
+def test_an_option_no_selected_backend_reads_is_refused():
+    """A backend's option set on a run that selects none of its readers would do nothing."""
+    from xfuser.config import xFuserArgs
+
+    specs = [_spec(AttentionBackendType.SDPA), _spec(AttentionBackendType.AITER_FP8_SOL, options=("solattn_beta",))]
+    sdpa, sol = AttentionBackendType.SDPA, AttentionBackendType.AITER_FP8_SOL
+
+    with registry.using(specs):
+        with pytest.raises(ValueError, match="--solattn_beta applies only to the AITER_FP8_SOL"):
+            registry.refuse_unread_options(xFuserArgs(model="m", solattn_beta=0.25), [sdpa])
+        registry.refuse_unread_options(xFuserArgs(model="m", solattn_beta=0.25), [sdpa, sol])
+        # Unset, or set to its default, the option asks for nothing.
+        registry.refuse_unread_options(xFuserArgs(model="m"), [sdpa])
+        registry.refuse_unread_options(xFuserArgs(model="m", solattn_beta=0.5), [sdpa])
+
+
 def test_get_unregistered_names_the_backend():
     with registry.using([_spec(AttentionBackendType.SDPA)]):
         with pytest.raises(KeyError, match="AITER_F4F4"):

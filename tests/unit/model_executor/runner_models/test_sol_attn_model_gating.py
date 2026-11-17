@@ -72,7 +72,7 @@ def test_a_hybrid_schedule_on_sol_is_gated_like_an_explicit_backend(monkeypatch)
     monkeypatch.setattr(
         model, "capabilities", dataclasses.replace(model.capabilities, supports_sol_attention_backends=False)
     )
-    with pytest.raises(ValueError, match="does not support Sol-Attn"):
+    with pytest.raises(ValueError, match="does not support AITER_FP8_SOL"):
         _build(
             "Wan2.2-T2V",
             use_hybrid_attn_schedule=True,
@@ -80,9 +80,17 @@ def test_a_hybrid_schedule_on_sol_is_gated_like_an_explicit_backend(monkeypatch)
             hybrid_attn_high_precision_backend="aiter_bf16",
             cross_attention_backend="aiter_bf16",
         )
+    # An explicit schedule names its backends too, and used to pass without the gate.
+    with pytest.raises(ValueError, match="does not support AITER_BF16_SOL"):
+        _build(
+            "Wan2.2-T2V",
+            use_hybrid_attn_schedule=True,
+            hybrid_attn_schedule="AITER_BF16,AITER_BF16_SOL,AITER_BF16",
+            cross_attention_backend="aiter_bf16",
+        )
 
 
 def test_a_model_without_the_capability_refuses_sol():
     """The gate is opt-in, so a Wan runner that has not been checked for Sol-Attn keeps saying no."""
-    with pytest.raises(ValueError, match="does not support Sol-Attn"):
+    with pytest.raises(ValueError, match="does not support AITER_FP8_SOL"):
         _build("Wan2.1-VACE-14B", attention_backend="aiter_fp8_sol", cross_attention_backend="aiter_bf16")

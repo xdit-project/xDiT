@@ -259,6 +259,17 @@ class Spec:
     # configuration on this device.
     validates: Optional[Impl | Callable] = None
 
+    # The run-configuration fields this backend reads and no other part of
+    # xDiT does. A run that sets one while no selected backend lists it is
+    # refused before loading, rather than having the option do nothing.
+    options: Tuple[str, ...] = ()
+
+    # Run once the run's step plan is known -- denoising steps and transformer
+    # forwards per step -- outside any compiled region, for per-step state the
+    # backend owns. Called as (runtime_config, denoising_steps,
+    # forwards_per_step), for every backend the run selected.
+    configures: Optional[Impl | Callable] = None
+
     # Filled in by the registry from the module the spec came from, so Impl
     # targets can be written relative to the backend package.
     package: str = ""
@@ -301,6 +312,14 @@ class Spec:
             check = check.resolve(self.package)
         if check is not None:
             check(runtime_config)
+
+    def configure(self, runtime_config, denoising_steps: int, forwards_per_step: int) -> None:
+        """Hand the run's step plan to the backend, if it keeps per-step state."""
+        setup = self.configures
+        if isinstance(setup, Impl):
+            setup = setup.resolve(self.package)
+        if setup is not None:
+            setup(runtime_config, denoising_steps, forwards_per_step)
 
     def resolved(self) -> AttnFn:
         """The callable, importing the kernel module if it has not been yet.

@@ -11,8 +11,9 @@ and the Sol backend reads the step's beta rather than the flag.
 import pytest
 import torch
 
+from xfuser.config.config import RuntimeConfig
 from xfuser.core.attention.backends.aiter_sol import kernel
-from xfuser.core.attention.spec import AttnCall
+from xfuser.core.attention.spec import AttentionBackendType, AttnCall
 from xfuser.core.distributed.attention_schedule import SolAttnBetaSchedule
 from xfuser.core.distributed.runtime_state import DiTRuntimeState
 
@@ -222,6 +223,38 @@ def test_installing_a_schedule_tracks_steps_and_clearing_it_restores_the_flag(mo
     assert _forward_beta(runtime, solattn_beta=0.125) == pytest.approx(0.125)
 
 
+def _sol_run(monkeypatch, **runtime_config):
+    """A runtime that selected a Sol backend, which kernel.install_beta_schedule reports to."""
+    runtime = _bare_runtime(
+        attention_backend=AttentionBackendType.AITER_FP8_SOL,
+        cross_attention_backend=AttentionBackendType.AITER,
+        runtime_config=RuntimeConfig(**runtime_config),
+    )
+    monkeypatch.setattr(kernel, "get_runtime_state", lambda: runtime)
+    monkeypatch.setattr(kernel, "_BETA_SCHEDULE", None)
+    return runtime
+
+
+def test_the_sol_backend_installs_the_schedule_from_the_runs_step_plan(monkeypatch):
+    """The runner hands over only the step plan; the Sol backend reads --solattn_beta_schedule."""
+    runtime = _sol_run(monkeypatch, solattn_beta_schedule="1.0:0.0")
+
+    runtime.configure_attention_backends(2, 2)
+
+    assert kernel._BETA_SCHEDULE.betas == [1.0, 1.0, 0.0, 0.0]
+    assert runtime.step_counter is not None
+
+
+def test_without_a_schedule_the_step_plan_installs_nothing(monkeypatch):
+    """Every run hands over its step plan, and most set no schedule: those must count no steps."""
+    runtime = _sol_run(monkeypatch)
+
+    runtime.configure_attention_backends(2, 2)
+
+    assert kernel._BETA_SCHEDULE is None
+    assert runtime.step_counter is None
+
+
 def test_advancing_the_step_costs_no_graph_break(installed):
     """A beta schedule alone must leave the compiled forward in one graph.
 
@@ -292,10 +325,8 @@ def test_an_installed_schedule_compiles_the_forward_once(monkeypatch):
         pytest.skip("needs an accelerator for the device table")
     from torch._dynamo.utils import counters
 
-    runtime = _bare_runtime()
-    monkeypatch.setattr(kernel, "get_runtime_state", lambda: runtime)
-    monkeypatch.setattr(kernel, "_BETA_SCHEDULE", None)
-    kernel.install_beta_schedule("1.0:0.0", 4, forwards_per_step=1)
+    runtime = _sol_run(monkeypatch, solattn_beta_schedule="1.0:0.0")
+    runtime.configure_attention_backends(4, 1)
 
     def forward(x):
         runtime.increment_step_counter()

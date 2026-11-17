@@ -59,8 +59,6 @@ from xfuser.core.distributed import (
     init_distributed_environment,
 )
 from xfuser.core.attention import registry as attention_registry
-from xfuser.core.attention.backends.aiter_mha_v4.spec import SPARGE_FORMATS as MHA_V4_SPARGE_FORMATS
-from xfuser.core.attention.backends.aiter_sol.spec import SOL_RECIPES
 from xfuser.core.attention.spec import AttentionBackendType, Sparsity
 from xfuser.core.distributed.fp8_comms import setup_fp8_comms, validate_fp8_comms_config
 from xfuser.core.distributed.attention_schedule import (
@@ -116,8 +114,13 @@ _SPARGE_ATTENTION_BACKENDS = (
 # capability publish; anywhere else it would quietly run dense.
 _BSA_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.BSA)
 
-# A model opts into Sol-Attn separately from Sparge: support for one does not imply the other.
-_SOL_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SOL)
+# The capability a model sets to opt into each family of sparse backends that also needs a dense
+# cross-attention backend. Sol is its own capability: support for Sparge does not imply it.
+_SPARSITY_CAPABILITY = {
+    Sparsity.SPARGE: "supports_sparge_attention_backends",
+    Sparsity.VSA: "supports_sparge_attention_backends",
+    Sparsity.SOL: "supports_sol_attention_backends",
+}
 
 
 def _parse_attention_backend(name: Optional[str], kind: str) -> Optional[AttentionBackendType]:
@@ -148,7 +151,7 @@ def _validate_cross_attention_for_sparge(config: xFuserArgs) -> None:
         )
 
 
-def _selected_attention_backends(config: xFuserArgs) -> list[AttentionBackendType]:
+def _selected_attention_backends(config: xFuserArgs, include_cross: bool = True) -> list[AttentionBackendType]:
     """Every backend the run would actually dispatch to, named as the user named them."""
     scheduled: list[AttentionBackendType] = []
     if config.use_hybrid_attn_schedule and config.hybrid_attn_schedule:
@@ -161,32 +164,11 @@ def _selected_attention_backends(config: xFuserArgs) -> list[AttentionBackendTyp
         ]
     else:
         specs = [(config.attention_backend, "attention backend")]
-    specs.append((config.cross_attention_backend, "cross attention backend"))
+    if include_cross:
+        specs.append((config.cross_attention_backend, "cross attention backend"))
     return scheduled + [
         backend for value, kind in specs if (backend := _parse_attention_backend(value, kind)) is not None
     ]
-
-
-def _validate_sparseattn_block_size(config: xFuserArgs) -> None:
-    """Refuse, before loading, a --sparseattn_block_size no selected backend reads.
-
-    Whether the GPU has a kernel at that tile is checked by the backend's spec
-    when it is selected, once the device is set.
-    """
-    if config.sparseattn_block_size is None:
-        return
-    if not any(b in MHA_V4_SPARGE_FORMATS or b in SOL_RECIPES for b in _selected_attention_backends(config)):
-        raise ValueError(
-            "--sparseattn_block_size applies only to the AITER MHA v4 Sparge and AITER Sol attention backends."
-        )
-
-
-def _validate_solattn_beta_schedule(config: xFuserArgs) -> None:
-    """Refuse, before loading, a --solattn_beta_schedule no selected backend reads."""
-    if config.solattn_beta_schedule is None:
-        return
-    if not any(b in SOL_RECIPES for b in _selected_attention_backends(config)):
-        raise ValueError("--solattn_beta_schedule applies only to the AITER Sol attention backends.")
 
 
 def _validate_attention_head_dims(model: "xFuserModel", config: xFuserArgs) -> None:
@@ -802,6 +784,25 @@ class xFuserModel(abc.ABC):
         config.attention_backend = default
         log(f"--attention_backend not set, using {self.settings.model_name} default: {default}")
 
+    def _validate_sparse_attention_families(self, config: xFuserArgs) -> None:
+        """Refuse a Sparge, VSA or Sol backend the model has not opted into, wherever the run
+        selects it -- including an explicit hybrid schedule -- and require a dense cross-attention
+        backend beside one on a model that has cross-attention."""
+        selects_one = False
+        for backend in _selected_attention_backends(config, include_cross=False):
+            spec = attention_registry.find(backend)
+            capability = _SPARSITY_CAPABILITY.get(spec.sparsity) if spec is not None else None
+            if capability is None:
+                continue
+            if not getattr(self.capabilities, capability):
+                raise ValueError(
+                    f"Model {config.model} does not support {backend.name}: it has not opted into "
+                    f"{spec.sparsity.value} attention backends."
+                )
+            selects_one = True
+        if selects_one and self.capabilities.cross_attention_backend:
+            _validate_cross_attention_for_sparge(config)
+
     def _validate_supported_attn_backends(self, config: xFuserArgs) -> None:
         """Refuse backends this model is not known to be correct with.
 
@@ -888,8 +889,8 @@ class xFuserModel(abc.ABC):
                 )
 
         self._validate_supported_attn_backends(config)
-        _validate_sparseattn_block_size(config)
-        _validate_solattn_beta_schedule(config)
+        attention_registry.refuse_unread_options(config, _selected_attention_backends(config))
+        self._validate_sparse_attention_families(config)
 
         if not self.capabilities.supports_bsa_attention_backends:
             for value, label in (
@@ -907,8 +908,6 @@ class xFuserModel(abc.ABC):
 
         backend = _parse_attention_backend(config.attention_backend, "attention backend")
         supports_sparse = self.capabilities.supports_sparse_attention_backends
-        supports_sparge = self.capabilities.supports_sparge_attention_backends
-        supports_sol = self.capabilities.supports_sol_attention_backends
 
         if backend is None:
             if supports_sparse:
@@ -919,20 +918,6 @@ class xFuserModel(abc.ABC):
                     f"capabilities. If you want to use a dense attention backend, "
                     f"use the dense model equivalent."
                 )
-            if config.use_hybrid_attn_schedule:
-                low = _parse_attention_backend(
-                    config.hybrid_attn_low_precision_backend,
-                    "hybrid low-precision attention backend",
-                )
-                high = _parse_attention_backend(
-                    config.hybrid_attn_high_precision_backend,
-                    "hybrid high-precision attention backend",
-                )
-                if low in _SOL_ATTENTION_BACKENDS or high in _SOL_ATTENTION_BACKENDS:
-                    if not supports_sol:
-                        raise ValueError(f"Model {config.model} does not support Sol-Attn attention backends.")
-                if low in _SPARGE_ATTENTION_BACKENDS or high in _SPARGE_ATTENTION_BACKENDS:
-                    _validate_cross_attention_for_sparge(config)
         else:
             if backend in _SPARSE_ATTENTION_BACKENDS and not supports_sparse:
                 raise ValueError(f"Model {config.model} does not support sparse attention backends.")
@@ -945,14 +930,6 @@ class xFuserModel(abc.ABC):
                     f"If you want to use a dense attention backend, use the dense "
                     f"model equivalent."
                 )
-            if backend in _SPARGE_ATTENTION_BACKENDS:
-                if backend in _SOL_ATTENTION_BACKENDS:
-                    if not supports_sol:
-                        raise ValueError(f"Model {config.model} does not support Sol-Attn attention backends.")
-                elif not supports_sparge:
-                    raise ValueError(f"Model {config.model} does not support Sparge attention backend.")
-                if self.capabilities.cross_attention_backend:
-                    _validate_cross_attention_for_sparge(config)
 
         possible_task = getattr(config, "task", None)
         if possible_task and self.settings.valid_tasks:
@@ -1633,8 +1610,10 @@ class xFuserModel(abc.ABC):
         if self.config.use_hybrid_gemm_schedule:
             self._setup_hybrid_gemm_schedule(input_args)
 
-        if getattr(self.config, "solattn_beta_schedule", None) is not None:
-            self._setup_solattn_beta_schedule(input_args)
+        if runtime_state_is_initialized() and input_args.get("num_inference_steps") is not None:
+            get_runtime_state().configure_attention_backends(
+                input_args["num_inference_steps"], self._calculate_hybrid_attention_step_multiplier(input_args)
+            )
 
         if self.config.use_vae_channels_last_format:
             self._convert_vae_to_channels_last()
@@ -1677,17 +1656,6 @@ class xFuserModel(abc.ABC):
         log("Enabling hybrid attention schedule")
         log(f"Hybrid attention schedule: {attention_schedule.backends}", debug=True)
         get_runtime_state().set_attention_schedule(attention_schedule, total_steps=total_steps)
-
-    def _setup_solattn_beta_schedule(self, input_args: dict) -> None:
-        """Hand --solattn_beta_schedule to the Sol backends, which _validate_config made sure are selected."""
-        from xfuser.core.attention.backends.aiter_sol import kernel as sol_kernel
-
-        beta_schedule = sol_kernel.install_beta_schedule(
-            self.config.solattn_beta_schedule,
-            input_args["num_inference_steps"],
-            self._calculate_hybrid_attention_step_multiplier(input_args),
-        )
-        log(f"Sol-Attn beta schedule: {beta_schedule.per_denoising_step}", debug=True)
 
     def _setup_hybrid_gemm_schedule(self, input_args: dict) -> None:
         """

@@ -108,6 +108,19 @@ def _probe_aiter():
     )
 
 
+def _probe_scale_storage():
+    """aiter's padded E8M0 scale allocator, its row tile and the lookahead its readers need."""
+    try:
+        from aiter.ops.mha_v4_quant import (
+            MHA_V4_KV_SCALE_LOOKAHEAD_ROWS,
+            MHA_V4_KV_TILE_ROWS,
+            block_scale_storage,
+        )
+    except ImportError:
+        return None, 0, 0
+    return block_scale_storage, MHA_V4_KV_TILE_ROWS, MHA_V4_KV_SCALE_LOOKAHEAD_ROWS
+
+
 def _probe_ragged_kv():
     """aiter's per-row ragged-KV query, or None on a build that predates it, where every row
     has its key length padded to the tile."""
@@ -126,6 +139,9 @@ SOL_ATTN_AVAILABLE = _AITER is not None
 _default_block_tile = _AITER.block_tile if _AITER is not None else None
 _kv_tile_for_q_tile = _AITER.kv_tile_for_q_tile if _AITER is not None else None
 _ragged_kv = _probe_ragged_kv() if _AITER is not None else None
+_block_scale_storage, _SCALE_TILE_ROWS, _SCALE_LOOKAHEAD_ROWS = (
+    _probe_scale_storage() if _AITER is not None else (None, 0, 0)
+)
 
 
 def sol_attn_block_tile(recipe, block_tile=None):
@@ -460,6 +476,20 @@ def sol_attn_routing_for(q, k, v, beta, recipe=_RECIPES["fp8"], block_attn_mask=
     )
 
 
+def _with_scale_lookahead(scale):
+    """A pooled E8M0 scale copied into storage that runs on, zeroed, past its last row.
+
+    aiter's 64x64 MXFP8 Sol row reads the pooled K scale past the rows sol_prepare allocates for
+    it, and faults the GPU whenever that allocation ends at an unmapped page. aiter backs its own
+    K scales with lookahead rows for its readers; this gives the pooled one the same backing.
+    """
+    if _block_scale_storage is None:
+        return scale
+    backed = _block_scale_storage(scale, *scale.shape, _SCALE_TILE_ROWS, lookahead_rows=_SCALE_LOOKAHEAD_ROWS)
+    backed.copy_(scale)
+    return backed
+
+
 def _head_cost_from_routing(routing):
     """Per-head count of exactly-computed KV blocks, float32 (nheads_q,)."""
     mask = routing["block_attn_mask"]  # (batch, nheads_q, num_q_tiles, num_kv_blocks) bool
@@ -590,7 +620,11 @@ def sol_attn_bhsd(
         mean_v=routing["mean_v"],
         block_bitmap=routing["block_bitmap"],
         # None where the pooled operand reuses the source descale.
-        mean_k_scale=routing["mean_k_scale"],
+        mean_k_scale=(
+            _with_scale_lookahead(routing["mean_k_scale"])
+            if recipe.qk_scale_mode == "block" and recipe.k_packed is None
+            else routing["mean_k_scale"]
+        ),
         mean_v_scale=routing["mean_v_scale"],
         block_tile=block_tile,
         v_pack=getattr(_AITER.pack, recipe.v_pack),

@@ -648,6 +648,39 @@ def test_the_64x64_block_size_routes_and_dispatches_at_64(monkeypatch):
         assert cosine > baseline - 0.02, f"{recipe}: 64x64 lost ground to the default: {cosine:.4f} vs {baseline:.4f}"
 
 
+@pytest.mark.parametrize("block_tile", [None, (64, 64)], ids=["default", "64x64"])
+def test_the_pooled_mxfp8_k_scale_is_backed_past_its_last_row(monkeypatch, block_tile):
+    """aiter's 64x64 MXFP8 Sol row reads the pooled K scale past the rows sol_prepare allocates,
+    and faulted the GPU whenever that allocation ended at an unmapped page. The scale the kernel
+    is handed has to run on, zeroed, past its last row."""
+    _require_sol_recipe("mxfp8")
+    from xfuser.core.attention.sparsity import sol
+
+    seen = {}
+    packed = sol._AITER.packed
+
+    def spy(*args, **kwargs):
+        seen["scale"] = kwargs["mean_k_scale"]
+        return packed(*args, **kwargs)
+
+    monkeypatch.setattr(sol._AITER, "packed", spy)
+    query, key, value = _operands(seqlen=2048)
+    with torch.no_grad():
+        sol.sol_attn_bhsd(query, key, value, beta=0.5, recipe="mxfp8", block_tile=block_tile, return_head_cost=True)
+    torch.cuda.synchronize()
+
+    scale = seen["scale"]
+    end = (scale.storage_offset() + scale.numel()) * scale.element_size()
+    storage = torch.empty(0, dtype=torch.uint8, device=scale.device)
+    storage.set_(scale.untyped_storage(), 0, (scale.untyped_storage().nbytes(),))
+    tail = storage[end:]
+    # The kernels read pooled scales 128 rows at a time, and this row reads on past even that.
+    row = scale[0, 0].numel() * scale.element_size()
+    whole_tiles = -(-scale.shape[1] // 128) * 128
+    assert tail.numel() > (whole_tiles - scale.shape[1]) * row, "nothing mapped past the last 128-row tile"
+    assert not tail.any(), "the backing past the scale must be zero (E8M0 0 is finite)"
+
+
 def test_a_block_size_with_no_kernel_is_rejected_at_setup_by_name():
     """Named at the flag that set it, at setup: this is the check that stands between a mistyped
     launch and a run that loads a model for minutes before dying."""

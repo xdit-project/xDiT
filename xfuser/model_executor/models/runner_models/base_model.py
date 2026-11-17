@@ -8,6 +8,7 @@ from PIL.Image import Image
 from typing import Callable, List, Optional, Tuple, Generator, Union
 from dataclasses import dataclass, field, replace
 from torch.profiler import profile, record_function, ProfilerActivity
+from torch.utils._pytree import tree_map_only
 import diffusers
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.utils import load_image, export_to_video
@@ -18,6 +19,7 @@ from xfuser.envs import (
     PACKAGES_CHECKER,
     _is_hip,
     _is_cuda,
+    bind_group_norm,
 )
 from xfuser.core.utils.outputs_equal import outputs_equal
 from xfuser.logger import warn_once
@@ -554,6 +556,7 @@ class xFuserModel(abc.ABC):
         self.engine_config.runtime_config.runner_managed_torch_compile = (
             getattr(self.config, "pipefusion_parallel_degree", 1) > 1
         )
+        bind_group_norm(use_aiter=self._uses_aiter_group_norm())
         log("Loading model pipeline...")
         self.pipe = self._load_model_checked()
         enable_fast_pil_postprocess([self.pipe, getattr(self, "second_pipe", None)])
@@ -704,15 +707,15 @@ class xFuserModel(abc.ABC):
     def _enable_cpu_offload(self) -> None:
         """Apply the CPU offload mode the config selects, if any."""
         if self.config.enable_group_cpu_offload:
-            # block_level groups only top-level ModuleLists: fits compiled transformers
-            # (blocks are top-level) and avoids the per-block-compile recompile storm that
-            # leaf-level hooks trigger. Eager components nest their layers (e.g. Mistral-3 at
-            # model.language_model.layers) where block_level cannot reach, leaving the whole
-            # component in one unmatched group and OOMing; they use leaf_level, which recurses.
+            # block_level groups only top-level ModuleLists, which also avoids the
+            # per-block-compile recompile storm that leaf-level hooks trigger. Components
+            # that nest their layers (e.g. Mistral-3 at model.language_model.layers) are out
+            # of its reach and would offload as one group, so they use leaf_level, which
+            # recurses. _block_level_offload_components names the ones it fits.
             from diffusers.hooks import apply_group_offloading
 
-            log("Enabling group CPU offload (transformer block-level, others leaf-level, streamed)...")
-            block_level_names = set(self._get_compiled_pipe_components())
+            log("Enabling group CPU offload (declared components block-level, others leaf-level, streamed)...")
+            block_level_names = set(self._block_level_offload_components())
             for name, component in self.pipe.components.items():
                 if not isinstance(component, torch.nn.Module):
                     continue
@@ -1064,8 +1067,55 @@ class xFuserModel(abc.ABC):
         component.register_forward_pre_hook(_mark, with_kwargs=True, prepend=True)
         component._xfuser_marks_cudagraph_steps = True
 
+    def _compiles_vae_decoder(self) -> bool:
+        """Whether ``--use_torch_compile`` covers this model's VAE decoder too.
+
+        Off by default.  A decoder is compiled where a runner has measured it,
+        because this also builds the VAE with torch GroupNorm instead of AITER's,
+        which is the faster of the two for a decoder that stays eager.
+        """
+        return False
+
+    def _uses_aiter_group_norm(self) -> bool:
+        """Whether this run builds its model with AITER's GroupNorm.
+
+        AITER's kernel is the faster of the two run eagerly, so a run takes it
+        unless something needs the torch class: DistVAE identifies the layers to
+        shard by that type, and Inductor cannot fuse across AITER's custom op.
+        """
+        if self.config.use_parallel_vae:
+            return False
+        return not (self.config.use_torch_compile and self._compiles_vae_decoder())
+
+    def _compile_vae_decoder(self, mode: str = "default") -> None:
+        """Forward decoder compilation to the VAE manager, which owns the policy."""
+        self._vae_manager.compile_decoders(self._decoding_vaes(), mode=mode)
+
+    def _compile_whole(self, module: torch.nn.Module, kwargs: dict) -> torch.nn.Module:
+        """Compile a whole component; under CUDA graphs, copy its outputs out of the graph's pool.
+
+        The next replay overwrites the pool, and sequential true CFG reads one call's output after the next call.
+        """
+        compiled = torch.compile(module, **kwargs)
+        if kwargs["mode"] in self.CUDAGRAPH_COMPILE_MODES:
+            compiled.register_forward_hook(
+                lambda _module, _args, output: tree_map_only(torch.Tensor, torch.clone, output)
+            )
+        return compiled
+
     def _get_compiled_pipe_components(self) -> List[str]:
         return ["transformer"]
+
+    def _block_level_offload_components(self) -> List[str]:
+        """Components that group CPU offload splits block by block.
+
+        ``block_level`` groups the ModuleLists that are direct children of a
+        component, which suits a transformer that holds its blocks there. A
+        component that nests its blocks deeper matches nothing, and group
+        offload then holds all of it on the device at once, so such a component
+        belongs on ``leaf_level``, which recurses.
+        """
+        return self._get_compiled_pipe_components()
 
     def _get_compile_warmup_steps(self, input_args: dict) -> Optional[int]:
         return 2  # None = skip step reduction, run full warmup cycle
@@ -1143,7 +1193,12 @@ class xFuserModel(abc.ABC):
         when ``run`` or ``profile`` executes. The final warmup runs
         ``_get_compile_warmup_steps`` steps, or the caller's count when that
         returns ``None``.
+
+        A runner that opts in through ``_compiles_vae_decoder`` also has its VAE
+        decoder compiled here, in the mode the VAE manager selects for it.
         """
+        if self._compiles_vae_decoder():
+            self._compile_vae_decoder()
         self._enable_compute_comm_overlap()
         compile_kwargs = {"mode": self._get_compile_mode()}
         pp_degree = getattr(self.config, "pipefusion_parallel_degree", 1)
@@ -1200,7 +1255,7 @@ class xFuserModel(abc.ABC):
                 kwargs = {**compile_kwargs, "mode": usp_sdma.compile_mode(compile_kwargs["mode"])}
             blockwise = name in stages or name in sharded or name in cache_targets or self._prefer_blockwise_compile()
             if not blockwise:
-                setattr(self.pipe, name, torch.compile(module, **kwargs))
+                setattr(self.pipe, name, self._compile_whole(module, kwargs))
                 continue
             block_lists = self._declared_blocks(name, module)
             for block_list in block_lists:
@@ -1219,7 +1274,7 @@ class xFuserModel(abc.ABC):
                         f"{self.settings.fsdp_strategy.get(name, {}).get('wrap_attrs', [])} exist. Name them in "
                         f"fsdp_strategy[{name!r}]['wrap_attrs'] of {type(self).__name__}."
                     )
-                setattr(self.pipe, name, torch.compile(module, **kwargs))
+                setattr(self.pipe, name, self._compile_whole(module, kwargs))
                 continue
             if kwargs["mode"] in self.CUDAGRAPH_COMPILE_MODES:
                 self._mark_cudagraph_steps(module)

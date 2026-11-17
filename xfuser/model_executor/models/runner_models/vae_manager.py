@@ -17,6 +17,7 @@ from xfuser.core.utils.runner_utils import (
     convert_model_convs_to_channels_last,
     log,
 )
+from xfuser.model_executor.layers.distvae_attention import split_replicated_vae_attention
 
 
 def _validate_vae_tile_pair(config, capabilities, settings, kind, minimum, constraint) -> None:
@@ -45,6 +46,8 @@ def validate_vae_config(config, capabilities, settings) -> None:
     """Validate VAE-specific runner configuration without runner state."""
     _validate_vae_tile_pair(config, capabilities, settings, "size", 1, "positive")
     _validate_vae_tile_pair(config, capabilities, settings, "overlap", 0, "non-negative")
+    if getattr(config, "split_parallel_vae_attention", False) and not config.use_parallel_vae:
+        raise ValueError("--split_parallel_vae_attention requires --use_parallel_vae.")
 
 
 class VAEManager:
@@ -130,6 +133,12 @@ class VAEManager:
         except ImportError:
             AutoencoderKLMiniMaxH3Image = None
 
+        split_attention = getattr(self.config, "split_parallel_vae_attention", False)
+
+        def unsplit(vae, reason):
+            if split_attention:
+                log(f"WARNING: --split_parallel_vae_attention has no effect on {type(vae).__name__}: {reason}.")
+
         for vae in vaes:
             if AutoencoderKLMiniMaxH3 is not None and isinstance(vae, AutoencoderKLMiniMaxH3):
                 from xfuser.model_executor.models.runner_models.minimax_h3 import (
@@ -137,6 +146,7 @@ class VAEManager:
                 )
 
                 install_minimax_h3_vae_tile_parallel(vae)
+                unsplit(vae, "it decodes complete tiles per rank")
                 continue
             if AutoencoderKLMiniMaxH3Image is not None and isinstance(vae, AutoencoderKLMiniMaxH3Image):
                 from xfuser.model_executor.models.runner_models.minimax_h3_image import (
@@ -144,6 +154,7 @@ class VAEManager:
                 )
 
                 install_minimax_h3_image_tiled_decode(vae, coordinator)
+                unsplit(vae, "it decodes complete tiles per rank")
                 continue
             if self._tiles(vae) and vae_tiling.supports_tile_parallel(vae):
                 mark(vae, tile_context)
@@ -151,9 +162,15 @@ class VAEManager:
                     "Parallel VAE will assign complete tiles of "
                     f"{type(vae).__name__} to ranks instead of sharding rows within each tile."
                 )
+                unsplit(vae, "parallel VAE decodes complete tiles per rank")
             else:
                 adapter = vae_parallel.parallelize_decoder(vae, vae_group)
                 log(f"Parallel VAE decoder enabled on {type(vae).__name__} via {adapter}.")
+                split = split_replicated_vae_attention(vae) if split_attention else 0
+                if split:
+                    log(f"Parallel VAE decoder: {split} replicated mid-block attention(s) split by query rows.")
+                else:
+                    unsplit(vae, "its decoder has no mid-block attention that every rank runs whole")
             if self.capabilities.use_parallel_vae_encoder:
                 adapter = vae_parallel.parallelize_encoder(vae, vae_group)
                 log(f"Parallel VAE encoder enabled on {type(vae).__name__} via {adapter}.")

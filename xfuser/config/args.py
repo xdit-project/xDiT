@@ -233,6 +233,7 @@ class xFuserArgs:
     warmup_steps: int = 1
     # use_cuda_graph: bool = True
     use_parallel_vae: bool = False
+    split_parallel_vae_attention: bool = False
     # use_profiler: bool = False
     use_torch_compile: bool = False
     use_onediff: bool = False
@@ -346,6 +347,7 @@ class xFuserArgs:
     memory_efficient_sharding: bool = False
     memory_efficient_replicated_load: bool = False
     use_vae_channels_last_format: bool = False
+    vae_dtype: Optional[str] = None
     # Hybrid attention schedule
     use_hybrid_attn_schedule: bool = False
     hybrid_attn_low_precision_backend: Optional[str] = None
@@ -1062,6 +1064,12 @@ class xFuserArgs:
             action="store_true",
         )
         parser.add_argument(
+            "--split_parallel_vae_attention",
+            action="store_true",
+            help="With --use_parallel_vae, split the decoder mid-block self-attention, which DistVAE's row "
+            "sharding runs on the whole latent on every rank, by query rows across the ranks.",
+        )
+        parser.add_argument(
             "--use_torch_compile",
             action="store_true",
             help="Compile supported model components with torch.compile, including supported parallel configurations.",
@@ -1514,6 +1522,13 @@ class xFuserArgs:
             action="store_true",
             default=False,
             help="Use channels last memory format for the VAE.",
+        )
+        parser.add_argument(
+            "--vae_dtype",
+            choices=["bf16", "fp32"],
+            default=None,
+            help="Load the VAE in this dtype instead of the model's default. Faster in bf16, "
+            "at some image fidelity. Only for models that list it.",
         )
         parser.add_argument(
             "--use_ssta_sparse_text_to_image",

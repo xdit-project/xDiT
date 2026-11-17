@@ -265,6 +265,7 @@ class ModelCapabilities:
     enable_slicing: bool = False
     enable_tiling: bool = False
     use_vae_channels_last_format: bool = True
+    vae_dtype: bool = False
     # Other features
     use_int8_gemms: bool = False
     use_fp8_gemms: bool = False

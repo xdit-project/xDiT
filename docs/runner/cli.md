@@ -103,6 +103,7 @@ enable a setting and their `--no-...` spellings disable it.
 | Syntax | Parser default | Description |
 | --- | --- | --- |
 | <a id="-use_parallel_vae"></a><a id="--use_parallel_vae"></a>`--use_parallel_vae` | `False` | Distribute supported VAE work across existing ranks. DistVAE uses row sharding by default; tiling can select tile dispatch. |
+| <a id="-split_parallel_vae_attention"></a><a id="--split_parallel_vae_attention"></a>`--split_parallel_vae_attention` | `False` | With --use\_parallel\_vae, split the decoder mid-block self-attention, which DistVAE's row sharding runs on the whole latent on every rank, by query rows across the ranks. |
 | <a id="-enable_tiling"></a><a id="--enable_tiling"></a>`--enable_tiling` | `False` | Enable VAE tiling to save GPU memory. |
 | <a id="-enable_slicing"></a><a id="--enable_slicing"></a>`--enable_slicing` | `False` | Decode one batch item at a time to reduce GPU memory use. This has no effect when the batch size is 1. |
 | <a id="-vae_tile_size_height"></a><a id="--vae_tile_size_height"></a>`--vae_tile_size_height` `INT` | `None` | Exact output-pixel height of each VAE tile. Requires --enable\_tiling. Must be used with --vae\_tile\_size\_width. |
@@ -110,6 +111,7 @@ enable a setting and their `--no-...` spellings disable it.
 | <a id="-vae_tile_overlap_height"></a><a id="--vae_tile_overlap_height"></a>`--vae_tile_overlap_height` `INT` | `None` | Exact VAE tile overlap along the height axis, in output pixels. Requires --enable\_tiling. Must be used with --vae\_tile\_overlap\_width. Height and width may differ; use 0 for an inactive strip axis. |
 | <a id="-vae_tile_overlap_width"></a><a id="--vae_tile_overlap_width"></a>`--vae_tile_overlap_width` `INT` | `None` | Exact VAE tile overlap along the width axis, in output pixels. Requires --enable\_tiling. Must be used with --vae\_tile\_overlap\_height. Height and width may differ; use 0 for an inactive strip axis. |
 | <a id="-use_vae_channels_last_format"></a><a id="--use_vae_channels_last_format"></a>`--use_vae_channels_last_format` | `False` | Use channels last memory format for the VAE. |
+| <a id="-vae_dtype"></a><a id="--vae_dtype"></a>`--vae_dtype` `{bf16,fp32}` | `None` | Load the VAE in this dtype instead of the model's default. Faster in bf16, at some image fidelity. Only for models that list it. |
 
 ## Compilation and GEMM quantization
 

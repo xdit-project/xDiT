@@ -20,10 +20,8 @@ from xfuser.core.distributed import (
     get_cfg_group,
     get_classifier_free_guidance_rank,
     get_classifier_free_guidance_world_size,
-    get_sequence_parallel_world_size,
 )
 from xfuser.config import EngineConfig
-from xfuser.model_executor.models.transformers.transformer_qwen import per_sample_key_packing
 
 from .base_pipeline import xFuserPipelineBaseWrapper
 from .pipeline_qwen_image import QwenPipeFusionMixin
@@ -46,8 +44,9 @@ class _BatchedTrueCfgTransformer:
     The pipeline calls the transformer twice per step, conditional then unconditional, with the
     same latents and timestep. The first call runs the batch [conditional, unconditional], each
     row with its own prompt, and returns the conditional row; the second returns the stored
-    unconditional row. The prompts are zero-padded to one length, and per-row key packing keeps
-    every row from attending over its padding, so each row matches its sequential call.
+    unconditional row. The prompts are zero-padded to one length, and the transformer's per-row
+    key packing keeps every row from attending over its padding, so each row matches its
+    sequential call.
     """
 
     def __init__(self, transformer, prompts):
@@ -55,7 +54,6 @@ class _BatchedTrueCfgTransformer:
         # (embeds, mask) per encode_prompt call: the conditional prompt, then the unconditional one.
         self._prompts_seen = prompts
         self._unconditional = None
-        self._packing = {}
         self._batched = None
 
     def __getattr__(self, name):
@@ -78,12 +76,18 @@ class _BatchedTrueCfgTransformer:
             return (unconditional,)
         if prompt is not self._positive[0] or not self._batchable():
             return self._transformer(*args, **kwargs)
-        packing = self._key_packing(kwargs["hidden_states"].shape[1], prompt.device)
+        embeds = [self._positive[0], self._negative[0]]
+        lengths = [e.shape[1] for e in embeds]
+        packing = self._transformer.padded_prompt_key_packing(lengths, kwargs["hidden_states"].shape[1], prompt.device)
         if packing is None:
             return self._transformer(*args, **kwargs)
 
         batch = dict(kwargs)
-        batch["encoder_hidden_states"], batch["encoder_hidden_states_mask"] = self._prompts()
+        batch["encoder_hidden_states"] = torch.cat(
+            [torch.nn.functional.pad(e, (0, 0, 0, max(lengths) - e.shape[1])) for e in embeds]
+        )
+        # The packing, not a mask, keeps each row off its padding.
+        batch["encoder_hidden_states_mask"] = None
         batch["hidden_states"] = kwargs["hidden_states"].repeat(2, 1, 1)
         batch["timestep"] = kwargs["timestep"].repeat(2)
         if kwargs.get("guidance") is not None:
@@ -94,15 +98,6 @@ class _BatchedTrueCfgTransformer:
         self._unconditional = output[1:]
         return (output[:1],)
 
-    def _prompts(self):
-        embeds = [self._positive[0], self._negative[0]]
-        length = max(e.shape[1] for e in embeds)
-        padded = [torch.nn.functional.pad(e, (0, 0, 0, length - e.shape[1])) for e in embeds]
-        mask = torch.zeros(2, length, dtype=torch.bool, device=embeds[0].device)
-        for row, e in enumerate(embeds):
-            mask[row, : e.shape[1]] = True
-        return torch.cat(padded), mask
-
     def _batchable(self):
         """One prompt per branch, each without padding of its own, so its length is its shape."""
         if self._batched is None:
@@ -111,15 +106,6 @@ class _BatchedTrueCfgTransformer:
                 for embeds, mask in (self._positive, self._negative)
             )
         return self._batched
-
-    def _key_packing(self, image_seq_len, device):
-        lengths = [self._positive[0].shape[1], self._negative[0].shape[1]]
-        key = (image_seq_len, *lengths)
-        if key not in self._packing:
-            self._packing[key] = per_sample_key_packing(
-                lengths, max(lengths), image_seq_len, get_sequence_parallel_world_size(), device
-            )
-        return self._packing[key]
 
 
 class _TrueCfgParallelMixin:

@@ -1,6 +1,5 @@
 """Qwen-Image-Edit's batched true CFG: the transformer stand-in batches and splits both branches."""
 
-import pytest
 import torch
 
 from xfuser.model_executor.pipelines import pipeline_qwen_image_edit as edit
@@ -9,8 +8,14 @@ from xfuser.model_executor.pipelines import pipeline_qwen_image_edit as edit
 class _Transformer:
     """Records calls and returns rows that name the prompt each row saw."""
 
-    def __init__(self):
+    def __init__(self, packs=True):
         self.calls = []
+        self.packing_requests = []
+        self.packing = {"cu_seqlens_k": torch.tensor([0, 11, 19])} if packs else None
+
+    def padded_prompt_key_packing(self, text_lens, image_seq_len, device=None):
+        self.packing_requests.append((text_lens, image_seq_len))
+        return self.packing
 
     def __call__(self, **kwargs):
         self.calls.append(kwargs)
@@ -31,12 +36,7 @@ def _step_kwargs(prompt, mask=None):
     )
 
 
-@pytest.fixture
-def sp_world(monkeypatch):
-    monkeypatch.setattr(edit, "get_sequence_parallel_world_size", lambda: 2)
-
-
-def test_the_two_branches_run_as_one_padded_batch(sp_world):
+def test_the_two_branches_run_as_one_padded_batch():
     positive, negative = torch.ones(1, 5, 3), torch.full((1, 2, 3), 2.0)
     transformer = _Transformer()
     standin = edit._BatchedTrueCfgTransformer(transformer, [(positive, None), (negative, None)])
@@ -45,20 +45,21 @@ def test_the_two_branches_run_as_one_padded_batch(sp_world):
     unconditional = standin(**_step_kwargs(negative))
 
     assert len(transformer.calls) == 1
+    assert transformer.packing_requests == [([5, 2], 6)]
     batch = transformer.calls[0]
     assert batch["encoder_hidden_states"].shape == (2, 5, 3)
     assert batch["encoder_hidden_states"][1, 2:].abs().sum() == 0
-    assert batch["encoder_hidden_states_mask"].tolist() == [[True] * 5, [True] * 2 + [False] * 3]
+    assert batch["encoder_hidden_states_mask"] is None
     assert batch["hidden_states"].shape == (2, 6, 2)
     assert batch["timestep"].tolist() == [0.5, 0.5]
     assert batch["img_shapes"] == [[(1, 2, 3)]] * 2
     assert batch["attention_kwargs"]["keep"] == 1
-    assert batch["attention_kwargs"]["cu_seqlens_k"].tolist() == [0, 11, 19]
+    assert batch["attention_kwargs"]["cu_seqlens_k"] is transformer.packing["cu_seqlens_k"]
     assert conditional[0].shape == (1, 4, 2) and float(conditional[0][0, 0, 0]) == positive.sum()
     assert float(unconditional[0][0, 0, 0]) == negative.sum()
 
 
-def test_the_stored_branch_serves_one_step_only(sp_world):
+def test_the_stored_branch_serves_one_step_only():
     positive, negative = torch.ones(1, 5, 3), torch.full((1, 2, 3), 2.0)
     transformer = _Transformer()
     standin = edit._BatchedTrueCfgTransformer(transformer, [(positive, None), (negative, None)])
@@ -73,7 +74,7 @@ def test_the_stored_branch_serves_one_step_only(sp_world):
     assert transformer.calls[-1]["encoder_hidden_states"] is negative
 
 
-def test_prompts_with_their_own_padding_keep_two_calls(sp_world):
+def test_prompts_with_their_own_padding_keep_two_calls():
     positive, negative = torch.ones(1, 5, 3), torch.full((1, 5, 3), 2.0)
     padded_mask = torch.tensor([[True, True, True, False, False]])
     transformer = _Transformer()
@@ -84,11 +85,9 @@ def test_prompts_with_their_own_padding_keep_two_calls(sp_world):
     assert [call["encoder_hidden_states"] for call in transformer.calls] == [positive, negative]
 
 
-def test_without_packing_the_branches_keep_two_calls(monkeypatch):
-    # Degree 8 with 6 image tokens pads several shards, so the prompt is replicated and gets no packing.
-    monkeypatch.setattr(edit, "get_sequence_parallel_world_size", lambda: 8)
+def test_without_packing_the_branches_keep_two_calls():
     positive, negative = torch.ones(1, 5, 3), torch.full((1, 2, 3), 2.0)
-    transformer = _Transformer()
+    transformer = _Transformer(packs=False)
     standin = edit._BatchedTrueCfgTransformer(transformer, [(positive, None), (negative, None)])
 
     standin(**_step_kwargs(positive))

@@ -380,12 +380,28 @@ class xFuserQwenImageTransformerWrapper(QwenImageTransformer2DModel):
         }
         self._sp_pad = {"local_rows": 0}
         self._text_sp_pad = {"local_rows": 0}
+        self._key_packing = (None, None)
         for block in self.transformer_blocks:
             block.attn.processor = xFuserQwenDoubleStreamAttnProcessor(self._self_attn_kwargs)
             # Qwen returns (encoder, image); each stream tracks its own SP pad.
             block.register_forward_hook(zero_sp_pad_rows_hook(self._sp_pad, index=1))
             block.register_forward_hook(zero_sp_pad_rows_hook(self._text_sp_pad, index=0))
         register_fp8_comms_eligible_modules(self, qwen_attn_modules(self))
+
+    def padded_prompt_key_packing(
+        self, text_lens: List[int], image_seq_len: int, device=None
+    ) -> Optional[Dict[str, Any]]:
+        """``attention_kwargs`` for a batch whose prompts are zero-padded to the longest of ``text_lens``.
+
+        None where the layout cannot carry per-row prompt lengths (see per_sample_key_packing).
+        Built outside ``forward``, so a compiled forward takes the packing as inputs, and the
+        last one is kept because a denoising loop asks for the same packing every step.
+        """
+        key = (tuple(text_lens), image_seq_len, get_sequence_parallel_world_size(), device)
+        if self._key_packing[0] != key:
+            packing = per_sample_key_packing(text_lens, max(text_lens), image_seq_len, key[2], device)
+            self._key_packing = (key, packing)
+        return self._key_packing[1]
 
     def forward(
         self,

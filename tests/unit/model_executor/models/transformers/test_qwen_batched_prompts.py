@@ -87,6 +87,20 @@ def _model():
     )
 
 
+def test_the_wrapper_builds_the_packing_for_its_own_layout_and_keeps_the_last(monkeypatch):
+    model = _model()
+    monkeypatch.setattr(qwen, "get_sequence_parallel_world_size", lambda: 4)
+    packing = model.padded_prompt_key_packing([7, 3], 8)
+    expected = per_sample_key_packing([7, 3], 7, 8, 4)
+    assert packing["indices_k"].tolist() == expected["indices_k"].tolist()
+    assert packing["cu_seqlens_k"].tolist() == expected["cu_seqlens_k"].tolist()
+    assert model.padded_prompt_key_packing([7, 3], 8) is packing
+    assert model.padded_prompt_key_packing([7, 2], 8) is not packing
+    # 5 image tokens at degree 8: the replicated-prompt layout.
+    monkeypatch.setattr(qwen, "get_sequence_parallel_world_size", lambda: 8)
+    assert model.padded_prompt_key_packing([8, 3], 5) is None
+
+
 def test_forward_hands_the_packing_to_attention_and_drops_the_uniform_pad(monkeypatch):
     from types import SimpleNamespace
 

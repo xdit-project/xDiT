@@ -58,7 +58,6 @@ def _worker(rank, world_size, init_method):
     from xfuser.core.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
     from xfuser.model_executor.layers import usp
     from xfuser.model_executor.models.transformers import transformer_qwen
-    from xfuser.model_executor.models.transformers.transformer_qwen import per_sample_key_packing
 
     torch.cuda.set_device(rank)
     device = torch.device(f"cuda:{rank}")
@@ -101,7 +100,7 @@ def _worker(rank, world_size, init_method):
                 tolerance = 0.05 * prompt_effect
 
                 padded = torch.cat([positive, torch.nn.functional.pad(negative, (0, 0, 0, 11))])
-                packing = per_sample_key_packing([24, 13], 24, image_tokens, world_size, device)
+                packing = model.padded_prompt_key_packing([24, 13], image_tokens, device)
                 assert packing is not None
                 batched = _call(model, hidden_states.repeat(2, 1, 1), padded, img_shapes, dict(packing))
 

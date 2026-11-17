@@ -131,7 +131,7 @@ The default is `sdpa_math`. Cross-attention in Wan has 512 text keys, so the ful
 
 A and B use the same run arguments, so B must produce the same call addresses as A. A difference means that the
 pipeline run of B did not reach a call that A captured, or the reverse. Then the fidelity of B for that call is not
-checked. The status is NOT_REACHED_B (the name is Not confirmed), and the case fails at once.
+checked. The status is NOT_REACHED_IN_B, and the case fails at once.
 
 ## 6. NaN and Inf
 
@@ -156,6 +156,6 @@ text "reference problem" ([checks.md](checks.md), section 4).
 
 1. FAILED_TO_START, for a path that does not resolve in B, or for every case without data after a failure outside
    the replays.
-2. NON_DETERMINISTIC_B, REPLAY_MISMATCH_B and NOT_REACHED_B.
+2. NON_DETERMINISTIC_B, REPLAY_MISMATCH_B and NOT_REACHED_IN_B.
 3. CRASHED_B, HUNG_B and ERROR_B.
 4. UNSUPPORTED, for one case whose inputs B cannot use.

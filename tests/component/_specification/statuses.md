@@ -16,7 +16,7 @@ human-readable messages instead.
 | ERROR_A, ERROR_B | worker | An exception ended the instance while it replayed this case. The state holds the traceback. | no | failed |
 | NON_DETERMINISTIC_A, NON_DETERMINISTIC_B | worker | Two replays of one call gave different outputs. | yes | failed at once if the determinism policy requires determinism; warning if it permits nondeterminism ([checks.md](checks.md), section 3) |
 | REPLAY_MISMATCH_A, REPLAY_MISMATCH_B | worker | Two replays agree, but differ from the capture. | yes, not trusted | failed at once |
-| NOT_REACHED_B (Not confirmed) | worker of B | The call addresses of B differ from those of A. | partly | failed at once |
+| NOT_REACHED_IN_B | worker of B | The call addresses of B differ from those of A. | partly | failed at once |
 | DATA_COMPLETE | worker of B | A and B finished the case. The test function can compare. | yes | from the checks |
 | PASSED | test function | All checks passed. The data files are deleted. | deleted | passed |
 | FAILED | test function | At least one deferred check failed. The data files stay. | yes | failed |
@@ -34,7 +34,7 @@ A reuse run does not start A or B. It uses the stored states ([files.md](files.m
 | UNSUPPORTED | skipped again, with the stored reason |
 | FAILED, data present | compared again with the current tolerances |
 | a status without data | the stored status and reason again |
-| NON_DETERMINISTIC, REPLAY_MISMATCH, NOT_REACHED_B | the stored status again |
+| NON_DETERMINISTIC, REPLAY_MISMATCH, NOT_REACHED_IN_B | the stored status again |
 | ABOUT_TO_START | error: "the previous run did not finish; clean the directory" |
 | no state (the case was not in the original run) | error: "this case was not part of the run that produced the data" |
 
@@ -51,7 +51,7 @@ whether to start B.
 ## 4. Mapping to pytest outcomes
 
 1. **failed:** tolerance failures and the other deferred checks; NON_DETERMINISTIC if the determinism policy
-   requires determinism; REPLAY_MISMATCH; NOT_REACHED_B; CRASHED, HUNG and ERROR of A or B.
+   requires determinism; REPLAY_MISMATCH; NOT_REACHED_IN_B; CRASHED, HUNG and ERROR of A or B.
 2. **error:** FAILED_TO_START; ABOUT_TO_START in a reuse run; a case that was not in the original run.
 3. **skipped:** UNSUPPORTED; PASSED in a reuse run.
 

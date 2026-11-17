@@ -310,6 +310,7 @@ class xFuserMiniMaxH3ImageModel(MiniMaxH3TextEncoderMixin, xFuserModel):
         # Without CUDA graphs: the decoder's blocks replay one graph back to back, so
         # each replay would overwrite the output the next block is still reading.
         self.pipe.vae.compile_repeated_blocks(mode="default", fullgraph=False)
+        self._compile_text_encoder()
         if self.config.fully_shard_degree > 1:
             super()._compile_model(input_args)
             return
@@ -326,3 +327,15 @@ class xFuserMiniMaxH3ImageModel(MiniMaxH3TextEncoderMixin, xFuserModel):
             fullgraph=not get_runtime_state().has_attention_schedule(),
         )
         self._run_timed_pipe(copy.deepcopy(input_args))
+
+    def _compile_text_encoder(self) -> None:
+        """Compile the Qwen3-VL decoder stack that encodes the prompt.
+
+        Encoding a prompt is launch-bound in eager mode. The prompt length varies
+        per request, so the graph is dynamic in it. The tensor-parallel encoder
+        all-reduces inside its layers, and offload moves it between devices, so
+        both stay eager.
+        """
+        if self.config.text_encoder_tp_degree > 1 or self.config.enable_model_cpu_offload:
+            return
+        self.pipe.text_encoder.model.language_model.compile(dynamic=True)

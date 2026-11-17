@@ -1,5 +1,4 @@
 import torch
-import torch.nn.functional as F
 from math import prod
 import numpy as np
 from typing import Optional, Dict, Any, Union, Tuple, List
@@ -15,7 +14,7 @@ from diffusers.utils import (
     scale_lora_layers,
     unscale_lora_layers,
 )
-from xfuser.model_executor.layers.usp import USP
+from xfuser.model_executor.layers.usp import USP, masked_attention_backend
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
 from xfuser.core.distributed import (
     get_runtime_state,
@@ -166,29 +165,19 @@ class xFuserQwenDoubleStreamAttnProcessor(QwenDoubleStreamAttnProcessor2_0):
             joint_query = torch.cat([txt_query, img_query], dim=1)
             joint_key = torch.cat([txt_key, img_key], dim=1)
             joint_value = torch.cat([txt_value, img_value], dim=1)
-            if attention_mask is not None:
-                # PipeFusion does not combine with sequence parallelism, so use
-                # SDPA for padded prompt batches. Several optimized backends
-                # accepted ``attn_mask`` here but silently ignored it.
-                joint_hidden_states = F.scaled_dot_product_attention(
-                    joint_query.transpose(1, 2),
-                    joint_key.transpose(1, 2),
-                    joint_value.transpose(1, 2),
-                    attn_mask=attention_mask,
-                    dropout_p=0.0,
-                    is_causal=False,
-                ).transpose(1, 2)
-            else:
-                joint_hidden_states = USP(
-                    joint_query.transpose(1, 2),
-                    joint_key.transpose(1, 2),
-                    joint_value.transpose(1, 2),
-                    dropout_p=0.0,
-                    is_causal=False,
-                    attention_kwargs=None,
-                    attn_layer=None,
-                    head_balance_layer=attn,
-                ).transpose(1, 2)
+            query, key, value = (tensor.transpose(1, 2) for tensor in (joint_query, joint_key, joint_value))
+            attention_kwargs = {"attn_mask": attention_mask} if attention_mask is not None else None
+            joint_hidden_states = USP(
+                query,
+                key,
+                value,
+                dropout_p=0.0,
+                is_causal=False,
+                backend=masked_attention_backend(query, key, value, attention_kwargs),
+                attention_kwargs=attention_kwargs,
+                attn_layer=None,
+                head_balance_layer=attn,
+            ).transpose(1, 2)
             joint_dtype = img_query.dtype
         elif self.attention_kwargs.get("replicated_prompt_tokens"):
             # Tiny sequences can have padding on several ranks. Keep their prompt

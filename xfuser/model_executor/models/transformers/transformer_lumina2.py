@@ -21,11 +21,10 @@ from xfuser.core.distributed import (
     get_sp_group,
     get_ulysses_parallel_world_size,
 )
-from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.model_executor.layers.attention_processor import (
     xFuserAttentionProcessorRegister,
 )
-from xfuser.model_executor.layers.usp import USP
+from xfuser.model_executor.layers.usp import USP, masked_attention_backend
 
 from .base_transformer import xFuserTransformerBaseWrapper
 from .register import xFuserTransformerWrappersRegister
@@ -100,15 +99,11 @@ class xFuserLumina2AttnProcessor2_0(Lumina2AttnProcessor2_0):
             query = query * (softmax_scale / attn.scale)
 
         attention_kwargs = None
-        backend = None
         if attention_mask is not None:
             attention_kwargs = {
                 "attn_mask": attention_mask.bool().view(batch_size, 1, 1, -1)
             }
-            # Several optimized backends ignore arbitrary masks. PyTorch SDPA
-            # supports this broadcastable key mask and still selects an
-            # appropriate CUDA kernel internally.
-            backend = AttentionBackendType.SDPA
+        backend = masked_attention_backend(query, key, value, attention_kwargs)
 
         # Keep the eight KV heads compact through all-to-all; USP repeats each
         # rank's local KV shard only after communication.

@@ -27,24 +27,18 @@ from diffusers.models.transformers.transformer_flux import (
     _get_qkv_projections,
 )
 
-from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.core.distributed import (
     get_ring_parallel_world_size,
-    get_runtime_state,
     get_sequence_parallel_rank,
     get_sequence_parallel_world_size,
     get_sp_group,
     get_ulysses_parallel_world_size,
 )
-from xfuser.model_executor.layers.usp import USP
+from xfuser.model_executor.layers.usp import USP, masked_attention_backend
 
 # Keyword the wrapper uses to hand the joint-sequence bias to every attention
 # processor through the blocks' ``joint_attention_kwargs``.
 ATTN_BIAS_KWARG = "xfuser_attn_bias"
-
-# Backends that consume ``attention_kwargs["attn_mask"]``. Any other backend
-# would silently drop the bias.
-MASK_ATTENTION_BACKENDS = frozenset({AttentionBackendType.SDPA, AttentionBackendType.SDPA_MATH})
 
 
 def _sp_order(tokens: torch.Tensor, num_txt: int, sp_world_size: int) -> torch.Tensor:
@@ -175,18 +169,14 @@ class xFuserChromaAttnProcessor(FluxAttnProcessor):
             query = apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
             key = apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
 
-        backend = None
-        attention_kwargs = None
-        if xfuser_attn_bias is not None:
-            backend = get_runtime_state().attention_backend
-            if backend not in MASK_ATTENTION_BACKENDS:
-                backend = AttentionBackendType.SDPA
-            attention_kwargs = {"attn_mask": xfuser_attn_bias}
+        query, key, value = (tensor.transpose(1, 2) for tensor in (query, key, value))
+        attention_kwargs = {"attn_mask": xfuser_attn_bias} if xfuser_attn_bias is not None else None
+        backend = masked_attention_backend(query, key, value, attention_kwargs)
 
         hidden_states = USP(
-            query.transpose(1, 2),
-            key.transpose(1, 2),
-            value.transpose(1, 2),
+            query,
+            key,
+            value,
             dropout_p=0.0,
             is_causal=False,
             attn_layer=attn,

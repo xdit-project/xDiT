@@ -20,7 +20,7 @@ from xfuser.model_executor.layers.attention_mask import (
     make_attn_mask_with_meta,
 )
 from xfuser.model_executor.layers.norms import _replace_rms_norms_with_aiter
-from xfuser.model_executor.layers.usp import USP, attention
+from xfuser.model_executor.layers.usp import USP, attention, masked_attention_backend
 from xfuser.model_executor.models.transformers.transformers_utils import (
     chunk_and_pad_sequence,
     gather_and_unpad,
@@ -136,6 +136,7 @@ class xFuserLTX2PerturbedAttnProcessor:
                 dropout_p=0.0,
                 is_causal=False,
                 attention_kwargs=attn_kw,
+                backend=masked_attention_backend(query, key, value, attn_kw),
             )
             hidden_states = hidden_states.transpose(1, 2).flatten(2, 3)
             hidden_states = hidden_states.to(query.dtype)
@@ -243,7 +244,13 @@ class xFuserLTX2AudioVideoAttnProcessor:
             # Sharded video keys: USP drops the padding after its exchange.
             attn_kw = {**self.attention_kwargs, **(attn_kw or {})}
         hidden_states = self.attention_method(
-            query, key, value, dropout_p=0.0, is_causal=False, attention_kwargs=attn_kw
+            query,
+            key,
+            value,
+            dropout_p=0.0,
+            is_causal=False,
+            attention_kwargs=attn_kw,
+            backend=masked_attention_backend(query, key, value, attn_kw),
         )
         hidden_states = hidden_states.transpose(1, 2).flatten(2, 3)
         hidden_states = hidden_states.to(query.dtype)

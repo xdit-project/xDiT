@@ -9,7 +9,9 @@ pytest.importorskip("diffusers.models.transformers.transformer_qwenimage")
 
 from diffusers.models.transformers.transformer_qwenimage import QwenImageTransformer2DModel  # noqa: E402
 
+from xfuser.model_executor.layers import usp  # noqa: E402
 from xfuser.model_executor.models.transformers import transformer_qwen  # noqa: E402
+from xfuser.core.attention import AttentionBackendType  # noqa: E402
 
 
 def _tiny_model():
@@ -42,8 +44,9 @@ def _install_pipefusion_processors(model, monkeypatch):
     monkeypatch.setattr(
         transformer_qwen,
         "get_runtime_state",
-        lambda: SimpleNamespace(num_pipeline_patch=2),
+        lambda: SimpleNamespace(num_pipeline_patch=2, attention_backend=AttentionBackendType.AITER_FLYDSL_FP8),
     )
+    monkeypatch.setattr(usp, "get_runtime_state", transformer_qwen.get_runtime_state)
     monkeypatch.setattr(transformer_qwen, "runtime_state_is_initialized", lambda: True)
     monkeypatch.setattr(transformer_qwen, "get_cache_manager", lambda: cache)
     monkeypatch.setattr(transformer_qwen, "_HAS_FLYDSL", False)
@@ -167,15 +170,15 @@ def test_pipefusion_attention_caches_only_image_kv_and_keeps_text_fresh(monkeypa
         calls["sdpa"] = (query, key, value, kwargs)
         return query
 
-    monkeypatch.setattr(transformer_qwen, "get_runtime_state", lambda: SimpleNamespace(num_pipeline_patch=2))
-    monkeypatch.setattr(transformer_qwen, "runtime_state_is_initialized", lambda: True)
-    monkeypatch.setattr(transformer_qwen, "get_cache_manager", Cache)
-    monkeypatch.setattr(transformer_qwen.F, "scaled_dot_product_attention", fake_sdpa)
     monkeypatch.setattr(
         transformer_qwen,
-        "USP",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("masked attention used USP")),
+        "get_runtime_state",
+        lambda: SimpleNamespace(num_pipeline_patch=2, attention_backend=AttentionBackendType.AITER_FLYDSL_FP8),
     )
+    monkeypatch.setattr(usp, "get_runtime_state", transformer_qwen.get_runtime_state)
+    monkeypatch.setattr(transformer_qwen, "runtime_state_is_initialized", lambda: True)
+    monkeypatch.setattr(transformer_qwen, "get_cache_manager", Cache)
+    monkeypatch.setattr(transformer_qwen, "USP", fake_sdpa)
 
     image_out, text_out = processor(
         attn,
@@ -193,6 +196,7 @@ def test_pipefusion_attention_caches_only_image_kv_and_keeps_text_fresh(monkeypa
     _, joint_key, _, sdpa_kwargs = calls["sdpa"]
     torch.testing.assert_close(joint_key[:, :, :2].transpose(1, 2).flatten(2), text)
     assert joint_key.shape[2] == 4
-    assert sdpa_kwargs["attn_mask"].shape == (1, 1, 1, 4)
+    assert sdpa_kwargs["backend"] == AttentionBackendType.SDPA
+    assert sdpa_kwargs["attention_kwargs"]["attn_mask"].shape == (1, 1, 1, 4)
     torch.testing.assert_close(image_out, image)
     torch.testing.assert_close(text_out, text)

@@ -53,3 +53,24 @@ def test_text_cross_attention_on_sdpa_attends_only_to_valid_text(text_cross_atte
                 hidden_states[b : b + 1], encoder_hidden_states=text[b : b + 1, valid[b].bool()]
             )
             torch.testing.assert_close(out[b : b + 1], alone)
+
+
+@pytest.mark.parametrize(
+    "backend", [AttentionBackendType.SDPA, AttentionBackendType.SDPA_MATH, AttentionBackendType.AITER_FLYDSL_FP8]
+)
+@pytest.mark.parametrize("ring_degree", [1, 2])
+@torch.no_grad()
+def test_dense_text_mask_matches_removing_padding(text_cross_attention, backend, ring_degree, monkeypatch):
+    monkeypatch.setattr("xfuser.model_executor.layers.usp.model_parallel_is_initialized", lambda: True)
+    monkeypatch.setattr("xfuser.model_executor.layers.usp.get_ulysses_parallel_world_size", lambda: 1)
+    monkeypatch.setattr("xfuser.model_executor.layers.usp.get_ring_parallel_world_size", lambda: ring_degree)
+    torch.manual_seed(2)
+    hidden_states = torch.randn(1, 5, 16)
+    text = torch.randn(1, 6, 16)
+    mask = torch.tensor([[[[0.0, 0.0, 0.0, float("-inf"), float("-inf"), float("-inf")]]]])
+    state = SimpleNamespace(attention_backend=backend)
+    with mock.patch("xfuser.model_executor.layers.usp.get_runtime_state", return_value=state):
+        actual = text_cross_attention(hidden_states, encoder_hidden_states=text, attention_mask=mask)
+        state.attention_backend = AttentionBackendType.SDPA
+        expected = text_cross_attention(hidden_states, encoder_hidden_states=text[:, :3])
+    torch.testing.assert_close(actual, expected)

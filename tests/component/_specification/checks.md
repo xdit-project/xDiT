@@ -21,7 +21,7 @@ metric.
    2. If the policy permits nondeterminism, the test prints a warning and continues with section 4. The warning
       reminds the user that the policy permits nondeterminism. It also lists the calls whose fidelity is unknown.
 3. **REPLAY_MISMATCH_A or REPLAY_MISMATCH_B.** The test fails at once, whatever the policy is.
-4. **NOT_REACHED_B.** The test fails at once.
+4. **NOT_REACHED_IN_B.** The test fails at once.
 5. **Message.** The instance knows these statuses before the test function starts. The failure message therefore
    lists every call and rank that has one of these statuses.
 6. **Metrics file.** A case that stops here writes one line with its outcome and no metric values

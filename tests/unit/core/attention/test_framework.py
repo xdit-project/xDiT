@@ -1150,6 +1150,27 @@ def test_packed_keys_requires_the_longest_segment_to_be_the_valid_count():
     assert reason is not None and "max_seqlen_k" in reason
 
 
+def test_trailing_pad_keys_takes_a_dense_call_and_one_declared_pad():
+    from xfuser.core.attention.constraints import TRAILING_PAD_KEYS
+
+    t = torch.empty((1, 2, 8, 128))
+    assert TRAILING_PAD_KEYS.unmet(t, t, t, AttnCall()) is None
+    assert TRAILING_PAD_KEYS.unmet(t, t, t, _packed(4, valid_kv_len=4)) is None
+
+
+def test_trailing_pad_keys_refuses_what_only_a_gather_could_serve():
+    """Unlike PACKED_KEYS, there is no gather to fall back on: an undeclared
+    pack and a batch that one valid_kv_len cannot describe are both refused,
+    and a declared length is still checked."""
+    from xfuser.core.attention.constraints import TRAILING_PAD_KEYS
+
+    t = torch.empty((1, 2, 8, 128))
+    assert "valid_kv_len" in TRAILING_PAD_KEYS.unmet(t, t, t, _packed(4))
+    batch = torch.empty((2, 2, 8, 128))
+    assert "one sequence" in TRAILING_PAD_KEYS.unmet(batch, batch, batch, _packed(4, valid_kv_len=4))
+    assert "max_seqlen_k" in TRAILING_PAD_KEYS.unmet(t, t, t, _packed(6, valid_kv_len=4))
+
+
 def test_dense_mha_v4_serves_packed_keys_but_sparge_does_not():
     """Sparge needs the key length padded to its KV tile, which is exactly the
     alignment both a trailing-pad slice and a gather remove."""
@@ -1163,3 +1184,22 @@ def test_dense_mha_v4_serves_packed_keys_but_sparge_does_not():
 
     sparge = registry.get(AttentionBackendType.AITER_FP8_SPARGE)
     assert sparge.rejects(t, t, t, call) is not None
+
+
+@pytest.mark.parametrize("with_mask", [False, True])
+def test_a_backend_can_apply_dense_masks_and_accept_unmasked_packing(with_mask):
+    from xfuser.core.attention.backends.sdpa.kernel import sdpa
+
+    query = torch.zeros(1, 1, 1, 8)
+    key = torch.zeros(1, 1, 2, 8)
+    value = torch.stack([torch.ones(8), torch.full((8,), 100.0)]).view(1, 1, 2, 8)
+    packing = VarlenPacking(torch.tensor([0, 1]), torch.tensor([0, 2], dtype=torch.int32), 2)
+    kwargs = {"indices_k": packing.indices_k, "cu_seqlens_k": packing.cu_seqlens_k, "max_seqlen_k": 2}
+    call = (
+        AttnCall(attention_kwargs={"attn_mask": torch.tensor([[[[True, False]]]])})
+        if with_mask
+        else AttnCall(varlen=packing, attention_kwargs=kwargs)
+    )
+    spec = _spec(AttentionBackendType.AITER_BF16, impl=sdpa, accepts=ANY_CALL, applies_attn_mask=True)
+    output, _ = spec.run(query, key, value, call)
+    torch.testing.assert_close(output, torch.full_like(query, 1.0 if with_mask else 50.5))

@@ -62,10 +62,10 @@ Text-encoder TP is separate; see the **Text TP** column.
 | [MiniMax-H3-Turbo](#model-minimax-h3-turbo) | ✓ | — | — | — | — | — | ✓ | ✓ | D |
 | [MOSS-Image](#model-moss-image) | ✓ | ✓ | ✓ | — | ✓ | — | — | — | — |
 | [Prism](#model-prism) | ✓ | — | — | — | — | — | — | — | — |
-| [Qwen-Image](#model-qwen-image) | ✓ | ✓ | — | — | ✓ | — | ✓ | — | D |
+| [Qwen-Image](#model-qwen-image) | ✓ | ✓ | — | ✓ | ✓ | — | ✓ | — | D |
 | [Qwen-Image-2.1](#model-qwen-image-2-1) | ✓ | — | — | — | ✓ | — | ✓ | — | — |
 | [Qwen-Image-2.1-Turbo](#model-qwen-image-2-1-turbo) | ✓ | — | — | — | ✓ | — | ✓ | — | — |
-| [Qwen-Image-Edit](#model-qwen-image-edit) | ✓ | ✓ | ✓ | — | ✓ | — | ✓ | — | D+E |
+| [Qwen-Image-Edit](#model-qwen-image-edit) | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | — | D+E |
 | [SD3.5](#model-sd3-5) | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | — | D |
 | [SkyReels-V2-I2V-14B](#model-skyreels-v2-i2v-14b) | ✓ | ✓ | — | — | ✓ | — | ✓ | — | — |
 | [SkyReels-V2-T2V-14B](#model-skyreels-v2-t2v-14b) | ✓ | ✓ | — | — | ✓ | — | ✓ | — | — |

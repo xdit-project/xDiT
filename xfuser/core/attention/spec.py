@@ -54,6 +54,16 @@ class AttentionBackendType(Enum):
     AITER_F6F4_SPARGE = "AITER F6F4 Sparge"
     AITER_MXFP4_SPARGE = "AITER MXFP4 Sparge"
     AITER_F4F4_SPARGE = "AITER F4F4 Sparge"
+    AITER_BF16_SOL = "AITER BF16 Sol"
+    AITER_BF16FP8_SOL = "AITER BF16/FP8 Sol"
+    AITER_I8FP8_SOL = "AITER I8FP8 Sol"
+    AITER_FP8_SOL = "AITER FP8 Sol"
+    AITER_MXFP8_SOL = "AITER MXFP8 Sol"
+    AITER_F8F6_SOL = "AITER F8F6 Sol"
+    AITER_MXFP6_SOL = "AITER MXFP6 Sol"
+    AITER_F6F6_SOL = "AITER F6F6 Sol"
+    AITER_F6F4_SOL = "AITER F6F4 Sol"
+    AITER_MXFP4_SOL = "AITER MXFP4 Sol"
     AITER_SAGE = "AITER Sage"
     AITER_SPARSE_SAGE = "AITER Sparse Sage"
     AITER_SAGE_V2 = "AITER Sage V2"
@@ -83,6 +93,10 @@ class Sparsity(Enum):
     SPARGE = "sparge"
     VSA = "vsa"
     H3 = "h3"
+    # Sol-Attn on AITER MHA v4: routes its own block selection and corrects the
+    # skipped blocks from pooled K/V. Not SPARGE, because a model checked for
+    # one is not thereby checked for the other.
+    SOL = "sol"
     BSA = "bsa"
 
 
@@ -124,6 +138,10 @@ class AttnCall:
     # exercised without an initialised process group.
     ulysses_world_size: int = 1
     ring_world_size: int = 1
+
+    # The transformer forward's index in the run, as a 0-d tensor, for a
+    # backend that varies per step. None when nothing tracks steps.
+    step: Optional[torch.Tensor] = None
 
     attention_kwargs: dict = field(default_factory=dict)
 
@@ -204,6 +222,9 @@ class Spec:
     accepts_prequantized: bool = False
     prequant_rotate: Optional[Callable] = None
 
+    # Applies attention_kwargs["attn_mask"] directly, independent of key packing.
+    applies_attn_mask: bool = False
+
     # Which calls the kernel can serve -- head dim, causality, varlen packing,
     # dropout, self- vs cross-attention. Enforced by run() before dispatch, so
     # an unsupported call raises with a reason instead of computing something
@@ -274,6 +295,8 @@ class Spec:
 
     def rejects(self, query, key, value, call: AttnCall) -> Optional[str]:
         """Why this backend cannot serve this particular call, or None."""
+        if call.varlen is None and call.attention_kwargs.get("attn_mask") is not None and not self.applies_attn_mask:
+            return "does not apply attn_mask without packed keys"
         return self.accepts.unmet(query, key, value, call)
 
     def validate(self, runtime_config) -> None:

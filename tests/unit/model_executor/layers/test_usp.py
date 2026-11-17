@@ -239,7 +239,7 @@ def usp_kv_lens(monkeypatch):
     runtime_state = SimpleNamespace(
         fp8_comms=None,
         attention_backend=AttentionBackendType.SDPA,
-        runtime_config=SimpleNamespace(use_spargeattn_head_balance=False),
+        runtime_config=SimpleNamespace(use_sparseattn_head_balance=False),
     )
     monkeypatch.setattr(usp, "get_runtime_state", lambda: runtime_state)
     for degree in ("sequence", "ulysses", "ring"):
@@ -398,3 +398,65 @@ def test_usp_refuses_a_declared_pad_with_joint_tensors_where_the_backend_would_k
             backend=backend,
             attention_kwargs=attention_kwargs,
         )
+
+
+@pytest.mark.parametrize("route", ["native", "fallback", "override"])
+@pytest.mark.parametrize("additive", [False, True])
+def test_dense_mask_preserves_output_and_backend_selection(route, additive):
+    from xfuser.core.attention import registry
+    from xfuser.core.attention.backends.sdpa.kernel import sdpa
+    from xfuser.core.attention.spec import AttnCall
+
+    query = torch.zeros(1, 1, 1, 8)
+    key = torch.zeros(1, 1, 2, 8)
+    value = torch.stack([torch.ones(8), torch.full((8,), 100.0)]).view(1, 1, 2, 8)
+    mask = torch.tensor([[[[0.0, float("-inf")]]]]) if additive else torch.tensor([[[[True, False]]]])
+    kwargs = {"attn_mask": mask}
+    capable = Spec(
+        AttentionBackendType.SDPA, impl=sdpa, accepts=ANY_CALL, requires=ALWAYS, ring=ALWAYS, applies_attn_mask=True
+    )
+    selected = Spec(
+        AttentionBackendType.AITER_BF16,
+        impl=sdpa,
+        accepts=ANY_CALL,
+        requires=ALWAYS,
+        ring=ALWAYS,
+        applies_attn_mask=route == "native",
+        fallback=AttentionBackendType.SDPA if route == "fallback" else None,
+    )
+    with registry.using([capable, selected]):
+        backend = usp.masked_attention_backend(query, key, value, kwargs, backend=selected.type)
+        assert backend == (capable.type if route == "override" else selected.type)
+        output, _ = registry.get(backend).run(query, key, value, AttnCall(attention_kwargs=kwargs))
+        torch.testing.assert_close(output, torch.ones_like(query))
+        if route == "override":
+            with pytest.raises(NotImplementedError, match="does not apply attn_mask"):
+                registry.get(selected.type).run(query, key, value, AttnCall(attention_kwargs=kwargs))
+
+
+@pytest.mark.parametrize("unsafe", ["query", "key", "value", "pre_quantized", "q_descale", "k_descale", "v_descale"])
+def test_dense_mask_refuses_unsafe_sdpa_override(monkeypatch, unsafe):
+    query, key, value = (torch.zeros(1, 1, 2, 8) for _ in range(3))
+    tensors = [query, key, value]
+    kwargs = {"attn_mask": torch.tensor([True, False])}
+    if unsafe in ("query", "key", "value"):
+        tensors[("query", "key", "value").index(unsafe)] = tensors[0].to(torch.float8_e4m3fn)
+    else:
+        kwargs[unsafe] = True if unsafe == "pre_quantized" else torch.ones(1)
+    with pytest.raises(NotImplementedError, match="prequantized"):
+        usp.masked_attention_backend(*tensors, kwargs, backend=AttentionBackendType.AITER_FLYDSL_FP8)
+
+
+def test_usp_refuses_a_masked_sdpa_override_before_ring_exchange(monkeypatch):
+    state = SimpleNamespace(attention_backend=AttentionBackendType.AITER_FLYDSL_FP8)
+    monkeypatch.setattr(usp, "get_runtime_state", lambda: state)
+    monkeypatch.setattr(usp, "get_ulysses_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(usp, "get_ring_parallel_world_size", lambda: 2)
+    query = torch.zeros(1, 1, 2, 8)
+    kwargs = {"attn_mask": torch.tensor([True, False])}
+    backend = usp.masked_attention_backend(query, query, query, kwargs)
+    with mock.patch.object(usp, "ring_attn") as exchange, mock.patch.object(usp, "fp8_attention_kwargs") as quantize:
+        with pytest.raises(NotImplementedError, match="SDPA cannot be used with ring parallelism"):
+            usp.USP(query, query, query, backend=backend, attention_kwargs=kwargs)
+    exchange.assert_not_called()
+    quantize.assert_not_called()

@@ -405,34 +405,33 @@ PACKAGES_CHECKER = PackagesEnvChecker()
 _TORCH_GROUPNORM = torch.nn.GroupNorm
 
 
-def restore_torch_group_norm_for_distvae() -> bool:
-    """Restore torch GroupNorm when xDiT's ROCm setup replaced it with AITER's.
+def bind_group_norm(use_aiter: bool) -> None:
+    """Bind the GroupNorm class that the modules built after this one use.
 
-    DistVAE discovers norms to shard by their torch type. This must run before a VAE intended
-    for sharding is built, while xDiT is still validating its environment.
+    AITER's kernel is the faster of the two run eagerly, so a run takes it
+    unless it needs the torch class: DistVAE identifies the layers to shard by
+    that type, and AITER's is an opaque custom op that Inductor cannot fuse
+    across.  A caller settles this before it builds its model, because rebinding
+    the class leaves the modules that exist already on the implementation they
+    were built with.
+
+    Asking for AITER off ROCm, or without AITER installed, keeps torch's.
     """
-    if torch.nn.GroupNorm.__module__ != "aiter.ops.groupnorm":
-        return False
-    torch.nn.GroupNorm = _TORCH_GROUPNORM
-    return True
-
-
-def _setup_rocm_libraries():
-    if PACKAGES_CHECKER.packages_info.get("has_aiter", False):
-        try:
-            from aiter.ops.groupnorm import GroupNorm
-
-            torch.nn.GroupNorm = GroupNorm
-            logger.info("Using AITER GroupNorm as torch.nn.GroupNorm")
-        except ImportError:
-            logger.warning(
-                "Using AITER but AITER GroupNorm is not available, please update AITER. "
-                "Defaulting to torch GroupNorm implementation"
-            )
-
-
-if _is_hip():
-    _setup_rocm_libraries()
+    if not use_aiter:
+        torch.nn.GroupNorm = _TORCH_GROUPNORM
+        return
+    if not _is_hip() or not PACKAGES_CHECKER.packages_info.get("has_aiter", False):
+        return
+    try:
+        from aiter.ops.groupnorm import GroupNorm
+    except ImportError:
+        logger.warning(
+            "Using AITER but AITER GroupNorm is not available, please update AITER. "
+            "Defaulting to torch GroupNorm implementation"
+        )
+        return
+    torch.nn.GroupNorm = GroupNorm
+    logger.info("Using AITER GroupNorm as torch.nn.GroupNorm")
 
 
 def __getattr__(name):

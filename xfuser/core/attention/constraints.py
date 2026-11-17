@@ -166,6 +166,25 @@ class _PackedKeys(CallConstraint):
         return None
 
 
+class _TrailingPadKeys(CallConstraint):
+    """Packed keys only as one sequence's declared trailing pad.
+
+    For a kernel that can drop a pad by length but cannot gather: keys packed
+    any other way -- several segments, a pad that is not a trailing block, or a
+    batch one ``valid_kv_len`` cannot describe -- would be attended across
+    their boundaries.
+    """
+
+    def unmet(self, query, key, value, call) -> Optional[str]:
+        if call.varlen is None:
+            return None
+        if call.attention_kwargs.get("valid_kv_len") is None:
+            return "serves packed keys only as a trailing pad declared through valid_kv_len"
+        if key.shape[0] != 1:
+            return f"serves a trailing key pad on one sequence only, got batch size {key.shape[0]}"
+        return PACKED_KEYS.unmet(query, key, value, call)
+
+
 @dataclass(frozen=True)
 class _NoDropout(CallConstraint):
     def unmet(self, query, key, value, call) -> Optional[str]:
@@ -208,6 +227,7 @@ SELF_ATTENTION = _SelfAttention()
 NO_VARLEN = _NoVarlen()
 MASKED_VARLEN = _MaskedVarlen()
 PACKED_KEYS = _PackedKeys()
+TRAILING_PAD_KEYS = _TrailingPadKeys()
 NO_DROPOUT = _NoDropout()
 BF16 = _BFloat16()
 SAME_QKV = _SameQKV()

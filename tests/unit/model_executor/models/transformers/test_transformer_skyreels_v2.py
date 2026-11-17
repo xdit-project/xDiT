@@ -79,8 +79,9 @@ def single_rank(monkeypatch):
             attention_backend=AttentionBackendType.SDPA,
             get_cross_attention_backend=lambda: AttentionBackendType.SDPA,
             fp8_comms=None,
-            runtime_config=SimpleNamespace(use_spargeattn_head_balance=False),
+            runtime_config=SimpleNamespace(use_sparseattn_head_balance=False),
             increment_step_counter=lambda: None,
+            current_step=lambda: None,
         )
         monkeypatch.setattr("xfuser.core.distributed.parallel_state._SP", sp_group)
         monkeypatch.setattr("xfuser.core.distributed.runtime_state._RUNTIME", runtime)

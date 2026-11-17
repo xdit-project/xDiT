@@ -9,7 +9,7 @@ from typing import Optional
 
 import torch
 
-from xfuser.core.sparge_attention.head_balance import COST_SINK_KEY
+from xfuser.core.attention.sparsity.head_balance import COST_SINK_KEY
 from xfuser.core.sparge_attention.sparge import (
     compute_sparge_block_mask,
     mask_padded_kv_blocks,

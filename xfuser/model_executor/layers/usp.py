@@ -1,6 +1,6 @@
 # This file implements USP with torch version >= '2.5.0'
 import functools
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.distributed._functional_collectives as ft_c
@@ -31,7 +31,7 @@ from xfuser.core.attention.backends.aiter_mha_v4.attention_a2a import (
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from xfuser.logger import init_logger
 from xfuser.core.attention import registry as attention_registry
-from xfuser.core.attention.spec import VarlenPacking
+from xfuser.core.attention.spec import AttentionBackendType, VarlenPacking
 from xfuser.core.attention.spec import AttnCall
 from xfuser.core.attention.spec import Sparsity
 from xfuser.core.distributed.fp8_comms import (
@@ -40,7 +40,7 @@ from xfuser.core.distributed.fp8_comms import (
     fp8_comms_output_all_to_all,
     fp8_observe_output,
 )
-from xfuser.core.sparge_attention.head_balance import (
+from xfuser.core.attention.sparsity.head_balance import (
     apply_head_balance,
     revert_head_balance,
 )
@@ -56,10 +56,11 @@ from xfuser.core.distributed.attention_a2a import (
 )
 from xfuser.model_executor.layers import usp_sdma
 
-# Sparge backends whose kernel cost can be load-balanced across Ulysses ranks.
-# These all build a block mask via _build_sparge_block_mask and write the
-# per-head cost into the head-balance "cost sink". Non-sparge backends are
-# excluded so head balancing is a clean no-op for them.
+# Backends whose kernel cost can be load-balanced across Ulysses ranks, i.e. the
+# ones that write a per-head cost into the head-balance "cost sink". The Sparge
+# backends get there by reducing the block mask they build; the AITER Sol
+# backends reduce the one their own routing returned. Backends absent here
+# publish no cost, so head balancing is a clean no-op for them.
 _HEAD_BALANCE_BACKENDS = attention_registry.types_where(head_balanced=True)
 
 _FP8_NCCL_NEEDS_VIEW = not version_at_least(torch.__version__, "2.11.0")
@@ -366,6 +367,29 @@ def _has_kv_cache(attn_layer) -> bool:
     return attn_layer is not None and get_cache_manager().has_cache_entry(attn_layer)
 
 
+def masked_attention_backend(query, key, value, attention_kwargs, backend=None):
+    """Keep the selected backend when it honors the mask; otherwise select SDPA.
+
+    Call before communication or quantization. Shape constraints remain in dispatch.
+    """
+    kwargs = attention_kwargs or {}
+    if kwargs.get("attn_mask") is None or kwargs.get("indices_k") is not None:
+        return backend
+    selected = backend if backend is not None else get_runtime_state().attention_backend
+    spec = attention_registry.get(selected)
+    while spec is not None:
+        if spec.applies_attn_mask:
+            return selected
+        spec = spec._fallback
+    if (
+        any(tensor.dtype in _FP8_DTYPES for tensor in (query, key, value))
+        or kwargs.get("pre_quantized", False)
+        or any(kwargs.get(name) is not None for name in ("q_descale", "k_descale", "v_descale"))
+    ):
+        raise NotImplementedError("Masked SDPA fallback does not support prequantized inputs")
+    return AttentionBackendType.SDPA
+
+
 def _serves_packed_keys(backend, key, attention_kwargs) -> bool:
     """Whether the selected backend will honour the packing itself."""
     spec = attention_registry.find(backend)
@@ -478,6 +502,13 @@ def _parallel_degrees() -> Tuple[int, int]:
     return get_ulysses_parallel_world_size(), get_ring_parallel_world_size()
 
 
+def _current_step() -> Optional[torch.Tensor]:
+    """The runtime's step, or None when there is no runtime -- the same fallback as above."""
+    if not runtime_state_is_initialized():
+        return None
+    return get_runtime_state().current_step()
+
+
 def _spec_adapter(spec):
     """Present a Spec with the calling convention ring_attn and the direct
     call sites already use.
@@ -502,6 +533,7 @@ def _spec_adapter(spec):
                 varlen=VarlenPacking.from_kwargs(kwargs),
                 ulysses_world_size=ulysses_world_size,
                 ring_world_size=ring_world_size,
+                step=_current_step(),
                 attention_kwargs=kwargs,
             ),
         )
@@ -629,7 +661,7 @@ def _attention_a2a_usp(
         raise NotImplementedError("Attention A2A does not support joint attention")
     if kv_head_repeat != 1:
         raise NotImplementedError("Attention A2A does not support grouped-query KV repetition")
-    if runtime_state.runtime_config.use_spargeattn_head_balance:
+    if runtime_state.runtime_config.use_sparseattn_head_balance:
         raise NotImplementedError("Attention A2A does not support sparse head balancing")
     if query.shape != key.shape or query.shape != value.shape:
         raise NotImplementedError("Attention A2A requires equal self-attention Q/K/V shapes")
@@ -721,7 +753,7 @@ def USP(
     the KV cache outside PipeFusion, where no entry exists.
 
     ``head_balance_layer`` (optional): a stable per-layer handle (e.g. the
-    attention module). When provided and --use_spargeattn_head_balance is set, the
+    attention module). When provided and --use_sparseattn_head_balance is set, the
     Ulysses head dimension is permuted so each rank gets a cost-balanced subset
     of heads (block-sparse load balancing); the permutation is inverted on the
     output. No-op for non-sparse backends (no cost is published) and for ring/
@@ -767,6 +799,15 @@ def USP(
     ulysses_world_size = get_ulysses_parallel_world_size()
     ring_world_size = get_ring_parallel_world_size()
     hb_backend = backend if backend is not None else runtime_state.attention_backend
+    # Runtime setup validates its selection; per-call overrides need the same
+    # ring contract here, before communication or quantization.
+    if ring_world_size > 1 and hb_backend != runtime_state.attention_backend:
+        spec = attention_registry.get(hb_backend)
+        while spec is not None:
+            no_ring = spec.ring.unmet()
+            if no_ring is not None:
+                raise NotImplementedError(f"{spec.type.value} cannot be used with ring parallelism: {no_ring}")
+            spec = spec._fallback
     attention_function = _get_attention_function(backend=backend)
 
     fp8_module = attn_layer if attn_layer is not None else head_balance_layer
@@ -795,10 +836,10 @@ def USP(
         key,
         value,
         head_balance_layer,
-        enabled=(runtime_state.runtime_config.use_spargeattn_head_balance and kv_head_repeat == 1),
+        enabled=(runtime_state.runtime_config.use_sparseattn_head_balance and kv_head_repeat == 1),
         ulysses_world_size=hb_uly,
         ring_world_size=ring_world_size,
-        is_sparge_backend=hb_backend in _HEAD_BALANCE_BACKENDS,
+        backend_publishes_head_cost=hb_backend in _HEAD_BALANCE_BACKENDS,
         joint_strategy=joint_strategy,
         attention_kwargs=attention_kwargs,
     )

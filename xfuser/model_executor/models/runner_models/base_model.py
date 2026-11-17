@@ -8,6 +8,7 @@ from PIL.Image import Image
 from typing import Callable, List, Optional, Tuple, Generator, Union
 from dataclasses import dataclass, field, replace
 from torch.profiler import profile, record_function, ProfilerActivity
+from torch.utils._pytree import tree_map_only
 import diffusers
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.utils import load_image, export_to_video
@@ -18,6 +19,7 @@ from xfuser.envs import (
     PACKAGES_CHECKER,
     _is_hip,
     _is_cuda,
+    bind_group_norm,
 )
 from xfuser.core.utils.outputs_equal import outputs_equal
 from xfuser.logger import warn_once
@@ -59,6 +61,7 @@ from xfuser.core.distributed import (
 )
 from xfuser.core.attention import registry as attention_registry
 from xfuser.core.attention.backends.aiter_mha_v4.spec import SPARGE_FORMATS as MHA_V4_SPARGE_FORMATS
+from xfuser.core.attention.backends.aiter_sol.spec import SOL_RECIPES
 from xfuser.core.attention.spec import AttentionBackendType, Sparsity
 from xfuser.core.distributed.fp8_comms import setup_fp8_comms, validate_fp8_comms_config
 from xfuser.core.distributed.attention_schedule import (
@@ -101,15 +104,21 @@ def register_model(name: str) -> Callable:
 
 
 # Derived from the backend specs rather than listed here: each backend declares
-# its sparsity strategy, so adding one cannot miss these sets. SPARGE and VSA
-# are grouped because both need a separate, dense cross-attention backend.
+# its sparsity strategy, so adding one cannot miss these sets. SPARGE, VSA and
+# SOL are grouped because all three need a separate, dense cross-attention
+# backend. Sol-Attn routes over KV blocks, and a short text KV has too few.
 _SPARSE_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SSTA)
-_SPARGE_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SPARGE) | attention_registry.types_where(
-    sparsity=Sparsity.VSA
+_SPARGE_ATTENTION_BACKENDS = (
+    attention_registry.types_where(sparsity=Sparsity.SPARGE)
+    | attention_registry.types_where(sparsity=Sparsity.VSA)
+    | attention_registry.types_where(sparsity=Sparsity.SOL)
 )
 # Prism's block-sparse attention needs a token grid that only models declaring the
 # capability publish; anywhere else it would quietly run dense.
 _BSA_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.BSA)
+
+# A model opts into Sol-Attn separately from Sparge: support for one does not imply the other.
+_SOL_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SOL)
 
 
 def _parse_attention_backend(name: Optional[str], kind: str) -> Optional[AttentionBackendType]:
@@ -122,12 +131,12 @@ def _parse_attention_backend(name: Optional[str], kind: str) -> Optional[Attenti
 
 
 def _validate_cross_attention_for_sparge(config: xFuserArgs) -> None:
-    """Cross-attention must be set and must not itself be a Sparge backend
-    whenever Sparge Attention is in play (either as the explicit backend or
-    via the hybrid schedule)."""
+    """Cross-attention must be set and must not itself be a Sparge, VSA or Sol backend
+    whenever one of those is in play (either as the explicit backend or via the
+    hybrid schedule)."""
     if config.cross_attention_backend is None:
         raise ValueError(
-            "When Sparge Attention is used, --cross_attention_backend must be set to a non-Sparge backend."
+            "A Sparge, VSA or Sol attention backend needs --cross_attention_backend set to a dense backend."
         )
     cross = _parse_attention_backend(
         config.cross_attention_backend,
@@ -135,8 +144,8 @@ def _validate_cross_attention_for_sparge(config: xFuserArgs) -> None:
     )
     if cross in _SPARGE_ATTENTION_BACKENDS:
         raise ValueError(
-            f"--cross_attention_backend cannot be {cross.name} when Sparge "
-            f"Attention is used. Pick a non-Sparge cross attention backend."
+            f"--cross_attention_backend cannot be {cross.name}, a Sparge, VSA or Sol backend. "
+            f"Pick a dense cross attention backend."
         )
 
 
@@ -167,8 +176,18 @@ def _validate_sparseattn_block_size(config: xFuserArgs) -> None:
     """
     if config.sparseattn_block_size is None:
         return
-    if not any(b in MHA_V4_SPARGE_FORMATS for b in _selected_attention_backends(config)):
-        raise ValueError("--sparseattn_block_size applies only to the AITER MHA v4 Sparge attention backends.")
+    if not any(b in MHA_V4_SPARGE_FORMATS or b in SOL_RECIPES for b in _selected_attention_backends(config)):
+        raise ValueError(
+            "--sparseattn_block_size applies only to the AITER MHA v4 Sparge and AITER Sol attention backends."
+        )
+
+
+def _validate_solattn_beta_schedule(config: xFuserArgs) -> None:
+    """Refuse, before loading, a --solattn_beta_schedule no selected backend reads."""
+    if config.solattn_beta_schedule is None:
+        return
+    if not any(b in SOL_RECIPES for b in _selected_attention_backends(config)):
+        raise ValueError("--solattn_beta_schedule applies only to the AITER Sol attention backends.")
 
 
 def _validate_attention_head_dims(model: "xFuserModel", config: xFuserArgs) -> None:
@@ -264,6 +283,7 @@ class ModelCapabilities:
     cross_attention_backend: bool = False
     supports_sparse_attention_backends: bool = False
     supports_sparge_attention_backends: bool = False
+    supports_sol_attention_backends: bool = False
     supports_bsa_attention_backends: bool = False
     supports_distilled_weights: bool = False
     profile_capture_phase: bool = False
@@ -520,6 +540,7 @@ class xFuserModel(abc.ABC):
         self.engine_config.runtime_config.runner_managed_torch_compile = (
             getattr(self.config, "pipefusion_parallel_degree", 1) > 1
         )
+        bind_group_norm(use_aiter=self._uses_aiter_group_norm())
         log("Loading model pipeline...")
         self.pipe = self._load_model_checked()
         enable_fast_pil_postprocess([self.pipe, getattr(self, "second_pipe", None)])
@@ -636,8 +657,8 @@ class xFuserModel(abc.ABC):
 
     def _enable_options(self) -> None:
         """Enable model options based on config"""
-        if getattr(self.config, "use_spargeattn_head_balance", False):
-            log("Enabling Sparge block-sparse head balancing...")
+        if getattr(self.config, "use_sparseattn_head_balance", False):
+            log("Enabling block-sparse head balancing...")
 
         self._vae_manager.enable_options(self._decoding_vaes())
         self._enable_cpu_offload()
@@ -670,15 +691,15 @@ class xFuserModel(abc.ABC):
     def _enable_cpu_offload(self) -> None:
         """Apply the CPU offload mode the config selects, if any."""
         if self.config.enable_group_cpu_offload:
-            # block_level groups only top-level ModuleLists: fits compiled transformers
-            # (blocks are top-level) and avoids the per-block-compile recompile storm that
-            # leaf-level hooks trigger. Eager components nest their layers (e.g. Mistral-3 at
-            # model.language_model.layers) where block_level cannot reach, leaving the whole
-            # component in one unmatched group and OOMing; they use leaf_level, which recurses.
+            # block_level groups only top-level ModuleLists, which also avoids the
+            # per-block-compile recompile storm that leaf-level hooks trigger. Components
+            # that nest their layers (e.g. Mistral-3 at model.language_model.layers) are out
+            # of its reach and would offload as one group, so they use leaf_level, which
+            # recurses. _block_level_offload_components names the ones it fits.
             from diffusers.hooks import apply_group_offloading
 
-            log("Enabling group CPU offload (transformer block-level, others leaf-level, streamed)...")
-            block_level_names = set(self._get_compiled_pipe_components())
+            log("Enabling group CPU offload (declared components block-level, others leaf-level, streamed)...")
+            block_level_names = set(self._block_level_offload_components())
             for name, component in self.pipe.components.items():
                 if not isinstance(component, torch.nn.Module):
                     continue
@@ -875,6 +896,7 @@ class xFuserModel(abc.ABC):
 
         self._validate_supported_attn_backends(config)
         _validate_sparseattn_block_size(config)
+        _validate_solattn_beta_schedule(config)
 
         if not self.capabilities.supports_bsa_attention_backends:
             for value, label in (
@@ -893,6 +915,7 @@ class xFuserModel(abc.ABC):
         backend = _parse_attention_backend(config.attention_backend, "attention backend")
         supports_sparse = self.capabilities.supports_sparse_attention_backends
         supports_sparge = self.capabilities.supports_sparge_attention_backends
+        supports_sol = self.capabilities.supports_sol_attention_backends
 
         if backend is None:
             if supports_sparse:
@@ -912,6 +935,9 @@ class xFuserModel(abc.ABC):
                     config.hybrid_attn_high_precision_backend,
                     "hybrid high-precision attention backend",
                 )
+                if low in _SOL_ATTENTION_BACKENDS or high in _SOL_ATTENTION_BACKENDS:
+                    if not supports_sol:
+                        raise ValueError(f"Model {config.model} does not support Sol-Attn attention backends.")
                 if low in _SPARGE_ATTENTION_BACKENDS or high in _SPARGE_ATTENTION_BACKENDS:
                     _validate_cross_attention_for_sparge(config)
         else:
@@ -927,7 +953,10 @@ class xFuserModel(abc.ABC):
                     f"model equivalent."
                 )
             if backend in _SPARGE_ATTENTION_BACKENDS:
-                if not supports_sparge:
+                if backend in _SOL_ATTENTION_BACKENDS:
+                    if not supports_sol:
+                        raise ValueError(f"Model {config.model} does not support Sol-Attn attention backends.")
+                elif not supports_sparge:
                     raise ValueError(f"Model {config.model} does not support Sparge attention backend.")
                 if self.capabilities.cross_attention_backend:
                     _validate_cross_attention_for_sparge(config)
@@ -1022,8 +1051,55 @@ class xFuserModel(abc.ABC):
         component.register_forward_pre_hook(_mark, with_kwargs=True, prepend=True)
         component._xfuser_marks_cudagraph_steps = True
 
+    def _compiles_vae_decoder(self) -> bool:
+        """Whether ``--use_torch_compile`` covers this model's VAE decoder too.
+
+        Off by default.  A decoder is compiled where a runner has measured it,
+        because this also builds the VAE with torch GroupNorm instead of AITER's,
+        which is the faster of the two for a decoder that stays eager.
+        """
+        return False
+
+    def _uses_aiter_group_norm(self) -> bool:
+        """Whether this run builds its model with AITER's GroupNorm.
+
+        AITER's kernel is the faster of the two run eagerly, so a run takes it
+        unless something needs the torch class: DistVAE identifies the layers to
+        shard by that type, and Inductor cannot fuse across AITER's custom op.
+        """
+        if self.config.use_parallel_vae:
+            return False
+        return not (self.config.use_torch_compile and self._compiles_vae_decoder())
+
+    def _compile_vae_decoder(self, mode: str = "default") -> None:
+        """Forward decoder compilation to the VAE manager, which owns the policy."""
+        self._vae_manager.compile_decoders(self._decoding_vaes(), mode=mode)
+
+    def _compile_whole(self, module: torch.nn.Module, kwargs: dict) -> torch.nn.Module:
+        """Compile a whole component; under CUDA graphs, copy its outputs out of the graph's pool.
+
+        The next replay overwrites the pool, and sequential true CFG reads one call's output after the next call.
+        """
+        compiled = torch.compile(module, **kwargs)
+        if kwargs["mode"] in self.CUDAGRAPH_COMPILE_MODES:
+            compiled.register_forward_hook(
+                lambda _module, _args, output: tree_map_only(torch.Tensor, torch.clone, output)
+            )
+        return compiled
+
     def _get_compiled_pipe_components(self) -> List[str]:
         return ["transformer"]
+
+    def _block_level_offload_components(self) -> List[str]:
+        """Components that group CPU offload splits block by block.
+
+        ``block_level`` groups the ModuleLists that are direct children of a
+        component, which suits a transformer that holds its blocks there. A
+        component that nests its blocks deeper matches nothing, and group
+        offload then holds all of it on the device at once, so such a component
+        belongs on ``leaf_level``, which recurses.
+        """
+        return self._get_compiled_pipe_components()
 
     def _get_compile_warmup_steps(self, input_args: dict) -> Optional[int]:
         return 2  # None = skip step reduction, run full warmup cycle
@@ -1101,7 +1177,12 @@ class xFuserModel(abc.ABC):
         when ``run`` or ``profile`` executes. The final warmup runs
         ``_get_compile_warmup_steps`` steps, or the caller's count when that
         returns ``None``.
+
+        A runner that opts in through ``_compiles_vae_decoder`` also has its VAE
+        decoder compiled here, in the mode the VAE manager selects for it.
         """
+        if self._compiles_vae_decoder():
+            self._compile_vae_decoder()
         self._enable_compute_comm_overlap()
         compile_kwargs = {"mode": self._get_compile_mode()}
         pp_degree = getattr(self.config, "pipefusion_parallel_degree", 1)
@@ -1158,7 +1239,7 @@ class xFuserModel(abc.ABC):
                 kwargs = {**compile_kwargs, "mode": usp_sdma.compile_mode(compile_kwargs["mode"])}
             blockwise = name in stages or name in sharded or name in cache_targets or self._prefer_blockwise_compile()
             if not blockwise:
-                setattr(self.pipe, name, torch.compile(module, **kwargs))
+                setattr(self.pipe, name, self._compile_whole(module, kwargs))
                 continue
             block_lists = self._declared_blocks(name, module)
             for block_list in block_lists:
@@ -1177,7 +1258,7 @@ class xFuserModel(abc.ABC):
                         f"{self.settings.fsdp_strategy.get(name, {}).get('wrap_attrs', [])} exist. Name them in "
                         f"fsdp_strategy[{name!r}]['wrap_attrs'] of {type(self).__name__}."
                     )
-                setattr(self.pipe, name, torch.compile(module, **kwargs))
+                setattr(self.pipe, name, self._compile_whole(module, kwargs))
                 continue
             if kwargs["mode"] in self.CUDAGRAPH_COMPILE_MODES:
                 self._mark_cudagraph_steps(module)
@@ -1489,6 +1570,9 @@ class xFuserModel(abc.ABC):
     def prepare_run(self, input_args: dict) -> None:
         """Prepare model state before a pipeline invocation."""
         self._vae_manager.prepare_run(self._decoding_vaes(), input_args)
+        # Warmups advance the step counter too, so each invocation starts the schedules at step 0.
+        if runtime_state_is_initialized():
+            get_runtime_state().reset_step_counter()
 
     def _run_timed_pipe(self, input_args: dict) -> Tuple[DiffusionOutput, float]:
         """Run the pipeline and time its latency from the synchronized across all ranks beginning
@@ -1568,6 +1652,9 @@ class xFuserModel(abc.ABC):
         if self.config.use_hybrid_gemm_schedule:
             self._setup_hybrid_gemm_schedule(input_args)
 
+        if getattr(self.config, "solattn_beta_schedule", None) is not None:
+            self._setup_solattn_beta_schedule(input_args)
+
         if self.config.use_vae_channels_last_format:
             self._convert_vae_to_channels_last()
 
@@ -1609,6 +1696,17 @@ class xFuserModel(abc.ABC):
         log("Enabling hybrid attention schedule")
         log(f"Hybrid attention schedule: {attention_schedule.backends}", debug=True)
         get_runtime_state().set_attention_schedule(attention_schedule, total_steps=total_steps)
+
+    def _setup_solattn_beta_schedule(self, input_args: dict) -> None:
+        """Hand --solattn_beta_schedule to the Sol backends, which _validate_config made sure are selected."""
+        from xfuser.core.attention.backends.aiter_sol import kernel as sol_kernel
+
+        beta_schedule = sol_kernel.install_beta_schedule(
+            self.config.solattn_beta_schedule,
+            input_args["num_inference_steps"],
+            self._calculate_hybrid_attention_step_multiplier(input_args),
+        )
+        log(f"Sol-Attn beta schedule: {beta_schedule.per_denoising_step}", debug=True)
 
     def _setup_hybrid_gemm_schedule(self, input_args: dict) -> None:
         """

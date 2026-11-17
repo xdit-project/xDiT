@@ -36,6 +36,8 @@ SSTA means Sparse Spatio-Temporal Attention. MHA means multi-head attention.
 | AITER Sage sparse | `aiter_sparse_sage`, `aiter_sparse_sage_v2`, `aiter_sparge`, `aiter_sparge_v2` | Model SSTA or Sparge support and AITER mask APIs; no Ring. |
 | AITER MHA v4 Sparge | `aiter_bf16_sparge`, `aiter_bf16fp8_sparge`, `aiter_i8fp8_sparge`, `aiter_fp8_sparge` | Model Sparge support and AITER MHA v4 block-mask API on `gfx942`/`gfx950`; no Ring. |
 | AITER MHA v4 MX Sparge | `aiter_mxfp8_sparge`, `aiter_f8f6_sparge`, `aiter_mxfp6_sparge`, `aiter_f6f4_sparge`, `aiter_mxfp4_sparge`, `aiter_f4f4_sparge` | Same Sparge requirements, limited to `gfx950`; no Ring. |
+| AITER Sol | `aiter_bf16_sol`, `aiter_bf16fp8_sol`, `aiter_i8fp8_sol`, `aiter_fp8_sol` | Model Sol support and AITER MHA v4 Sol API on `gfx950`; no Ring. See [Sol-Attn routing](#aiter-sol-attn-routing). |
+| AITER MX Sol | `aiter_mxfp8_sol`, `aiter_f8f6_sol`, `aiter_mxfp6_sol`, `aiter_f6f6_sol`, `aiter_f6f4_sol`, `aiter_mxfp4_sol` | Same Sol requirements; no Ring. |
 | Flex block attention | `flex_block_attn`, `flex_block_sparge` | `flex_block_attn` package and model SSTA/Sparge support; no Ring. |
 | Sol-Attn | `sol_attn` | Optional Sol-Attn on CUDA compute capability 8.0+; supported BF16 shapes use Sol-Attn, others fall back to SDPA. No Ring. |
 | AITER VSA | `aiter_vsa` | AITER Jenga kernels and compatible model/spatial layout; no Ring. |
@@ -56,6 +58,37 @@ MHA v4's fast path uses non-causal attention with head dimension 128. Unsupporte
 calls can fall back to `aiter`. MHA v4 Sparge variants require head dimension 128,
 self-attention, matching query/KV head counts, and no packed keys. These conditions mean a
 selected backend need not execute the same kernel for every attention call.
+
+### AITER Sol-Attn routing
+
+The AITER Sol backends compute the KV blocks that their routing selects exactly.
+They approximate the other blocks from pooled K/V. The `aiter_*_sol` names differ
+only in the Q/K/V formats, as in the dense MHA v4 names. `aiter_mxfp6_sol` uses
+MXFP6 Q/K and FP8 V, and `aiter_f6f6_sol` uses MXFP6 for Q, K, and V.
+Not every row exists on every AITER build. The runner refuses a row that the
+device does not serve.
+
+The Sol backends require head dimension 128, BF16 inputs, and non-causal attention.
+Packed keys are accepted only as one sequence's trailing pad. Ring is refused at
+startup; use `--ulysses_degree` for sequence parallelism. Set
+`--cross_attention_backend` to a dense backend. Short text keys give the routing
+too few blocks to select from.
+
+- `--solattn_beta` sets the routing threshold (default `0.5`). A larger value
+  computes fewer blocks exactly.
+- `--solattn_beta_schedule` changes the threshold per denoising step. Use
+  `first:last` for a linear ramp or one value per step. Both branches of a guided
+  step use the same value.
+- `--sparseattn_block_size` selects another tile that the recipe's row serves.
+- `--use_sparseattn_head_balance` balances the selected-block cost across
+  Ulysses ranks.
+
+```bash
+xdit --model Wan2.2-T2V --prompt "Clouds over a mountain lake" \
+    --ulysses_degree 8 --num_inference_steps 40 \
+    --attention_backend aiter_fp8_sol --cross_attention_backend aiter \
+    --solattn_beta_schedule=1.0:0.0 --use_torch_compile
+```
 
 ### FlyDSL FP8 behavior
 

@@ -94,7 +94,7 @@ xdit --model Wan2.2-T2V --prompt "A motorcycle on a coastal highway" \
 
 This recipe requires `gfx950`. The transport requires compatible AITER and MORI
 SHMEM, batch size 1, head dimension 128, and intranode Ulysses degree 2, 4, or 8.
-Ring and Sparge head balancing are unsupported. **Auto and MX profiles require
+Ring and sparse-attention head balancing are unsupported. **Auto and MX profiles require
 `gfx950`**; `gfx942` can use supported explicit non-MX profiles such as
 `--attention_a2a e4m3-e4m3` with `aiter_fp8`.
 

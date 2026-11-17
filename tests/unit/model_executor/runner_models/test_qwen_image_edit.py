@@ -53,6 +53,23 @@ def _load(model):
     model._load_model()
 
 
+@pytest.mark.parametrize("name", ["Qwen/Qwen-Image-Edit", "Qwen/Qwen-Image-2512"])
+@pytest.mark.parametrize(
+    ("cache_method", "rdna4", "mode"),
+    [(None, False, "reduce-overhead"), ("dbcache", False, "default"), (None, True, "default")],
+)
+def test_qwen_image_compiles_with_cuda_graphs_unless_step_caching_or_rdna4(
+    build, monkeypatch, name, cache_method, rdna4, mode
+):
+    from xfuser.envs import PACKAGES_CHECKER
+
+    model = build(name)
+    model.config.cache_method = cache_method
+    monkeypatch.setattr(PACKAGES_CHECKER, "_on_rdna4", lambda: rdna4)
+
+    assert model._get_compile_mode() == mode
+
+
 @requires_edit_plus
 @pytest.mark.parametrize(
     ("name", "checkpoint"),

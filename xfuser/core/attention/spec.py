@@ -222,6 +222,9 @@ class Spec:
     accepts_prequantized: bool = False
     prequant_rotate: Optional[Callable] = None
 
+    # Applies attention_kwargs["attn_mask"] directly, independent of key packing.
+    applies_attn_mask: bool = False
+
     # Which calls the kernel can serve -- head dim, causality, varlen packing,
     # dropout, self- vs cross-attention. Enforced by run() before dispatch, so
     # an unsupported call raises with a reason instead of computing something
@@ -292,6 +295,8 @@ class Spec:
 
     def rejects(self, query, key, value, call: AttnCall) -> Optional[str]:
         """Why this backend cannot serve this particular call, or None."""
+        if call.varlen is None and call.attention_kwargs.get("attn_mask") is not None and not self.applies_attn_mask:
+            return "does not apply attn_mask without packed keys"
         return self.accepts.unmet(query, key, value, call)
 
     def validate(self, runtime_config) -> None:

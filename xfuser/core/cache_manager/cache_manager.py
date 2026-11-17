@@ -1,4 +1,5 @@
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from contextlib import contextmanager
+from typing import Any, Callable, Dict, Iterable, List, MutableMapping, Optional, Tuple, Union
 import torch
 
 from xfuser.core.distributed.runtime_state import runtime_state_is_initialized
@@ -65,6 +66,39 @@ class CacheManager:
 
     def has_cache_entry(self, layer, layer_type: str = "attn") -> bool:
         return (layer_type, layer) in self.cache
+
+    def _get_cache_tensor(self, layer: Any, layer_type: str) -> Optional[torch.Tensor]:
+        if isinstance(layer, torch.nn.Module) and "_xdit_kv_cache" in layer._buffers:
+            return layer._buffers["_xdit_kv_cache"]
+        return self.cache[layer_type, layer].tensors[0]
+
+    def _set_cache_tensor(
+        self,
+        layer: Any,
+        layer_type: str,
+        tensor: Optional[torch.Tensor],
+    ) -> None:
+        if isinstance(layer, torch.nn.Module) and "_xdit_kv_cache" in layer._buffers:
+            layer._buffers["_xdit_kv_cache"] = tensor
+        else:
+            self.cache[layer_type, layer].tensors[0] = tensor
+
+    @contextmanager
+    def use_cache_state(
+        self,
+        layers: Iterable[Any],
+        state: MutableMapping[Any, Optional[torch.Tensor]],
+        layer_type: str = "attn",
+    ):
+        """Install a cache state for a model branch and save its updates on exit."""
+        layers = tuple(layers)
+        for layer in layers:
+            self._set_cache_tensor(layer, layer_type, state.get(layer))
+        try:
+            yield
+        finally:
+            for layer in layers:
+                state[layer] = self._get_cache_tensor(layer, layer_type)
 
     def clear(self) -> None:
         """Release cached activations while preserving layer registrations."""

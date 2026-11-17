@@ -31,7 +31,7 @@ from xfuser.core.attention.backends.aiter_mha_v4.attention_a2a import (
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from xfuser.logger import init_logger
 from xfuser.core.attention import registry as attention_registry
-from xfuser.core.attention.spec import VarlenPacking
+from xfuser.core.attention.spec import AttentionBackendType, VarlenPacking
 from xfuser.core.attention.spec import AttnCall
 from xfuser.core.attention.spec import Sparsity
 from xfuser.core.distributed.fp8_comms import (
@@ -365,6 +365,29 @@ def _update_and_get_kv_cache(key, value, attn_layer):
 def _has_kv_cache(attn_layer) -> bool:
     """Return whether PipeFusion registered a KV cache for this attention layer."""
     return attn_layer is not None and get_cache_manager().has_cache_entry(attn_layer)
+
+
+def masked_attention_backend(query, key, value, attention_kwargs, backend=None):
+    """Keep the selected backend when it honors the mask; otherwise select SDPA.
+
+    Call before communication or quantization. Shape constraints remain in dispatch.
+    """
+    kwargs = attention_kwargs or {}
+    if kwargs.get("attn_mask") is None or kwargs.get("indices_k") is not None:
+        return backend
+    selected = backend if backend is not None else get_runtime_state().attention_backend
+    spec = attention_registry.get(selected)
+    while spec is not None:
+        if spec.applies_attn_mask:
+            return selected
+        spec = spec._fallback
+    if (
+        any(tensor.dtype in _FP8_DTYPES for tensor in (query, key, value))
+        or kwargs.get("pre_quantized", False)
+        or any(kwargs.get(name) is not None for name in ("q_descale", "k_descale", "v_descale"))
+    ):
+        raise NotImplementedError("Masked SDPA fallback does not support prequantized inputs")
+    return AttentionBackendType.SDPA
 
 
 def _serves_packed_keys(backend, key, attention_kwargs) -> bool:
@@ -776,6 +799,15 @@ def USP(
     ulysses_world_size = get_ulysses_parallel_world_size()
     ring_world_size = get_ring_parallel_world_size()
     hb_backend = backend if backend is not None else runtime_state.attention_backend
+    # Runtime setup validates its selection; per-call overrides need the same
+    # ring contract here, before communication or quantization.
+    if ring_world_size > 1 and hb_backend != runtime_state.attention_backend:
+        spec = attention_registry.get(hb_backend)
+        while spec is not None:
+            no_ring = spec.ring.unmet()
+            if no_ring is not None:
+                raise NotImplementedError(f"{spec.type.value} cannot be used with ring parallelism: {no_ring}")
+            spec = spec._fallback
     attention_function = _get_attention_function(backend=backend)
 
     fp8_module = attn_layer if attn_layer is not None else head_balance_layer

@@ -235,6 +235,12 @@ class xFuserFluxKontextModel(xFuserModel):
         super()._customize_settings(config)
         prefer_mha_v4(self.settings, "auto")
 
+    def _get_compile_mode(self) -> str:
+        # One transformer pass per step, so CUDA graphs replay safely; as for FLUX.1.
+        if PACKAGES_CHECKER._on_rdna4() or self.config.cache_method:
+            return "default"
+        return "reduce-overhead"
+
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import FluxKontextPipeline
         from xfuser.model_executor.models.transformers.transformer_flux import (

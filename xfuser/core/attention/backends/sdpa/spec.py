@@ -8,7 +8,14 @@ from xfuser.core.attention.spec import AttentionBackendType, Impl, Spec
 SPECS = [
     # SDPA and SDPA_MATH pass attn_mask, so they serve a padded call through the
     # mask and ignore its packing.
-    Spec(AttentionBackendType.SDPA, impl=Impl("kernel:sdpa"), ring=NEVER, accepts=MASKED_VARLEN, requires=ALWAYS),
+    Spec(
+        AttentionBackendType.SDPA,
+        impl=Impl("kernel:sdpa"),
+        ring=NEVER,
+        accepts=MASKED_VARLEN,
+        requires=ALWAYS,
+        applies_attn_mask=True,
+    ),
     Spec(
         AttentionBackendType.SDPA_FLASH, impl=Impl("kernel:sdpa_flash"), ring=ALWAYS, accepts=NO_VARLEN, requires=ALWAYS
     ),
@@ -18,6 +25,7 @@ SPECS = [
         ring=NEVER,
         accepts=MASKED_VARLEN,
         requires=ALWAYS,
+        applies_attn_mask=True,
     ),
     Spec(
         AttentionBackendType.SDPA_EFFICIENT,
@@ -25,6 +33,7 @@ SPECS = [
         ring=ALWAYS,
         accepts=MASKED_VARLEN,
         requires=ALWAYS,
+        applies_attn_mask=True,
     ),
     # cuDNN, like SDPA_EFFICIENT above, applies attn_mask as its additive bias, so it
     # serves a padded call through the mask and ignores the packing.
@@ -39,5 +48,6 @@ SPECS = [
         accepts=MASKED_VARLEN & HALF_PRECISION,
         fallback=AttentionBackendType.SDPA_EFFICIENT,
         requires=PLATFORM("cuda"),
+        applies_attn_mask=True,
     ),
 ]

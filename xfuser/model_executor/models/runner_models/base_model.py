@@ -8,6 +8,7 @@ from PIL.Image import Image
 from typing import Callable, List, Optional, Tuple, Generator, Union
 from dataclasses import dataclass, field, replace
 from torch.profiler import profile, record_function, ProfilerActivity
+from torch.utils._pytree import tree_map_only
 import diffusers
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.utils import load_image, export_to_video
@@ -1090,6 +1091,18 @@ class xFuserModel(abc.ABC):
         """Forward decoder compilation to the VAE manager, which owns the policy."""
         self._vae_manager.compile_decoders(self._decoding_vaes(), mode=mode)
 
+    def _compile_whole(self, module: torch.nn.Module, kwargs: dict) -> torch.nn.Module:
+        """Compile a whole component; under CUDA graphs, copy its outputs out of the graph's pool.
+
+        The next replay overwrites the pool, and sequential true CFG reads one call's output after the next call.
+        """
+        compiled = torch.compile(module, **kwargs)
+        if kwargs["mode"] in self.CUDAGRAPH_COMPILE_MODES:
+            compiled.register_forward_hook(
+                lambda _module, _args, output: tree_map_only(torch.Tensor, torch.clone, output)
+            )
+        return compiled
+
     def _get_compiled_pipe_components(self) -> List[str]:
         return ["transformer"]
 
@@ -1242,7 +1255,7 @@ class xFuserModel(abc.ABC):
                 kwargs = {**compile_kwargs, "mode": usp_sdma.compile_mode(compile_kwargs["mode"])}
             blockwise = name in stages or name in sharded or name in cache_targets or self._prefer_blockwise_compile()
             if not blockwise:
-                setattr(self.pipe, name, torch.compile(module, **kwargs))
+                setattr(self.pipe, name, self._compile_whole(module, kwargs))
                 continue
             block_lists = self._declared_blocks(name, module)
             for block_list in block_lists:
@@ -1261,7 +1274,7 @@ class xFuserModel(abc.ABC):
                         f"{self.settings.fsdp_strategy.get(name, {}).get('wrap_attrs', [])} exist. Name them in "
                         f"fsdp_strategy[{name!r}]['wrap_attrs'] of {type(self).__name__}."
                     )
-                setattr(self.pipe, name, torch.compile(module, **kwargs))
+                setattr(self.pipe, name, self._compile_whole(module, kwargs))
                 continue
             if kwargs["mode"] in self.CUDAGRAPH_COMPILE_MODES:
                 self._mark_cudagraph_steps(module)

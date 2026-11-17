@@ -329,6 +329,8 @@ class RuntimeState(metaclass=ABCMeta):
         # schedule. Resolving walks the fallback chain, so a call that lands on
         # a fallback mid-graph finds it already imported.
         spec.resolved()
+        # Dense-mask overrides must also be imported before compiled forwards.
+        attention_registry.get(AttentionBackendType.SDPA).resolved()
         spec.validate(self.runtime_config)
 
     def current_step(self) -> Optional[torch.Tensor]:

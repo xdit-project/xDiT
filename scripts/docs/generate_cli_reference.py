@@ -68,7 +68,13 @@ def _category(action: argparse.Action) -> str:
         "enable_group_cpu_offload",
     }:
         return "Loading and CPU offload"
-    if name.startswith(("vae_", "use_vae_")) or name in {"use_parallel_vae", "parallel_vae_impl", "parallel_vae_halo", "enable_tiling", "enable_slicing"}:
+    if name.startswith(("vae_", "use_vae_")) or name in {
+        "use_parallel_vae",
+        "parallel_vae_impl",
+        "parallel_vae_halo",
+        "enable_tiling",
+        "enable_slicing",
+    }:
         return "VAE memory and layout"
     if "gemm" in name or name in {"use_torch_compile", "use_fp8_text_encoder"} or name.startswith("fp8_precision_"):
         return "Compilation and GEMM quantization"

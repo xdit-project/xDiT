@@ -150,9 +150,9 @@ def test_rocm_aiter_mxfp4_hybrid_adapters_remain_supported(modules):
         nvfp4_probe=lambda: pytest.fail("must not probe NVFP4 on ROCm"),
         int8_probe=lambda: pytest.fail("must not probe INT8 on ROCm"),
         diffusers_probe=lambda config_kind: pytest.fail("must not probe Diffusers for MXFP4"),
-        fsdp_probe=lambda config_kind: (True, None)
-        if config_kind == "mxfp4"
-        else pytest.fail(f"must not probe {config_kind} FSDP on ROCm"),
+        fsdp_probe=lambda config_kind: (
+            (True, None) if config_kind == "mxfp4" else pytest.fail(f"must not probe {config_kind} FSDP on ROCm")
+        ),
     )
 
     adapter = b.select_format_backend(
@@ -288,10 +288,12 @@ def test_aiter_mxfp4_capability_preserves_symbol_probe_reason(modules):
         cuda_probe=lambda: False,
         hip_probe=lambda: True,
         cuda_capability_probe=lambda: None,
-        mxfp4_probe=lambda: calls.append("mxfp4")
-        or (
-            False,
-            "missing required AITER MXFP4 API: aiter.gemm_a4w4",
+        mxfp4_probe=lambda: (
+            calls.append("mxfp4")
+            or (
+                False,
+                "missing required AITER MXFP4 API: aiter.gemm_a4w4",
+            )
         ),
         nvfp4_probe=lambda: pytest.fail("must not probe NVFP4"),
         int8_probe=lambda: pytest.fail("must not probe INT8"),

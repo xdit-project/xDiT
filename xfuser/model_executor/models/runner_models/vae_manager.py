@@ -131,6 +131,24 @@ class VAEManager:
             AutoencoderKLMiniMaxH3Image = None
 
         for vae in vaes:
+            if getattr(self.config, "parallel_vae_impl", "distvae") == "sharded":
+                from xfuser.model_executor.layers.wan_vae_sharded import decode as wan_sharded
+
+                if wan_sharded.supports(vae) and not self._tiles(vae):
+                    halo = wan_sharded.install(vae, vae_group, halo=getattr(self.config, "parallel_vae_halo", "auto"))
+                    log(
+                        f"Parallel VAE decode on {type(vae).__name__}: row-sharded over "
+                        f"{coordinator.world_size} ranks, halo rows over {halo}."
+                    )
+                    # the sharded decode only re-binds the decoder: the encoder still goes to DistVAE
+                    if self.capabilities.use_parallel_vae_encoder:
+                        adapter = vae_parallel.parallelize_encoder(vae, vae_group)
+                        log(f"Parallel VAE encoder enabled on {type(vae).__name__} via {adapter}.")
+                    continue
+                log(
+                    f"--parallel_vae_impl sharded does not support {type(vae).__name__} with this "
+                    "configuration; using DistVAE."
+                )
             if AutoencoderKLMiniMaxH3 is not None and isinstance(vae, AutoencoderKLMiniMaxH3):
                 from xfuser.model_executor.models.runner_models.minimax_h3 import (
                     install_minimax_h3_vae_tile_parallel,

@@ -233,6 +233,11 @@ class xFuserArgs:
     warmup_steps: int = 1
     # use_cuda_graph: bool = True
     use_parallel_vae: bool = False
+    # with use_parallel_vae: "distvae" (DistVAE adapters) or "sharded" (row-sharded Wan VAE decode on fused
+    # channels-last kernels, xfuser/model_executor/layers/wan_vae_sharded; falls back to DistVAE for other VAEs)
+    parallel_vae_impl: str = "distvae"
+    # halo rows of the sharded decode: "auto" (SDMA copy engines on ROCm when available, else NCCL), "nccl", "sdma"
+    parallel_vae_halo: str = "auto"
     # use_profiler: bool = False
     use_torch_compile: bool = False
     use_onediff: bool = False
@@ -681,6 +686,18 @@ class xFuserArgs:
         runtime_group.add_argument("--warmup_steps", type=int, default=1, help="Warmup steps in generation.")
         # runtime_group.add_argument("--use_cuda_graph", action="store_true")
         runtime_group.add_argument("--use_parallel_vae", action="store_true")
+        runtime_group.add_argument(
+            "--parallel_vae_impl",
+            choices=("distvae", "sharded"),
+            default="distvae",
+            help="With --use_parallel_vae: DistVAE adapters, or the row-sharded Wan VAE decode (AutoencoderKLWan only).",
+        )
+        runtime_group.add_argument(
+            "--parallel_vae_halo",
+            choices=("auto", "nccl", "sdma"),
+            default="auto",
+            help="Halo-row transport of --parallel_vae_impl sharded: SDMA copy engines (ROCm), NCCL, or auto.",
+        )
         # runtime_group.add_argument("--use_profiler", action="store_true")
         runtime_group.add_argument(
             "--use_torch_compile",
@@ -1060,6 +1077,18 @@ class xFuserArgs:
             "--use_parallel_vae",
             help="Distribute supported VAE work across existing ranks. DistVAE uses row sharding by default; tiling can select tile dispatch.",
             action="store_true",
+        )
+        parser.add_argument(
+            "--parallel_vae_impl",
+            choices=("distvae", "sharded"),
+            default="distvae",
+            help="With --use_parallel_vae: DistVAE adapters, or the row-sharded Wan VAE decode (AutoencoderKLWan only).",
+        )
+        parser.add_argument(
+            "--parallel_vae_halo",
+            choices=("auto", "nccl", "sdma"),
+            default="auto",
+            help="Halo-row transport of the sharded Wan VAE decode: SDMA copy engines (ROCm), NCCL, or auto.",
         )
         parser.add_argument(
             "--use_torch_compile",

@@ -267,6 +267,7 @@ class ModelCapabilities:
     use_vae_channels_last_format: bool = True
     # Other features
     use_int8_gemms: bool = False
+    use_aiter_int8_gemms: bool = False
     use_fp8_gemms: bool = False
     use_fp8_text_encoder: bool = False
     use_fp4_gemms: bool = False
@@ -978,9 +979,6 @@ class xFuserModel(abc.ABC):
 
         if self.settings.model_output_type == "video" and not self.settings.fps:
             raise ValueError(f"Model {self.settings.model_name} produces video output but fps is not set.")
-
-        if config.use_int8_gemms and _is_hip():
-            raise ValueError("Int8 GEMMs on ROCm are not supported.")
 
         if config.use_fp6_gemms and _is_cuda():
             raise ValueError(

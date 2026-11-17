@@ -77,6 +77,7 @@ class QuantizationBackends:
         return probe_format_backend_capabilities(
             require_mxfp6=self._uses_mxfp6_contract(),
             require_a6w4=self._uses_a6w4_contract(),
+            require_aiter_int8=self._format_value() == "int8",
         )
 
     @functools.cached_property

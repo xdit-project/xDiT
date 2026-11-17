@@ -197,6 +197,8 @@ class LoadDeclaration:
             contracts.add((QuantizationFormat.FP4_A6W4, QuantizationBackend.AITER))
         if getattr(model_capabilities, "use_int8_gemms", False):
             contracts.add((QuantizationFormat.INT8, QuantizationBackend.TORCHAO))
+            if getattr(model_capabilities, "use_aiter_int8_gemms", False):
+                contracts.add((QuantizationFormat.INT8, QuantizationBackend.AITER))
 
         modes = {MaterializationMode.EAGER}
         seam = None
@@ -542,6 +544,8 @@ def select_runtime_quantization(
         QuantizationFormat.FP4,
         QuantizationFormat.FP8_FP4,
     ):
+        backend = QuantizationBackend.TORCHAO if cuda_active else QuantizationBackend.AITER
+    elif format_ is QuantizationFormat.INT8:
         backend = QuantizationBackend.TORCHAO if cuda_active else QuantizationBackend.AITER
     else:
         backend = QuantizationBackend.TORCHAO

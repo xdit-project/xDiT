@@ -138,7 +138,7 @@ not the entire model. Text FP8 is a separate opt-in for supported encoders.
 | [Wan2.1-VACE-14B](#model-wan2-1-vace-14b) | ✓ | — | — | — | — | ✓ | ✓ | ✓ |
 | [Wan2.2-Distilled-I2V](#model-wan2-2-distilled-i2v) | ✓ | ✓ | ✓ | — | — | ✓ | ✓ | ✓ |
 | [Wan2.2-I2V](#model-wan2-2-i2v) | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ |
-| [Wan2.2-T2V](#model-wan2-2-t2v) | ✓ | ✓ | ✓ | ✓ | — | — | ✓ | ✓ |
+| [Wan2.2-T2V](#model-wan2-2-t2v) | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ |
 | [Wan2.2-TI2V](#model-wan2-2-ti2v) | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ |
 | [Z-Image](#model-z-image) | ✓ | — | — | — | ✓ | ✓ | ✓ | ✓ |
 | [Z-Image-Turbo](#model-z-image-turbo) | ✓ | — | — | — | ✓ | ✓ | ✓ | ✓ |

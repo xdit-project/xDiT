@@ -50,6 +50,7 @@ def _contract(modules, format_name, backend_name, mode_name="EAGER"):
         (True, False, (10, 0), False, "FP4", "TORCHAO", "TorchaoNvfp4BackendAdapter"),
         (False, True, None, True, "FP4", "AITER", "AiterMxfp4BackendAdapter"),
         (True, False, (8, 9), False, "INT8", "TORCHAO", "TorchaoInt8BackendAdapter"),
+        (False, True, None, True, "INT8", "AITER", "AiterInt8BackendAdapter"),
     ],
 )
 def test_hardware_routing_matrix_is_injectable(
@@ -68,6 +69,7 @@ def test_hardware_routing_matrix_is_injectable(
         hip_probe=lambda: hip,
         cuda_capability_probe=lambda: capability,
         aiter_probe=lambda: aiter,
+        require_aiter_int8=(format_name == "INT8" and hip),
         nvfp4_probe=lambda: (True, None),
         int8_probe=lambda: (True, None),
         diffusers_probe=lambda config_kind: (True, None),
@@ -591,6 +593,49 @@ def test_descriptor_declares_storage_sharding_and_trainability(modules):
     message = descriptor.log_message()
     assert "backend=aiter" in message
     assert "storage=aiter_mxfp4_per_1x32" in message
+
+
+def test_aiter_int8_descriptor_declares_packed_state(modules):
+    b = modules.backends
+    adapter = b.AiterInt8BackendAdapter(
+        backend=modules.contracts.QuantizationBackend.AITER,
+        format_=modules.contracts.QuantizationFormat.INT8,
+    )
+
+    descriptor = b.describe_blockwise_format_load(
+        adapter,
+        component_name="transformer",
+        targets=("blocks",),
+        wrap_attrs=("blocks",),
+    )
+
+    assert descriptor.storage_semantics == "aiter_int8_per_row_preshuffled"
+    assert descriptor.parameter_semantics == "packed_weight_parameter"
+    assert descriptor.auxiliary_state_semantics == "replicated_scale_buffer"
+    assert descriptor.serialization == "runtime_conversion_only"
+
+
+def test_aiter_int8_fsdp_requires_non_float_parameter_support(modules):
+    b = modules.backends
+    adapter = b.AiterInt8BackendAdapter(
+        backend=modules.contracts.QuantizationBackend.AITER,
+        format_=modules.contracts.QuantizationFormat.INT8,
+    )
+    capabilities = b.FormatBackendCapabilities(
+        aiter_int8=True,
+        aiter_int8_fsdp=False,
+        aiter_int8_fsdp_reason="torch is too old",
+    )
+    with pytest.raises(
+        modules.contracts.UnsupportedLoadContract,
+        match=r"AITER INT8 packed weight.*torch is too old",
+    ):
+        b.validate_format_fsdp_placement(
+            _contract(modules, "INT8", "AITER", "FSDP_META"),
+            adapter,
+            capabilities=capabilities,
+            required=True,
+        )
 
 
 @pytest.mark.parametrize("format_name", ["FP4", "INT8"])

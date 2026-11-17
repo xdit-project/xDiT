@@ -64,3 +64,20 @@ def test_attention_a2a_is_rejected_for_unvalidated_wan_runners():
             attention_backend="aiter_fp8",
             attention_a2a="auto",
         )
+
+
+def test_wan22_t2v_declares_aiter_int8_transformer_targets():
+    model = _build("Wan2.2-T2V", gemm_quantization="int8")
+    assert model.capabilities.use_int8_gemms is True
+    assert model.capabilities.use_aiter_int8_gemms is True
+    assert model.settings.int8_gemm_module_list == ["transformer.blocks", "transformer_2.blocks"]
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    ["Wan2.1-T2V", "Wan2.1-T2V-1.3B", "Wan2.1-I2V", "Wan2.2-I2V", "Wan2.2-TI2V", "Wan2.1-VACE-14B"],
+)
+def test_aiter_int8_gemms_are_limited_to_wan22_t2v(model_name):
+    from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY
+
+    assert MODEL_REGISTRY[model_name].capabilities.use_aiter_int8_gemms is False

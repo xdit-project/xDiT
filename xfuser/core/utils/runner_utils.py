@@ -402,6 +402,55 @@ def quantize_linear_layers_to_int8(
         )
 
 
+def quantize_linear_layers_to_aiter_int8(
+    model: torch.nn.Module,
+    parent_name: str = "",
+    filter_fn: Optional[Callable[[torch.nn.Module, str], bool]] = None,
+    device: torch.device | str | None = None,
+    offload_to_cpu: bool = False,
+) -> int:
+    """Replace supported Linear leaves with AITER true-INT8 linears."""
+    from xfuser.model_executor.layers.aiter_int8_linear import (
+        supports_aiter_int8_linear,
+        xFuserAiterInt8Linear,
+    )
+
+    replaced = 0
+    for name, module in list(model.named_children()):
+        full_name = f"{parent_name}.{name}" if parent_name else name
+        if isinstance(module, torch.nn.Linear):
+            if _weight_is_torchao_quantized(module):
+                continue
+            if filter_fn is not None and not filter_fn(module, full_name):
+                continue
+            if not supports_aiter_int8_linear(module.in_features, module.out_features):
+                continue
+            weight = module.weight.detach()
+            bias = module.bias.detach() if module.bias is not None else None
+            int8_layer = xFuserAiterInt8Linear(
+                module.in_features,
+                module.out_features,
+                bias=module.bias is not None,
+                device="meta",
+                dtype=weight.dtype,
+            )
+            int8_layer.train(module.training)
+            int8_layer.load_and_quantize_weights(weight, bias, device=device)
+            if offload_to_cpu:
+                int8_layer.to("cpu")
+            setattr(model, name, int8_layer)
+            replaced += 1
+        elif next(module.children(), None) is not None:
+            replaced += quantize_linear_layers_to_aiter_int8(
+                module,
+                parent_name=full_name,
+                filter_fn=filter_fn,
+                device=device,
+                offload_to_cpu=offload_to_cpu,
+            )
+    return replaced
+
+
 def quantize_linear_layers_to_fp8(
     module_or_module_list_to_quantize: torch.nn.Module | torch.nn.ModuleList,
     filter_fn: Optional[Callable[[torch.nn.Module, str], bool]] = None,

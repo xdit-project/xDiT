@@ -49,6 +49,7 @@ def test_qwen_sync_prefix_uses_explicit_patch_mode_handoff(monkeypatch):
         return "done"
 
     pipe = SimpleNamespace(
+        _qwen_do_true_cfg=False,
         _pipefusion_async_enabled=lambda **_kwargs: True,
         _sync_qwen_pipeline=sync_pipeline,
         _pipefusion_handoff_sync_latents=handoff,

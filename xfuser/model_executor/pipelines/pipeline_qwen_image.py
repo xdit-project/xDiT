@@ -159,11 +159,11 @@ class QwenPipeFusionMixin:
         text_outputs = []
         image_states = latents.chunk(len(branches), dim=0)
         text_states = encoder_hidden_states.chunk(len(branches), dim=0)
-        text_masks = (
-            encoder_hidden_states_mask.chunk(len(branches), dim=0)
-            if encoder_hidden_states_mask is not None
-            else (None,) * len(branches)
-        )
+        text_masks = encoder_hidden_states_mask
+        if isinstance(text_masks, torch.Tensor):
+            text_masks = text_masks.chunk(len(branches), dim=0)
+        elif text_masks is None:
+            text_masks = (None,) * len(branches)
         for branch, image_state, text_state, text_mask in zip(
             branches,
             image_states,
@@ -293,7 +293,7 @@ class QwenPipeFusionMixin:
         patch_rope = self._patch_rotary_embeddings(
             layout,
             img_shapes,
-            condition_mask.shape[1] if condition_mask is not None else condition.shape[1],
+            condition.shape[1],
             condition.device,
         )
         transport = PipeFusionTransport(
@@ -354,6 +354,12 @@ class QwenPipeFusionMixin:
     ):
         state = get_runtime_state()
         warmup = state.runtime_config.warmup_steps
+        if condition_mask is not None:
+            pure_cfg = self._qwen_do_true_cfg and get_classifier_free_guidance_world_size() == 1
+            # Check once per branch, before denoising; avoid a device sync in each block.
+            condition_mask = tuple(
+                None if mask.all().item() else mask for mask in condition_mask.chunk(2 if pure_cfg else 1, dim=0)
+            )
         run_async = self._pipefusion_async_enabled(
             num_timesteps=len(timesteps),
             pipeline_warmup_steps=warmup,

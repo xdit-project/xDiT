@@ -51,6 +51,20 @@ def sp_pad_spans_ranks(seq_len: int, sp_size: int) -> bool:
     return (-seq_len) % sp_size > -(-seq_len // sp_size)
 
 
+def share_fused_weights(fused: torch.nn.Linear, parts) -> None:
+    """Turn `parts` into views of `fused`, the linear that stacks their weights, so that fusing costs no memory.
+
+    The parts compute what they did before; only their own copies of the weights are freed.
+    """
+    offset = 0
+    for part in parts:
+        rows = slice(offset, offset + part.out_features)
+        part.weight.data = fused.weight.data[rows]
+        if part.bias is not None:
+            part.bias.data = fused.bias.data[rows]
+        offset += part.out_features
+
+
 def zero_sp_pad_rows(tensor: torch.Tensor, rows: int) -> None:
     """Clear a tensor's trailing `rows` SP pad rows in place; a no-op when `rows` is 0.
 

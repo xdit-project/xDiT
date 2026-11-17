@@ -5,7 +5,12 @@ from typing import Optional
 import torch
 
 from xfuser.core.attention.sparsity.head_balance import COST_SINK_KEY
-from xfuser.core.attention.sparsity.sol import SolAttnUnsupported, check_sol_attn_recipe, sol_attn_bhsd
+from xfuser.core.attention.sparsity.sol import (
+    SolAttnUnsupported,
+    check_sol_attn_recipe,
+    check_sol_tilt,
+    sol_attn_bhsd,
+)
 from xfuser.core.attention.spec import EXACT_KV_TOKENS_KEY, AttnCall
 from xfuser.core.distributed.attention_schedule import SolAttnBetaSchedule
 from xfuser.core.distributed.runtime_state import (
@@ -85,13 +90,19 @@ def _block_tile():
     return get_runtime_state().runtime_config.sparseattn_block_size
 
 
-def check_sparse_block_size(runtime_config, *, recipe: str) -> None:
-    """Refuse a --sparseattn_block_size that `recipe`'s Sol-Attn row is not built at."""
-    block_tile = runtime_config.sparseattn_block_size
-    if block_tile is None:
-        return
+def _tilt_rank() -> int:
+    """--solattn_tilt_rank, or 0 outside a run."""
+    if not runtime_state_is_initialized():
+        return 0
+    return get_runtime_state().runtime_config.solattn_tilt_rank
+
+
+def check_run_config(runtime_config, *, recipe: str) -> None:
+    """Refuse a --sparseattn_block_size or --solattn_tilt_rank that `recipe`'s Sol-Attn row cannot serve."""
     try:
-        check_sol_attn_recipe(recipe, block_tile=block_tile)
+        check_sol_tilt(recipe, runtime_config.solattn_tilt_rank)
+        if runtime_config.sparseattn_block_size is not None:
+            check_sol_attn_recipe(recipe, block_tile=runtime_config.sparseattn_block_size)
     except SolAttnUnsupported as error:
         raise ValueError(str(error)) from None
 
@@ -119,6 +130,7 @@ def sol(query, key, value, call: AttnCall, *, recipe: str):
         block_tile=_block_tile(),
         query_seqlen=None if valid_q_len is None else int(valid_q_len),
         exact_tokens=kwargs.get(EXACT_KV_TOKENS_KEY),
+        tilt_rank=_tilt_rank(),
     )
     if cost_sink is not None:
         cost_sink.copy_(head_cost)

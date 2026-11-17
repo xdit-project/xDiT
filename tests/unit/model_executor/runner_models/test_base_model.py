@@ -244,6 +244,13 @@ def test_a_beta_schedule_without_a_sol_backend_is_refused(backend):
         _refuse_unread_options(config)
 
 
+def test_a_tilt_rank_without_a_sol_backend_is_refused():
+    config = xFuserArgs(model="m", solattn_tilt_rank=2, attention_backend="AITER_FP8")
+
+    with pytest.raises(ValueError, match="--solattn_tilt_rank applies only to the AITER_BF16FP8_SOL"):
+        _refuse_unread_options(config)
+
+
 def _gather_dp_outputs(monkeypatch, *, dp_degree, legacy_pipe, rank=0, sp_rank=0):
     """Run ``_gather_dp_outputs`` on a non-saving rank and return what it sent, or "not gathered"."""
     sent = []

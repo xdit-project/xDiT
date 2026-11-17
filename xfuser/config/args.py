@@ -372,6 +372,7 @@ class xFuserArgs:
     # AITER MHA v4 Sol-Attn (the AITER_*_SOL backends)
     solattn_beta: float = 0.5
     solattn_beta_schedule: Optional[str] = None
+    solattn_tilt_rank: int = 0
     # NVIDIA Sol-Attn (the SOL_ATTN backend)
     sol_attn_tau: float = 0.2
     sol_attn_thresh_type: str = "exact"
@@ -1596,6 +1597,16 @@ class xFuserArgs:
             "reads the leading minus as another option.",
         )
         parser.add_argument(
+            "--solattn_tilt_rank",
+            type=int,
+            default=0,
+            metavar="RANK",
+            help="Correct each pooled block of the AITER Sol backends with its leading RANK "
+            "terms of Cov(v, k) q, on top of a second-order term on its logit, so a skipped "
+            "block stands in for its keys more closely. 0 (default) keeps the block means. "
+            "Not served by aiter_mxfp6_sol.",
+        )
+        parser.add_argument(
             "--sol_attn_tau",
             type=float,
             default=0.2,
@@ -1890,6 +1901,7 @@ class xFuserArgs:
             sparseattn_block_size=self.sparseattn_block_size,
             solattn_beta=self.solattn_beta,
             solattn_beta_schedule=self.solattn_beta_schedule,
+            solattn_tilt_rank=self.solattn_tilt_rank,
             use_sparseattn_head_balance=self.use_sparseattn_head_balance,
             sol_attn_tau=self.sol_attn_tau,
             sol_attn_thresh_type=self.sol_attn_thresh_type,

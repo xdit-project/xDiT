@@ -92,8 +92,8 @@ def _spec(row: SolRecipe) -> Spec:
             & row.archs
             & _SolRow(row.recipe)
         ),
-        validates=Impl("kernel:check_sparse_block_size", {"recipe": row.recipe}),
-        options=("solattn_beta", "solattn_beta_schedule", "sparseattn_block_size"),
+        validates=Impl("kernel:check_run_config", {"recipe": row.recipe}),
+        options=("solattn_beta", "solattn_beta_schedule", "solattn_tilt_rank", "sparseattn_block_size"),
         configures=Impl("kernel:configure_run"),
     )
 

@@ -132,6 +132,31 @@ def _probe_ragged_kv():
     return mha_v4_ragged_kv
 
 
+def _probe_second_order():
+    """aiter's Jensen cap and pooled value tilt builders, or Nones on a build without them."""
+    try:
+        from aiter.ops.triton.attention.sol_tilt import (
+            sol_jensen_cap,
+            sol_q_abs_max,
+            sol_tilt_factors,
+            sol_tilt_planes,
+            sol_tilt_scaled_params,
+            sol_tilt_valu_params,
+        )
+        from aiter.ops.triton.attention.utils import _e8m0_dequantize
+    except ImportError:
+        return (None,) * 7
+    return (
+        sol_q_abs_max,
+        sol_jensen_cap,
+        sol_tilt_factors,
+        sol_tilt_planes,
+        sol_tilt_valu_params,
+        sol_tilt_scaled_params,
+        _e8m0_dequantize,
+    )
+
+
 _AITER = _probe_aiter()
 SOL_ATTN_AVAILABLE = _AITER is not None
 
@@ -143,6 +168,16 @@ _ragged_kv = _probe_ragged_kv() if _AITER is not None else None
 _block_scale_storage, _SCALE_TILE_ROWS, _SCALE_LOOKAHEAD_ROWS = (
     _probe_scale_storage() if _AITER is not None else (None, 0, 0)
 )
+# Module globals for the same reason.
+(
+    _q_abs_max,
+    _jensen_cap,
+    _tilt_factors,
+    _tilt_planes,
+    _tilt_valu_params,
+    _tilt_scaled_params,
+    _e8m0_dequantize,
+) = _probe_second_order() if _AITER is not None else (None,) * 7
 # Whether sol_prepare can add forced blocks to its selection (exact KV tokens).
 _SOL_PREPARE_FORCES_BLOCKS = _AITER is not None and "force_block_mask" in inspect.signature(_AITER.prepare).parameters
 
@@ -447,13 +482,22 @@ def _quantize(recipe, query, key, value, softmax_scale):
 
 
 def sol_attn_routing_for(
-    q, k, v, beta, recipe=_RECIPES["fp8"], block_attn_mask=None, block_tile=None, force_block_mask=None
+    q,
+    k,
+    v,
+    beta,
+    recipe=_RECIPES["fp8"],
+    block_attn_mask=None,
+    block_tile=None,
+    force_block_mask=None,
+    k_variance=False,
 ):
     """Pooled K/V, ragged LUT and selection bitmap for one call, as the kernel consumes them.
 
     q/k/v are the (tensor, descale, source) triples _quantize returns. block_attn_mask supplies an
     already chosen selection instead of routing from beta; pass exactly one of the two.
     force_block_mask, ending in num_kv_blocks, is OR-ed into the selection either way.
+    k_variance also returns each block's K variance, for the Jensen term.
     """
     qk_packed = recipe.k_packed is not None
     # An addressable E8M0-scaled operand's codes are not proportional to its values, so routing
@@ -478,6 +522,7 @@ def sol_attn_routing_for(
         k_packed_format=recipe.k_packed,
         v_packed_format=recipe.v_packed,
         block_attn_mask=block_attn_mask,
+        k_variance=k_variance,
         q_scale=q[1] if qk_block_scaled else None,
         # Only when set: older sol_prepare builds take no force_block_mask.
         **({} if force_block_mask is None else {"force_block_mask": force_block_mask}),
@@ -496,6 +541,213 @@ def _with_scale_lookahead(scale):
     backed = _block_scale_storage(scale, *scale.shape, _SCALE_TILE_ROWS, lookahead_rows=_SCALE_LOOKAHEAD_ROWS)
     backed.copy_(scale)
     return backed
+
+
+# The recipes whose Sol rows take the pooled value tilt. aiter's manifest has no column for it; its
+# mha_v4_packed documents every Sol row but f6f8 (MXFP6 Q/K, FP8 V), which is the mxfp6 recipe.
+_TILT_RECIPES = frozenset({"bf16", "bf16fp8", "fp8", "i8fp8", "mxfp8", "f8f6", "f6f6", "f6f4", "mxfp4"})
+
+
+def check_sol_tilt(recipe_id, tilt_rank):
+    """Raise unless this aiter can serve the pooled value tilt at `tilt_rank` on `recipe_id`'s row."""
+    if tilt_rank < 0:
+        raise SolAttnUnsupported(f"--solattn_tilt_rank must be >= 0, got {tilt_rank}")
+    if tilt_rank == 0:
+        return
+    if recipe_id not in _TILT_RECIPES:
+        raise SolAttnUnsupported(
+            f"--solattn_tilt_rank has no Sol-Attn '{recipe_id}' row with the pooled value tilt; "
+            f"the rows with it are {', '.join(r for r in SOL_ATTN_RECIPES if r in _TILT_RECIPES)}"
+        )
+    if _tilt_factors is None or _jensen_cap is None:
+        raise SolAttnUnsupported("--solattn_tilt_rank needs aiter's sol_jensen_cap and sol_tilt builders")
+
+
+def _second_order(recipe, q, k, v, routing, softmax_scale, block_tile, tilt_rank):
+    """The capped Jensen term and, with tilt_rank, the pooled value tilt, as mha_v4_packed kwargs.
+
+    The Jensen term adds 0.5 * scale^2 * q^2 . var_k to each pooled block's logit, capped per block
+    at ln(kv_tile): uncapped, a block whose scores are far from Gaussian takes most of the softmax.
+    The tilt then adds each pooled block's leading Cov(v, k) q terms to its mean value, scaled by
+    the block's capped gain. The recipes build the tilt through different aiter kernels.
+    """
+    out = dict(
+        mean_k=routing["mean_k"],
+        mean_v=routing["mean_v"],
+        mean_k_scale=routing["mean_k_scale"],
+        mean_v_scale=routing["mean_v_scale"],
+    )
+    q_tile, kv_tile = block_tile
+    packed = recipe.k_packed is not None
+    q_cap, qk_descales, block_scaled = q[0], (None, None), {}
+    if recipe.qk_format == "BF16":
+        q_abs_max = _q_abs_max(q[0], q_tile)
+    elif recipe.qk_scale_mode != "block":
+        # Per-tensor FP8 / INT8 Q and K.
+        q_abs_max = _q_abs_max(q[0], q_tile)
+        qk_descales = (q[1], k[1])
+    elif not packed:
+        # MXFP8: the quantizer folds softmax_scale * log2(e) into the Q codes.
+        q_abs_max = _q_abs_max(q[0], q_tile, q_scale=q[1])
+        block_scaled = dict(
+            mean_k_var_scale=routing["mean_k_var_scale"], q_multiplier=_AITER.q_multiplier(softmax_scale)
+        )
+    else:
+        # A packed Q cannot be read back, so its BF16 source goes through the packers' rotation.
+        q_cap = q[2]
+        q_abs_max = _q_abs_max(q_cap, q_tile, rotate=True)
+        block_scaled = dict(
+            mean_k_var_scale=routing["mean_k_var_scale"], mean_k_var_pooled=routing["mean_k_var_pooled"]
+        )
+    out["mean_k_var"], out["mean_k_var_scale"], gain = _jensen_cap(
+        q_cap,
+        *qk_descales,
+        routing["mean_k_var"],
+        softmax_scale,
+        kv_tile,
+        block_attn_mask=routing["block_attn_mask"],
+        q_tile=q_tile,
+        q_abs_max=q_abs_max,
+        **block_scaled,
+    )
+    if not tilt_rank:
+        return out
+
+    gain = gain.sqrt()
+    mean_k, mean_v = out["mean_k"], out["mean_v"]
+    mean_k_scale, mean_v_scale = out["mean_k_scale"], out["mean_v_scale"]
+    if recipe.id == "fp8":
+        out["mean_k"], out["mean_v"], out["sol_tilt"] = _tilt_factors(
+            q[0],
+            k[0],
+            v[0],
+            q[1],
+            k[1],
+            v[1],
+            mean_k,
+            mean_v,
+            softmax_scale,
+            tilt_rank,
+            kv_tile,
+            block_gain=gain,
+            q_abs_max=q_abs_max,
+        )
+        return out
+    if recipe.id == "mxfp8":
+        # The score MFMA decodes Q and the A planes, so the multiplier carries no descale; the
+        # K-scale plane stride rides in the parameter block's third dword.
+        mult = _AITER.q_multiplier(softmax_scale)
+        planes = _tilt_planes(
+            _e8m0_dequantize(k[0], k[1]).to(torch.bfloat16),
+            v[0],
+            q_abs_max,
+            mean_k,
+            mean_v,
+            softmax_scale,
+            tilt_rank,
+            kv_tile,
+            k_format="mxfp8",
+            v_format="e4m3",
+            q_descale=1.0 / mult,
+            v_descale=v[1],
+            q_multiplier=mult,
+            mean_k_scale=mean_k_scale,
+            block_gain=gain,
+        )
+        params = _tilt_scaled_params(planes, planes.k_scale_plane_stride)
+    elif recipe.id in ("bf16", "bf16fp8"):
+        # BF16 A planes against the BF16 Q. BF16/FP8's B planes are FP8, half the K planes' width,
+        # so the V plane stride rides in the parameter block's third dword.
+        bf16_v = recipe.id == "bf16"
+        planes = _tilt_planes(
+            k[0],
+            v[0],
+            q_abs_max,
+            mean_k,
+            mean_v,
+            softmax_scale,
+            tilt_rank,
+            kv_tile,
+            k_format="bf16",
+            v_format="bf16" if bf16_v else "e4m3",
+            v_descale=1.0 if bf16_v else v[1],
+            block_gain=gain,
+        )
+        params = _tilt_scaled_params(planes, planes.v_plane_stride)
+    elif recipe.id == "i8fp8":
+        planes = _tilt_planes(
+            k[0],
+            v[0],
+            q_abs_max,
+            mean_k,
+            mean_v,
+            softmax_scale,
+            tilt_rank,
+            kv_tile,
+            k_format="int8",
+            v_format="e4m3",
+            q_descale=q[1],
+            k_descale=k[1],
+            v_descale=v[1],
+            block_gain=gain,
+        )
+        params = _tilt_valu_params(planes, q[1], k[1])
+    elif recipe.id == "f8f6":
+        # e4m3 A planes against the rotated FP8 Q; MXFP6 B planes packed from the pooled BF16 V by
+        # V's own packer, their data and scale strides after the score multiplier.
+        planes = _tilt_planes(
+            k[0],
+            v[2],
+            q_abs_max,
+            mean_k,
+            mean_v,
+            softmax_scale,
+            tilt_rank,
+            kv_tile,
+            k_format="e4m3",
+            v_format="mxfp6_fp6_p",
+            q_descale=q[1],
+            k_descale=k[1],
+            mean_v_scale=mean_v_scale,
+            mean_v_pooled=routing["mean_v_pooled"],
+            block_gain=gain,
+        )
+        params = _tilt_valu_params(planes, q[1], k[1], strides=(planes.v_plane_stride, planes.v_scale_plane_stride))
+    elif recipe.id in ("f6f6", "f6f4", "mxfp4"):
+        # Packed K: the A planes go through K's own packer, which rotates them as it rotates K, so
+        # the factors take the unrotated sources and Q maxima. MXFP4's A-plane scales have an
+        # image of their own, whose stride rides after V's two.
+        planes = _tilt_planes(
+            k[2],
+            v[2],
+            _q_abs_max(q[2], q_tile),
+            mean_k,
+            mean_v,
+            softmax_scale,
+            tilt_rank,
+            kv_tile,
+            k_format=recipe.k_packed,
+            v_format=recipe.v_packed,
+            q_multiplier=_AITER.q_multiplier(softmax_scale),
+            mean_k_scale=mean_k_scale,
+            mean_v_scale=mean_v_scale,
+            mean_k_pooled=routing["mean_k_pooled"],
+            mean_v_pooled=routing["mean_v_pooled"],
+            block_gain=gain,
+        )
+        strides = (planes.v_plane_stride, planes.v_scale_plane_stride)
+        if recipe.id == "mxfp4":
+            strides += (planes.k_scale_plane_stride,)
+        params = _tilt_valu_params(planes, strides=strides)
+    else:
+        raise SolAttnUnsupported(f"the pooled value tilt has no '{recipe.id}' factor path")
+    out["mean_k"], out["mean_v"] = planes.mean_k, planes.mean_v
+    if planes.mean_k_scale is not None:
+        out["mean_k_scale"] = planes.mean_k_scale
+    if planes.mean_v_scale is not None:
+        out["mean_v_scale"] = planes.mean_v_scale
+    out["sol_tilt"] = (planes.rank, planes.k_plane_stride, params)
+    return out
 
 
 def _head_cost_from_routing(routing):
@@ -572,6 +824,8 @@ def sol_attn_bhsd(
     block_tile=None,
     query_seqlen=None,
     exact_tokens=None,
+    tilt_rank=0,
+    jensen=False,
 ):
     """Sol-Attn over BHSD tensors, returning (BHSD bf16 output, per-head cost or None).
 
@@ -599,6 +853,10 @@ def sol_attn_bhsd(
 
     block_tile is the (q_tile, kv_tile) to route and dispatch at, from --sparseattn_block_size.
     None takes the recipe's default.
+
+    tilt_rank, from --solattn_tilt_rank, adds the leading Cov(v, k) q terms of each pooled block to
+    its mean value, on top of the capped Jensen term on its logit. jensen applies the capped term
+    alone, for comparison. Both take the packed API.
     """
     if _AITER is None:
         raise SolAttnUnsupported("Sol-Attn requires aiter with mha_v4_sol and sol_prepare; please update AITER")
@@ -630,7 +888,10 @@ def sol_attn_bhsd(
     if softmax_scale is None:
         softmax_scale = query.shape[-1] ** -0.5
 
-    if routing is None and not return_head_cost and force_blocks is None and recipe.routes_through_raw:
+    check_sol_tilt(recipe.id, tilt_rank)
+    second_order = jensen or tilt_rank > 0
+    raw = routing is None and not return_head_cost and force_blocks is None and not second_order
+    if raw and recipe.routes_through_raw:
         qk, v_fmt = _format(recipe.qk_format), _format(recipe.v_format)
         out = _AITER.sol(
             query, key, value, qk, qk, v_fmt, beta=beta, softmax_scale=softmax_scale, block_tile=block_tile
@@ -639,7 +900,24 @@ def sol_attn_bhsd(
 
     q, k, v = _quantize(recipe, query, key, value, softmax_scale)
     if routing is None:
-        routing = sol_attn_routing_for(q, k, v, beta, recipe, block_tile=block_tile, force_block_mask=force_blocks)
+        routing = sol_attn_routing_for(
+            q, k, v, beta, recipe, block_tile=block_tile, force_block_mask=force_blocks, k_variance=second_order
+        )
+    if second_order:
+        pooled = _second_order(recipe, q, k, v, routing, softmax_scale, block_tile, tilt_rank)
+    else:
+        pooled = dict(
+            mean_k=routing["mean_k"],
+            mean_v=routing["mean_v"],
+            # None where the pooled operand reuses the source descale.
+            mean_k_scale=routing["mean_k_scale"],
+            mean_v_scale=routing["mean_v_scale"],
+        )
+    if not recipe.routes_through_raw and "sol_tilt" not in pooled:
+        # Only the MXFP8 row reads past the pooled K scale, and it is the one row that is not raw.
+        # The tilt's planes come in AITER's own padded storage; sol_prepare's pooled scale does
+        # not. Drop the copy once AITER's sol_prepare pads the scale itself.
+        pooled["mean_k_scale"] = _with_scale_lookahead(pooled["mean_k_scale"])
     qk_fmt, v_fmt = _format(recipe.qk_format), _format(recipe.v_format)
     qk_scale, v_scale = _scale_mode(recipe.qk_scale_mode), _scale_mode(recipe.v_scale_mode)
     out = _AITER.packed(
@@ -659,16 +937,8 @@ def sol_attn_bhsd(
         kv_block_indices=routing["kv_block_indices"],
         lut_start=routing["lut_start"],
         lut_count=routing["lut_count"],
-        mean_k=routing["mean_k"],
-        mean_v=routing["mean_v"],
         block_bitmap=routing["block_bitmap"],
-        # None where the pooled operand reuses the source descale.
-        # Only the MXFP8 row reads past the pooled K scale, and it is the one row that is not raw.
-        # Drop the copy once AITER's sol_prepare pads the scale itself.
-        mean_k_scale=(
-            routing["mean_k_scale"] if recipe.routes_through_raw else _with_scale_lookahead(routing["mean_k_scale"])
-        ),
-        mean_v_scale=routing["mean_v_scale"],
+        **pooled,
         block_tile=block_tile,
         v_pack=getattr(_AITER.pack, recipe.v_pack),
     )

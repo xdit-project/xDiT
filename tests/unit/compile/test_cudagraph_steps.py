@@ -71,7 +71,7 @@ def test_the_marker_actually_announces_the_step_to_torch(monkeypatch):
     [
         # No CUDA graphs, so there are no reused buffers to announce a boundary for.
         ("default", 8),
-        # One graph for the whole component: its own output is the only thing anyone reads.
+        # One graph for the whole component: its outputs are copied out instead.
         ("reduce-overhead", 1),
     ],
 )
@@ -94,6 +94,32 @@ def test_marking_a_component_twice_leaves_one_marker():
     assert len(transformer._forward_pre_hooks) == 1
 
 
+class _GraphPool(torch.nn.Module):
+    """Returns the same buffer from every call, as a replayed CUDA graph returns its pool."""
+
+    def __init__(self):
+        super().__init__()
+        self.out = torch.zeros(2)
+
+    def forward(self, value):
+        self.out.fill_(value)
+        return (self.out,)
+
+
+@pytest.mark.parametrize(("mode", "kept"), [("reduce-overhead", [1.0, 1.0]), ("default", [2.0, 2.0])])
+def test_a_whole_component_under_cuda_graphs_returns_outputs_the_next_call_cannot_overwrite(monkeypatch, mode, kept):
+    """Sequential true CFG reads the conditional output after the unconditional call."""
+    model, _ = _model(mode, fully_shard_degree=1)
+    model.pipe.transformer = _GraphPool()
+    monkeypatch.setattr(torch, "compile", lambda module, **kwargs: module)
+
+    model._compile_model({"num_inference_steps": 4})
+    conditional = model.pipe.transformer(1.0)[0]
+    model.pipe.transformer(2.0)
+
+    assert conditional.tolist() == kept
+
+
 def test_sdma_ulysses_drops_cuda_graphs_for_the_transformer_only(monkeypatch):
     """The SDMA copies are queued from the host: the transformer compiles without CUDA graphs,
     the other components keep them."""
@@ -109,7 +135,12 @@ def test_sdma_ulysses_drops_cuda_graphs_for_the_transformer_only(monkeypatch):
     model.settings.transformer_attr_names = ["transformer"]
     model._get_compiled_pipe_components = lambda: ["transformer", "vae"]
     modes = {}
-    monkeypatch.setattr(torch, "compile", lambda module, **kwargs: modes.setdefault(id(module), kwargs["mode"]))
+
+    def compile(module, **kwargs):
+        modes[id(module)] = kwargs["mode"]
+        return module
+
+    monkeypatch.setattr(torch, "compile", compile)
 
     model._compile_model({"num_inference_steps": 4})
 

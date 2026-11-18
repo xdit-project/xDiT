@@ -78,10 +78,11 @@ Where this specification conflicts with the testing skill in
    `pipe.transformer.blocks[0]`. See [component_paths.md](component_paths.md).
 5. **Case.** One listed component path of one configuration. A case is one pytest test.
 6. **Call.** One execution of a listed component in a pipeline run.
-7. **Call address.** The tuple of call counters that identifies one call. See
+7. **Call address.** For a certain component path, the tuple of call counters that identifies one call. See
    [component_paths.md](component_paths.md), section 5.
-   A call address does not tell in which execution an outcome happened (item 19).
-8. **Capture.** The record of the inputs and the output of one call during a pipeline run.
+   A call address does not tell in which execution an outcome happened (item 19). It's an accepted
+   limitation that in version 1, a component shared by different parents might record wrong call addresses.
+8. **Capture.** The record of the inputs, random-number states, and the output of one call during a pipeline run.
 9. **Replay.** A new execution of a component with the captured inputs, outside the pipeline run.
 10. **Fidelity check.** A bitwise comparison of a replay output with the captured output of the same instance. Fidelity check verifies that component doesn't depend on a hidden, unaccounted state.
 11. **Determinism check.** A bitwise comparison of two replay outputs of the same instance.

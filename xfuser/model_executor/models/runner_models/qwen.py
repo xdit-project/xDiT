@@ -210,6 +210,39 @@ class xFuserQwenImageEditModel(xFuserModel):
         )
         return pipe
 
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        self.pipe.batched_true_cfg = self._batches_true_cfg()
+        if self.pipe.batched_true_cfg:
+            log("Qwen-Image-Edit: true CFG runs its two branches as one batch.")
+
+    def _batches_true_cfg(self) -> bool:
+        """Whether both true-CFG branches can run as one batch with each row exact.
+
+        The batch pads the shorter prompt and keeps every row off its padding with per-row key
+        packing, which the AITER FAv3 kernel and BF16 MHA v4 serve. MHA v4 does not split
+        calls carrying per-row key lengths, so an explicit split count keeps the two calls.
+        """
+        config = self.config
+        state = get_runtime_state()
+        if (
+            config.cache_method
+            or (config.ring_degree or 1) > 1
+            or config.pipefusion_parallel_degree > 1
+            or config.use_fp8_comms
+            or state.has_attention_schedule()
+        ):
+            return False
+        backend = state.attention_backend
+        if backend == AttentionBackendType.AITER:
+            return True
+        if backend == AttentionBackendType.AITER_BF16:
+            from xfuser.core.attention.backends.aiter_mha_v4.kernel import HAS_SEQLENS_K
+
+            splits = state.runtime_config.mha_v4_kv_splits
+            return HAS_SEQLENS_K and (splits == "auto" or splits == 1)
+        return False
+
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         images = input_args["input_images"]
         kwargs = {

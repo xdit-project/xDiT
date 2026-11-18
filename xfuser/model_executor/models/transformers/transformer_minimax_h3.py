@@ -21,7 +21,7 @@ from xfuser.core.distributed import (
     get_ulysses_parallel_world_size,
 )
 from xfuser.core.attention import registry as attention_registry
-from xfuser.core.attention.spec import Sparsity
+from xfuser.core.attention.spec import EXACT_KV_TOKENS_KEY, AttentionBackendType, Sparsity
 from xfuser.core.attention.backends.vsa_h3.attention import build_h3_vsa_metadata
 from xfuser.model_executor.layers.fused_qk_rope_flydsl import (
     _HAS_FLYDSL,
@@ -39,6 +39,9 @@ from xfuser.model_executor.layers.usp import (
 # Both VSA-H3 backends declare the same sparsity strategy, so the set follows
 # from the specs rather than being listed here.
 VSA_H3_BACKENDS = attention_registry.types_where(sparsity=Sparsity.H3)
+SOL_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SOL)
+# The token refiner's backend under a Sol run; the runner selects it before compiling.
+REFINER_DENSE_BACKEND = AttentionBackendType.AITER
 
 
 MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT = 64
@@ -104,12 +107,17 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
         attention_kwargs: dict[str, Any] | None = None,
         backend=None,
         use_fasth3_vsa: bool = False,
+        dense_for_sol: bool = False,
     ) -> None:
         super().__init__()
         self.use_ulysses_parallel_attention = use_ulysses_parallel_attention
         self.attention_kwargs = attention_kwargs
         self.backend = backend
         self.use_vsa_h3 = use_fasth3_vsa and backend in VSA_H3_BACKENDS
+        # For the token refiner, which attends a few hundred text tokens: too few KV blocks for
+        # Sol-Attn's routing threshold to mean anything. Resolved per call, since None defers to
+        # the runtime's backend, which a hybrid schedule changes between steps.
+        self.dense_for_sol = dense_for_sol
 
     def __call__(
         self,
@@ -149,6 +157,10 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
             # the Ulysses exchange before the VSA-H3 backend consumes it.
             self.attention_kwargs[ULYSSES_EXTRA_INPUTS_KEY] = ("vsa_h3_gate",)
 
+        backend = self.backend
+        if self.dense_for_sol and (backend or get_runtime_state().attention_backend) in SOL_BACKENDS:
+            backend = REFINER_DENSE_BACKEND
+
         use_ulysses = self.use_ulysses_parallel_attention and get_ulysses_parallel_world_size() > 1
         attention_function = USP if use_ulysses else attention
         attention_args = {
@@ -156,7 +168,7 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
             "is_causal": False,
             "attention_kwargs": self.attention_kwargs,
             "head_balance_layer": attn,
-            "backend": self.backend,
+            "backend": backend,
         }
         if use_ulysses:
             attention_args["combine_qkv_a2a"] = True
@@ -307,6 +319,10 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
             # The pad rows are a trailing block, so backends without a
             # key-padding mask can slice K/V here instead of packing.
             "valid_kv_len": None,
+            # The same count on the query side, for Sol-Attn: it routes one
+            # selection per query tile, and pad rows would vote on it.
+            "valid_q_len": None,
+            EXACT_KV_TOKENS_KEY: None,
             "vsa_h3_metadata": None,
             "vsa_h3_gate": None,
             ULYSSES_EXTRA_INPUTS_KEY: None,
@@ -344,6 +360,7 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
                 xFuserMiniMaxH3AttnProcessor(
                     use_ulysses_parallel_attention=False,
                     backend=self.attention_backend,
+                    dense_for_sol=True,
                 )
             )
 
@@ -561,6 +578,15 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
             cu_seqlens_k = None
             max_seqlen_k = None
 
+        # Text and audio are a few percent and a fraction of a percent of this
+        # sequence. Sol-Attn thresholds every KV block against statistics the
+        # video blocks set, so their queries would lose the text and audio
+        # blocks they need most. Forcing those blocks exact costs one exact
+        # block per block they occupy. Every other backend ignores the mask.
+        exact_tokens = torch.zeros(padded_length, dtype=torch.bool, device=packed_hidden_states.device)
+        exact_tokens[text_indices] = True
+        exact_tokens[audio_indices] = True
+
         self._usp_attention_kwargs.update(
             {
                 "indices_k": indices_k,
@@ -569,6 +595,8 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
                 # _pad_rows appends its rows, so the valid keys are the leading
                 # sequence_length rows and nothing beyond them is real.
                 "valid_kv_len": max_seqlen_k,
+                "valid_q_len": max_seqlen_k,
+                EXACT_KV_TOKENS_KEY: exact_tokens,
             }
         )
 

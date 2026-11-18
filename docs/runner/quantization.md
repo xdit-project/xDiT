@@ -16,7 +16,7 @@ packages and hardware:
 | FP8 | AITER block-scale FP8 on RDNA 4 (`gfx1200`/`gfx1201`) when AITER is installed; otherwise torchao. CUDA FP8 requires compute capability 8.9 or newer. |
 | FP4 | AITER MXFP4 on ROCm `gfx950`/`gfx1250`, or torchao NVFP4 on CUDA compute capability 10.0 or newer. RDNA 4 does not support this path. |
 | FP6 / A6W4 | Supported Wan runners on ROCm `gfx950` with the corresponding AITER ASM kernels. A6W4 requires eager, GPU-resident loading. |
-| INT8 | CUDA with torchao, currently declared by Z-Image and Z-Image-Turbo. ROCm is rejected. Small linear layers remain unquantized. |
+| INT8 | torchao on CUDA, declared by Z-Image and Z-Image-Turbo; AITER's 4-wave INT8 GEMM on ROCm `gfx950`, declared by Wan2.2 T2V. A model runs INT8 only on the platform whose backend it declares. Linear layers the backend cannot take remain unquantized. |
 
 To quantize a supported text encoder, set `--use_fp8_text_encoder` and a GEMM
 profile containing FP8. For AITER streaming text-encoder FP8

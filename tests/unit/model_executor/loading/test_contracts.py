@@ -128,6 +128,7 @@ def test_runner_declaration_derives_quantization_contracts(contracts):
             "use_fp8_gemms": True,
             "use_fp4_gemms": False,
             "use_int8_gemms": True,
+            "use_aiter_int8_gemms": True,
         },
     )()
 
@@ -160,30 +161,38 @@ def test_runner_declaration_derives_quantization_contracts(contracts):
                 contracts.QuantizationFormat.INT8,
                 contracts.QuantizationBackend.TORCHAO,
             ),
+            (
+                contracts.QuantizationFormat.INT8,
+                contracts.QuantizationBackend.AITER,
+            ),
         }
     )
     assert declaration.meta_text_encoders == ("text_encoder",)
 
 
-def test_runner_declaration_does_not_allow_cross_product_backend_pairs(contracts):
+@pytest.mark.parametrize(
+    ("declared", "requested"),
+    [("use_int8_gemms", "AITER"), ("use_aiter_int8_gemms", "TORCHAO")],
+)
+def test_runner_declaration_does_not_allow_cross_product_backend_pairs(contracts, declared, requested):
     model_capabilities = type(
         "ModelCapabilities",
         (),
         {
             "use_fp8_gemms": False,
             "use_fp4_gemms": False,
-            "use_int8_gemms": True,
+            declared: True,
         },
     )()
     declaration = contracts.LoadDeclaration.for_runner(model_capabilities)
 
     with pytest.raises(
         contracts.UnsupportedLoadContract,
-        match=r"AITER.*INT8.*ExampleRunner",
+        match=rf"{requested}.*INT8.*ExampleRunner",
     ):
         contracts.select_load_contract(
             requested_format=contracts.QuantizationFormat.INT8,
-            selected_backend=contracts.QuantizationBackend.AITER,
+            selected_backend=getattr(contracts.QuantizationBackend, requested),
             materialization_mode=contracts.MaterializationMode.EAGER,
             declaration=declaration,
             fsdp_strategy={},
@@ -516,6 +525,12 @@ def test_offload_that_was_measured_working_is_allowed(contracts, flags, shard_de
             False,
             True,
             ("INT8", "TORCHAO"),
+        ),
+        (
+            {"use_int8_gemms": True},
+            False,
+            False,
+            ("INT8", "AITER"),
         ),
     ],
 )

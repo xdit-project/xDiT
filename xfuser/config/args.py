@@ -233,7 +233,6 @@ class xFuserArgs:
     warmup_steps: int = 1
     # use_cuda_graph: bool = True
     use_parallel_vae: bool = False
-    split_parallel_vae_attention: bool = False
     # use_profiler: bool = False
     use_torch_compile: bool = False
     use_onediff: bool = False
@@ -1062,12 +1061,6 @@ class xFuserArgs:
             "--use_parallel_vae",
             help="Distribute supported VAE work across existing ranks. DistVAE uses row sharding by default; tiling can select tile dispatch.",
             action="store_true",
-        )
-        parser.add_argument(
-            "--split_parallel_vae_attention",
-            action="store_true",
-            help="With --use_parallel_vae, split the decoder mid-block self-attention, which DistVAE's row "
-            "sharding runs on the whole latent on every rank, by query rows across the ranks.",
         )
         parser.add_argument(
             "--use_torch_compile",

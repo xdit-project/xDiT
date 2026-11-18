@@ -10,7 +10,7 @@ its section and its position in the section multiplied by 10, for example `HL10`
 
 **UC1. Check that a component works correctly.** A developer asks: "Does this component of this model
 configuration work correctly?" The harness runs the component as production runs it (instance A) and as an
-eager reference in high precision (instance B). It then compares the outputs against tolerances. Requirements:
+eager reference in potentially extended precision (instance B). It then compares the outputs against tolerances. Requirements:
 HL10–HL60, TD10–TD40, TM10–TM50, IA10–IA80, IB10–IB80.
 *Rationale:* some operations of xDiT diffusion models can be flaky (produce wrong numerics, or cause hangs or
 crashes). Component-wise testing could help with QA of the implementation.
@@ -68,10 +68,10 @@ be the VAE of `diffusers`, a DistVAE, or something else. Also, xDiT changes fast
 
 **HL30.** The details of a configuration are private to the configuration: Ulysses, ring, classifier-free
 guidance, quantized GEMMs and others. The tests do not depend on them. The tests are generic, so that they can
-run every configuration. The configuration identifier is one parameter among many.
+run every configuration.
 
-**HL40.** The reference is the same xDiT component, built by the xDiT runner, run with extended precision (fp32
-by default). It is not a `diffusers` implementation.
+**HL40.** The reference is the same xDiT component, built by the xDiT runner, run potentially
+with an extended precision (fp32 by default). It is not a `diffusers` implementation.
 
 **HL50.** One test answers one question: "Does this component, in this regime, with these inputs, work
 correctly?" A failed check belongs to one test, so only that test fails (wider failures due to
@@ -82,7 +82,7 @@ detectable issue. "Flaky" includes a crash and a hang.
 
 **HL70.** **Working tests first.** Test coverage has priority over correct reports, for example a correct call
 identifier. A wrong report is acceptable as a documented limitation, possibly with a corresponding future-work
-item. A deviation that a working test needs is permitted with the approval of the user.
+item. A deviation from some requirements that a working test needs is permitted with a due documentation.
 
 **HL80.** Decisions rest on facts that the code shows directly.
 
@@ -99,10 +99,12 @@ components. Version 1 plans nothing for benchmarks, but it identifies the code t
 
 ### Tests definition
 
-**TD10.** The definition is in Python. One call defines one configuration: its run settings
-(including parameters of B instance, determinism overrides, deadlines and other things requirements mandate to be
-user-overridable), its list of components, and the tolerances for each output of each component.
-Each element of the list of components defines a separate test case, selectable with `-k` pytest parameter.
+**TD10.** The definition is in Python. One call defines one configuration: its run settings,
+its list of components, the tolerances for each output of each component, special parameters
+of B instance, per component path determinism overrides, deadlines and other things the
+requirements mandate to be user-overridable.
+Each entry (a component path) of the list of components defines a separate test case,
+selectable with `-k` pytest parameter.
 Each configuration is a separate call.
 
 **TD20.** The run settings come from an entry of a CI benchmark YAML file, in the same format as the benchmark
@@ -114,9 +116,9 @@ parser of the xDiT runner.
 **TD30.** Test configuration (TD10) can override every field of the YAML entry, and overrides
 can be sufficient to define the configuration alone, without a YAML file.
 `overrides` is a dictionary with the structure of a YAML entry. The
-permitted fields are those of the `Experiment` class of CI. Other fields are an error. `args` merges key by
-key: a key replaces the value of the entry, and `None` removes the key. Other fields replace the value of the
-entry, and `None` removes the field.
+permitted fields are only those of the `Experiment` class of CI; other fields are an error.
+`args` merges key by key: a key replaces the value of the entry, and `None` removes the key.
+Other fields replace the value of the entry, and `None` removes the field.
 
 **TD40.** The resulting overrides apply both to A and to B. A and B can apply own overrides later (TD90, IB10, IB70).
 
@@ -125,7 +127,7 @@ configuration run before the next configuration starts its instances.
 
 **TD60.** The configuration name is the `name` of the entry by default. It is an error if neither a name nor an
 entry is set, or if the name is absent, `None`, not a string, or empty. The name selects the data directory
-and the metrics file of the configuration.
+and the metrics file of the configuration. Note that `name` can be overridden with `overrides` (TD30).
 
 **TD70.** Configuration names are unique. The harness raises an error for two configurations with the same
 name. The check runs during collection, and it also covers the configurations that `-k` deselects. A separate
@@ -133,7 +135,7 @@ check in the configuration fixture stops a configuration that starts a second ti
 names across sessions are the responsibility of the user.
 
 **TD80.** A name contains only letters, digits, `_`, `.` and `-`. The literal names `.` and `..` are not
-allowed. The `--ff` option of pytest is not supported.
+allowed. The `--ff` option of pytest, `pytest-xdist` and random-order pytest plugins are not supported.
 
 **TD90.** The harness forces these settings in A and B: no warmup calls, one execution ("iteration"
 in terms of xDiT runner), and `use_torch_compile` off.
@@ -183,7 +185,7 @@ to apply.
 
 ### Components, paths and calls
 
-**CP10.** The harness tests only an explicit list of components. The list is a list of strings.
+**CP10.** The harness tests only an explicit list of components (component path strings).
 Each string is the path from the runner model object to the callable component or a method.
 Only the listed components are captured. A listed component must run at least once during pipeline
 run.
@@ -191,7 +193,7 @@ run.
 **CP20.** The list is known before the run. The harness makes the test cases from the definition, without a
 model.
 
-**CP30.** A component path defines a component to test. Path syntax: dots separate the
+**CP30.** A component path defines a component to test. Path syntax: dots separate the path
 elements, and `[i]` indexes a container, for example
 `pipe.transformer.blocks[0].attn1` and `pipe.transformer.blocks[-1]`. A path has no leading dot. `[key]`
 selects an item of an `nn.ModuleDict`.
@@ -202,7 +204,8 @@ is a path error.
 
 **CP50.** A call number follows the element after a colon, for example `pipe.transformer:3.blocks[0]:3`. A path
 without a call number selects all calls, and its one case checks every call. The case fails if one call fails,
-and the message names the failing calls.
+and the message names the failing calls. Version 1 has accepted limitation: the first path element
+ignores its call number.
 
 **CP60.** Call numbers are not negative.
 *Rationale:* then the harness can save the tensors of a call at once.
@@ -211,8 +214,9 @@ and the message names the failing calls.
 never uses it to recover the call stack. Each path addresses only one component: the component that the path
 reaches with its call numbers stripped. Call numbers only select calls of that component.
 
-**CP80.** Each callable element of each listed path gets one global call counter and a set of references to
-counters of direct callable descendants (i.e. callable components that directly follow the element in any
+**CP80.** Each callable element of each listed path gets one global (i.e. same for different
+component paths) call counter and a set of references to counters of direct callable descendants
+(i.e. callable components that directly follow the element in any
 path, ignoring non-callable components in between). The harness knows at path resolution which elements
 are callable and what their path descendants are.
 1. The counter is 0 before the pipeline starts and can only be modified during pipeline run (replays excluded).
@@ -231,12 +235,13 @@ are callable and what their path descendants are.
    not be counted properly due to the counter reset.
 
 **CP90.** `:i` refers to the global counter of its element. Example: `a.b:2.c.d[2]:3` selects a call of `d[2]`
-when its counter is 3 and the counter of `b` is 2. During the pipeline run of A, the harness saves the inputs
-of each selected call, and the outputs after the call returns.
+when its counter is 3 and the counter of `b` is 2. During the run of pipelines in A or B, the harness saves the inputs
+of each selected call (in A only), random-number states (in A only) and the outputs after the call returns.
 
-**CP100.** An address contains the call numbers of all callable elements that the harness tracks. The first path
-element, such as `pipe`, `second_pipe` or `refiner_pipe` is usually callable, but version 1 does not track it
-due to complications, and assumes it to be a non-callable instead.
+**CP100.** An address contains the call numbers of all callable elements of a path that the
+harness tracks. The first path element, such as `pipe`, `second_pipe` or `refiner_pipe` is
+usually callable, but version 1 does not track it due to complications, and assumes it to
+be a non-callable instead.
 
 **CP110.** The harness does not care who calls a component. It uses only the inputs and the outputs of each
 call. Calls from another pipeline, from the runner, or from any other code are tested like all other calls.
@@ -244,7 +249,8 @@ call. Calls from another pipeline, from the runner, or from any other code are t
 **CP120.** Two entries of the same component with different call numbers are separate cases, for example
 `pipe.transformer:1` and `pipe.transformer:2`. Overlapping entries are an error at path resolution. Two
 entries on the same component are disjoint only if one object has a call number in both entries and the
-numbers differ. Then `pipe.transformer:1` and `second_pipe.transformer:2` in the LTX-2.3 runner are permitted.
+numbers differ. Then `pipe.transformer:1` and `second_pipe.transformer:2` in the LTX-2.3 runner
+are permitted.
 *Rationale for the error:* it is better not to support such cases than to make the implementation more
 complex.
 
@@ -288,7 +294,7 @@ If the policy of an instance requires determinism, NON_DETERMINISTIC stops the c
 and fails the test at once. If the policy permits nondeterminism, NON_DETERMINISTIC does not stop the case, and
 SUCCESS can replace it (IA80). The bitwise checks always run, whatever the policy is.
 
-Each rank also has a nondeterminism flag for each case. Each NON_DETERMINISTIC status that the rank gets sets
+Each rank also has a nondeterminism status flag for each case. Each NON_DETERMINISTIC status that the rank gets sets
 the flag, and nothing clears it; the rank also records the call identifier of each nondeterministic execution.
 The flag of a case is the OR of the flags of all ranks of A and B. If it is set, the test issues a pytest
 warning that names the instances, the ranks with the flag and their call identifiers, whatever the policy and
@@ -315,7 +321,8 @@ last status; a rank whose case another rank stopped (FC90.4) keeps ABOUT_TO_STAR
 
 **IB10.** Instance B is an eager reference. It uses the same configuration and the same world size and parallel
 layout as A, with these changes:
-1. the reference dtype: fp32 by default; a parameter, because some models might need a smaller dtype; If it uses
+1. the reference dtype for calculating in extended precision: fp32 by default; a parameter,
+   because some models might need a smaller dtype; If it uses
    fp32, B forces full fp32 matrix precision: `torch.backends.cuda.matmul.allow_tf32 = False`,
    `torch.backends.cudnn.allow_tf32 = False` and `torch.set_float32_matmul_precision("highest")`.
 2. quantization off, so B loads normal weights;
@@ -331,8 +338,8 @@ VAE tiling and its tile shape, distilled weights, LoRA and channels-last.
 (it's a known limitation of version 1 needs to be addressed in future versions that these warnings
 aren't recorded and are produced only during instance B runs)
 
-**IB30.** B loads in bf16 and casts up to the reference dtype. It does not load an fp32 checkpoint. B converts
-all components at once.
+**IB30.** B always loads in bf16 and casts to the reference dtype. It does not load a checkpoint
+in the reference dtype. B converts all components at once.
 
 **IB40.** B runs the pipeline in the reference dtype with the same run arguments as A (changes of IB10 applied).
 It captures its own calls and runs its own fidelity check on them.
@@ -348,8 +355,8 @@ bit. Nondeterminism in B gives NON_DETERMINISTIC_B.
 **IB60.** If a case gets REPLAY_MISMATCH_B, or NON_DETERMINISTIC_B under a policy that requires determinism, only
 that case fails. The other cases continue.
 
-**IB70.** B has three parameters for the user: the reference dtype, the self-attention backend and the
-cross-attention backend.
+**IB70.** B has three run-related parameters for the user: the reference dtype, the self-attention backend and the
+cross-attention backend, and also own per-path determinism override setting, and deadlines.
 
 **IB80.** An attention backend that declares a fallback, or that needs a blocked vendor package, makes the
 configuration UNSUPPORTED_B (IA70.2). A cross-attention parameter for a model without a separate
@@ -360,7 +367,7 @@ cross-attention backend is an error. The default cross-attention backend is `SDP
 **FC10.** The harness must detect each crash and each hang, wherever it occurs, and attribute it to the
 instance (A or B) and, for a failure during a replay, to the case, the component and the call identifier (FC20.3)
 
-**FC20.** Each instance computes the results of many cases in one process and saves them to files. A crash or a
+**FC20.** Each instance computes the results of many cases in one go and saves them to files. A crash or a
 hang ends the instance. Version 1 does not recover.
 1. A case with complete data (A and B) is checked as usual.
 2. A case that an instance had to run but did not start gets FAILED_TO_START.
@@ -501,9 +508,9 @@ lines with the values and the outcome.
 test that passes marks its state as passed and deletes its data files; the state stays, so that re-runs can
 skip the case (FR50). The files of tests that did not pass stay.
 
-**FR20.** One entity, in the launcher, defines the paths of the data files. The test functions get the paths
-from it, read the files, and might delete some of them during the work, following other requirements
-to save the storage space.
+**FR20.** One entity, in the pytest process, defines the paths of the data files. The launcher,
+instances and test functions all get the paths from it. Test functions read the files, and
+might delete some of them during the work, following other requirements to save the storage space.
 
 **FR30.** Tensors go into safetensors files. Structure and plain values go into JSON. Other types give
 UNSUPPORTED for the affected case.

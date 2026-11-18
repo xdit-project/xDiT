@@ -67,6 +67,58 @@ def _qwen_cos_sin(freqs: torch.Tensor):
     return cos, sin
 
 
+def per_sample_key_packing(
+    text_lens: List[int], text_seq_len: int, image_seq_len: int, sp_size: int, device=None
+) -> Optional[Dict[str, Any]]:
+    """Varlen key packing for a batch whose prompts are zero-padded to ``text_seq_len``.
+
+    Row ``b`` of the batch has ``text_lens[b]`` real prompt tokens. The packing selects, from
+    the keys Ulysses gathers, each row's real prompt and image tokens, so no row attends over
+    another row's prompt padding or over sequence-parallel padding. Built from Python ints,
+    once per call, so it adds no device sync and nothing data-dependent to a compiled graph.
+
+    Returns None for the replicated-prompt layout, which keeps the prompt out of the gathered
+    keys and so cannot carry per-row prompt lengths.
+    """
+    if sp_pad_spans_ranks(image_seq_len, sp_size) or sp_pad_spans_ranks(text_seq_len, sp_size):
+        return None
+    image_pad = (-image_seq_len) % sp_size
+    text_pad = (-text_seq_len) % sp_size
+    local_image = (image_seq_len + image_pad) // sp_size
+    local_text = (text_seq_len + text_pad) // sp_size
+    sharded_padding = bool(image_pad or text_pad)
+    # Global token position of every gathered key, in the order USP attends over them, with
+    # -1 for SP pad. Text positions are offset past the image so one range test covers both.
+    order = []
+    for rank in range(sp_size):
+        image = range(rank * local_image, (rank + 1) * local_image)
+        text = range(rank * local_text, (rank + 1) * local_text)
+        image_real = [p for p in image if p < image_seq_len]
+        text_real = [image_seq_len + p for p in text if p < text_seq_len]
+        if sharded_padding:
+            image_pad_rows = [-1] * (local_image - len(image_real))
+            text_pad_rows = [-1] * (local_text - len(text_real))
+            order += image_real + text_real + image_pad_rows + text_pad_rows
+        else:
+            order += text_real + image_real
+    gathered = len(order)
+    indices, cu_seqlens, max_len = [], [0], 0
+    for row, text_len in enumerate(text_lens):
+        keep = [
+            row * gathered + i
+            for i, p in enumerate(order)
+            if 0 <= p < image_seq_len or image_seq_len <= p < image_seq_len + text_len
+        ]
+        indices += keep
+        cu_seqlens.append(cu_seqlens[-1] + len(keep))
+        max_len = max(max_len, len(keep))
+    return {
+        "indices_k": torch.tensor(indices, dtype=torch.long, device=device),
+        "cu_seqlens_k": torch.tensor(cu_seqlens, dtype=torch.int32, device=device),
+        "max_seqlen_k": max_len,
+    }
+
+
 @xFuserAttentionProcessorRegister.register(QwenDoubleStreamAttnProcessor2_0)
 class xFuserQwenDoubleStreamAttnProcessor(QwenDoubleStreamAttnProcessor2_0):
     def __init__(self, attention_kwargs=None):
@@ -322,15 +374,34 @@ class xFuserQwenImageTransformerWrapper(QwenImageTransformer2DModel):
             "sharded_padding": False,
             "local_image_pad_rows": 0,
             "local_text_pad_rows": 0,
+            "indices_k": None,
+            "cu_seqlens_k": None,
+            "max_seqlen_k": None,
         }
         self._sp_pad = {"local_rows": 0}
         self._text_sp_pad = {"local_rows": 0}
+        self._key_packing = (None, None)
         for block in self.transformer_blocks:
             block.attn.processor = xFuserQwenDoubleStreamAttnProcessor(self._self_attn_kwargs)
             # Qwen returns (encoder, image); each stream tracks its own SP pad.
             block.register_forward_hook(zero_sp_pad_rows_hook(self._sp_pad, index=1))
             block.register_forward_hook(zero_sp_pad_rows_hook(self._text_sp_pad, index=0))
         register_fp8_comms_eligible_modules(self, qwen_attn_modules(self))
+
+    def padded_prompt_key_packing(
+        self, text_lens: List[int], image_seq_len: int, device=None
+    ) -> Optional[Dict[str, Any]]:
+        """``attention_kwargs`` for a batch whose prompts are zero-padded to the longest of ``text_lens``.
+
+        None where the layout cannot carry per-row prompt lengths (see per_sample_key_packing).
+        Built outside ``forward``, so a compiled forward takes the packing as inputs, and the
+        last one is kept because a denoising loop asks for the same packing every step.
+        """
+        key = (tuple(text_lens), image_seq_len, get_sequence_parallel_world_size(), device)
+        if self._key_packing[0] != key:
+            packing = per_sample_key_packing(text_lens, max(text_lens), image_seq_len, key[2], device)
+            self._key_packing = (key, packing)
+        return self._key_packing[1]
 
     def forward(
         self,
@@ -380,7 +451,12 @@ class xFuserQwenImageTransformerWrapper(QwenImageTransformer2DModel):
             attention_kwargs = attention_kwargs.copy()
             lora_scale = attention_kwargs.pop("scale", 1.0)
         else:
+            attention_kwargs = {}
             lora_scale = 1.0
+        # Per-row prompt lengths of a batch padded to one prompt length (see per_sample_key_packing).
+        key_packing = {name: attention_kwargs.pop(name, None) for name in ("indices_k", "cu_seqlens_k", "max_seqlen_k")}
+        if key_packing["indices_k"] is not None and replicated_text:
+            raise ValueError("per-row prompt lengths need a sharded prompt, not the replicated-prompt layout")
 
         if USE_PEFT_BACKEND:
             # weight the lora layers by setting `lora_scale` for each PEFT layer
@@ -431,6 +507,10 @@ class xFuserQwenImageTransformerWrapper(QwenImageTransformer2DModel):
         )
         self._self_attn_kwargs["local_image_pad_rows"] = self._sp_pad["local_rows"]
         self._self_attn_kwargs["local_text_pad_rows"] = self._text_sp_pad["local_rows"]
+        self._self_attn_kwargs.update(key_packing)
+        if key_packing["indices_k"] is not None:
+            # The packing already leaves out the SP pad, row by row.
+            self._self_attn_kwargs["valid_kv_len"] = None
         txt_freqs = image_rotary_emb[1]
         if not replicated_text:
             encoder_hidden_states = chunk_and_pad_sequence(
@@ -455,7 +535,7 @@ class xFuserQwenImageTransformerWrapper(QwenImageTransformer2DModel):
 
         # Construct joint attention mask once to avoid reconstructing in every block
         # This eliminates 60 GPU syncs during training while maintaining torch.compile compatibility
-        block_attention_kwargs = attention_kwargs.copy() if attention_kwargs is not None else {}
+        block_attention_kwargs = attention_kwargs.copy()
         if encoder_hidden_states_mask is not None:
             # Build joint mask: [text_mask, all_ones_for_image]
             batch_size, image_seq_len = hidden_states.shape[:2]

@@ -17,6 +17,10 @@ MXFP6_STREAMING_FALLBACK = (
     "AITER MXFP6 conversion requires each full-precision weight before creating "
     "xFuserMXFP6Linear packed state; no native Diffusers per-weight loader exists"
 )
+AITER_INT8_STREAMING_FALLBACK = (
+    "AITER INT8 conversion requires each full-precision weight before creating "
+    "preshuffled signed-INT8 state; no native Diffusers per-weight loader exists"
+)
 # The architectures AITER has FP4 kernels for, per its own arch_info.is_fp4_avail. Its build gate
 # is wider than that (aiter/jit/core.py compiles -D__Float4_e2m1fn_x2 for anything but gfx942 when
 # AITER_FP4x2 is enabled), but the kernels behind the define are narrower: the hand-written A4W4
@@ -38,6 +42,7 @@ class FormatBackendCapabilities:
     aiter_mxfp4: bool = False
     aiter_mxfp6: bool = False
     aiter_a6w4: bool = False
+    aiter_int8: bool = False
     torchao_int8: bool = False
     torchao_nvfp4_streaming: bool = False
     torchao_int8_streaming: bool = False
@@ -45,10 +50,12 @@ class FormatBackendCapabilities:
     torchao_int8_fsdp: bool = False
     aiter_mxfp4_fsdp: bool = False
     aiter_mxfp6_fsdp: bool = False
+    aiter_int8_fsdp: bool = False
     torchao_nvfp4_reason: str | None = None
     aiter_mxfp4_reason: str | None = None
     aiter_mxfp6_reason: str | None = None
     aiter_a6w4_reason: str | None = None
+    aiter_int8_reason: str | None = None
     torchao_int8_reason: str | None = None
     torchao_nvfp4_streaming_reason: str | None = None
     torchao_int8_streaming_reason: str | None = None
@@ -56,6 +63,7 @@ class FormatBackendCapabilities:
     torchao_int8_fsdp_reason: str | None = None
     aiter_mxfp4_fsdp_reason: str | None = None
     aiter_mxfp6_fsdp_reason: str | None = None
+    aiter_int8_fsdp_reason: str | None = None
 
 
 def _probe_torchao_config(kind: str) -> tuple[bool, str | None]:
@@ -68,7 +76,7 @@ def _probe_torchao_config(kind: str) -> tuple[bool, str | None]:
     if installed < _MIN_TORCHAO_VERSION:
         return (
             False,
-            f"torchao {installed} is older than required " f"{_MIN_TORCHAO_VERSION}",
+            f"torchao {installed} is older than required {_MIN_TORCHAO_VERSION}",
         )
     try:
         if kind == "nvfp4":
@@ -229,10 +237,7 @@ def _probe_aiter_a6w4_apis(
         a6w4 = import_module("aiter.ops.gemm_op_a6w4")
         a6w6 = import_module("aiter.ops.gemm_op_a6w6")
     except Exception as exc:  # noqa: BLE001
-        return False, (
-            "AITER A6W4 import probe failed: "
-            f"{type(exc).__name__}: {exc}"
-        )
+        return False, (f"AITER A6W4 import probe failed: {type(exc).__name__}: {exc}")
     required = (
         ("gemm_a6w4", getattr(a6w4, "gemm_a6w4", None)),
         ("mxfp4_gemm_pack_size", getattr(a6w4, "mxfp4_gemm_pack_size", None)),
@@ -251,15 +256,38 @@ def _probe_aiter_a6w4_apis(
     except Exception as exc:  # noqa: BLE001
         return False, f"AITER mixed-MXFP pack-size probe failed: {exc}"
     if actual_fp4 != expected_fp4 or actual_fp6 != expected_fp6:
-        return False, (
-            "AITER mixed-MXFP packed-layout ABI mismatch: "
-            f"fp4={actual_fp4}, fp6={actual_fp6}"
-        )
+        return False, (f"AITER mixed-MXFP packed-layout ABI mismatch: fp4={actual_fp4}, fp6={actual_fp6}")
     arch = (gcn_arch_probe or _gcn_arch_name)()
     if arch is None:
         return False, "cannot determine ROCm architecture for mixed-MXFP support"
     if "gfx950" not in arch:
         return False, f"AITER A6W4 ASM requires gfx950, detected {arch}"
+    return True, None
+
+
+def _probe_aiter_int8_apis(
+    gcn_arch_probe: Callable[[], str | None] | None = None,
+) -> tuple[bool, str | None]:
+    """Probe AITER's signed-INT8 path of gemm_a8w8_bpreshuffle."""
+    try:
+        aiter = import_module("aiter")
+        four_wave = import_module("aiter.ops.flydsl.gemm_a8w8_bpreshuffle_4wave")
+        shuffle = import_module("aiter.ops.shuffle")
+    except Exception as exc:
+        return False, f"AITER INT8 import probe failed: {type(exc).__name__}: {exc}"
+    required = (
+        ("gemm_a8w8_bpreshuffle", getattr(aiter, "gemm_a8w8_bpreshuffle", None)),
+        ("supports_4wave_int8_shape", getattr(four_wave, "supports_4wave_int8_shape", None)),
+        ("shuffle_weight", getattr(shuffle, "shuffle_weight", None)),
+    )
+    missing = [name for name, value in required if not callable(value)]
+    if missing:
+        return False, "missing required AITER INT8 API: " + ", ".join(missing)
+    arch = (gcn_arch_probe or _gcn_arch_name)()
+    if arch is None:
+        return False, "cannot determine ROCm architecture for AITER INT8 support"
+    if "gfx950" not in arch:
+        return False, f"AITER true-INT8 FlyDSL requires gfx950, detected {arch}"
     return True, None
 
 
@@ -300,7 +328,7 @@ def _probe_fsdp_support(kind: str) -> tuple[bool, str | None]:
             False,
             "NVFP4 tensor-subclass FSDP gather/scatter support is not validated",
         )
-    if kind in {"mxfp4", "mxfp6"}:
+    if kind in {"mxfp4", "mxfp6", "aiter_int8"}:
         return _probe_fsdp_non_float_parameters()
     try:
         torch = import_module("torch")
@@ -318,9 +346,7 @@ def _probe_fsdp_support(kind: str) -> tuple[bool, str | None]:
         )
         weight = module.weight
         methods = ("fsdp_pre_all_gather", "fsdp_post_all_gather")
-        missing = [
-            name for name in methods if not callable(getattr(weight, name, None))
-        ]
+        missing = [name for name in methods if not callable(getattr(weight, name, None))]
         if missing:
             return False, "INT8 tensor subclass is missing " + ", ".join(missing)
     except Exception as exc:
@@ -338,7 +364,9 @@ def probe_format_backend_capabilities(
     mxfp6_probe: Callable[[], _ProbeResult] | None = None,
     require_mxfp6: bool = False,
     require_a6w4: bool = False,
+    require_aiter_int8: bool = False,
     a6w4_probe: Callable[[], _ProbeResult] | None = None,
+    aiter_int8_probe: Callable[[], _ProbeResult] | None = None,
     nvfp4_probe: Callable[[], _ProbeResult] | None = None,
     int8_probe: Callable[[], _ProbeResult] | None = None,
     diffusers_probe: Callable[[str], _ProbeResult] | None = None,
@@ -389,6 +417,18 @@ def probe_format_backend_capabilities(
                     None if available else "AITER MXFP6 APIs are unavailable",
                 )
 
+    if aiter_int8_probe is None:
+        if aiter_probe is None:
+            aiter_int8_probe = _probe_aiter_int8_apis
+        else:
+
+            def aiter_int8_probe():
+                available = bool(aiter_probe())
+                return (
+                    available,
+                    None if available else "AITER INT8 APIs are unavailable",
+                )
+
     nvfp4_probe = nvfp4_probe or (lambda: _probe_torchao_config("nvfp4"))
     int8_probe = int8_probe or (lambda: _probe_torchao_config("int8"))
     diffusers_probe = diffusers_probe or _probe_diffusers_config
@@ -407,12 +447,15 @@ def probe_format_backend_capabilities(
             mxfp6 = False
             mxfp6_reason = "AITER MXFP6 was not requested"
         if require_a6w4:
-            a6w4_available, a6w4_reason = _result(
-                (a6w4_probe or _probe_aiter_a6w4_apis)()
-            )
+            a6w4_available, a6w4_reason = _result((a6w4_probe or _probe_aiter_a6w4_apis)())
         else:
             a6w4_available = False
             a6w4_reason = "AITER A6W4 was not requested"
+        if require_aiter_int8:
+            aiter_int8, aiter_int8_reason = _result(aiter_int8_probe())
+        else:
+            aiter_int8 = False
+            aiter_int8_reason = "AITER INT8 was not requested"
     else:
         mxfp4 = False
         mxfp4_reason = "AITER MXFP4 requires ROCm"
@@ -420,35 +463,29 @@ def probe_format_backend_capabilities(
         mxfp6_reason = "AITER MXFP6 requires ROCm"
         a6w4_available = False
         a6w4_reason = "AITER A6W4 requires ROCm"
+        aiter_int8 = False
+        aiter_int8_reason = "AITER INT8 requires ROCm gfx950"
     if cuda:
         int8, int8_reason = _result(int8_probe())
     else:
         int8 = False
         int8_reason = "TorchAO INT8 is supported only on CUDA"
 
-    nv_stream, nv_stream_reason = (
-        _result(diffusers_probe("nvfp4")) if nvfp4 else (False, nvfp4_reason)
-    )
-    int8_stream, int8_stream_reason = (
-        _result(diffusers_probe("int8")) if int8 else (False, int8_reason)
-    )
-    nv_fsdp, nv_fsdp_reason = (
-        _result(fsdp_probe("nvfp4")) if nvfp4 else (False, nvfp4_reason)
-    )
-    int8_fsdp, int8_fsdp_reason = (
-        _result(fsdp_probe("int8")) if int8 else (False, int8_reason)
-    )
-    mx_fsdp, mx_fsdp_reason = (
-        _result(fsdp_probe("mxfp4")) if mxfp4 else (False, mxfp4_reason)
-    )
-    mx6_fsdp, mx6_fsdp_reason = (
-        _result(fsdp_probe("mxfp6")) if mxfp6 else (False, mxfp6_reason)
+    nv_stream, nv_stream_reason = _result(diffusers_probe("nvfp4")) if nvfp4 else (False, nvfp4_reason)
+    int8_stream, int8_stream_reason = _result(diffusers_probe("int8")) if int8 else (False, int8_reason)
+    nv_fsdp, nv_fsdp_reason = _result(fsdp_probe("nvfp4")) if nvfp4 else (False, nvfp4_reason)
+    int8_fsdp, int8_fsdp_reason = _result(fsdp_probe("int8")) if int8 else (False, int8_reason)
+    mx_fsdp, mx_fsdp_reason = _result(fsdp_probe("mxfp4")) if mxfp4 else (False, mxfp4_reason)
+    mx6_fsdp, mx6_fsdp_reason = _result(fsdp_probe("mxfp6")) if mxfp6 else (False, mxfp6_reason)
+    aiter_int8_fsdp, aiter_int8_fsdp_reason = (
+        _result(fsdp_probe("aiter_int8")) if aiter_int8 else (False, aiter_int8_reason)
     )
     return FormatBackendCapabilities(
         torchao_nvfp4=nvfp4,
         aiter_mxfp4=mxfp4,
         aiter_mxfp6=mxfp6,
         aiter_a6w4=a6w4_available,
+        aiter_int8=aiter_int8,
         torchao_int8=int8,
         torchao_nvfp4_streaming=nv_stream,
         torchao_int8_streaming=int8_stream,
@@ -456,10 +493,12 @@ def probe_format_backend_capabilities(
         torchao_int8_fsdp=int8_fsdp,
         aiter_mxfp4_fsdp=mx_fsdp,
         aiter_mxfp6_fsdp=mx6_fsdp,
+        aiter_int8_fsdp=aiter_int8_fsdp,
         torchao_nvfp4_reason=nvfp4_reason,
         aiter_mxfp4_reason=mxfp4_reason,
         aiter_mxfp6_reason=mxfp6_reason,
         aiter_a6w4_reason=a6w4_reason,
+        aiter_int8_reason=aiter_int8_reason,
         torchao_int8_reason=int8_reason,
         torchao_nvfp4_streaming_reason=nv_stream_reason,
         torchao_int8_streaming_reason=int8_stream_reason,
@@ -467,6 +506,7 @@ def probe_format_backend_capabilities(
         torchao_int8_fsdp_reason=int8_fsdp_reason,
         aiter_mxfp4_fsdp_reason=mx_fsdp_reason,
         aiter_mxfp6_fsdp_reason=mx6_fsdp_reason,
+        aiter_int8_fsdp_reason=aiter_int8_fsdp_reason,
     )
 
 
@@ -551,10 +591,7 @@ class FormatBackendAdapter:
         residual_match: Callable[[str], bool] | None = None,
     ):
         if not self.uses_native_transformer_streaming:
-            raise RuntimeError(
-                self.native_unavailable_reason
-                or "native Diffusers per-weight streaming is unavailable"
-            )
+            raise RuntimeError(self.native_unavailable_reason or "native Diffusers per-weight streaming is unavailable")
         if model_factory is None:
             raise RuntimeError("target mapping unavailable: no model structure factory")
         model = model_factory()
@@ -606,9 +643,7 @@ class TorchaoNvfp4BackendAdapter(FormatBackendAdapter):
         filter_fn=None,
     ):
         if hybrid:
-            raise RuntimeError(
-                "CUDA NVFP4 does not implement the runtime hybrid FP8/FP4 " "schedule"
-            )
+            raise RuntimeError("CUDA NVFP4 does not implement the runtime hybrid FP8/FP4 schedule")
         from xfuser.core.utils.runner_utils import quantize_linear_layers_to_nvfp4
 
         return quantize_linear_layers_to_nvfp4(
@@ -688,9 +723,7 @@ class AiterMxfp6BackendAdapter(FormatBackendAdapter):
         **kwargs,
     ):
         if hybrid:
-            raise RuntimeError(
-                "AITER MXFP6 does not implement the hybrid FP8/FP4 GEMM schedule"
-            )
+            raise RuntimeError("AITER MXFP6 does not implement the hybrid FP8/FP4 GEMM schedule")
         from xfuser.core.utils.runner_utils import quantize_linear_layers_to_fp6
 
         return quantize_linear_layers_to_fp6(
@@ -742,6 +775,31 @@ class TorchaoInt8BackendAdapter(FormatBackendAdapter):
             module,
             device=device,
             min_layer_size=self.min_layer_size,
+            filter_fn=filter_fn,
+        )
+
+
+class AiterInt8BackendAdapter(FormatBackendAdapter):
+    storage_semantics = "aiter_int8_per_row_preshuffled"
+    parameter_semantics = "packed_weight_parameter"
+    auxiliary_state_semantics = "replicated_scale_buffer"
+    serialization = "runtime_conversion_only"
+
+    def convert_module(
+        self,
+        module,
+        *,
+        device,
+        filter_fn=None,
+        **kwargs,
+    ):
+        from xfuser.core.utils.runner_utils import (
+            quantize_linear_layers_to_aiter_int8,
+        )
+
+        return quantize_linear_layers_to_aiter_int8(
+            module,
+            device=device,
             filter_fn=filter_fn,
         )
 
@@ -812,15 +870,10 @@ def derive_linear_ownership(
         try:
             model.get_submodule(target)
         except (AttributeError, KeyError) as exc:
-            raise RuntimeError(
-                f"target mapping unavailable: model structure is missing '{target}'"
-            ) from exc
+            raise RuntimeError(f"target mapping unavailable: model structure is missing '{target}'") from exc
 
     def targeted(name):
-        return any(
-            not target or name == target or name.startswith(f"{target}.")
-            for target in targets
-        )
+        return any(not target or name == target or name.startswith(f"{target}.") for target in targets)
 
     exclusions = []
     streamed = []
@@ -828,10 +881,7 @@ def derive_linear_ownership(
     for name, module in model.named_modules():
         if not name or not is_linear(module):
             continue
-        too_small = (
-            min_layer_size > 0
-            and min(module.in_features, module.out_features) < min_layer_size
-        )
+        too_small = min_layer_size > 0 and min(module.in_features, module.out_features) < min_layer_size
         if not targeted(name) or too_small:
             exclusions.append(name)
         elif residual_match is not None and residual_match(name):
@@ -898,8 +948,13 @@ def select_format_backend(
     backend_value = contract.selected_backend.value
     error = _unsupported_error(contract)
     if format_value not in {
-        "fp4", "fp8_fp4", "fp6", "fp4_fp6",
-        "a6w4", "fp4_a6w4", "int8",
+        "fp4",
+        "fp8_fp4",
+        "fp6",
+        "fp4_fp6",
+        "a6w4",
+        "fp4_a6w4",
+        "int8",
     }:
         return None
     if format_value in {"a6w4", "fp4_a6w4"}:
@@ -928,16 +983,12 @@ def select_format_backend(
         )
     if format_value in {"fp6", "fp4_fp6"}:
         if backend_value != "aiter":
-            raise error(
-                f"{backend_value} cannot store {format_value}; MXFP6 is AITER-only"
-            )
+            raise error(f"{backend_value} cannot store {format_value}; MXFP6 is AITER-only")
         if not capabilities.aiter_mxfp6:
             reason = capabilities.aiter_mxfp6_reason or "backend unavailable"
             raise error(f"AITER MXFP6 backend is unavailable: {reason}")
         if hybrid and format_value == "fp6":
-            raise error(
-                "Pure MXFP6 cannot use a low/high GEMM schedule"
-            )
+            raise error("Pure MXFP6 cannot use a low/high GEMM schedule")
         if format_value == "fp6":
             return AiterMxfp6BackendAdapter(
                 backend=contract.selected_backend,
@@ -946,9 +997,7 @@ def select_format_backend(
             )
         if not capabilities.aiter_mxfp4:
             reason = capabilities.aiter_mxfp4_reason or "backend unavailable"
-            raise error(
-                "AITER MXFP4 backend for mixed FP4+FP6 is unavailable: " f"{reason}"
-            )
+            raise error(f"AITER MXFP4 backend for mixed FP4+FP6 is unavailable: {reason}")
         return AiterMxfp4BackendAdapter(
             backend=contract.selected_backend,
             format_=contract.requested_format,
@@ -956,6 +1005,15 @@ def select_format_backend(
             use_fp6_for_overrides=True,
         )
     if format_value == "int8":
+        if backend_value == "aiter":
+            if not capabilities.aiter_int8:
+                reason = capabilities.aiter_int8_reason or "backend unavailable"
+                raise error(f"AITER INT8 backend is unavailable: {reason}")
+            return AiterInt8BackendAdapter(
+                backend=contract.selected_backend,
+                format_=contract.requested_format,
+                native_unavailable_reason=AITER_INT8_STREAMING_FALLBACK,
+            )
         if backend_value != "torchao" or not capabilities.torchao_int8:
             reason = capabilities.torchao_int8_reason or "backend unavailable"
             raise error(f"TorchAO INT8 backend is unavailable: {reason}")
@@ -1073,8 +1131,7 @@ def prepare_native_transformer_format_load(
     else:
         residual_match = (
             _precision_override_matcher(targets, precision_prefixes, precision_suffixes)
-            if isinstance(adapter, TorchaoNvfp4BackendAdapter)
-            and (precision_prefixes or precision_suffixes)
+            if isinstance(adapter, TorchaoNvfp4BackendAdapter) and (precision_prefixes or precision_suffixes)
             else None
         )
         try:
@@ -1089,14 +1146,10 @@ def prepare_native_transformer_format_load(
             return PreparedFormatLoad(
                 descriptor=_descriptor(adapter, component_name, "streaming"),
                 quantization_config=config,
-                streamed_targets=(
-                    ownership.streamed if ownership.residual else targets
-                ),
+                streamed_targets=(ownership.streamed if ownership.residual else targets),
                 residual_targets=ownership.residual,
             )
-    return PreparedFormatLoad(
-        descriptor=_descriptor(adapter, component_name, "post_load", fallback)
-    )
+    return PreparedFormatLoad(descriptor=_descriptor(adapter, component_name, "post_load", fallback))
 
 
 def describe_blockwise_format_load(
@@ -1115,9 +1168,7 @@ def describe_blockwise_format_load(
             "post_load",
             f"{component_name} has no {adapter.format.value.upper()} targets",
         )
-    if not wrap_attrs or not any(
-        module_paths_overlap(target, attr) for target in targets for attr in wrap_attrs
-    ):
+    if not wrap_attrs or not any(module_paths_overlap(target, attr) for target in targets for attr in wrap_attrs):
         return _descriptor(
             adapter,
             component_name,
@@ -1142,31 +1193,20 @@ def plan_eager_blockwise_fallback(
         "a6w4",
         "fp4_a6w4",
     }:
-        return EagerBlockwisePlan(
-            False, "A6W4 requires ordinary eager post-load conversion"
-        )
+        return EagerBlockwisePlan(False, "A6W4 requires ordinary eager post-load conversion")
     if prepared.descriptor.materialization_mode != "post_load":
         return EagerBlockwisePlan(False, "native loading already owns materialization")
     if world_size != 1:
         return EagerBlockwisePlan(False, "local blockwise loading requires one rank")
     if not standard_loader:
-        return EagerBlockwisePlan(
-            False, "loader does not expose the standard checkpoint seam"
-        )
+        return EagerBlockwisePlan(False, "loader does not expose the standard checkpoint seam")
     if offload_requested:
-        return EagerBlockwisePlan(
-            False, "local blockwise loading does not support offload"
-        )
+        return EagerBlockwisePlan(False, "local blockwise loading does not support offload")
     targets = tuple(targets)
     wrap_attrs = tuple(wrap_attrs)
     if not targets or not wrap_attrs:
-        return EagerBlockwisePlan(
-            False, "quantization targets or wrap attributes are empty"
-        )
-    if not all(
-        any(module_path_is_covered(target, attr) for attr in wrap_attrs)
-        for target in targets
-    ):
+        return EagerBlockwisePlan(False, "quantization targets or wrap attributes are empty")
+    if not all(any(module_path_is_covered(target, attr) for attr in wrap_attrs) for target in targets):
         return EagerBlockwisePlan(
             False,
             "quantization targets are not fully owned by streamed transformer blocks",
@@ -1199,6 +1239,10 @@ def validate_format_fsdp_placement(
         available = capabilities.aiter_mxfp6_fsdp
         reason = capabilities.aiter_mxfp6_fsdp_reason
         label = "AITER MXFP6 packed weight"
+    elif isinstance(adapter, AiterInt8BackendAdapter):
+        available = capabilities.aiter_int8_fsdp
+        reason = capabilities.aiter_int8_fsdp_reason
+        label = "AITER INT8 packed weight"
     elif isinstance(adapter, AiterMixedMxfpBackendAdapter):
         available = False
         reason = "A6W4 currently requires eager materialization"
@@ -1207,6 +1251,4 @@ def validate_format_fsdp_placement(
         return
     if not available:
         suffix = f": {reason}" if reason else ""
-        raise _unsupported_error(contract)(
-            f"{label} cannot be placed under FSDP2{suffix}"
-        )
+        raise _unsupported_error(contract)(f"{label} cannot be placed under FSDP2{suffix}")

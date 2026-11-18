@@ -967,6 +967,8 @@ def test_vdn_supported_attn_backends_exclude_unservable_paths():
     assert supported < xFuserMiniMaxH3Model.supported_attn_backends
     assert AttentionBackendType.CUDNN not in supported
     assert AttentionBackendType.NVTE_FP8 not in supported
+    # Nor does it claim Sol-Attn support, which the model reference advertises from the capability.
+    assert not xFuserVDNMiniMaxH3Model.capabilities.supports_sol_attention_backends
 
 
 def test_vdn_window_backend_derived_from_attention_backend():

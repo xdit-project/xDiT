@@ -1187,6 +1187,8 @@ class xFuserVDNMiniMaxH3Model(xFuserMiniMaxH3Model):
         use_fp8_gemms=True,
         use_fp4_gemms=False,
         use_hybrid_attn_schedule=False,
+        # The window executor serves none of the Sol rows; see _VDN_SUPPORTED_ATTN_BACKENDS.
+        supports_sol_attention_backends=False,
     )
 
     supported_attn_backends = _VDN_SUPPORTED_ATTN_BACKENDS

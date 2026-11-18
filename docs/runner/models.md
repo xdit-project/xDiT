@@ -158,9 +158,9 @@ requires a compatible DBCache layout and is described in the PipeFusion guide.
 | [Chroma1-HD](#model-chroma1-hd) | — | — | — | — | — |
 | [Cosmos3-Nano](#model-cosmos3-nano) | — | — | — | — | — |
 | [Cosmos3-Super](#model-cosmos3-super) | — | — | — | — | — |
-| [FastH3](#model-fasth3) | — | — | — | — | — |
-| [FastH3-Dense](#model-fasth3-dense) | — | — | — | — | — |
-| [FastVideo/FastVideo-FastH3-8-Step-V2](#model-fastvideo-fastvideo-fasth3-8-step-v2) | — | — | — | — | — |
+| [FastH3](#model-fasth3) | — | — | ✓ | — | — |
+| [FastH3-Dense](#model-fasth3-dense) | — | — | ✓ | — | — |
+| [FastVideo/FastVideo-FastH3-8-Step-V2](#model-fastvideo-fastvideo-fasth3-8-step-v2) | — | — | ✓ | — | — |
 | [flux-3-image-klein](#model-flux-3-image-klein) | ✓ | — | — | — | — |
 | [flux-3-image-klein-base](#model-flux-3-image-klein-base) | ✓ | — | — | — | — |
 | [FLUX.1-dev](#model-flux-1-dev) | ✓ | — | — | `dbcache`, `teacache` | ✓ |
@@ -183,10 +183,10 @@ requires a compatible DBCache layout and is described in the PipeFusion guide.
 | [LTX-2.5-full](#model-ltx-2-5-full) | — | — | — | — | — |
 | [LTX-Video-0.9.7-dev](#model-ltx-video-0-9-7-dev) | — | — | — | — | — |
 | [Lumina2](#model-lumina2) | — | — | — | — | — |
-| [MiniMax-H3](#model-minimax-h3) | — | — | — | — | — |
+| [MiniMax-H3](#model-minimax-h3) | — | — | ✓ | — | — |
 | [MiniMax-H3-Image](#model-minimax-h3-image) | — | — | — | — | — |
-| [MiniMax-H3-Ref2VA](#model-minimax-h3-ref2va) | — | — | — | — | — |
-| [MiniMax-H3-Turbo](#model-minimax-h3-turbo) | — | — | — | — | ✓ |
+| [MiniMax-H3-Ref2VA](#model-minimax-h3-ref2va) | — | — | ✓ | — | — |
+| [MiniMax-H3-Turbo](#model-minimax-h3-turbo) | — | — | ✓ | — | ✓ |
 | [MOSS-Image](#model-moss-image) | — | — | — | — | — |
 | [Prism](#model-prism) | — | — | ✓ | — | — |
 | [Qwen-Image](#model-qwen-image) | ✓ | — | — | `dbcache` | — |

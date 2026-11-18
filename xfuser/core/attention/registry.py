@@ -17,7 +17,7 @@ each sparsity strategy. A new backend joins those sets by declaring the field.
 """
 
 import contextlib
-from dataclasses import replace
+from dataclasses import fields, replace
 from types import MappingProxyType
 from typing import Dict, Iterable, List, Mapping, Optional
 
@@ -183,6 +183,27 @@ def missing_specs() -> List[AttentionBackendType]:
     refuses to publish one that is short -- so this is for inspecting a
     registry built but not installed, or one swapped in by using()."""
     return [b for b in AttentionBackendType if b not in _REGISTRY]
+
+
+def refuse_unread_options(config, selected: Iterable[AttentionBackendType]) -> None:
+    """Refuse a backend option that `config` sets but no `selected` backend reads.
+
+    The options are the fields specs list in ``options``. Set means different from the field's
+    default in `config`'s dataclass, so passing a default explicitly is not an error.
+    """
+    defaults = {f.name: f.default for f in fields(config)}
+    chosen = set(selected)
+    readers: Dict[str, List[AttentionBackendType]] = {}
+    for spec in _REGISTRY.values():
+        for name in spec.options:
+            readers.setdefault(name, []).append(spec.type)
+    for name, backends in readers.items():
+        if getattr(config, name) == defaults.get(name) or not chosen.isdisjoint(backends):
+            continue
+        raise ValueError(
+            f"--{name} applies only to the {', '.join(sorted(b.name for b in backends))} attention "
+            "backends, and none of them is selected."
+        )
 
 
 def available(backend: AttentionBackendType) -> Optional[str]:

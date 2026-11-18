@@ -80,9 +80,10 @@ Where this specification conflicts with the testing skill in
 6. **Call.** One execution of a listed component in a pipeline run.
 7. **Call address.** The tuple of call counters that identifies one call. See
    [component_paths.md](component_paths.md), section 5.
+   A call address does not tell in which execution an outcome happened (item 19).
 8. **Capture.** The record of the inputs and the output of one call during a pipeline run.
 9. **Replay.** A new execution of a component with the captured inputs, outside the pipeline run.
-10. **Fidelity check.** A bitwise comparison of a replay output with the captured output of the same instance.
+10. **Fidelity check.** A bitwise comparison of a replay output with the captured output of the same instance. Fidelity check verifies that component doesn't depend on a hidden, unaccounted state.
 11. **Determinism check.** A bitwise comparison of two replay outputs of the same instance.
 12. **Determinism override.** A setting of one case that sets its determinism policy for A and B, or for B only.
     See [checks.md](checks.md), section 3.
@@ -90,10 +91,16 @@ Where this specification conflicts with the testing skill in
 14. **Launcher.** The process that runs one instance. It starts torchrun and survives crashes and hangs of the
     workers. See [processes.md](processes.md).
 15. **Worker.** One rank of an instance.
-16. **State file.** The file that holds rank statuses and the file paths of one case. See [files.md](files.md).
+16. **State file.** The file that holds the rank statuses, the nondeterminism flags, the call identifiers and
+    other supplemental information, the mark of a passed test and the file paths of one case. See [files.md](files.md).
 17. **Metrics file.** The file that collects metric values across runs. See [files.md](files.md), section 9.
 18. **Configuration fixture.** The pytest fixture that runs A and B of one configuration. It has one instance for
     each configuration. See [pytest_integration.md](pytest_integration.md), section 3.
+19. **Call identifier.** A call address (item 7) and the execution in which an outcome happened: the pipeline
+    run of A or B, or replay k of the call. In B, the replays with the inputs that B captured and the replays with
+    the inputs of A are two separate sequences. Each sequence numbers its replays from 1. For an outcome that
+    compares two executions, the call identifier names the later one; IA40 and IB50 of
+    [requirements.md](./requirements.md) define the other one.
 
 ## 5. End-to-end flow
 

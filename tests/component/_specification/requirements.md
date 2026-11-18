@@ -79,7 +79,7 @@ correctly?" A failed check belongs to one test, so only that test fails.
 detectable issue. "Flaky" includes a crash and a hang.
 
 **HL70.** **Working tests first.** Test coverage has priority over correct reports, for example a correct call
-address. A wrong report is acceptable as a documented limitation, possibly with a corresponding future-work
+identifier. A wrong report is acceptable as a documented limitation, possibly with a corresponding future-work
 item. A deviation that a working test needs is permitted with the approval of the user.
 
 **HL80.** Decisions rest on facts that the code shows directly.
@@ -241,8 +241,9 @@ saves the CPU and CUDA random-number states before each call, and each replay re
 **IA30.** A runs the pipeline once, captures the calls of the listed components, and replays them with the
 captured inputs (a standalone replay).
 
-**IA40.** **Fidelity and determinism checks (A and B).** The instance replays a captured call once. If the
-output equals the captured output bit for bit, the fidelity check passes. Otherwise it replays the call again:
+**IA40.** **Fidelity and determinism checks (A and B).** The instance replays a captured call once (replay 1). If
+the output equals the captured output bit for bit, the fidelity check passes. Otherwise it replays the call
+again (replay 2):
 1. if the two replays differ, the status is NON_DETERMINISTIC_A or NON_DETERMINISTIC_B (depending on
    the instance), collectively called NON_DETERMINISTIC;
 2. if the two replays are equal but differ from the capture, the status is REPLAY_MISMATCH_A or
@@ -255,11 +256,17 @@ selected calls of one component path (CP50, CP120). Each test can have two deter
 1. The general override sets the policy for A. It also sets the policy for B if the test has no B override.
 2. The B override sets the policy for B only. If it is set, it takes precedence over the general override.
 
-If the policy of an instance requires determinism, the NON_DETERMINISTIC status of that instance fails the
-test at once. If it permits nondeterminism, the harness prints a warning and continues to the tolerance checks.
-The bitwise checks always run, whatever the policy is.
+If the policy of an instance requires determinism, NON_DETERMINISTIC stops the case on all ranks (FC90.4)
+and fails the test at once. If the policy permits nondeterminism, NON_DETERMINISTIC does not stop the case, and
+SUCCESS can replace it (IA80). The bitwise checks always run, whatever the policy is.
 
-**IA60.** REPLAY_MISMATCH always fails the test at once.
+Each rank also has a nondeterminism flag for each case. Each NON_DETERMINISTIC status that the rank gets sets
+the flag, and nothing clears it; the rank also records the call identifier of each nondeterministic execution.
+The flag of a case is the OR of the flags of all ranks of A and B. If it is set, the test issues a pytest
+warning that names the instances, the ranks with the flag and their call identifiers, whatever the policy and
+the outcome are.
+
+**IA60.** REPLAY_MISMATCH always stops the case on all ranks (FC90.4) and fails the test at once.
 
 **IA70.** UNSUPPORTED marks a known limit of the harness:
 1. If the harness cannot handle an argument (fp8 or MX tensors, types that it cannot serialize), only the
@@ -268,12 +275,13 @@ The bitwise checks always run, whatever the policy is.
    UNSUPPORTED_A if A cannot handle the feature, otherwise UNSUPPORTED_B. The message names the feature and the
    run argument with its value. The harness finds this at collection, from the run settings (TD20), or when A or
    B loads the configuration. After that, no instance of the configuration starts or continues. If no case gets
-   SUCCESS_A, B does not start (FC20 item 5), so a feature that only B can find stays unknown in that run.
+   SUCCESS_A, B does not start (FC20.5), so a feature that only B can find stays unknown in that run.
 
-**IA80.** After passing the end-of-case barrier of FC50, a case replaces its status with (the only) successful status
-SUCCESS_A or SUCCESS_B (depending on the instance), collectively called SUCCESS, if it passed
-all the checks (including getting NON_DETERMINISTIC under a policy that permits it), has done all
-the replays of the case, and successfully dumped all the necessary data.
+**IA80.** After passing the end-of-case barrier of FC50, each rank replaces its status with SUCCESS_A or
+SUCCESS_B (depending on the instance), collectively called SUCCESS, if it passed all the checks (a
+NON_DETERMINISTIC under a policy that permits it counts as passed), has done all the replays of the case, and
+successfully dumped all the necessary data. SUCCESS is the only successful status. Otherwise the rank keeps its
+last status; a rank whose case another rank stopped (FC90.4) keeps ABOUT_TO_START (FR50).
 
 ### Instance B
 
@@ -298,9 +306,13 @@ all components at once.
 
 **IB40.** B runs the pipeline in the reference dtype with the same run arguments as A (changes of IB10 applied).
 It captures its own calls and runs its own fidelity check on them.
+*Rationale:* if the replay is faithful with B's inputs, it is also faithful with A's inputs. That
+holds if faithfulness depends on the context and state of the replay and not on the input values.
+A component whose behavior depends on its inputs and on hidden state could break this assumption,
+so a fidelity check on own inputs is needed.
 
-**IB50.** B replays the inputs of A at least two times and compares the replays bit for bit. Nondeterminism in
-B gives NON_DETERMINISTIC_B.
+**IB50.** B replays the inputs of A at least two times and compares each replay with the first one bit for bit.
+Nondeterminism in B gives NON_DETERMINISTIC_B.
 
 **IB60.** If a case gets REPLAY_MISMATCH_B, or NON_DETERMINISTIC_B under a policy that requires determinism, only
 that case fails. The other cases continue.
@@ -309,21 +321,22 @@ that case fails. The other cases continue.
 cross-attention backend.
 
 **IB80.** An attention backend that declares a fallback, or that needs a blocked vendor package, makes the
-configuration UNSUPPORTED_B (IA70 item 2). A cross-attention parameter for a model without a separate
+configuration UNSUPPORTED_B (IA70.2). A cross-attention parameter for a model without a separate
 cross-attention backend is an error. The default cross-attention backend is `SDPA_MATH`.
 
 ### Failures, crashes and hangs
 
 **FC10.** The harness must detect each crash and each hang, wherever it occurs, and attribute it to the
-instance (A or B) and, for a failure during a replay, to the case, the component and the call (FC20.3).
+instance (A or B) and, for a failure during a replay, to the case, the component and the call identifier (FC20.3)
 
 **FC20.** Each instance computes the results of many cases in one process and saves them to files. A crash or a
 hang ends the instance. Version 1 does not recover.
 1. A case with complete data (A and B) is checked as usual.
 2. A case that an instance had to run but did not start gets FAILED_TO_START.
 3. The case whose replay was running gets a status that shows what happened and in which instance, for example
-   CRASHED_A, CRASHED_B, HUNG_A or HUNG_B. The message names the last call of each rank, if available (such a
-   call is not a proven cause; a documented limitation, see HL70).
+   CRASHED_A, CRASHED_B, HUNG_A or HUNG_B. The message names the instance, the kind of failure
+   (crash or hang) and, if available, the call identifier of the last progress record of each rank
+   (not a proven cause, HL70).
 4. A failure outside the replays gives FAILED_TO_START to every case that the instance did not start.
    The message names the instance and the kind of failure (crash or hang).
 5. B runs only on cases with SUCCESS_A (IA80). If there are no such cases, or if processes of A survive
@@ -334,9 +347,10 @@ CRASHED_B, collectively called CRASHED. NOT_REACHED_IN_B exists only for B.
 
 **FC40.** An exception that ends the instance counts as a crash (FC20).
 
-**FC50.** A synchronization and a barrier at the end of each case, and progress records of each rank, attribute
-crashes. Before each replayed call, each rank writes a progress record with the call address. A fault that
-silently damages memory and shows only in a later case is an accepted limit.
+**FC50.** A synchronization and a barrier at the end of each case, and progress records of each
+rank, attribute crashes. Before each call of a listed component in a pipeline run, and before each
+replayed call, each rank writes a progress record with the call identifier. A fault that silently
+damages memory and shows only in a later case is an accepted limit.
 
 **FC60.** Statuses can be extended later. There is no
 NOT_EVALUATED status. Users do not need to see status identifiers: the harness raises verbose exceptions with
@@ -372,17 +386,16 @@ B makes no replays of a case that it skips before the replays.
 and its details reach pytest as the skip reason (UNSUPPORTED_A) or the error message (UNSUPPORTED_B) of each
 affected case. If a single rank gets UNSUPPORTED status all other ranks must also get UNSUPPORTED (shared
 decision, FC90).
-The state keeps the reason for later reuse runs. The details are:
+The state keeps the reason for later re-runs. The details are:
 1. the instance and the ranks;
 2. for a configuration: the feature, and the run argument with its value;
-3. for a case: the call address, the argument name, and its type or dtype.
+3. for a case: the call identifier, the argument name, and its type or dtype.
 
 **FC130.** Every run shows the UNSUPPORTED reasons without extra pytest options. A `pytest_terminal_summary`
 hook adds a section that lists each UNSUPPORTED case with its reason.
 
-**FC140.** If the ranks report different statuses for one case, a single status that is not a SUCCESS decides
-the outcome of the whole case (PI30). The message still shows all different statuses of ranks along with ranks
-that found them.
+**FC140.** If the ranks report different statuses for one case, PI30 decides the outcome from the statuses of
+all ranks. The message shows each status with the ranks that have it.
 
 **FC150.** One result path carries all results of the workers. Each worker appends result records to its own
 progress file. After torchrun ends, the launcher reads the records of all ranks, merges them by case, call and
@@ -405,8 +418,8 @@ failed fidelity check, a hang and a crash. The specification must list these tes
 **PI10.** The harness is a set of pytest tests. The `pytest_integration` prototype is an implementation hint,
 not a binding rule. The harness takes the best of it and adapts it.
 
-**PI20.** **General meaning of the pytest outcomes.** (This requirement exist to alleviate decisions
-for new statuses. Actual mapping is provided by PI30) "error" means that the test has nothing to check, for example
+**PI20.** **General meaning of the pytest outcomes.** (This requirement exists to alleviate decisions
+for new statuses. Actual mapping is provided by PI30.) "error" means that the test has nothing to check, for example
 because an instance that had to replay the case did not start its replays. "failed" means that an instance
 replayed the case, and the instance or the test found a problem. Documented exceptions are possible:
 1. UNSUPPORTED_A gives "skipped".
@@ -417,26 +430,31 @@ and must handle everything A handles, so UNSUPPORTED_B is not a reason to skip. 
 case of the configuration can have a meaningful test.
 
 **PI30.** pytest outcomes (PI20; for re-runs FR50 takes precedence):
-1. A failure of the configuration fixture (TD70, FC70, FR60), or a configuration that is UNSUPPORTED_B (IA70 item 2),
+1. A failure of the configuration fixture (TD70, FC70, FR60), or a configuration that is UNSUPPORTED_B (IA70.2),
    gives "error" to every case of the configuration, whatever its other statuses are. For UNSUPPORTED_B, the
    message of each case also lists its statuses from A.
 2. Otherwise, each case gets its own outcome decided in the following order:
    1. "error" if any rank has FAILED_TO_START, UNSUPPORTED_B, or NOT_REACHED_IN_B. Also if a rank of A
-      has UNSUPPORTED_A, but some other rank of A doesn't have it. The case fixture (function scope) raises
+      has UNSUPPORTED_A, but some other rank of A doesn't have it. Also if all ranks of an instance that had to
+      run the case still have ABOUT_TO_START ("the previous run did not finish"): A always has to run a case, B
+      only if all ranks of A have SUCCESS (FC20.5). The case fixture (function scope) raises
       the exception before the test function starts, because pytest gives "error" only for an exception in
       setup, teardown or a fixture.
    2. "skipped" for UNSUPPORTED_A on all ranks of A.
    3. "failed" if not all ranks of A and B have SUCCESS (PI50), or for a failed check.
    4. "passed" otherwise
-3. `record_property` stores the statuses.
+3. `record_property` stores the statuses, the nondeterminism flags and applicable information mandated by other
+   requirements such as call identifiers of all ranks.
 4. If a pytest outcome mandates an exception (i.e. it's a "failure" or "error"), the exception message must contain
-   statuses of all ranks and all other applicable information mandated by other requirements.
+   the statuses and the nondeterminism flags of all ranks and all other applicable information mandated by other
+   requirements.
 
-**PI40.** The test checks each rank independently against the same tolerance; compares A with the output of the
-first replay of B.
+**PI40.** The test checks each rank independently against the same tolerance. It compares the output that A
+captured with the output of replay 1 of B with the inputs of A.
 
-**PI50.** If a status gives "failed" (PI30.2.3), the test fails at once. The failure message
-lists every call and rank with its status, and the case writes one metrics line with its outcome only.
+**PI50.** If the statuses give "failed" (PI30.2.3), the test fails at once. The failure message lists every
+rank with its status and, if known, the call identifier at which the rank got it; the case writes one metrics line
+with its outcome only.
 Otherwise, the test runs as many checks as possible before it fails, like the `EXPECT_` macros of
 GoogleTest. It uses the installed `pytest-check` package. After the checks, it writes the metrics
 lines with the values and the outcome.
@@ -444,10 +462,12 @@ lines with the values and the outcome.
 ### Files, re-runs and metrics
 
 **FR10.** Each configuration writes its data into its own directory. Only the listed components are saved. A
-test that passes deletes its files; the files of tests that did not pass stay.
+test that passes marks its state as passed and deletes its data files; the state stays, so that re-runs can
+skip the case (FR50). The files of tests that did not pass stay.
 
 **FR20.** One entity, in the launcher, defines the paths of the data files. The test functions get the paths
-from it, read the files, and delete them.
+from it, read the files, and might delete some of them during the work, following other requirements
+to save the storage space.
 
 **FR30.** Tensors go into safetensors files. Structure and plain values go into JSON. Other types give
 UNSUPPORTED for the affected case.
@@ -456,18 +476,20 @@ UNSUPPORTED for the affected case.
 running test module. The pytest process resolves the paths one time. The launchers and the workers get
 absolute paths.
 
-**FR50.** **Re-runs.** Each case has its own state. A fresh run gives each case the state ABOUT_TO_START, and
-the state changes during the run.
-1. If every recorded case passed (a case that is UNSUPPORTED_A counts as passed), the harness
-   cleans the directory automatically and runs everything from the beginning.
+**FR50.** **Re-runs.** Each case has its own state: the status, the nondeterminism flag and supplemental
+information of each rank of A and B (for example, see IA50, IA80, or PI50; other requirements might
+add to the list), and the mark of a passed test (FR10). A fresh run gives every rank the status
+ABOUT_TO_START in each case.
+1. If every recorded case passed (a case that is UNSUPPORTED_A counts as passed), the harness cleans the
+   directory automatically and runs everything from the beginning.
    *Rationale:* a new run of tests that all passed gives no new information.
-2. Otherwise, the harness prints a warning, does not run A and B, and runs the tests only on the data that
-   still exists.
-3. Each case acts by its stored state: a case that passed earlier is skipped with "passed in a previous run";
-   a failed case with data is compared again; a case without data shows its stored statuses again; a case that
-   is still ABOUT_TO_START is an error ("the previous run did not finish"); a case without a state is an error
-   ("not part of the run that produced the data").
-4. The user cleans the directory after a change of the settings. There is no fingerprint check.
+2. Otherwise, the harness prints a warning and does not run A and B. Each case gets its outcome from its stored
+   state by the same rules as in a fresh run (IA50, PI30), and the checks use the stored data. Two rules come
+   first in this order: a case that passed in a previous run is skipped with "passed in a previous run",
+   and a case without a state or data expected by the test function from the rank statuses
+   is an error ("not part of the run that produced the data" without a state, "the stored data is
+   missing" without data).
+3. The user cleans the directory after a change of the settings. There is no fingerprint check.
 
 **FR60.** A marker file and a lock protect the data directory. Two pytest sessions must never use one
 configuration directory at the same time, also during the cleanup.

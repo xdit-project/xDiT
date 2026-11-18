@@ -14,7 +14,7 @@ import torch.nn.functional as F
 pytest.importorskip("diffusers.models.transformers.transformer_flux")
 
 from xfuser.core.attention.spec import AttentionBackendType  # noqa: E402
-from xfuser.model_executor.layers import sharded_modulation, usp_sdma  # noqa: E402
+from xfuser.model_executor.layers import plain_linear as plain_linear_module, sharded_modulation  # noqa: E402
 from xfuser.model_executor.layers.sharded_modulation import SlicedModulation  # noqa: E402
 from xfuser.model_executor.models.runner_models import base_model  # noqa: E402
 from xfuser.model_executor.models.runner_models.flux import (  # noqa: E402
@@ -137,7 +137,7 @@ def test_modulation_that_is_not_all_plain_linears_stays_as_it_is(monkeypatch, tr
     elif kind == "sharded":
         norm.linear.weight.placements = ("shard",)
     else:
-        monkeypatch.setattr(usp_sdma, "_weight_is_torchao_quantized", lambda module: module is norm.linear)
+        monkeypatch.setattr(plain_linear_module, "_weight_is_torchao_quantized", lambda module: module is norm.linear)
 
     assert transformer.shard_modulation() == 0
     assert not any(type(linear) is SlicedModulation for linear in flux.flux_modulation_linears(transformer))

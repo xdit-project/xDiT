@@ -268,15 +268,13 @@ def _probe_aiter_a6w4_apis(
 def _probe_aiter_int8_apis(
     gcn_arch_probe: Callable[[], str | None] | None = None,
 ) -> tuple[bool, str | None]:
-    """Probe AITER's signed-INT8 path of gemm_a8w8_bpreshuffle (ROCm/aiter#6828)."""
+    """Probe AITER's signed-INT8 path of gemm_a8w8_bpreshuffle."""
     try:
         aiter = import_module("aiter")
         four_wave = import_module("aiter.ops.flydsl.gemm_a8w8_bpreshuffle_4wave")
         shuffle = import_module("aiter.ops.shuffle")
     except Exception as exc:
-        return False, (
-            f"AITER INT8 import probe failed (INT8 GEMMs need AITER with ROCm/aiter#6828): {type(exc).__name__}: {exc}"
-        )
+        return False, f"AITER INT8 import probe failed: {type(exc).__name__}: {exc}"
     required = (
         ("gemm_a8w8_bpreshuffle", getattr(aiter, "gemm_a8w8_bpreshuffle", None)),
         ("supports_4wave_int8_shape", getattr(four_wave, "supports_4wave_int8_shape", None)),

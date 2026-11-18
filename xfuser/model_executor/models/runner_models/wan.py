@@ -790,7 +790,6 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
     # See xFuserWan22I2VModel: "fbcache" == DBCache first-block (Fn_compute_blocks=1).
     capabilities = replace(
         xFuserWan21T2VModel.capabilities,
-        use_int8_gemms=True,
         use_aiter_int8_gemms=True,
         use_fp8_comms=True,
         supports_attention_a2a=True,

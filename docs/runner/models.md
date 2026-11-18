@@ -8,6 +8,7 @@ These tables describe this source checkout; installed releases can differ.
 depends on the checkpoint, inputs, hardware, kernels, and flag combinations.
 Follow the linked guides for restrictions; a row does not promise every feature
 can be enabled together. CUDA, ROCm, and Ascend availability varies by backend.
+INT8 names the platform instead, because its backends differ: torchao on CUDA, AITER on ROCm gfx950.
 
 - [Parallelism](#parallelism)
 - [Memory and precision](#memory-and-precision)
@@ -138,10 +139,10 @@ not the entire model. Text FP8 is a separate opt-in for supported encoders.
 | [Wan2.1-VACE-14B](#model-wan2-1-vace-14b) | ✓ | — | — | — | — | ✓ | ✓ | ✓ |
 | [Wan2.2-Distilled-I2V](#model-wan2-2-distilled-i2v) | ✓ | ✓ | ✓ | — | — | ✓ | ✓ | ✓ |
 | [Wan2.2-I2V](#model-wan2-2-i2v) | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ |
-| [Wan2.2-T2V](#model-wan2-2-t2v) | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ |
+| [Wan2.2-T2V](#model-wan2-2-t2v) | ✓ | ✓ | ✓ | ✓ | ROCm gfx950 | — | ✓ | ✓ |
 | [Wan2.2-TI2V](#model-wan2-2-ti2v) | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ |
-| [Z-Image](#model-z-image) | ✓ | — | — | — | ✓ | ✓ | ✓ | ✓ |
-| [Z-Image-Turbo](#model-z-image-turbo) | ✓ | — | — | — | ✓ | ✓ | ✓ | ✓ |
+| [Z-Image](#model-z-image) | ✓ | — | — | — | CUDA | ✓ | ✓ | ✓ |
+| [Z-Image-Turbo](#model-z-image-turbo) | ✓ | — | — | — | CUDA | ✓ | ✓ | ✓ |
 
 ## Communication, caching, and adapters
 

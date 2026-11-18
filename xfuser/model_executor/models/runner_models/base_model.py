@@ -50,6 +50,7 @@ from xfuser.core.distributed import (
     get_data_parallel_rank,
     get_data_parallel_world_size,
     get_sequence_parallel_rank,
+    get_sequence_parallel_world_size,
     get_classifier_free_guidance_rank,
     get_pipeline_parallel_world_size,
     get_pp_group,
@@ -1041,6 +1042,33 @@ class xFuserModel(abc.ABC):
 
     def _get_compiled_pipe_components(self) -> List[str]:
         return ["transformer"]
+
+    def _shard_modulation(self) -> None:
+        """Share the transformer's timestep modulation out over the sequence-parallel ranks.
+
+        For runners whose transformer wrapper has `shard_modulation()`, called once the weights
+        are placed. Each rank then projects one share of the modulation instead of all of it,
+        and holds a copy of that share of the modulation weights. Stays off where a rank does
+        not run the whole transformer on whole weights (PipeFusion, sharded or offloaded
+        weights), and with step caching and on RDNA4, where it is not tested.
+        """
+        config = self.config
+        size = get_sequence_parallel_world_size()
+        if (
+            size <= 1
+            or config.pipefusion_parallel_degree > 1
+            or config.fully_shard_degree > 1
+            or config.memory_efficient_sharding
+            or config.enable_group_cpu_offload
+            or config.enable_sequential_cpu_offload
+            or config.enable_model_cpu_offload
+            or config.cache_method
+            or PACKAGES_CHECKER._on_rdna4()
+        ):
+            return
+        count = self.pipe.transformer.shard_modulation()
+        if count:
+            log(f"Shared the timestep modulation of {count} projections out over {size} sequence-parallel ranks.")
 
     def _block_level_offload_components(self) -> List[str]:
         """Components that group CPU offload splits block by block.

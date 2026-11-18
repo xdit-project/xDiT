@@ -97,6 +97,10 @@ class xFuserFluxModel(xFuserModel):
             return "default"
         return "reduce-overhead"
 
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        self._shard_modulation()
+
     def _load_model(self) -> DiffusionPipeline:
         if self.config.pipefusion_parallel_degree > 1:
             dtype = torch.bfloat16 if PACKAGES_CHECKER._on_rdna4() else torch.float16
@@ -235,6 +239,10 @@ class xFuserFluxKontextModel(xFuserModel):
         if PACKAGES_CHECKER._on_rdna4() or self.config.cache_method:
             return "default"
         return "reduce-overhead"
+
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        self._shard_modulation()
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import FluxKontextPipeline

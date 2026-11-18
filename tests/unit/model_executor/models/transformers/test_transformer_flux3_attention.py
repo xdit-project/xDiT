@@ -2,7 +2,7 @@
 
 The text stage attends the prompt alone, too few KV blocks for a backend that selects blocks, so it
 runs on the cross-attention backend. The joint stage marks the prompt's keys and rows exact for
-such a backend. Each forward advances the per-step schedules once.
+such a backend, with one mask tensor per shape. Each forward advances the per-step schedules once.
 """
 
 from types import SimpleNamespace
@@ -90,3 +90,6 @@ def test_each_stage_gets_its_backend_and_the_joint_stage_marks_the_prompt(monkey
                 kwargs.get(EXACT_KV_TOKENS_KEY) is None and kwargs.get(EXACT_Q_TOKENS_KEY) is None
             )
     assert {id(attn) for attn, _, _ in first_forward} >= text | joint
+    # The compiled joint blocks capture CUDA graphs that read the mask as a static input.
+    masks = {id(kwargs[EXACT_KV_TOKENS_KEY]) for attn, _, kwargs in calls if id(attn) in joint}
+    assert len(masks) == 1, "every forward of one shape hands over the same mask tensor"

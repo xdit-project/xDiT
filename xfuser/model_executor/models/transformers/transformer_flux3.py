@@ -194,6 +194,7 @@ class xFuserFlux3Transformer2DWrapper(Flux3Transformer2DModel):
         self._image_processor = xFuserFlux3AttnProcessor()
         self._image_cond_processor = xFuserFlux3AttnProcessor()
         self._joint_processor = xFuserFlux3AttnProcessor()
+        self._exact_tokens_key, self._exact_tokens = None, None
         stages = (
             (self.txt_mode_blocks, self._txt_processor),
             (self.mode_blocks["image"], self._image_processor),
@@ -218,6 +219,19 @@ class xFuserFlux3Transformer2DWrapper(Flux3Transformer2DModel):
         temb_mod = chunk_and_pad_sequence(temb_mod, sp_rank, sp_world_size, pad, dim=1)
         rotary_emb = tuple(chunk_and_pad_sequence(r, sp_rank, sp_world_size, pad, dim=0) for r in rotary_emb)
         return hidden_states, temb_mod, rotary_emb
+
+    def _joint_exact_tokens(self, txt_seq_len: int, padded_len: int, device: torch.device) -> torch.Tensor:
+        # The prompt is a few percent of the joint sequence. A backend that selects KV blocks keeps
+        # its keys exact for every query, and computes its own rows exactly: they become the text
+        # stream every later joint block conditions on.
+        # The same tensor is reused while the shape holds: the CUDA-graph-compiled joint blocks
+        # read it as a static input, and a new tensor would make every block re-record its graph.
+        key = (txt_seq_len, padded_len, device)
+        if self._exact_tokens_key != key:
+            exact_tokens = torch.zeros(padded_len, dtype=torch.bool, device=device)
+            exact_tokens[:txt_seq_len] = True
+            self._exact_tokens_key, self._exact_tokens = key, exact_tokens
+        return self._exact_tokens
 
     def _run_mode_blocks(
         self,
@@ -347,12 +361,9 @@ class xFuserFlux3Transformer2DWrapper(Flux3Transformer2DModel):
         sp_world_size = get_sequence_parallel_world_size()
         pad = (sp_world_size - joint_seq_len % sp_world_size) % sp_world_size
         self._joint_processor.valid_kv_len = joint_seq_len if pad else None
-        # The prompt is a few percent of the joint sequence. A backend that selects KV blocks keeps
-        # its keys exact for every query, and computes its own rows exactly: they become the text
-        # stream every later joint block conditions on.
-        exact_kv_tokens = torch.zeros(joint_seq_len + pad, dtype=torch.bool, device=joint_states.device)
-        exact_kv_tokens[:txt_seq_len] = True
-        self._joint_processor.exact_kv_tokens = exact_kv_tokens
+        self._joint_processor.exact_kv_tokens = self._joint_exact_tokens(
+            txt_seq_len, joint_seq_len + pad, joint_states.device
+        )
         joint_states, joint_mod, joint_rotary_emb = self._shard(
             sp_rank, sp_world_size, pad, joint_states, joint_mod, joint_rotary_emb
         )

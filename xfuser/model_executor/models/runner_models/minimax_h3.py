@@ -23,7 +23,8 @@ from xfuser.core.distributed import (
 )
 from xfuser.core.utils.runner_utils import log
 from xfuser.core.utils.video_utils import encode_video_with_audio
-from xfuser.envs import get_device_name
+from xfuser.envs import PACKAGES_CHECKER, get_device_name
+from xfuser.model_executor.layers import usp_sdma
 from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
@@ -585,6 +586,8 @@ class MiniMaxH3TextEncoderMixin:
 class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
     # From the registered checkpoint's transformer config.
     attention_heads = 56
+    # Measured on the base checkpoint only; the variants keep the runner's compile mode.
+    transformer_cudagraphs = True
 
     # diffusers 0.40.0 is the first release with native MiniMax-H3.
     min_diffusers_version = "0.40.0"
@@ -849,7 +852,7 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
         original_forward = transformer.forward
         compiled_forward = torch.compile(
             original_forward,
-            mode=mode,
+            mode=self._transformer_compile_mode(mode, use_hybrid),
             fullgraph=not use_hybrid,
         )
 
@@ -860,6 +863,18 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
         if not get_runtime_state().has_attention_schedule():
             compile_args["num_inference_steps"] = self._warmup_num_inference_steps
         self._run_timed_pipe(compile_args)
+
+    def _transformer_compile_mode(self, mode: str, use_hybrid: bool) -> str:
+        """CUDA graphs for the transformer alone: the video VAE decoder reads graph outputs across calls."""
+        if not self.transformer_cudagraphs or use_hybrid or PACKAGES_CHECKER._on_rdna4():
+            return mode
+        return usp_sdma.compile_mode("reduce-overhead")
+
+    def _records_cudagraphs(self) -> bool:
+        if self.config.fully_shard_degree > 1:
+            return super()._records_cudagraphs()
+        mode = self._transformer_compile_mode(self._get_compile_mode(), get_runtime_state().has_attention_schedule())
+        return mode in self.CUDAGRAPH_COMPILE_MODES
 
     def _run_warmup_calls(self, input_args: dict) -> None:
         if not self.config.warmup_calls:
@@ -937,6 +952,8 @@ class xFuserFastH3Model(xFuserMiniMaxH3Model):
     kernel; ``FLEX_VSA_H3`` runs the same selection through FlexAttention;
     other MiniMax-H3 backends stay dense when selected explicitly.
     """
+
+    transformer_cudagraphs = False
 
     default_input_values = DefaultInputValues(
         height=768,
@@ -1039,6 +1056,8 @@ class xFuserMiniMaxH3TurboModel(xFuserMiniMaxH3Model):
     are refused; any other adapter needs ``--num_inference_steps`` and ``--flow_shift``.
     """
 
+    transformer_cudagraphs = False
+
     default_input_values = DefaultInputValues(
         height=768,
         width=1344,
@@ -1110,6 +1129,9 @@ class xFuserVDNMiniMaxH3Model(xFuserMiniMaxH3Model):
     transformer block (fullgraph=True); the packed-layout geometry is primed from
     position_ids in an eager forward pre-hook outside the compiled blocks.
     """
+
+    # Compiles its blocks in _compile_model below, outside _transformer_compile_mode.
+    transformer_cudagraphs = False
 
     default_input_values = DefaultInputValues(
         height=768,
@@ -1263,6 +1285,7 @@ class xFuserVDNMiniMaxH3Model(xFuserMiniMaxH3Model):
 
 @register_model("MiniMax-H3-Ref2VA")
 class xFuserMiniMaxH3Ref2VAModel(xFuserMiniMaxH3Model):
+    transformer_cudagraphs = False
     # The reference workflow shares the modular loading and QKV-fusion limitation.
     load_support = LoadSupport(
         meta_transformers=(),

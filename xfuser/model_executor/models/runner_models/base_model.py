@@ -1429,6 +1429,10 @@ class xFuserModel(abc.ABC):
 
         return DiffusionOutput.from_outputs(all_outputs, self.settings.model_output_type), timings
 
+    def _records_cudagraphs(self) -> bool:
+        """Whether a compiled component records CUDA graphs; override when one component's mode differs."""
+        return self._get_compile_mode() in self.CUDAGRAPH_COMPILE_MODES
+
     def _warmup_cudagraph_capture(self, input_args: dict) -> bool:
         """Record CUDA graphs once, before timings, and report whether that happened.
 
@@ -1442,7 +1446,7 @@ class xFuserModel(abc.ABC):
             return False
         if self.config.warmup_calls:
             return False
-        if self._get_compile_mode() not in self.CUDAGRAPH_COMPILE_MODES:
+        if not self._records_cudagraphs():
             return False
 
         capture_args = copy.deepcopy(input_args)

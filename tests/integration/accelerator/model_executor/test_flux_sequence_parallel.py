@@ -17,7 +17,6 @@ from xfuser.core.distributed.parallel_state import (
     destroy_model_parallel,
 )
 from xfuser.model_executor.models.transformers.transformer_flux import (
-    fold_mlp_into_qkv_projections,
     xFuserFlux1Transformer2DWrapper,
 )
 
@@ -90,7 +89,6 @@ def _flux_worker(
         parallel.load_state_dict(reference.state_dict())
         if fused:
             parallel.fuse_qkv_projections()
-            fold_mlp_into_qkv_projections(parallel)
         inputs = _inputs(image_tokens, text_tokens, device)
         with torch.no_grad():
             expected = reference(**inputs)[0]

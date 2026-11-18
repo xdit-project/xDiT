@@ -246,26 +246,6 @@ def _validate_attention_head_dims(model: "xFuserModel", config: xFuserArgs) -> N
         )
 
 
-def _has_plain_projections(attn: torch.nn.Module) -> bool:
-    """Whether every Q/K/V projection of an attention layer is a plain linear, which is what fusing concatenates.
-
-    Quantized projections and those wrapped for LoRA are other module types.
-    """
-    names = ("to_q", "to_k", "to_v", "add_q_proj", "add_k_proj", "add_v_proj")
-    projections = [getattr(attn, name, None) for name in names]
-    return type(projections[0]) is torch.nn.Linear and all(
-        projection is None or type(projection) is torch.nn.Linear for projection in projections
-    )
-
-
-# The fused projections an attention layer may hold, with the projections each one stacks.
-_FUSED_PROJECTIONS = (
-    ("to_qkv", ("to_q", "to_k", "to_v")),
-    ("to_kv", ("to_k", "to_v")),
-    ("to_added_qkv", ("add_q_proj", "add_k_proj", "add_v_proj")),
-)
-
-
 @dataclass(frozen=True)
 class ModelCapabilities:
     """Class to define model capabilities"""
@@ -1109,13 +1089,14 @@ class xFuserModel(abc.ABC):
 
         One GEMM three times as wide replaces three, which is faster where a rank holds few
         tokens and GEMMs that small run far below the GPU's throughput. A runner opts in once
-        its attention processors read the fused projection. The separate projections become
-        views of the fused weights, so fusing costs no memory.
+        its attention processors read the fused projection and its components'
+        `fuse_qkv_projections()` fuses only plain linears and shares their weights
+        (`fuse_plain_qkv_projections`), so that fusing costs no memory.
         """
         return False
 
     def _fuse_qkv_projections(self) -> None:
-        """Fuse the Q/K/V projections of the compiled components, where they are plain linears on this rank."""
+        """Fuse the Q/K/V projections of the compiled components, unless their weights are sharded or offloaded."""
         config = self.config
         if (
             config.fully_shard_degree > 1
@@ -1125,20 +1106,11 @@ class xFuserModel(abc.ABC):
             or config.enable_model_cpu_offload
         ):
             return
-        from diffusers.models.attention import AttentionModuleMixin
-        from xfuser.model_executor.models.transformers.transformers_utils import share_fused_weights
-
         fused = 0
         for name in self._get_compiled_pipe_components():
-            for module in getattr(self.pipe, name).modules():
-                if isinstance(module, AttentionModuleMixin) and _has_plain_projections(module):
-                    module.fuse_projections()
-                    if not module.fused_projections:
-                        continue
-                    fused += 1
-                    for fused_name, names in _FUSED_PROJECTIONS:
-                        if hasattr(module, fused_name):
-                            share_fused_weights(getattr(module, fused_name), [getattr(module, name) for name in names])
+            component = getattr(self.pipe, name)
+            component.fuse_qkv_projections()
+            fused += sum(bool(getattr(module, "fused_projections", False)) for module in component.modules())
         if fused:
             # Hand the separate projections' own copies back to the device.
             torch.cuda.empty_cache()

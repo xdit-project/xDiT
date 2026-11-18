@@ -57,7 +57,9 @@ from xfuser.model_executor.layers.attention_processor import (
 )
 from xfuser.model_executor.layers.usp import USP
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
+from xfuser.model_executor.layers.usp_sdma import plain_linear
 from xfuser.model_executor.models.transformers.transformers_utils import (
+    fuse_plain_qkv_projections,
     local_sp_pad_rows,
     share_fused_weights,
     zero_sp_pad_rows_hook,
@@ -371,9 +373,10 @@ def _fused_single_block_forward(
     residual = hidden_states
     norm_hidden_states, gate = self.norm(hidden_states, emb=temb)
     qkv_projections, mlp_hidden_states = self.to_qkv_mlp(norm_hidden_states).split_with_sizes(
-        [self.attn.to_qkv.out_features, self.mlp_hidden_dim], dim=-1
+        [self.to_qkv_mlp.out_features - self.mlp_hidden_dim, self.mlp_hidden_dim], dim=-1
     )
     mlp_hidden_states = self.act_mlp(mlp_hidden_states)
+    # A single block's attention has no prompt-stream projections, which `qkv_projections` skips.
     attn_output = self.attn(
         hidden_states=norm_hidden_states,
         image_rotary_emb=image_rotary_emb,
@@ -400,7 +403,7 @@ def fold_mlp_into_qkv_projections(transformer) -> int:
     folded = 0
     for block in transformer.single_transformer_blocks:
         attn = block.attn
-        if not getattr(attn, "fused_projections", False) or type(block.proj_mlp) is not torch.nn.Linear:
+        if not getattr(attn, "fused_projections", False) or not plain_linear(block.proj_mlp):
             continue
         qkv, mlp = attn.to_qkv, block.proj_mlp
         fused = torch.nn.Linear(
@@ -471,6 +474,17 @@ class xFuserFlux1Transformer2DWrapper(FluxTransformer2DModel):
             block.attn.processor = xFuserFluxAttnProcessor()
             block.register_forward_hook(zero_sp_pad_rows_hook(self._sp_pad, index=1))
         register_fp8_comms_eligible_modules(self, flux_attn_modules(self))
+
+    def fuse_qkv_projections(self) -> None:
+        """Compute each layer's projections of one input with one GEMM, where they are plain linears.
+
+        Fuses Q, K and V of every attention layer and folds the single blocks' MLP projection into
+        theirs. The separate projections become views of the fused weights, so this costs no memory.
+        """
+        fuse_plain_qkv_projections(self)
+        # Before folding allocates: the freed Q/K/V copies would otherwise sit cached under it.
+        torch.cuda.empty_cache()
+        fold_mlp_into_qkv_projections(self)
 
     def _pad_to_sp_divisible(self, tensor: torch.Tensor, padding_length: int, dim: int) -> torch.Tensor:
         padding = torch.zeros(

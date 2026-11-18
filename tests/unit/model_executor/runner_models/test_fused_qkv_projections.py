@@ -14,6 +14,7 @@ import torch.nn.functional as F
 pytest.importorskip("diffusers.models.transformers.transformer_flux")
 
 from xfuser.core.attention.spec import AttentionBackendType  # noqa: E402
+from xfuser.model_executor.layers import usp_sdma  # noqa: E402
 from xfuser.model_executor.models.runner_models import flux as flux_runner  # noqa: E402
 from xfuser.model_executor.models.runner_models.flux import (  # noqa: E402
     xFuserFlux2Model,
@@ -179,6 +180,27 @@ def test_a_layer_whose_projections_are_not_plain_linears_stays_separate(transfor
     _runner(xFuserFluxModel, transformer)._fuse_qkv_projections()
 
     assert [layer.fused_projections for layer in _attention_layers(transformer)] == [False, True, True, True]
+
+
+@pytest.mark.parametrize("kind", ["quantized-in-place", "sharded"])
+def test_linears_whose_weights_are_not_plain_tensors_are_left_alone(monkeypatch, transformer, kind):
+    """torchao quantizes a weight in place and FSDP shards it: the module stays an ``nn.Linear`` either way."""
+    double, single = transformer.transformer_blocks[0], transformer.single_transformer_blocks[0]
+    expected = _forward(transformer)
+    special = (double.attn.to_k, single.proj_mlp)
+    if kind == "sharded":
+        for linear in special:
+            linear.weight.placements = ("shard",)
+    else:
+        monkeypatch.setattr(
+            usp_sdma, "_weight_is_torchao_quantized", lambda module: any(module is linear for linear in special)
+        )
+
+    _runner(xFuserFluxModel, transformer)._fuse_qkv_projections()
+
+    assert [layer.fused_projections for layer in _attention_layers(transformer)] == [False, True, True, True]
+    assert not hasattr(single, "to_qkv_mlp") and "forward" not in vars(single)
+    assert torch.allclose(_forward(transformer), expected, atol=1e-5)
 
 
 @pytest.mark.parametrize(

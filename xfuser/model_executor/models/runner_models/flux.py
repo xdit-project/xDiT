@@ -16,7 +16,6 @@ from xfuser.model_executor.models.runner_models.base_model import (
 )
 from xfuser.envs import PACKAGES_CHECKER
 from xfuser.core.utils.runner_utils import (
-    log,
     resize_and_crop_image,
 )
 from xfuser.core.distributed import get_runtime_state, get_pipeline_parallel_world_size
@@ -25,16 +24,6 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     STANDARD_LOAD_ROUTES,
 )
-
-
-def _fold_single_block_mlp_projections(transformer) -> None:
-    """Fold the MLP projection of the single blocks into their fused Q/K/V projection."""
-    from xfuser.model_executor.models.transformers.transformer_flux import fold_mlp_into_qkv_projections
-
-    folded = fold_mlp_into_qkv_projections(transformer)
-    if folded:
-        torch.cuda.empty_cache()
-        log(f"Folded the MLP projection of {folded} single blocks into their Q/K/V projection.")
 
 
 @register_model("black-forest-labs/FLUX.1-dev")
@@ -111,10 +100,6 @@ class xFuserFluxModel(xFuserModel):
     def _fuses_qkv_projections(self) -> bool:
         # A PipeFusion stage holds only its own blocks; RDNA4 is not measured.
         return self.config.pipefusion_parallel_degree <= 1 and not PACKAGES_CHECKER._on_rdna4()
-
-    def _fuse_qkv_projections(self) -> None:
-        super()._fuse_qkv_projections()
-        _fold_single_block_mlp_projections(self.pipe.transformer)
 
     def _load_model(self) -> DiffusionPipeline:
         if self.config.pipefusion_parallel_degree > 1:
@@ -258,10 +243,6 @@ class xFuserFluxKontextModel(xFuserModel):
     def _fuses_qkv_projections(self) -> bool:
         # RDNA4 is not measured.
         return not PACKAGES_CHECKER._on_rdna4()
-
-    def _fuse_qkv_projections(self) -> None:
-        super()._fuse_qkv_projections()
-        _fold_single_block_mlp_projections(self.pipe.transformer)
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import FluxKontextPipeline

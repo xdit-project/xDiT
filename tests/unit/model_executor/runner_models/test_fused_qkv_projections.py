@@ -111,7 +111,32 @@ def test_fusing_keeps_the_transformer_output(transformer):
     assert [layer.fused_projections for layer in layers] == [True] * 4
     # Double blocks also project the prompt stream.
     assert [hasattr(layer, "to_added_qkv") for layer in layers] == [True, True, False, False]
+    # Single blocks compute their MLP projection with Q/K/V.
+    assert [block.to_qkv_mlp.out_features for block in transformer.single_transformer_blocks] == [7 * 32] * 2
     assert torch.allclose(_forward(transformer), expected, atol=1e-5)
+
+
+def test_a_single_block_whose_mlp_projection_is_not_a_plain_linear_keeps_its_forward(transformer):
+    class QuantizedLinear(torch.nn.Linear):
+        pass
+
+    expected = _forward(transformer)
+    first, second = transformer.single_transformer_blocks
+    quantized = QuantizedLinear(first.proj_mlp.in_features, first.proj_mlp.out_features)
+    quantized.load_state_dict(first.proj_mlp.state_dict())
+    first.proj_mlp = quantized
+
+    _runner(xFuserFluxModel, transformer)._fuse_qkv_projections()
+
+    assert not hasattr(first, "to_qkv_mlp") and "forward" not in vars(first)
+    assert first.attn.fused_projections
+    assert hasattr(second, "to_qkv_mlp")
+    assert torch.allclose(_forward(transformer), expected, atol=1e-5)
+
+
+def test_single_blocks_keep_their_forward_while_q_k_and_v_are_separate(transformer):
+    assert flux.fold_mlp_into_qkv_projections(transformer) == 0
+    assert not any("forward" in vars(block) for block in transformer.single_transformer_blocks)
 
 
 def _weight_bytes(model):

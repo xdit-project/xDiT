@@ -217,6 +217,10 @@ class _Recipe(NamedTuple):
     # tile order. They cannot be pooled or routed on, so both use the BF16 source.
     k_packed: Optional[str] = None
     v_packed: Optional[str] = None
+    # The aiter builder path the row's pooled value tilt goes through (see _second_order), or None
+    # for a row aiter builds without the tilt. aiter's manifest has no column for it; this follows
+    # mha_v4_packed's documentation.
+    tilt: Optional[str] = None
 
     @property
     def v_pack(self) -> str:
@@ -242,11 +246,12 @@ _RECIPES = {
             quantize_v="quantize_bf16",
             v_format="BF16",
             v_scale_mode="none",
+            tilt="bf16_planes",
         ),
-        _Recipe("bf16fp8", "BF16", "none", "quantize_bf16", "quantize_bf16"),
-        _Recipe("fp8", "native", "per_tensor", "quantize_fp8_rotated", "quantize_fp8_rotated"),
-        _Recipe("i8fp8", "INT8", "per_tensor", "quantize_int8", "quantize_int8"),
-        _Recipe("mxfp8", "native", "block", "quantize_mxfp8_q", "quantize_mxfp8_k"),
+        _Recipe("bf16fp8", "BF16", "none", "quantize_bf16", "quantize_bf16", tilt="bf16_planes"),
+        _Recipe("fp8", "native", "per_tensor", "quantize_fp8_rotated", "quantize_fp8_rotated", tilt="fp8_factors"),
+        _Recipe("i8fp8", "INT8", "per_tensor", "quantize_int8", "quantize_int8", tilt="int8_planes"),
+        _Recipe("mxfp8", "native", "block", "quantize_mxfp8_q", "quantize_mxfp8_k", tilt="mxfp8_planes"),
         # The MX-V rows store V in the order the kernel's FP6 P operand reads it.
         _Recipe(
             "f8f6",
@@ -258,6 +263,7 @@ _RECIPES = {
             v_format="MXFP6",
             v_scale_mode="block",
             v_packed="mxfp6_fp6_p",
+            tilt="fp8_k_mx_v_planes",
         ),
         _Recipe(
             "mxfp6",
@@ -280,6 +286,7 @@ _RECIPES = {
             v_scale_mode="block",
             k_packed="mxfp6",
             v_packed="mxfp6_fp6_p",
+            tilt="packed_k_planes",
         ),
         _Recipe(
             "f6f4",
@@ -292,6 +299,7 @@ _RECIPES = {
             v_scale_mode="block",
             k_packed="mxfp6",
             v_packed="mxfp4_fp6_p",
+            tilt="packed_k_planes",
         ),
         _Recipe(
             "mxfp4",
@@ -304,6 +312,7 @@ _RECIPES = {
             v_scale_mode="block",
             k_packed="mxfp4",
             v_packed="mxfp4_fp6_p",
+            tilt="packed_k_planes",
         ),
     )
 }
@@ -543,9 +552,9 @@ def _with_scale_lookahead(scale):
     return backed
 
 
-# The recipes whose Sol rows take the pooled value tilt. aiter's manifest has no column for it; its
-# mha_v4_packed documents every Sol row but f6f8 (MXFP6 Q/K, FP8 V), which is the mxfp6 recipe.
-_TILT_RECIPES = frozenset({"bf16", "bf16fp8", "fp8", "i8fp8", "mxfp8", "f8f6", "f6f6", "f6f4", "mxfp4"})
+# The recipes whose Sol rows take the pooled value tilt: every row but f6f8 (MXFP6 Q/K, FP8 V),
+# which is the mxfp6 recipe.
+_TILT_RECIPES = frozenset(r.id for r in _RECIPES.values() if r.tilt is not None)
 
 
 def check_sol_tilt(recipe_id, tilt_rank):
@@ -616,7 +625,7 @@ def _second_order(recipe, q, k, v, routing, softmax_scale, block_tile, tilt_rank
     gain = gain.sqrt()
     mean_k, mean_v = out["mean_k"], out["mean_v"]
     mean_k_scale, mean_v_scale = out["mean_k_scale"], out["mean_v_scale"]
-    if recipe.id == "fp8":
+    if recipe.tilt == "fp8_factors":
         out["mean_k"], out["mean_v"], out["sol_tilt"] = _tilt_factors(
             q[0],
             k[0],
@@ -633,9 +642,11 @@ def _second_order(recipe, q, k, v, routing, softmax_scale, block_tile, tilt_rank
             q_abs_max=q_abs_max,
         )
         return out
-    if recipe.id == "mxfp8":
+    if recipe.tilt == "mxfp8_planes":
         # The score MFMA decodes Q and the A planes, so the multiplier carries no descale; the
-        # K-scale plane stride rides in the parameter block's third dword.
+        # K-scale plane stride rides in the parameter block's third dword. The planes are built
+        # from K as the kernel sees it, its E8M0 codes dequantized: an addressable MXFP8 K keeps
+        # no BF16 source, and the planes have to match the quantized K the exact pass reads.
         mult = _AITER.q_multiplier(softmax_scale)
         planes = _tilt_planes(
             _e8m0_dequantize(k[0], k[1]).to(torch.bfloat16),
@@ -655,10 +666,10 @@ def _second_order(recipe, q, k, v, routing, softmax_scale, block_tile, tilt_rank
             block_gain=gain,
         )
         params = _tilt_scaled_params(planes, planes.k_scale_plane_stride)
-    elif recipe.id in ("bf16", "bf16fp8"):
+    elif recipe.tilt == "bf16_planes":
         # BF16 A planes against the BF16 Q. BF16/FP8's B planes are FP8, half the K planes' width,
         # so the V plane stride rides in the parameter block's third dword.
-        bf16_v = recipe.id == "bf16"
+        bf16_v = recipe.v_format == "BF16"
         planes = _tilt_planes(
             k[0],
             v[0],
@@ -674,7 +685,7 @@ def _second_order(recipe, q, k, v, routing, softmax_scale, block_tile, tilt_rank
             block_gain=gain,
         )
         params = _tilt_scaled_params(planes, planes.v_plane_stride)
-    elif recipe.id == "i8fp8":
+    elif recipe.tilt == "int8_planes":
         planes = _tilt_planes(
             k[0],
             v[0],
@@ -692,7 +703,7 @@ def _second_order(recipe, q, k, v, routing, softmax_scale, block_tile, tilt_rank
             block_gain=gain,
         )
         params = _tilt_valu_params(planes, q[1], k[1])
-    elif recipe.id == "f8f6":
+    elif recipe.tilt == "fp8_k_mx_v_planes":
         # e4m3 A planes against the rotated FP8 Q; MXFP6 B planes packed from the pooled BF16 V by
         # V's own packer, their data and scale strides after the score multiplier.
         planes = _tilt_planes(
@@ -713,7 +724,7 @@ def _second_order(recipe, q, k, v, routing, softmax_scale, block_tile, tilt_rank
             block_gain=gain,
         )
         params = _tilt_valu_params(planes, q[1], k[1], strides=(planes.v_plane_stride, planes.v_scale_plane_stride))
-    elif recipe.id in ("f6f6", "f6f4", "mxfp4"):
+    elif recipe.tilt == "packed_k_planes":
         # Packed K: the A planes go through K's own packer, which rotates them as it rotates K, so
         # the factors take the unrotated sources and Q maxima. MXFP4's A-plane scales have an
         # image of their own, whose stride rides after V's two.
@@ -736,11 +747,11 @@ def _second_order(recipe, q, k, v, routing, softmax_scale, block_tile, tilt_rank
             block_gain=gain,
         )
         strides = (planes.v_plane_stride, planes.v_scale_plane_stride)
-        if recipe.id == "mxfp4":
+        if recipe.k_packed == "mxfp4":
             strides += (planes.k_scale_plane_stride,)
         params = _tilt_valu_params(planes, strides=strides)
     else:
-        raise SolAttnUnsupported(f"the pooled value tilt has no '{recipe.id}' factor path")
+        raise SolAttnUnsupported(f"Sol-Attn '{recipe.id}' names an unknown tilt path {recipe.tilt!r}")
     out["mean_k"], out["mean_v"] = planes.mean_k, planes.mean_v
     if planes.mean_k_scale is not None:
         out["mean_k_scale"] = planes.mean_k_scale
@@ -825,7 +836,8 @@ def sol_attn_bhsd(
     query_seqlen=None,
     exact_tokens=None,
     tilt_rank=0,
-    jensen=False,
+    *,
+    _jensen_only=False,
 ):
     """Sol-Attn over BHSD tensors, returning (BHSD bf16 output, per-head cost or None).
 
@@ -855,8 +867,8 @@ def sol_attn_bhsd(
     None takes the recipe's default.
 
     tilt_rank, from --solattn_tilt_rank, adds the leading Cov(v, k) q terms of each pooled block to
-    its mean value, on top of the capped Jensen term on its logit. jensen applies the capped term
-    alone, for comparison. Both take the packed API.
+    its mean value, on top of the capped Jensen term on its logit, and takes the packed API.
+    _jensen_only applies the capped term alone: a comparison for the tests, which no option reaches.
     """
     if _AITER is None:
         raise SolAttnUnsupported("Sol-Attn requires aiter with mha_v4_sol and sol_prepare; please update AITER")
@@ -889,7 +901,7 @@ def sol_attn_bhsd(
         softmax_scale = query.shape[-1] ** -0.5
 
     check_sol_tilt(recipe.id, tilt_rank)
-    second_order = jensen or tilt_rank > 0
+    second_order = _jensen_only or tilt_rank > 0
     raw = routing is None and not return_head_cost and force_blocks is None and not second_order
     if raw and recipe.routes_through_raw:
         qk, v_fmt = _format(recipe.qk_format), _format(recipe.v_format)

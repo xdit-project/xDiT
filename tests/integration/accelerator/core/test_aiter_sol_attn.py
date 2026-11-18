@@ -816,7 +816,16 @@ def test_a_block_size_with_no_kernel_is_rejected_at_setup_by_name():
 # the pooled value tilt
 # ---------------------------------------------------------------------------
 
-TILT_RECIPES = ["bf16", "bf16fp8", "fp8", "i8fp8", "mxfp8", "f8f6", "f6f6", "f6f4", "mxfp4"]
+
+def _tilt_recipes():
+    """Every recipe whose row takes the tilt, in table order; read from the recipe table so a row
+    gaining or losing the tilt is exercised without a second list to keep in step."""
+    from xfuser.core.attention.sparsity.sol import _TILT_RECIPES, SOL_ATTN_RECIPES
+
+    return [r for r in SOL_ATTN_RECIPES if r in _TILT_RECIPES]
+
+
+TILT_RECIPES = _tilt_recipes()
 
 
 def _correlated_operands(seqlen=4096, heads=2, seed=1234):
@@ -834,7 +843,7 @@ def _correlated_operands(seqlen=4096, heads=2, seed=1234):
 
 @pytest.mark.parametrize("recipe", TILT_RECIPES)
 @pytest.mark.parametrize("tile", ["default", (64, 64)])
-@pytest.mark.parametrize("options", [dict(jensen=True), dict(tilt_rank=2)], ids=["capped", "tilt2"])
+@pytest.mark.parametrize("options", [dict(_jensen_only=True), dict(tilt_rank=2)], ids=["capped", "tilt2"])
 def test_the_capped_term_and_the_tilt_run_on_every_row_that_has_them(recipe, tile, options):
     _require_sol_recipe(recipe)
     from xfuser.core.attention.sparsity.sol import sol_attn_bhsd
@@ -863,7 +872,7 @@ def test_the_tilt_recovers_what_the_capped_term_leaves(recipe):
             out, _ = sol_attn_bhsd(query, key, value, beta=0.5, recipe=recipe, **options)
         return _relative_error(out, reference)
 
-    assert error(tilt_rank=2) < error(jensen=True)
+    assert error(tilt_rank=2) < error(_jensen_only=True)
     assert error(tilt_rank=2) < error()
 
 
@@ -872,7 +881,7 @@ _TILT_TOLERANCE = {"f6f6": 1e-1, "f6f4": 1e-1, "mxfp4": 1e-1}
 
 
 @pytest.mark.parametrize("recipe", TILT_RECIPES)
-@pytest.mark.parametrize("options", [dict(jensen=True), dict(tilt_rank=2)], ids=["capped", "tilt2"])
+@pytest.mark.parametrize("options", [dict(_jensen_only=True), dict(tilt_rank=2)], ids=["capped", "tilt2"])
 def test_the_capped_term_and_the_tilt_hold_one_graph(recipe, options):
     """fullgraph=True: the cap and the tilt builders launch Triton kernels inside the forward, and
     each recipe builds its tilt through a different one."""
@@ -907,7 +916,7 @@ def test_the_compiled_tilt_is_not_the_capped_term_alone(recipe):
 
     with torch.no_grad():
         torch._dynamo.reset()
-        capped = torch.compile(functools.partial(run, jensen=True))(query, key, value).float()
+        capped = torch.compile(functools.partial(run, _jensen_only=True))(query, key, value).float()
         torch._dynamo.reset()
         tilted = torch.compile(functools.partial(run, tilt_rank=2))(query, key, value).float()
 

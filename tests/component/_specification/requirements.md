@@ -13,14 +13,15 @@ configuration work correctly?" The harness runs the component as production runs
 eager reference in high precision (instance B). It then compares the outputs against tolerances. Requirements:
 HL10–HL60, TD10–TD40, TM10–TM50, IA10–IA80, IB10–IB80.
 *Rationale:* some operations of xDiT diffusion models can be flaky (produce wrong numerics, or cause hangs or
-crashes). Tests of single components are decoupled from the whole model.
+crashes). Component-wise testing could help with QA of the implementation.
 
 **UC2. Find flaky kernels.** A test shows a deviation beyond the tolerance, nondeterminism, a crash or a hang.
 The report names the instance and the case. At least for a deviation or nondeterminism, it also names the calls.
 Requirements: HL60, IA40–IA60, IB50, FC10–FC160.
 
-**UC3. Test the configurations of the CI benchmark files.** A test selects an entry of a CI benchmark YAML
-file. The test can change any field of the entry. Requirements: TD20–TD40.
+**UC3. Test the configurations of the CI benchmark files.** Tests run on selected components
+of a model that is configured by an entry in a CI benchmark YAML file, or directly.
+Requirements: TD20–TD40.
 *Rationale:* the user specifies model configurations in the same way as the benchmark configurations.
 
 **UC4. Cover many configurations of one model in one test module.** Requirements: TD50–TD80.
@@ -73,7 +74,8 @@ run every configuration. The configuration identifier is one parameter among man
 by default). It is not a `diffusers` implementation.
 
 **HL50.** One test answers one question: "Does this component, in this regime, with these inputs, work
-correctly?" A failed check belongs to one test, so only that test fails.
+correctly?" A failed check belongs to one test, so only that test fails (wider failures due to
+crashes or hangs are an accepted limitation of version 1).
 
 **HL60.** A test fails for a deviation beyond its tolerance, a crash, a hang, nondeterminism, or any other
 detectable issue. "Flaky" includes a crash and a hang.
@@ -95,10 +97,13 @@ components. Version 1 plans nothing for benchmarks, but it identifies the code t
 **HL110.** One model initialization of an instance serves the tests of many components.
 *Rationale:* a model can need 5–10 minutes to load and initialize. That is too long for each test.
 
-### Test definition
+### Tests definition
 
-**TD10.** The definition is in Python. One call defines one configuration: its run settings, its list of
-components, and the tolerances for each output of each component. Each configuration is a separate call.
+**TD10.** The definition is in Python. One call defines one configuration: its run settings
+(including parameters of B instance, determinism overrides, deadlines and other things requirements mandate to be
+user-overridable), its list of components, and the tolerances for each output of each component.
+Each element of the list of components defines a separate test case, selectable with `-k` pytest parameter.
+Each configuration is a separate call.
 
 **TD20.** The run settings come from an entry of a CI benchmark YAML file, in the same format as the benchmark
 configurations. A helper reads the entry, builds the command-line flags as CI does, and parses them with the
@@ -106,13 +111,14 @@ parser of the xDiT runner.
 *Rationale:* the parser applies its defaults and conversions, for example to
 `gemm_quantization: low=fp4,high=fp6`.
 
-**TD30.** A test can override every field of the YAML entry and it can be sufficient to define the
-configuration alone, without a YAML file. `overrides` is a dictionary with the structure of a YAML entry. The
+**TD30.** Test configuration (TD10) can override every field of the YAML entry, and overrides
+can be sufficient to define the configuration alone, without a YAML file.
+`overrides` is a dictionary with the structure of a YAML entry. The
 permitted fields are those of the `Experiment` class of CI. Other fields are an error. `args` merges key by
 key: a key replaces the value of the entry, and `None` removes the key. Other fields replace the value of the
 entry, and `None` removes the field.
 
-**TD40.** The overrides apply both to A and to B. B has a few parameters of its own (IB70).
+**TD40.** The resulting overrides apply both to A and to B. A and B can apply own overrides later (TD90, IB10, IB70).
 
 **TD50.** Each configuration has its own fixture, which runs A and B of that configuration. The tests of the
 configuration run before the next configuration starts its instances.
@@ -129,32 +135,51 @@ names across sessions are the responsibility of the user.
 **TD80.** A name contains only letters, digits, `_`, `.` and `-`. The literal names `.` and `..` are not
 allowed. The `--ff` option of pytest is not supported.
 
-**TD90.** The harness forces these settings in A and B: no warmup calls, one iteration, and `use_torch_compile`
-off.
+**TD90.** The harness forces these settings in A and B: no warmup calls, one execution ("iteration"
+in terms of xDiT runner), and `use_torch_compile` off.
 
-**TD100.** Deadlines have default values, and a test can override them. The defaults are:
+**TD100.** Deadlines have default values, and a configuration can override them. The defaults are:
 1. A: 10 minutes for the initialization, 20 minutes for the pipeline run;
 2. B: 15 minutes for the initialization, 40 minutes for the pipeline run;
-3. each replayed call: 2 minutes in A and 8 minutes in B, measured as the time since the last progress record.
+3. each replayed call (measured between pre-call and post-call barriers): 2 minutes in A and
+   5 minutes in B.
+
+**TD110.** **Deadlines enforcement**. Pytest launches each instance sequentially using a
+supplementary launcher process that takes care of deadlines and child processes cleanup.
+Each rank of the instance writes its deadline -related progress and timestamps to a
+certain rank-specific file known to the launcher. The launcher then periodically read these files
+and using progress records and timestamps enforces deadlines. A missed deadline leads to
+a warning message and killing the instance and all its descendant processes. Launcher does not
+modify any rank or case statuses, or leftover files. User is responsible for setting
+appropriate deadlines and proper interpretation of testing results in case of missed deadlines.
+
+**TD120.** Configurations with step caching or hybrid schedules aren't supported.
 
 ### Tolerances and metrics
 
-**TM10.** A tolerance applies to one output of one component path. Every tensor output must have a tolerance. A
-tensor output without a tolerance is a failure, and so is a tolerance for a name that is not an output. The
-failure message lists the actual output names.
+**TM10.** Each output of each component path for instance A is compared to that of instance B
+taken as a reference (see "Instance A" and "Instance B" below). Two comparison metrics are
+computed and asserted:
+1. maximum absolute deviation (requires absolute tolerance value, default is `1e-10`) and
+2. the relative L2 deviation (requires relative tolerance value, default is `1e-10`)
+
+For tensors, the cosine similarity is also computed but reported without an assertion.
+
+**TM20.** Each output of each component path must be named in the configuration, and may have
+a tolerance override. An output of a component that doesn't have a set name is an error, so
+is a name that is not an output.
 *Rationale:* there must be a guarantee that the test itself has no mistake and that it tests each output.
 
-**TM20.** A metric without a value gets a very small default tolerance, `1e-10`. The test then fails, and the
-user sets a reasonable tolerance from the reported values.
-
-**TM30.** The test asserts the maximum absolute deviation and the relative L2 deviation. It reports the cosine
-similarity without an assertion.
-
-**TM40.** The metrics are computed on the CPU in float64, separately for each rank and call. The test always
+**TM30.** The metrics are computed on the CPU in float64, separately for each rank and call. The test always
 reports its metric values, also when it passes.
 
-**TM50.** Output names use the path notation relative to the return value: `[0]` for a tuple item, `.name` for
+**TM40.** Output names use the path notation relative to the return value: `[0]` for a tuple item, `.name` for
 an attribute, and an empty name for a bare tensor. Nested containers flatten to their tensor leaves.
+
+**TM50.** A proposed way to specify a list of component paths, outputs and tolerances, to a
+configuration call (TD10) is as a python dictionary where keys are components paths and values are
+dictionaries mapping component output names to a named tuple (abs, rel) of tolerance overrides
+to apply.
 
 ### Components, paths and calls
 
@@ -166,7 +191,8 @@ run.
 **CP20.** The list is known before the run. The harness makes the test cases from the definition, without a
 model.
 
-**CP30.** Path syntax: dots separate the elements, and `[i]` indexes a container, for example
+**CP30.** A component path defines a component to test. Path syntax: dots separate the
+elements, and `[i]` indexes a container, for example
 `pipe.transformer.blocks[0].attn1` and `pipe.transformer.blocks[-1]`. A path has no leading dot. `[key]`
 selects an item of an `nn.ModuleDict`.
 
@@ -189,7 +215,7 @@ reaches with its call numbers stripped. Call numbers only select calls of that c
 counters of direct callable descendants (i.e. callable components that directly follow the element in any
 path, ignoring non-callable components in between). The harness knows at path resolution which elements
 are callable and what their path descendants are.
-1. The counter is 0 before the pipeline starts.
+1. The counter is 0 before the pipeline starts and can only be modified during pipeline run (replays excluded).
 2. The element call handler first increments the counter, then walks over its own direct descendant set and
    invokes "reset_counter()" for each of the descendants. Upon getting a "reset_counter()" request, a counter
    sets own call number to 0 and invokes "reset_counter()" on each of counters of its own descendants, so
@@ -302,6 +328,8 @@ communication and the hybrid precision schedules. B keeps the parallel degrees a
 VAE tiling and its tile shape, distilled weights, LoRA and channels-last.
 
 **IB20.** A `TorchDispatchMode` audit checks the dtypes in B. It warns about custom calls and does not fail.
+(it's a known limitation of version 1 needs to be addressed in future versions that these warnings
+aren't recorded and are produced only during instance B runs)
 
 **IB30.** B loads in bf16 and casts up to the reference dtype. It does not load an fp32 checkpoint. B converts
 all components at once.
@@ -313,8 +341,9 @@ holds if faithfulness depends on the context and state of the replay and not on 
 A component whose behavior depends on its inputs and on hidden state could break this assumption,
 so a fidelity check on own inputs is needed.
 
-**IB50.** B replays the inputs of A at least two times and compares each replay with the first one bit for bit.
-Nondeterminism in B gives NON_DETERMINISTIC_B.
+**IB50.** B replays the inputs of A at least two times (using A's random-number states, but
+restoring the original state after a replay) and compares each replay with the first one bit for
+bit. Nondeterminism in B gives NON_DETERMINISTIC_B.
 
 **IB60.** If a case gets REPLAY_MISMATCH_B, or NON_DETERMINISTIC_B under a policy that requires determinism, only
 that case fails. The other cases continue.
@@ -402,7 +431,10 @@ all ranks. The message shows each status with the ranks that have it.
 
 **FC150.** One result path carries all results of the workers. Each worker appends result records to its own
 progress file. After torchrun ends, the launcher reads the records of all ranks, merges them by case, call and
-rank, and writes each state file. While an instance runs, the launcher is the only writer of state files.
+rank, and writes each state file (while merging, it must not assume that for a certain case all
+ranks necessary always ran the same calls; it must identify the discrepancies whenever possible,
+issue a diagnostics message and fail the execution). While an instance runs, the launcher is the
+only writer of state files.
 
 **FC160.** A process that survives SIGKILL (uninterruptible sleep) must not hang the pytest session. After
 SIGKILL, the harness waits only for a limited time, and then it reports the surviving processes. The
@@ -493,7 +525,8 @@ ABOUT_TO_START in each case.
    and a case without a state or data expected by the test function from the rank statuses
    is an error ("not part of the run that produced the data" without a state, "the stored data is
    missing" without data).
-3. The user cleans the directory after a change of the settings. There is no fingerprint check.
+3. The user cleans the directory after a change of the settings or configurations.
+   There is no fingerprint check.
 
 **FR60.** A marker file and a lock protect the data directory. Two pytest sessions must never use one
 configuration directory at the same time, also during the cleanup.

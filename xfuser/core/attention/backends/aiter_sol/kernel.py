@@ -43,6 +43,18 @@ def install_beta_schedule(spec: str, denoising_steps: int, forwards_per_step: in
     return schedule
 
 
+def configure_run(runtime_config, denoising_steps: Optional[int], forwards_per_step: int) -> None:
+    """Install --solattn_beta_schedule for a run of `denoising_steps` steps, if one is set.
+
+    Called by the runtime once the step plan is known, before the forward is compiled.
+    """
+    if runtime_config.solattn_beta_schedule is None:
+        return
+    if denoising_steps is None:
+        raise ValueError("--solattn_beta_schedule needs the run's number of denoising steps, and this run has none.")
+    install_beta_schedule(runtime_config.solattn_beta_schedule, denoising_steps, forwards_per_step)
+
+
 def clear_beta_schedule() -> None:
     """Go back to --solattn_beta for every forward."""
     global _BETA_SCHEDULE

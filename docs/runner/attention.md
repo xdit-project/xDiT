@@ -83,6 +83,10 @@ too few blocks to select from.
 - `--use_sparseattn_head_balance` balances the selected-block cost across
   Ulysses ranks.
 
+The runner refuses `--solattn_beta`, `--solattn_beta_schedule`, and
+`--sparseattn_block_size` when no selected backend reads them. A Sol backend in
+an explicit `--hybrid_attn_schedule` counts as selected.
+
 ```bash
 xdit --model Wan2.2-T2V --prompt "Clouds over a mountain lake" \
     --ulysses_degree 8 --num_inference_steps 40 \

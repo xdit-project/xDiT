@@ -73,3 +73,46 @@ def test_unrunnable_automatic_backend_falls_back_to_sdpa_with_a_warning(monkeypa
     message = logger.warning.call_args.args[0]
     assert "CUDNN" in message
     assert "requires cuda, found cpu" in message
+
+
+def _configuring_spec(backend, hook):
+    return Spec(
+        backend,
+        impl=lambda q, k, v, c: (q, None),
+        ring=ALWAYS,
+        requires=ALWAYS,
+        accepts=ANY_CALL,
+        configures=hook,
+    )
+
+
+def test_every_selected_backend_gets_the_step_plan_and_a_shared_hook_runs_once():
+    """The attention, cross-attention and scheduled backends are all configured: a backend picked
+    only by a hybrid schedule still owns per-step state. Backends from one family share a hook,
+    which must not install the same state twice."""
+    calls = []
+
+    def shared(config, steps, forwards):
+        calls.append(("shared", config.solattn_beta_schedule, steps, forwards))
+
+    def own(config, steps, forwards):
+        calls.append(("own", steps, forwards))
+
+    specs = [
+        _configuring_spec(AttentionBackendType.AITER_FP8_SOL, shared),
+        _configuring_spec(AttentionBackendType.AITER_BF16_SOL, shared),
+        _configuring_spec(AttentionBackendType.AITER, own),
+        _configuring_spec(AttentionBackendType.SDPA, None),
+    ]
+    state = runtime_state.DiTRuntimeState.__new__(runtime_state.DiTRuntimeState)
+    state.runtime_config = RuntimeConfig(solattn_beta_schedule="1.0:0.0")
+    state.attention_backend = AttentionBackendType.SDPA
+    state.cross_attention_backend = AttentionBackendType.AITER
+    state.attention_schedule = SimpleNamespace(
+        backends=[AttentionBackendType.AITER_FP8_SOL, AttentionBackendType.AITER_BF16_SOL]
+    )
+
+    with registry.using(specs):
+        state.configure_attention_backends(40, 2)
+
+    assert sorted(calls) == [("own", 40, 2), ("shared", "1.0:0.0", 40, 2)]

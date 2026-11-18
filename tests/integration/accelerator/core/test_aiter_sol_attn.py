@@ -15,6 +15,8 @@ The CPU-side contract -- what the backends refuse, and what reaches sol_attn_bhs
 tests/unit/core/test_aiter_sol_contracts.py.
 """
 
+import functools
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -808,3 +810,114 @@ def test_a_block_size_with_no_kernel_is_rejected_at_setup_by_name():
         with pytest.raises(SolAttnUnsupported, match=rf"--sparseattn_block_size 512x512 .*'{recipe}'"):
             check_sol_attn_recipe(recipe, block_tile=unserved)
         check_sol_attn_recipe(recipe, block_tile=_default_tile(recipe))
+
+
+# ---------------------------------------------------------------------------
+# the pooled value tilt
+# ---------------------------------------------------------------------------
+
+
+def _tilt_recipes():
+    """Every recipe whose row takes the tilt, in table order; read from the recipe table so a row
+    gaining or losing the tilt is exercised without a second list to keep in step."""
+    from xfuser.core.attention.sparsity.sol import _TILT_RECIPES, SOL_ATTN_RECIPES
+
+    return [r for r in SOL_ATTN_RECIPES if r in _TILT_RECIPES]
+
+
+TILT_RECIPES = _tilt_recipes()
+
+
+def _correlated_operands(seqlen=4096, heads=2, seed=1234):
+    """_operands with V partly a linear function of K: the in-block covariance the tilt models.
+
+    Sharpness 0.5 rather than 2.0, so the skipped blocks keep real attention mass. At 2.0 the
+    selected blocks hold nearly all of it, and there is nothing pooled to correct.
+    """
+    query, key, value = _operands(seqlen=seqlen, heads=heads, seed=seed, sharpness=0.5)
+    generator = torch.Generator(device=key.device).manual_seed(seed + 1)
+    mix = torch.randn(key.shape[-1], value.shape[-1], generator=generator, device=key.device)
+    value = (0.5 * value.float() + key.float() @ (mix / key.shape[-1] ** 0.5)).to(torch.bfloat16)
+    return query, key, value
+
+
+@pytest.mark.parametrize("recipe", TILT_RECIPES)
+@pytest.mark.parametrize("tile", ["default", (64, 64)])
+@pytest.mark.parametrize("options", [dict(_jensen_only=True), dict(tilt_rank=2)], ids=["capped", "tilt2"])
+def test_the_capped_term_and_the_tilt_run_on_every_row_that_has_them(recipe, tile, options):
+    _require_sol_recipe(recipe)
+    from xfuser.core.attention.sparsity.sol import sol_attn_bhsd
+
+    block_tile = None if tile == "default" else tile
+    if block_tile is not None and not _serves(recipe, block_tile):
+        pytest.skip(f"no {recipe} Sol row at 64x64")
+    query, key, value = _correlated_operands(seqlen=2048)
+    with torch.no_grad():
+        out, _ = sol_attn_bhsd(query, key, value, beta=0.5, recipe=recipe, block_tile=block_tile, **options)
+
+    assert out.shape == query.shape and torch.isfinite(out).all()
+
+
+@pytest.mark.parametrize("recipe", ["bf16", "fp8", "f6f6"])
+def test_the_tilt_recovers_what_the_capped_term_leaves(recipe):
+    """With V moving with K inside a block, a block's mean value alone misses Cov(v, k) q."""
+    _require_sol_recipe(recipe)
+    from xfuser.core.attention.sparsity.sol import sol_attn_bhsd
+
+    query, key, value = _correlated_operands()
+    reference = _fp32_attention(query, key, value)
+
+    def error(**options):
+        with torch.no_grad():
+            out, _ = sol_attn_bhsd(query, key, value, beta=0.5, recipe=recipe, **options)
+        return _relative_error(out, reference)
+
+    assert error(tilt_rank=2) < error(_jensen_only=True)
+    assert error(tilt_rank=2) < error()
+
+
+# MXFP6 K's compiled path differs from eager in the low bits even without the tilt.
+_TILT_TOLERANCE = {"f6f6": 1e-1, "f6f4": 1e-1, "mxfp4": 1e-1}
+
+
+@pytest.mark.parametrize("recipe", TILT_RECIPES)
+@pytest.mark.parametrize("options", [dict(_jensen_only=True), dict(tilt_rank=2)], ids=["capped", "tilt2"])
+def test_the_capped_term_and_the_tilt_hold_one_graph(recipe, options):
+    """fullgraph=True: the cap and the tilt builders launch Triton kernels inside the forward, and
+    each recipe builds its tilt through a different one."""
+    _require_sol_recipe(recipe)
+    from xfuser.core.attention.sparsity.sol import sol_attn_bhsd
+
+    query, key, value = _correlated_operands(seqlen=1024)
+
+    def run(q, k, v):
+        return sol_attn_bhsd(q, k, v, beta=0.5, recipe=recipe, **options)[0]
+
+    torch._dynamo.reset()
+    with torch.no_grad():
+        compiled = torch.compile(run, fullgraph=True)(query, key, value)
+        eager = run(query, key, value)
+    if recipe in _TILT_TOLERANCE:
+        torch.testing.assert_close(compiled.float(), eager.float(), atol=_TILT_TOLERANCE[recipe], rtol=0)
+    else:
+        assert torch.equal(compiled, eager)
+
+
+@pytest.mark.parametrize("recipe", ["bf16", "fp8", "f8f6", "f6f6"])
+def test_the_compiled_tilt_is_not_the_capped_term_alone(recipe):
+    """A tilt whose planes 1..rank were dropped would leave only the capped term."""
+    _require_sol_recipe(recipe)
+    from xfuser.core.attention.sparsity.sol import sol_attn_bhsd
+
+    query, key, value = _correlated_operands()
+
+    def run(q, k, v, **options):
+        return sol_attn_bhsd(q, k, v, beta=0.5, recipe=recipe, **options)[0]
+
+    with torch.no_grad():
+        torch._dynamo.reset()
+        capped = torch.compile(functools.partial(run, _jensen_only=True))(query, key, value).float()
+        torch._dynamo.reset()
+        tilted = torch.compile(functools.partial(run, tilt_rank=2))(query, key, value).float()
+
+    assert ((tilted - capped).norm() / capped.norm()).item() > 1e-2

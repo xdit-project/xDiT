@@ -316,12 +316,9 @@ def test_the_refiners_dense_backend_is_selected_before_compile(monkeypatch, back
     from xfuser.model_executor.models.runner_models.base_model import xFuserModel
 
     checked = []
+    selected = [AttentionBackendType[backend], *(AttentionBackendType[b] for b in schedule or ())]
     runtime = SimpleNamespace(
-        attention_backend=AttentionBackendType[backend],
-        attention_schedule=None
-        if schedule is None
-        else SimpleNamespace(backends=[AttentionBackendType[b] for b in schedule]),
-        has_attention_schedule=lambda: schedule is not None,
+        selected_attention_backends=lambda: selected,
         _check_if_backend_compatible_with_current_configuration=checked.append,
     )
     monkeypatch.setattr(minimax_h3_runner, "get_runtime_state", lambda: runtime)

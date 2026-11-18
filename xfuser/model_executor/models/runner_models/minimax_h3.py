@@ -31,6 +31,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     ModelCapabilities,
     ModelSettings,
     _parse_attention_backend,
+    _selected_attention_backends,
     register_model,
     xFuserModel,
 )
@@ -666,8 +667,7 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
         # Under a Sol backend the token refiner runs on dense AITER (see the transformer wrapper).
         # Select it here, outside the compiled forward, which cannot import its kernel.
         runtime = get_runtime_state()
-        scheduled = runtime.attention_schedule.backends if runtime.has_attention_schedule() else ()
-        if {runtime.attention_backend, *scheduled} & _SOL_ATTN_BACKENDS:
+        if set(runtime.selected_attention_backends()) & _SOL_ATTN_BACKENDS:
             runtime._check_if_backend_compatible_with_current_configuration(AttentionBackendType.AITER)
 
     def _validate_config(self, config) -> None:
@@ -687,24 +687,7 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
                 "existing model ranks and does not support dedicated VAE-only "
                 "ranks; leave --vae_parallel_size at 0."
             )
-        if config.use_hybrid_attn_schedule:
-            backend_specs = [
-                (
-                    config.hybrid_attn_high_precision_backend,
-                    "hybrid attention high precision backend",
-                ),
-                (
-                    config.hybrid_attn_low_precision_backend,
-                    "hybrid attention low precision backend",
-                ),
-            ]
-        else:
-            backend_specs = [(config.attention_backend, "attention backend")]
-
-        backends = [
-            backend for value, label in backend_specs if (backend := _parse_attention_backend(value, label)) is not None
-        ]
-        for backend in backends:
+        for backend in _selected_attention_backends(config):
             if backend == AttentionBackendType.AITER_FP8:
                 try:
                     from aiter import flash_attn_varlen_fp8_pertensor_func  # noqa: F401

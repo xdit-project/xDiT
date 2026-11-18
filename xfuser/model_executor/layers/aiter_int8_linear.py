@@ -3,9 +3,13 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-import triton
-import triton.language as tl
-from triton.language.extra import libdevice
+
+try:
+    import triton
+    import triton.language as tl
+    from triton.language.extra import libdevice
+except ImportError:  # CPU-only tests and installations without Triton.
+    triton = None
 
 _K_TILE = 128
 _PRESHUFFLE_LAYOUT = (16, 16)
@@ -15,36 +19,38 @@ def supports_aiter_int8_linear(in_features: int, out_features: int) -> bool:
     return in_features >= 2 * _K_TILE and in_features % _K_TILE == 0 and out_features % _PRESHUFFLE_LAYOUT[0] == 0
 
 
-@triton.jit
-def _quantize_rows_int8_kernel(
-    output,
-    scale_output,
-    source,
-    columns: tl.constexpr,
-    source_stride,
-    BLOCK: tl.constexpr,
-):
-    row = tl.program_id(0)
-    column = tl.arange(0, BLOCK)
-    mask = column < columns
-    values = tl.load(
-        source + row * source_stride + column,
-        mask=mask,
-        other=0.0,
-        cache_modifier=".cg",
-    ).to(tl.float32)
-    amax = tl.max(tl.abs(values), axis=0)
-    scale = amax / 127.0
-    reciprocal = tl.where(amax > 0.0, 1.0 / scale, 0.0)
-    quantized = libdevice.rint(values * reciprocal)
-    quantized = tl.maximum(tl.minimum(quantized, 127.0), -127.0)
-    tl.store(scale_output + row, scale)
-    tl.store(
-        output + row * columns + column,
-        quantized.to(tl.int8),
-        mask=mask,
-        cache_modifier=".cs",
-    )
+if triton is not None:
+
+    @triton.jit
+    def _quantize_rows_int8_kernel(
+        output,
+        scale_output,
+        source,
+        columns: tl.constexpr,
+        source_stride,
+        BLOCK: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        column = tl.arange(0, BLOCK)
+        mask = column < columns
+        values = tl.load(
+            source + row * source_stride + column,
+            mask=mask,
+            other=0.0,
+            cache_modifier=".cg",
+        ).to(tl.float32)
+        amax = tl.max(tl.abs(values), axis=0)
+        scale = amax / 127.0
+        reciprocal = tl.where(amax > 0.0, 1.0 / scale, 0.0)
+        quantized = libdevice.rint(values * reciprocal)
+        quantized = tl.maximum(tl.minimum(quantized, 127.0), -127.0)
+        tl.store(scale_output + row, scale)
+        tl.store(
+            output + row * columns + column,
+            quantized.to(tl.int8),
+            mask=mask,
+            cache_modifier=".cs",
+        )
 
 
 def _quantize_rows_int8(tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

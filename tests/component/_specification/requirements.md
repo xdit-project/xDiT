@@ -158,8 +158,10 @@ an attribute, and an empty name for a bare tensor. Nested containers flatten to 
 
 ### Components, paths and calls
 
-**CP10.** The harness tests only an explicit list of components. The list is a list of strings. Each string is
-the path from the runner model object to the callable component or a method. Only the listed components are captured.
+**CP10.** The harness tests only an explicit list of components. The list is a list of strings.
+Each string is the path from the runner model object to the callable component or a method.
+Only the listed components are captured. A listed component must run at least once during pipeline
+run.
 
 **CP20.** The list is known before the run. The harness makes the test cases from the definition, without a
 model.
@@ -194,9 +196,8 @@ are callable and what their path descendants are.
    counter resetting propagates to each indirect descendant of the original element that started the reset
    chain. Once all descendant counters reset, i.e. counter reset chain finishes, the element makes all other
    checks, for example whether to save the call.
-3. So the first call has the number 1, and no recorded call has the number 0. A counter value of 0 means that
-   the element was never called since the last call of its parent in some path that was called chronologically
-   the last.
+3. So the first call has the number 1. A counter value of 0 means that the element was never called
+   since the last call of its parent in some path that was called chronologically the last.
 4. Every call of the element counts, whatever code makes it.
 5. When an element counter is found to belong to more than one set of references to counters of direct
    descendants (which means that the element whose calls it counts is shared between several higher-level
@@ -233,13 +234,14 @@ accepted.
 ### Instance A
 
 **IA10.** Instance A runs the component as production does: low-precision math, custom kernels, and the other
-settings of the configuration. In version 1 it runs eagerly.
+settings of the configuration. In version 1 it runs eagerly. 
 
 **IA20.** One instance A does the capture and the replays. There is no separate capture instance. The capture
 saves the CPU and CUDA random-number states before each call, and each replay restores them.
 
 **IA30.** A runs the pipeline once, captures the calls of the listed components, and replays them with the
-captured inputs (a standalone replay).
+captured inputs (a standalone replay). If a component is listed, but never run on a rank, the rank get
+NOT_REACHED_IN_A status for the component.
 
 **IA40.** **Fidelity and determinism checks (A and B).** The instance replays a captured call once (replay 1). If
 the output equals the captured output bit for bit, the fidelity check passes. Otherwise it replays the call
@@ -343,7 +345,8 @@ hang ends the instance. Version 1 does not recover.
    SIGKILL (FC160), B does not start.
 
 **FC30.** Each status that an instance gives has a form for A and a form for B, for example CRASHED_A and
-CRASHED_B, collectively called CRASHED. NOT_REACHED_IN_B exists only for B.
+CRASHED_B, collectively called CRASHED, or NOT_REACHED_IN_A and NOT_REACHED_IN_B, collectively
+called NOT_REACHED_IN.
 
 **FC40.** An exception that ends the instance counts as a crash (FC20).
 
@@ -434,10 +437,11 @@ case of the configuration can have a meaningful test.
    gives "error" to every case of the configuration, whatever its other statuses are. For UNSUPPORTED_B, the
    message of each case also lists its statuses from A.
 2. Otherwise, each case gets its own outcome decided in the following order:
-   1. "error" if any rank has FAILED_TO_START, UNSUPPORTED_B, or NOT_REACHED_IN_B. Also if a rank of A
-      has UNSUPPORTED_A, but some other rank of A doesn't have it. Also if all ranks of an instance that had to
-      run the case still have ABOUT_TO_START ("the previous run did not finish"): A always has to run a case, B
-      only if all ranks of A have SUCCESS (FC20.5). The case fixture (function scope) raises
+   1. "error" if any rank has FAILED_TO_START, UNSUPPORTED_B, or NOT_REACHED_IN.
+      Also if a rank of A has UNSUPPORTED_A, but some other rank of A doesn't have it.
+      Also if all ranks of an instance that had to run the case still have ABOUT_TO_START
+      ("the previous run did not finish"): A always has to run a case, B only if all ranks
+      of A have SUCCESS (FC20.5). The case fixture (function scope) raises
       the exception before the test function starts, because pytest gives "error" only for an exception in
       setup, teardown or a fixture.
    2. "skipped" for UNSUPPORTED_A on all ranks of A.

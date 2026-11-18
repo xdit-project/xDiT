@@ -11,7 +11,9 @@ from diffusers.models.transformers.transformer_flux3 import (
     _get_qkv_projections,
 )
 
+from xfuser.core.attention.spec import EXACT_KV_TOKENS_KEY
 from xfuser.core.distributed import (
+    get_runtime_state,
     get_sequence_parallel_rank,
     get_sequence_parallel_world_size,
 )
@@ -32,11 +34,29 @@ class xFuserFlux3AttnProcessor:
     ``valid_kv_len`` to the stage's real length when the SP pad made the sequence
     longer, so the pad keys are dropped after the all-to-all, and ``local`` when
     every rank holds the whole stream, so attention runs without collectives.
+
+    ``text_only`` marks the text stage's instance, which attends the prompt alone
+    and runs on the cross-attention backend: the main backend unless
+    ``--cross_attention_backend`` names another. ``exact_kv_tokens`` marks the joint
+    stage's prompt tokens, over the padded sequence, for backends that select KV
+    blocks; every other backend ignores it.
     """
 
-    def __init__(self):
+    def __init__(self, text_only: bool = False):
         self.valid_kv_len: Optional[int] = None
         self.local = False
+        self.text_only = text_only
+        self.exact_kv_tokens: Optional[torch.Tensor] = None
+
+    def _backend(self):
+        # The prompt is 80-512 tokens: too few KV blocks for a backend that selects blocks, so a
+        # Sol or Sparge run names a dense one for it with --cross_attention_backend.
+        return get_runtime_state().get_cross_attention_backend() if self.text_only else None
+
+    def _attention_kwargs(self) -> Optional[Dict[str, Any]]:
+        if self.valid_kv_len is None and self.exact_kv_tokens is None:
+            return None
+        return {"valid_kv_len": self.valid_kv_len, EXACT_KV_TOKENS_KEY: self.exact_kv_tokens}
 
     def __call__(
         self,
@@ -60,11 +80,16 @@ class xFuserFlux3AttnProcessor:
         value = value.transpose(1, 2)
 
         if self.local:
-            hidden_states = attention(query, key, value)
+            hidden_states = attention(query, key, value, backend=self._backend())
         else:
-            attention_kwargs = None if self.valid_kv_len is None else {"valid_kv_len": self.valid_kv_len}
             hidden_states = USP(
-                query, key, value, attn_layer=attn, attention_kwargs=attention_kwargs, combine_qkv_a2a=True
+                query,
+                key,
+                value,
+                attn_layer=attn,
+                backend=self._backend(),
+                attention_kwargs=self._attention_kwargs(),
+                combine_qkv_a2a=True,
             )
 
         hidden_states = hidden_states.transpose(1, 2).flatten(2, 3)
@@ -110,8 +135,8 @@ class xFuserFlux3SdmaAttnProcessor(xFuserFlux3AttnProcessor):
                 attn,
                 hidden_states,
                 lambda q, k, v: self._norm_rope(attn, q, k, v, image_rotary_emb),
-                backend=None,
-                attention_kwargs=None if self.valid_kv_len is None else {"valid_kv_len": self.valid_kv_len},
+                backend=self._backend(),
+                attention_kwargs=self._attention_kwargs(),
                 group=PROCESS_GROUP.ULYSSES_PG,
             )
             if grouped is not None:
@@ -160,7 +185,7 @@ class xFuserFlux3Transformer2DWrapper(Flux3Transformer2DModel):
     @functools.wraps(Flux3Transformer2DModel.__init__)
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._txt_processor = xFuserFlux3AttnProcessor()
+        self._txt_processor = xFuserFlux3AttnProcessor(text_only=True)
         self._image_processor = xFuserFlux3AttnProcessor()
         self._image_cond_processor = xFuserFlux3AttnProcessor()
         self._joint_processor = xFuserFlux3AttnProcessor()
@@ -239,6 +264,8 @@ class xFuserFlux3Transformer2DWrapper(Flux3Transformer2DModel):
 
         batch_size, image_seq_len = hidden_states.shape[:2]
         dtype = hidden_states.dtype
+        # One forward is one entry of the per-step schedules (--solattn_beta_schedule).
+        get_runtime_state().increment_step_counter()
 
         # 1-4. Timestep embeddings, modulations, input projections and RoPE, as upstream.
         image_temb = self.time_proj(timestep.to(dtype) * 1000)
@@ -315,6 +342,11 @@ class xFuserFlux3Transformer2DWrapper(Flux3Transformer2DModel):
         sp_world_size = get_sequence_parallel_world_size()
         pad = (sp_world_size - joint_seq_len % sp_world_size) % sp_world_size
         self._joint_processor.valid_kv_len = joint_seq_len if pad else None
+        # The prompt is a few percent of the joint sequence, and a backend that selects KV blocks
+        # judges its blocks against statistics the image writes; keep them exact for every query.
+        exact_kv_tokens = torch.zeros(joint_seq_len + pad, dtype=torch.bool, device=joint_states.device)
+        exact_kv_tokens[:txt_seq_len] = True
+        self._joint_processor.exact_kv_tokens = exact_kv_tokens
         joint_states, joint_mod, joint_rotary_emb = self._shard(
             sp_rank, sp_world_size, pad, joint_states, joint_mod, joint_rotary_emb
         )

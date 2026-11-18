@@ -206,3 +206,18 @@ def test_an_unwrapped_transformer_is_left_alone(build_flux3):
     model._expose_transformer_signature()
 
     assert "forward" not in vars(transformer)
+
+
+@pytest.mark.parametrize(
+    ("guidance_scale", "cfg_parallel", "forwards"),
+    [(3.5, False, 2), (3.5, True, 1), (1.0, False, 1)],
+)
+def test_a_guided_base_step_counts_both_branches(build_flux3, guidance_scale, cfg_parallel, forwards):
+    """Per-step schedules count forwards; a guided step on one rank group runs two."""
+    model = build_flux3("FLUX.3-image-klein-base", use_cfg_parallel=cfg_parallel)
+
+    assert model._calculate_hybrid_attention_step_multiplier({"guidance_scale": guidance_scale}) == forwards
+
+
+def test_the_distilled_model_runs_one_forward_per_step(build_flux3):
+    assert build_flux3()._calculate_hybrid_attention_step_multiplier({"guidance_scale": None}) == 1

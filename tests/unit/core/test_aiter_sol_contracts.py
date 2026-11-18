@@ -114,7 +114,9 @@ def _record_sol_calls(monkeypatch, block_size=None):
 
     monkeypatch.setattr(kernel, "sol_attn_bhsd", record)
     if block_size is not None:
-        state = SimpleNamespace(runtime_config=SimpleNamespace(sparseattn_block_size=block_size))
+        from xfuser.config.config import RuntimeConfig
+
+        state = SimpleNamespace(runtime_config=RuntimeConfig(sparseattn_block_size=block_size))
         monkeypatch.setattr(kernel, "runtime_state_is_initialized", lambda: True)
         monkeypatch.setattr(kernel, "get_runtime_state", lambda: state)
     return seen

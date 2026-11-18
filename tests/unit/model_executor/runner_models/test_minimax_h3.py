@@ -240,6 +240,124 @@ def test_minimax_h3_publishes_the_trailing_pad_length(monkeypatch):
     assert set(wrapper._usp_attention_kwargs) == aligned_keys
 
 
+def test_minimax_h3_declares_the_query_pad_and_its_exact_rows_for_sol(monkeypatch):
+    """Sol-Attn drops the query pad by valid_q_len and computes the blocks holding text and audio
+    keys exactly. Both keys are present on every forward, like valid_kv_len."""
+    from xfuser.core.attention.spec import EXACT_KV_TOKENS_KEY
+    from xfuser.core.attention.spec import AttentionBackendType
+    from xfuser.model_executor.models.transformers import transformer_minimax_h3
+    from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
+        xFuserMiniMaxH3Transformer3DWrapper,
+    )
+
+    monkeypatch.setattr(transformer_minimax_h3, "get_ulysses_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(transformer_minimax_h3, "get_ulysses_parallel_rank", lambda: 0)
+    _patch_minimax_runtime_state(monkeypatch)
+    wrapper = xFuserMiniMaxH3Transformer3DWrapper(
+        **_tiny_config(),
+        attention_backend=AttentionBackendType.SDPA,
+    ).eval()
+    inputs = _tiny_inputs(torch.device("cpu"), text_tokens=5)
+
+    with torch.no_grad():
+        wrapper(**inputs)
+
+    kwargs = wrapper._usp_attention_kwargs
+    assert kwargs["valid_q_len"] == kwargs["valid_kv_len"] == 65
+    exact = kwargs[EXACT_KV_TOKENS_KEY]
+    assert exact.shape == (128,)
+    expected = torch.zeros(128, dtype=torch.bool)
+    expected[inputs["text_indices"]] = True
+    expected[inputs["audio_indices"]] = True
+    assert torch.equal(exact, expected)
+
+
+def test_the_token_refiner_stays_dense_under_sol(monkeypatch):
+    """The refiner attends the text alone, too few KV blocks to route; the packed blocks keep Sol."""
+    from xfuser.core.attention.spec import AttentionBackendType
+    from xfuser.model_executor.models.transformers import transformer_minimax_h3
+    from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
+        xFuserMiniMaxH3Transformer3DWrapper,
+    )
+
+    monkeypatch.setattr(transformer_minimax_h3, "get_ulysses_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(transformer_minimax_h3, "get_ulysses_parallel_rank", lambda: 0)
+    _patch_minimax_runtime_state(monkeypatch, attention_backend=AttentionBackendType.AITER_FP8_SOL)
+    backends = []
+
+    def attention(query, key, value, *, backend, **kwargs):
+        backends.append(backend)
+        return query
+
+    monkeypatch.setattr(transformer_minimax_h3, "attention", attention)
+    config = _tiny_config()
+    wrapper = xFuserMiniMaxH3Transformer3DWrapper(**config).eval()
+
+    with torch.no_grad():
+        wrapper(**_tiny_inputs(torch.device("cpu")))
+
+    refiner = [AttentionBackendType.AITER] * config["num_refiner_layers"]
+    blocks = [AttentionBackendType.AITER_FP8_SOL] * config["num_layers"]
+    assert backends == refiner + blocks
+
+
+@pytest.mark.parametrize(
+    "backend,schedule,prepared",
+    [
+        ("AITER_FP8_SOL", None, True),
+        ("AITER_BF16", ["AITER_BF16", "AITER_BF16_SOL"], True),
+        ("AITER_BF16", None, False),
+    ],
+)
+def test_the_refiners_dense_backend_is_selected_before_compile(monkeypatch, backend, schedule, prepared):
+    """The refiner's AITER is reached only inside the compiled forward, which cannot import it."""
+    from xfuser.core.attention.spec import AttentionBackendType
+    from xfuser.model_executor.models.runner_models import minimax_h3 as minimax_h3_runner
+    from xfuser.model_executor.models.runner_models.base_model import xFuserModel
+
+    checked = []
+    selected = [AttentionBackendType[backend], *(AttentionBackendType[b] for b in schedule or ())]
+    runtime = SimpleNamespace(
+        selected_attention_backends=lambda: selected,
+        _check_if_backend_compatible_with_current_configuration=checked.append,
+    )
+    monkeypatch.setattr(minimax_h3_runner, "get_runtime_state", lambda: runtime)
+    monkeypatch.setattr(xFuserModel, "_post_load_and_state_initialization", lambda self, input_args: None)
+    model = object.__new__(minimax_h3_runner.xFuserMiniMaxH3Model)
+
+    model._post_load_and_state_initialization({})
+
+    assert checked == ([AttentionBackendType.AITER] if prepared else [])
+
+
+def test_minimax_h3_accepts_sol_backends_where_h3_image_does_not(monkeypatch):
+    from xfuser import xFuserArgs
+    from xfuser.core.attention import registry as attention_registry
+    from xfuser.core.attention.spec import Sparsity
+    from xfuser.model_executor.models.runner_models.minimax_h3 import xFuserMiniMaxH3Model
+    from xfuser.model_executor.models.runner_models.minimax_h3_image import xFuserMiniMaxH3ImageModel
+
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "1")
+    sol = attention_registry.types_where(sparsity=Sparsity.SOL)
+
+    for backend in sol:
+        xFuserMiniMaxH3Model(xFuserArgs(model="MiniMax-H3", task="t2va", attention_backend=backend.name))
+    # H3 attends text, video and audio in one sequence: no separate cross-attention backend.
+    xFuserMiniMaxH3Model(
+        xFuserArgs(
+            model="MiniMax-H3",
+            task="t2va",
+            use_hybrid_attn_schedule=True,
+            hybrid_attn_high_precision_backend="AITER_BF16",
+            hybrid_attn_low_precision_backend="AITER_FP8_SOL",
+            solattn_beta_schedule="0.5:0.0",
+        )
+    )
+    # H3-Image has not been checked with Sol-Attn.
+    assert not (xFuserMiniMaxH3ImageModel.supported_attn_backends & sol)
+
+
 def test_minimax_h3_wrapper_exposes_diffusers_config_signature():
     from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
         xFuserMiniMaxH3Transformer3DWrapper,
@@ -846,6 +964,8 @@ def test_vdn_supported_attn_backends_exclude_unservable_paths():
     assert supported < xFuserMiniMaxH3Model.supported_attn_backends
     assert AttentionBackendType.CUDNN not in supported
     assert AttentionBackendType.NVTE_FP8 not in supported
+    # Nor does it claim Sol-Attn support, which the model reference advertises from the capability.
+    assert not xFuserVDNMiniMaxH3Model.capabilities.supports_sol_attention_backends
 
 
 def test_vdn_window_backend_derived_from_attention_backend():

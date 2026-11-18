@@ -378,3 +378,14 @@ def test_a_schedule_without_a_step_count_is_refused(monkeypatch):
         runtime.configure_attention_backends(None, 1)
 
     _sol_run(monkeypatch).configure_attention_backends(None, 1)
+
+
+def test_a_call_without_a_beta_of_its_own_takes_the_runs_flag(installed, monkeypatch):
+    """MiniMax-H3 passes no solattn_beta; --solattn_beta must still reach its calls."""
+    installed(None)
+    runtime = _bare_runtime(runtime_config=RuntimeConfig(solattn_beta=0.25))
+    monkeypatch.setattr(kernel, "runtime_state_is_initialized", lambda: True)
+    monkeypatch.setattr(kernel, "get_runtime_state", lambda: runtime)
+
+    assert kernel._beta(AttnCall(), "cpu") == pytest.approx(0.25)
+    assert kernel._beta(AttnCall(attention_kwargs={"solattn_beta": 0.75}), "cpu") == pytest.approx(0.75)

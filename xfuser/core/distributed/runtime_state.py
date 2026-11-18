@@ -337,6 +337,32 @@ class RuntimeState(metaclass=ABCMeta):
         """The running forward's index as a 0-d tensor, or None when nothing tracks steps."""
         return None
 
+    def selected_attention_backends(self) -> list[AttentionBackendType]:
+        """Every backend this run can dispatch to: the attention and cross-attention backends and
+        those of the attention schedule, once it is set. Each once, by name."""
+        selected = {self.attention_backend, self.get_cross_attention_backend()}
+        schedule = getattr(self, "attention_schedule", None)
+        if schedule is not None:
+            selected.update(schedule.backends)
+        return sorted(selected, key=lambda b: b.name)
+
+    def configure_attention_backends(self, denoising_steps: Optional[int], forwards_per_step: int) -> None:
+        """Hand the run's step plan to every selected attention backend that keeps per-step state.
+
+        Runs after any attention schedule is set, so the scheduled backends are configured too, and
+        before the forward is compiled. A hook several backends share runs once. denoising_steps is
+        None for a run without a step count; a backend that needs one raises.
+        """
+        configured = []
+        for backend in self.selected_attention_backends():
+            spec = attention_registry.get(backend)
+            # With the package: an Impl target is relative to it.
+            hook = (spec.package, spec.configures)
+            if spec.configures is None or hook in configured:
+                continue
+            configured.append(hook)
+            spec.configure(self.runtime_config, denoising_steps, forwards_per_step)
+
 
 class UnetRuntimeState(RuntimeState):
     def __init__(self, pipeline: DiffusionPipeline, config: EngineConfig):

@@ -203,17 +203,25 @@ def _block_size_config(**kwargs):
     return xFuserArgs(model="m", sparseattn_block_size=(64, 64), **kwargs)
 
 
+def _refuse_unread_options(config):
+    from xfuser.core.attention import registry
+
+    registry.refuse_unread_options(config, base_model._selected_attention_backends(config))
+
+
 @pytest.mark.parametrize("scheduled", ["AITER_BF16,AITER_FP8_SPARGE", "AITER_BF16,AITER_F6F4_SOL"])
 def test_a_block_size_is_accepted_when_a_scheduled_backend_reads_it(scheduled):
     config = _block_size_config(use_hybrid_attn_schedule=True, hybrid_attn_schedule=scheduled)
 
-    base_model._validate_sparseattn_block_size(config)
+    _refuse_unread_options(config)
 
 
 @pytest.mark.parametrize("backend", ["AITER_BF16", "FLEX_BLOCK_SPARGE"])
 def test_a_block_size_without_a_backend_that_reads_it_is_refused(backend):
-    with pytest.raises(ValueError, match="applies only to the AITER MHA v4 Sparge and AITER Sol"):
-        base_model._validate_sparseattn_block_size(_block_size_config(attention_backend=backend))
+    with pytest.raises(
+        ValueError, match="--sparseattn_block_size applies only to the sol and sparge attention backends"
+    ):
+        _refuse_unread_options(_block_size_config(attention_backend=backend))
 
 
 def test_a_beta_schedule_is_accepted_when_a_scheduled_backend_is_sol():
@@ -224,7 +232,7 @@ def test_a_beta_schedule_is_accepted_when_a_scheduled_backend_is_sol():
         hybrid_attn_schedule="AITER_BF16,AITER_F6F4_SOL",
     )
 
-    base_model._validate_solattn_beta_schedule(config)
+    _refuse_unread_options(config)
 
 
 @pytest.mark.parametrize("backend", ["AITER_BF16", "AITER_FP8_SPARGE"])
@@ -232,8 +240,15 @@ def test_a_beta_schedule_without_a_sol_backend_is_refused(backend):
     """No Sol backend would read it, so the run would quietly route nothing by it."""
     config = xFuserArgs(model="m", solattn_beta_schedule="1.0:0.0", attention_backend=backend)
 
-    with pytest.raises(ValueError, match="applies only to the AITER Sol"):
-        base_model._validate_solattn_beta_schedule(config)
+    with pytest.raises(ValueError, match="--solattn_beta_schedule applies only to the sol attention backends"):
+        _refuse_unread_options(config)
+
+
+def test_a_tilt_rank_without_a_sol_backend_is_refused():
+    config = xFuserArgs(model="m", solattn_tilt_rank=2, attention_backend="AITER_FP8")
+
+    with pytest.raises(ValueError, match="--solattn_tilt_rank applies only to the "):
+        _refuse_unread_options(config)
 
 
 def _gather_dp_outputs(monkeypatch, *, dp_degree, legacy_pipe, rank=0, sp_rank=0):

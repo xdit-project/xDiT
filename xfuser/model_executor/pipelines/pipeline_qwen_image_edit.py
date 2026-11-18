@@ -38,12 +38,109 @@ def _image_size(image):
     return source.size
 
 
+class _BatchedTrueCfgTransformer:
+    """Stands in for the transformer during one true-CFG call, running both branches as one batch.
+
+    The pipeline calls the transformer twice per step, conditional then unconditional, with the
+    same latents and timestep. The first call runs the batch [conditional, unconditional], each
+    row with its own prompt, and returns the conditional row; the second returns the stored
+    unconditional row. The prompts are zero-padded to one length, and the transformer's per-row
+    key packing keeps every row from attending over its padding, so each row matches its
+    sequential call.
+    """
+
+    def __init__(self, transformer, prompts):
+        self._transformer = transformer
+        # (embeds, mask) per encode_prompt call: the conditional prompt, then the unconditional one.
+        self._prompts_seen = prompts
+        self._unconditional = None
+        self._batched = None
+
+    def __getattr__(self, name):
+        return getattr(self._transformer, name)
+
+    @property
+    def _positive(self):
+        return self._prompts_seen[0] if len(self._prompts_seen) == 2 else (None, None)
+
+    @property
+    def _negative(self):
+        return self._prompts_seen[1] if len(self._prompts_seen) == 2 else (None, None)
+
+    def __call__(self, *args, **kwargs):
+        prompt = kwargs.get("encoder_hidden_states")
+        if args or kwargs.get("return_dict", True) or prompt is None:
+            return self._transformer(*args, **kwargs)
+        if prompt is self._negative[0] and self._unconditional is not None:
+            unconditional, self._unconditional = self._unconditional, None
+            return (unconditional,)
+        if prompt is not self._positive[0] or not self._batchable():
+            return self._transformer(*args, **kwargs)
+        embeds = [self._positive[0], self._negative[0]]
+        lengths = [e.shape[1] for e in embeds]
+        packing = self._transformer.padded_prompt_key_packing(lengths, kwargs["hidden_states"].shape[1], prompt.device)
+        if packing is None:
+            return self._transformer(*args, **kwargs)
+
+        batch = dict(kwargs)
+        batch["encoder_hidden_states"] = torch.cat(
+            [torch.nn.functional.pad(e, (0, 0, 0, max(lengths) - e.shape[1])) for e in embeds]
+        )
+        # The packing, not a mask, keeps each row off its padding.
+        batch["encoder_hidden_states_mask"] = None
+        batch["hidden_states"] = kwargs["hidden_states"].repeat(2, 1, 1)
+        batch["timestep"] = kwargs["timestep"].repeat(2)
+        if kwargs.get("guidance") is not None:
+            batch["guidance"] = kwargs["guidance"].repeat(2)
+        batch["img_shapes"] = list(kwargs["img_shapes"]) * 2
+        batch["attention_kwargs"] = {**(kwargs.get("attention_kwargs") or {}), **packing}
+        output = self._transformer(**batch)[0]
+        self._unconditional = output[1:]
+        return (output[:1],)
+
+    def _batchable(self):
+        """One prompt per branch, each without padding of its own, so its length is its shape."""
+        if self._batched is None:
+            self._batched = all(
+                embeds is not None and embeds.shape[0] == 1 and (mask is None or bool(mask.all()))
+                for embeds, mask in (self._positive, self._negative)
+            )
+        return self._batched
+
+
 class _TrueCfgParallelMixin:
-    """Run Qwen-Image-Edit's true-CFG branches on the two CFG parallel ranks."""
+    """Run Qwen-Image-Edit's true-CFG branches on the two CFG parallel ranks, or as one batch.
+
+    ``batched_true_cfg`` is set by the runner where the attention backend can keep each row
+    off its prompt padding.
+    """
+
+    batched_true_cfg = False
+
+    def _call_batched_true_cfg(self, *args: Any, **kwargs: Any):
+        prompts = []
+        encode_prompt = self.encode_prompt
+
+        def recording_encode_prompt(*encode_args, **encode_kwargs):
+            result = encode_prompt(*encode_args, **encode_kwargs)
+            prompts.append(result)
+            return result
+
+        transformer = self.transformer
+        # Plain attributes: DiffusionPipeline.__setattr__ would re-register the transformer in its config.
+        object.__setattr__(self, "encode_prompt", recording_encode_prompt)
+        object.__setattr__(self, "transformer", _BatchedTrueCfgTransformer(transformer, prompts))
+        try:
+            return super().__call__(*args, **kwargs)
+        finally:
+            object.__setattr__(self, "transformer", transformer)
+            del self.encode_prompt
 
     @torch.no_grad()
     def __call__(self, *args: Any, **kwargs: Any):
         if get_classifier_free_guidance_world_size() != 2:
+            if self.batched_true_cfg:
+                return self._call_batched_true_cfg(*args, **kwargs)
             return super().__call__(*args, **kwargs)
 
         parent_call = super().__call__

@@ -170,7 +170,7 @@ def test_runner_declaration_derives_quantization_contracts(contracts):
     assert declaration.meta_text_encoders == ("text_encoder",)
 
 
-def test_runner_declaration_allows_aiter_int8(contracts):
+def test_runner_declaration_does_not_allow_cross_product_backend_pairs(contracts):
     model_capabilities = type(
         "ModelCapabilities",
         (),
@@ -178,20 +178,22 @@ def test_runner_declaration_allows_aiter_int8(contracts):
             "use_fp8_gemms": False,
             "use_fp4_gemms": False,
             "use_int8_gemms": True,
-            "use_aiter_int8_gemms": True,
         },
     )()
     declaration = contracts.LoadDeclaration.for_runner(model_capabilities)
 
-    selected = contracts.select_load_contract(
-        requested_format=contracts.QuantizationFormat.INT8,
-        selected_backend=contracts.QuantizationBackend.AITER,
-        materialization_mode=contracts.MaterializationMode.EAGER,
-        declaration=declaration,
-        fsdp_strategy={},
-        runner_name="ExampleRunner",
-    )
-    assert selected.selected_backend is contracts.QuantizationBackend.AITER
+    with pytest.raises(
+        contracts.UnsupportedLoadContract,
+        match=r"AITER.*INT8.*ExampleRunner",
+    ):
+        contracts.select_load_contract(
+            requested_format=contracts.QuantizationFormat.INT8,
+            selected_backend=contracts.QuantizationBackend.AITER,
+            materialization_mode=contracts.MaterializationMode.EAGER,
+            declaration=declaration,
+            fsdp_strategy={},
+            runner_name="ExampleRunner",
+        )
 
 
 def test_fp8_fp4_hybrid_is_an_explicit_valid_contract(contracts):

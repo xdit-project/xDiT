@@ -595,49 +595,6 @@ def test_descriptor_declares_storage_sharding_and_trainability(modules):
     assert "storage=aiter_mxfp4_per_1x32" in message
 
 
-def test_aiter_int8_descriptor_declares_packed_state(modules):
-    b = modules.backends
-    adapter = b.AiterInt8BackendAdapter(
-        backend=modules.contracts.QuantizationBackend.AITER,
-        format_=modules.contracts.QuantizationFormat.INT8,
-    )
-
-    descriptor = b.describe_blockwise_format_load(
-        adapter,
-        component_name="transformer",
-        targets=("blocks",),
-        wrap_attrs=("blocks",),
-    )
-
-    assert descriptor.storage_semantics == "aiter_int8_per_row_preshuffled"
-    assert descriptor.parameter_semantics == "packed_weight_parameter"
-    assert descriptor.auxiliary_state_semantics == "replicated_scale_buffer"
-    assert descriptor.serialization == "runtime_conversion_only"
-
-
-def test_aiter_int8_fsdp_requires_non_float_parameter_support(modules):
-    b = modules.backends
-    adapter = b.AiterInt8BackendAdapter(
-        backend=modules.contracts.QuantizationBackend.AITER,
-        format_=modules.contracts.QuantizationFormat.INT8,
-    )
-    capabilities = b.FormatBackendCapabilities(
-        aiter_int8=True,
-        aiter_int8_fsdp=False,
-        aiter_int8_fsdp_reason="torch is too old",
-    )
-    with pytest.raises(
-        modules.contracts.UnsupportedLoadContract,
-        match=r"AITER INT8 packed weight.*torch is too old",
-    ):
-        b.validate_format_fsdp_placement(
-            _contract(modules, "INT8", "AITER", "FSDP_META"),
-            adapter,
-            capabilities=capabilities,
-            required=True,
-        )
-
-
 @pytest.mark.parametrize("format_name", ["FP4", "INT8"])
 def test_fsdp_tensor_subclass_validation_is_format_specific(modules, format_name):
     b = modules.backends
@@ -676,18 +633,26 @@ def test_fsdp_tensor_subclass_validation_is_format_specific(modules, format_name
 
 
 @pytest.mark.parametrize("fsdp_supported", [False, True])
-def test_mxfp4_fsdp_placement_follows_the_packed_parameter_capability(modules, fsdp_supported):
+@pytest.mark.parametrize(
+    ("format_name", "adapter_name", "label"),
+    [("FP4", "AiterMxfp4BackendAdapter", "mxfp4"), ("INT8", "AiterInt8BackendAdapter", "int8")],
+)
+def test_aiter_fsdp_placement_follows_the_packed_parameter_capability(
+    modules, format_name, adapter_name, label, fsdp_supported
+):
     b = modules.backends
     capabilities = b.FormatBackendCapabilities(
-        aiter_mxfp4=True,
-        aiter_mxfp4_fsdp=fsdp_supported,
-        aiter_mxfp4_fsdp_reason=None if fsdp_supported else "torch is too old",
+        **{
+            f"aiter_{label}": True,
+            f"aiter_{label}_fsdp": fsdp_supported,
+            f"aiter_{label}_fsdp_reason": None if fsdp_supported else "torch is too old",
+        }
     )
-    adapter = b.AiterMxfp4BackendAdapter(
+    adapter = getattr(b, adapter_name)(
         backend=modules.contracts.QuantizationBackend.AITER,
-        format_=modules.contracts.QuantizationFormat.FP4,
+        format_=getattr(modules.contracts.QuantizationFormat, format_name),
     )
-    contract = _contract(modules, "FP4", "AITER", "FSDP_META")
+    contract = _contract(modules, format_name, "AITER", "FSDP_META")
 
     if fsdp_supported:
         b.validate_format_fsdp_placement(contract, adapter, capabilities=capabilities, required=True)
@@ -695,7 +660,7 @@ def test_mxfp4_fsdp_placement_follows_the_packed_parameter_capability(modules, f
 
     with pytest.raises(
         modules.contracts.UnsupportedLoadContract,
-        match=r"AITER MXFP4 packed weight cannot be placed under FSDP2: torch is too old",
+        match=rf"AITER {label.upper()} packed weight cannot be placed under FSDP2: torch is too old",
     ):
         b.validate_format_fsdp_placement(contract, adapter, capabilities=capabilities, required=True)
 

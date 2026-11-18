@@ -402,53 +402,77 @@ def quantize_linear_layers_to_int8(
         )
 
 
-def quantize_linear_layers_to_aiter_int8(
+def _replace_linear_leaves(
     model: torch.nn.Module,
-    parent_name: str = "",
-    filter_fn: Optional[Callable[[torch.nn.Module, str], bool]] = None,
-    device: torch.device | str | None = None,
+    make_layer: Callable[[torch.nn.Linear], torch.nn.Module],
+    select: Callable[[torch.nn.Linear, str], bool],
+    device: torch.device | str | None,
     offload_to_cpu: bool = False,
+    parent_name: str = "",
 ) -> int:
-    """Replace supported Linear leaves with AITER true-INT8 linears."""
-    from xfuser.model_executor.layers.aiter_int8_linear import (
-        supports_aiter_int8_linear,
-        xFuserAiterInt8Linear,
-    )
+    """Replace the selected nn.Linear leaves, one at a time, with layers from make_layer.
 
+    Each new layer receives the BF16 weight and bias through load_and_quantize_weights.
+    Returns the number of leaves replaced.
+    """
     replaced = 0
     for name, module in list(model.named_children()):
         full_name = f"{parent_name}.{name}" if parent_name else name
         if isinstance(module, torch.nn.Linear):
-            if _weight_is_torchao_quantized(module):
+            if not select(module, full_name):
                 continue
-            if filter_fn is not None and not filter_fn(module, full_name):
-                continue
-            if not supports_aiter_int8_linear(module.in_features, module.out_features):
-                continue
-            weight = module.weight.detach()
-            bias = module.bias.detach() if module.bias is not None else None
-            int8_layer = xFuserAiterInt8Linear(
-                module.in_features,
-                module.out_features,
-                bias=module.bias is not None,
-                device="meta",
-                dtype=weight.dtype,
-            )
-            int8_layer.train(module.training)
-            int8_layer.load_and_quantize_weights(weight, bias, device=device)
+            weight = module.weight.data
+            bias = module.bias.data if module.bias is not None else None
+            layer = make_layer(module)
+            # Free BF16 weight before quantization to avoid holding two copies on GPU
+            module.weight = None
+            if module.bias is not None:
+                module.bias = None
+            layer.load_and_quantize_weights(weight, bias, device=device)
+            del weight, bias
+            # Under offload, quantize on GPU then evict to CPU immediately so peak VRAM
+            # during quantization stays at one layer, not the whole component. The offload
+            # manager streams these leaves back on demand.
             if offload_to_cpu:
-                int8_layer.to("cpu")
-            setattr(model, name, int8_layer)
+                layer.to("cpu")
+            setattr(model, name, layer)
             replaced += 1
         elif next(module.children(), None) is not None:
-            replaced += quantize_linear_layers_to_aiter_int8(
-                module,
-                parent_name=full_name,
-                filter_fn=filter_fn,
-                device=device,
-                offload_to_cpu=offload_to_cpu,
+            replaced += _replace_linear_leaves(
+                module, make_layer, select, device, offload_to_cpu=offload_to_cpu, parent_name=full_name
             )
     return replaced
+
+
+def quantize_linear_layers_to_aiter_int8(
+    model: torch.nn.Module,
+    filter_fn: Optional[Callable[[torch.nn.Module, str], bool]] = None,
+    device: torch.device | str | None = None,
+) -> int:
+    """Replace the Linear leaves AITER's INT8 GEMM supports with xFuserAiterInt8Linear."""
+    from aiter.ops.flydsl.gemm_a8w8_bpreshuffle_4wave import supports_4wave_int8_shape
+
+    from xfuser.model_executor.layers.aiter_int8_linear import xFuserAiterInt8Linear
+
+    def select(module: torch.nn.Linear, name: str) -> bool:
+        return (
+            not _weight_is_torchao_quantized(module)
+            and (filter_fn is None or filter_fn(module, name))
+            # M is only known per call, where the GEMM checks it.
+            and supports_4wave_int8_shape(0, module.out_features, module.in_features)
+        )
+
+    def make_layer(module: torch.nn.Linear) -> torch.nn.Module:
+        layer = xFuserAiterInt8Linear(
+            module.in_features,
+            module.out_features,
+            bias=module.bias is not None,
+            device="meta",
+            dtype=module.weight.dtype,
+        )
+        return layer.train(module.training)
+
+    return _replace_linear_leaves(model, make_layer, select, device)
 
 
 def quantize_linear_layers_to_fp8(
@@ -492,54 +516,29 @@ def quantize_linear_layers_to_fp8_blockscale(
 ) -> int:
     """Replace nn.Linear layers with xFuserFP8BlockScaleLinear (AITER gemm_a8w8_blockscale).
 
-    Mirrors quantize_linear_layers_to_fp4 structure: recursive tree walk, in-place
-    setattr replacement. Pre-quantizes weights to FP8 block-128 at call time.
+    Pre-quantizes weights to FP8 block-128 at call time.
     Returns the number of nn.Linear leaves replaced (0 when leaves are already FP8, e.g.
     after streaming quantize-on-load).
     """
     from xfuser.model_executor.layers.fp8_linear import xFuserFP8BlockScaleLinear
 
-    replaced = 0
-    for name, module in list(model.named_children()):
-        full_name = f"{parent_name}.{name}" if parent_name else name
-        if isinstance(module, torch.nn.Linear):
-            if filter_fn is not None:
-                if not filter_fn(module, full_name):
-                    continue
-            elif include_suffixes and not full_name.endswith(include_suffixes):
-                continue
-            weight = module.weight.data
-            bias = module.bias.data if module.bias is not None else None
-            fp8_layer = xFuserFP8BlockScaleLinear(
-                module.in_features,
-                module.out_features,
-                bias=(bias is not None),
-                device=weight.device,
-                dtype=weight.dtype,
-            )
-            # Free BF16 weight before quantization to avoid holding two copies on GPU
-            module.weight = None
-            if module.bias is not None:
-                module.bias = None
-            fp8_layer.load_and_quantize_weights(weight, bias, device=device)
-            del weight, bias
-            # Under offload, quantize on GPU then evict to CPU immediately so peak VRAM
-            # during quantization stays at one layer, not the whole component. The offload
-            # manager streams these fp8 leaves back on demand.
-            if offload_to_cpu:
-                fp8_layer.to("cpu")
-            setattr(model, name, fp8_layer)
-            replaced += 1
-        elif next(module.children(), None) is not None:
-            replaced += quantize_linear_layers_to_fp8_blockscale(
-                module,
-                parent_name=full_name,
-                include_suffixes=include_suffixes,
-                device=device,
-                offload_to_cpu=offload_to_cpu,
-                filter_fn=filter_fn,
-            )
-    return replaced
+    def select(module: torch.nn.Linear, name: str) -> bool:
+        if filter_fn is not None:
+            return filter_fn(module, name)
+        return not include_suffixes or name.endswith(include_suffixes)
+
+    def make_layer(module: torch.nn.Linear) -> torch.nn.Module:
+        return xFuserFP8BlockScaleLinear(
+            module.in_features,
+            module.out_features,
+            bias=module.bias is not None,
+            device=module.weight.device,
+            dtype=module.weight.dtype,
+        )
+
+    return _replace_linear_leaves(
+        model, make_layer, select, device, offload_to_cpu=offload_to_cpu, parent_name=parent_name
+    )
 
 
 def load_dataset_prompts(dataset_path: str) -> list[str]:

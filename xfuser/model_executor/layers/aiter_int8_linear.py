@@ -11,12 +11,7 @@ try:
 except ImportError:  # CPU-only tests and installations without Triton.
     triton = None
 
-_K_TILE = 128
 _PRESHUFFLE_LAYOUT = (16, 16)
-
-
-def supports_aiter_int8_linear(in_features: int, out_features: int) -> bool:
-    return in_features >= 2 * _K_TILE and in_features % _K_TILE == 0 and out_features % _PRESHUFFLE_LAYOUT[0] == 0
 
 
 if triton is not None:
@@ -125,11 +120,10 @@ class xFuserAiterInt8Linear(nn.Module):
         dtype = torch.bfloat16 if dtype is None else dtype
         if dtype != torch.bfloat16:
             raise TypeError("AITER INT8 linear supports only torch.bfloat16")
-        if not supports_aiter_int8_linear(in_features, out_features):
-            raise ValueError(
-                "AITER INT8 linear requires K >= 256, K % 128 == 0, "
-                f"and N % 16 == 0; got N={out_features}, K={in_features}"
-            )
+        from aiter.ops.flydsl.gemm_a8w8_bpreshuffle_4wave import supports_4wave_int8_shape
+
+        if not supports_4wave_int8_shape(0, out_features, in_features):
+            raise ValueError(f"AITER's INT8 GEMM does not support N={out_features}, K={in_features}")
 
         self.in_features = in_features
         self.out_features = out_features

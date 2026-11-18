@@ -791,7 +791,6 @@ class AiterInt8BackendAdapter(FormatBackendAdapter):
         *,
         device,
         filter_fn=None,
-        offload_to_cpu=False,
         **kwargs,
     ):
         from xfuser.core.utils.runner_utils import (
@@ -802,7 +801,6 @@ class AiterInt8BackendAdapter(FormatBackendAdapter):
             module,
             device=device,
             filter_fn=filter_fn,
-            offload_to_cpu=offload_to_cpu,
         )
 
 

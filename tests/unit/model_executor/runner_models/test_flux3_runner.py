@@ -102,9 +102,20 @@ def test_compile_warmup_runs_a_whole_schedule(
         has_attention_schedule=lambda: attention_schedule,
         has_gemm_schedule=lambda: gemm_schedule,
     )
-    monkeypatch.setattr("xfuser.model_executor.models.runner_models.flux3.get_runtime_state", lambda: state)
+    base_model = "xfuser.model_executor.models.runner_models.base_model"
+    monkeypatch.setattr(f"{base_model}.runtime_state_is_initialized", lambda: True)
+    monkeypatch.setattr(f"{base_model}.get_runtime_state", lambda: state)
 
-    assert model._get_compile_warmup_steps(_args()) == warmup_steps
+    assert model._compile_warmup_steps(_args()) == warmup_steps
+
+
+@pytest.mark.parametrize(
+    ("vae_dtype", "dtype"), [(None, torch.bfloat16), ("bf16", torch.bfloat16), ("fp32", torch.float32)]
+)
+def test_the_vae_decodes_in_bf16_unless_asked_for_fp32(build_flux3, vae_dtype, dtype):
+    model = build_flux3(vae_dtype=vae_dtype)
+
+    assert model._resolve_vae_dtype(torch.bfloat16) == dtype
 
 
 def test_the_compiled_text_encoder_keeps_leaf_level_offload(build_flux3):
@@ -159,10 +170,19 @@ def test_resizing_references_needs_a_target_size(build_flux3, monkeypatch):
         model._preprocess_args_images(_args(input_images=["ref.png"], resize_input_images=True))
 
 
+class _RecordingTransformer:
+    def __init__(self):
+        self.releases = 0
+
+    def release_step_constants(self):
+        self.releases += 1
+
+
 class _RecordingPipe:
     def __init__(self, size):
         self.size = size
         self.calls = []
+        self.transformer = _RecordingTransformer()
 
     def __call__(self, **kwargs):
         self.calls.append(kwargs)
@@ -201,11 +221,10 @@ def test_a_seed_draws_the_same_noise_as_a_cpu_generator(build_flux3):
 def test_a_call_releases_the_transformers_step_constants(build_flux3):
     model = build_flux3()
     model.pipe = _RecordingPipe((1024, 1024))
-    model.pipe.transformer = SimpleNamespace(_step_constants={"context": (torch.zeros(1), 0, torch.zeros(1))})
 
-    model._run_pipe(_args())
+    model._run_pipe(_args(prompt=["a bison", "a heron"]))
 
-    assert model.pipe.transformer._step_constants == {}
+    assert model.pipe.transformer.releases == 1
 
 
 def test_the_base_model_runs_the_requested_guidance_and_negative_prompt(build_flux3):

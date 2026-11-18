@@ -21,6 +21,8 @@ from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_module
 from xfuser.model_executor.layers import usp_sdma
 from xfuser.model_executor.layers.usp import PROCESS_GROUP, USP, attention
 from xfuser.model_executor.models.transformers.transformers_utils import (
+    PerCallCache,
+    StaticBlockInputs,
     chunk_and_pad_sequence,
     gather_and_unpad,
 )
@@ -176,58 +178,22 @@ class xFuserFlux3Transformer2DWrapper(Flux3Transformer2DModel):
             for block in blocks:
                 block.attn.processor = processor
         register_fp8_comms_eligible_modules(self, flux3_attn_modules(self))
-        self._block_input_buffers: Dict[tuple, torch.Tensor] = {}
-        self._step_constants: Dict[str, list] = {}
-        # One transformer call per scheduled step: the hybrid GEMM and attention schedules
-        # pick the step's precision before the blocks run.
+        # The RoPE tables and modulations every compiled block of a step reads, and the
+        # RoPE tables (float64, many small kernels) and text projection of a call's ids and
+        # prompt embeddings, which its steps share.
+        self._block_inputs = StaticBlockInputs()
+        self._step_constants = PerCallCache()
+        # One transformer call per scheduled step: the hybrid GEMM schedule picks the step's
+        # precision before the blocks run.
         self.register_forward_pre_hook(lambda module, args: get_runtime_state().increment_step_counter())
 
-    def _block_input(self, name: str, tensor: torch.Tensor) -> torch.Tensor:
-        """``tensor`` in a persistent buffer that every block call of a step reads.
-
-        The compiled blocks replay as CUDA/HIP graphs, which copy each input of
-        unknown address into their own memory before every replay: 28 joint blocks
-        per step would copy the same RoPE tables and modulations 28 times. A buffer
-        per name and shape, marked static, keeps one address, so it is filled once
-        per step instead. Stream order keeps a later fill behind earlier readers.
-        """
-        key = (name, tuple(tensor.shape), tensor.dtype, tensor.device)
-        buffer = self._block_input_buffers.get(key)
-        if buffer is None:
-            buffer = torch.empty(tensor.shape, dtype=tensor.dtype, device=tensor.device)
-            mark_static_address(buffer)
-            self._block_input_buffers[key] = buffer
-        buffer.copy_(tensor)
-        return buffer
-
-    # Sources kept per name: CFG alternates the conditional and unconditional branch's.
-    step_constant_entries = 2
-
-    def _step_constant(self, name: str, source: torch.Tensor, compute) -> Any:
-        """``compute(source)``, reused while the steps pass the same, unmodified ``source``.
-
-        The denoise loop hands every step of a call the same ids and prompt embeddings, so
-        their RoPE tables (built in float64 from many small kernels) and text projection need
-        computing once per call, or once per branch under CFG. Each entry holds its ``source``,
-        so a later tensor cannot reuse its identity; in-place writes bump its version.
-        Inference tensors have no version counter, so for them identity alone decides: the
-        pipeline never writes its conditioning in place. Autograd always recomputes.
-        """
-        if torch.is_grad_enabled():
-            return compute(source)
-        version = None if source.is_inference() else source._version
-        entries = self._step_constants.setdefault(name, [])
-        for cached_source, cached_version, result in entries:
-            if cached_source is source and cached_version == version:
-                return result
-        result = compute(source)
-        kept = [entry for entry in entries if entry[0] is not source]
-        entries[:] = [*kept[max(0, len(kept) + 1 - self.step_constant_entries) :], (source, version, result)]
-        return result
+    def release_step_constants(self) -> None:
+        """Drop the per-call cache, and with it the prompt embeddings and ids it holds."""
+        self._step_constants.clear()
 
     def _modulation(self, name: str, mod_row: torch.Tensor, seq_len: int) -> torch.Tensor:
         """The (batch, seq_len, 3 * dim) modulation of a mode whose tokens share one row."""
-        mod = self._block_input(name, mod_row).expand(-1, seq_len, -1)
+        mod = self._block_inputs(name, mod_row).expand(-1, seq_len, -1)
         mark_static_address(mod)
         return mod
 
@@ -249,7 +215,7 @@ class xFuserFlux3Transformer2DWrapper(Flux3Transformer2DModel):
         return torch.cat([mod_row.expand(-1, overlap, -1) for _, mod_row, overlap in pieces], dim=1)
 
     def _rotary(self, name: str, rotary_emb: Tuple[torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
-        return self._block_input(f"{name}.cos", rotary_emb[0]), self._block_input(f"{name}.sin", rotary_emb[1])
+        return self._block_inputs(f"{name}.cos", rotary_emb[0]), self._block_inputs(f"{name}.sin", rotary_emb[1])
 
     def _run_mode_blocks(
         self,
@@ -316,20 +282,20 @@ class xFuserFlux3Transformer2DWrapper(Flux3Transformer2DModel):
         # one row and broadcast instead of on every token of every rank.
         txt_early_mod = self.early_stream_modulations["txt"](zero_temb_act)
         txt_single_mod = self.single_stream_modulations["txt"](zero_temb_act)
-        encoder_hidden_states = self._step_constant("context", encoder_hidden_states, self.context_embedder)
-        txt_rotary_emb = self._step_constant("txt_ids", txt_ids, self.pos_embed)
+        encoder_hidden_states = self._step_constants("context", encoder_hidden_states, self.context_embedder)
+        txt_rotary_emb = self._step_constants("txt_ids", txt_ids, self.pos_embed)
 
         image_temb_act = F.silu(image_temb)
         image_early_mod = self.early_stream_modulations["image"](image_temb_act)
         image_single_mod = self.single_stream_modulations["image"](image_temb_act)
         hidden_states = self.x_embedders["image"](hidden_states)
-        image_rotary_emb = self._step_constant("img_ids", img_ids, self.pos_embed)
+        image_rotary_emb = self._step_constants("img_ids", img_ids, self.pos_embed)
 
         if image_cond_hidden_states is not None:
             cond_early_mod = self.early_stream_modulations["image_cond"](zero_temb_act)
             cond_single_mod = self.single_stream_modulations["image_cond"](zero_temb_act)
             image_cond_hidden_states = self.x_embedders["image_cond"](image_cond_hidden_states)
-            cond_rotary_emb = self._step_constant("image_cond_ids", image_cond_ids, self.pos_embed)
+            cond_rotary_emb = self._step_constants("image_cond_ids", image_cond_ids, self.pos_embed)
 
         # 5. Per-mode blocks, each mode attended on its own; short text runs whole on every rank.
         replicate_text = (

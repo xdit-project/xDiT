@@ -2,12 +2,10 @@ import functools
 import math
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import Optional
 
 import torch
 
 from xfuser.config.args import xFuserArgs
-from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.core.utils.runner_utils import log, resize_and_crop_image
 from xfuser.envs import PACKAGES_CHECKER
 from xfuser.model_executor.models.runner_models.base_model import (
@@ -137,8 +135,7 @@ class _Flux3Model(xFuserModel):
         trim_text_encoder(pipe.text_encoder, _deepest_text_encoder_layer(pipe.blocks))
         # The VAE runs in bf16 by default, as the transformer does; --vae_dtype fp32 is BFL's
         # reference and the diffusers FLUX.3 docs' choice.
-        vae_dtype = torch.float32 if self.config.vae_dtype == "fp32" else torch.bfloat16
-        pipe.load_components(names=["vae"], dtype=vae_dtype)
+        pipe.load_components(names=["vae"], dtype=self._resolve_vae_dtype(torch.bfloat16))
         return pipe
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
@@ -185,14 +182,6 @@ class _Flux3Model(xFuserModel):
         if PACKAGES_CHECKER._on_rdna4():
             return "default"
         return "reduce-overhead"
-
-    def _get_compile_warmup_steps(self, input_args: dict) -> Optional[int]:
-        # A per-step schedule's counter resets only after its last step, so a shortened
-        # warmup would start every later call partway through the schedule.
-        runtime_state = get_runtime_state()
-        if runtime_state.has_attention_schedule() or runtime_state.has_gemm_schedule():
-            return None
-        return 2
 
     def _get_runtime_state_pipeline(self):
         # The transformer takes tokens the pipeline already packed 2x2, so it has no
@@ -263,10 +252,7 @@ class _Flux3Model(xFuserModel):
                 # Edits size the output from the reference unless told otherwise.
                 args_per_image.append({**input_args, "prompt": prompt, "height": image.height, "width": image.width})
         finally:
-            # The per-call cache holds the prompt embeddings and ids it was computed from.
-            step_constants = getattr(getattr(self.pipe, "transformer", None), "_step_constants", None)
-            if step_constants is not None:
-                step_constants.clear()
+            self.pipe.transformer.release_step_constants()
         return DiffusionOutput(images=images, pipe_args=args_per_image)
 
 

@@ -281,6 +281,7 @@ class xFuserQwenImageModel(xFuserModel):
         use_parallel_vae=True,
         enable_tiling=True,
         enable_slicing=True,
+        shards_modulation=True,
     )
     default_input_values = DefaultInputValues(
         height=928,
@@ -319,10 +320,6 @@ class xFuserQwenImageModel(xFuserModel):
             self.settings.model_name = "Qwen/Qwen-Image-2512"
             self.settings.output_name = "qwen_image_2512"
         _configure_qwen_pipefusion_stages(config)
-
-    def _post_load_and_state_initialization(self, input_args: dict) -> None:
-        super()._post_load_and_state_initialization(input_args)
-        self._shard_modulation()
 
     def _get_compile_mode(self) -> str:
         # CUDA graphs are incompatible with cross-step caching and re-capture pathologically on RDNA4.

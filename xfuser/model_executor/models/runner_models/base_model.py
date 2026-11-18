@@ -237,6 +237,8 @@ class ModelCapabilities:
     supports_lora: bool = False
     # The runner fuses the LoRA into bf16 weights before quantized GEMMs are materialized.
     supports_lora_with_quantized_gemms: bool = False
+    # The transformer wrapper has `shard_modulation()` and gains from it (see `_shard_modulation`).
+    shards_modulation: bool = False
     use_fp8_comms: bool = False
     supports_attention_a2a: bool = False
     use_hybrid_attn_schedule: bool = False
@@ -1046,9 +1048,9 @@ class xFuserModel(abc.ABC):
     def _shard_modulation(self) -> None:
         """Share the transformer's timestep modulation out over the sequence-parallel ranks.
 
-        For runners whose transformer wrapper has `shard_modulation()`, called once the weights
-        are placed. Each rank then projects one share of the modulation instead of all of it,
-        and holds a copy of that share of the modulation weights. Stays off where a rank does
+        For runners that declare `shards_modulation`, once the weights are placed. Each rank
+        then projects one share of the modulation instead of all of it, and its device holds
+        that share of the modulation weights instead of all of them. Stays off where a rank does
         not run the whole transformer on whole weights (PipeFusion, sharded or offloaded
         weights), and with step caching and on RDNA4, where it is not tested.
         """
@@ -1068,7 +1070,13 @@ class xFuserModel(abc.ABC):
             return
         count = self.pipe.transformer.shard_modulation()
         if count:
-            log(f"Shared the timestep modulation of {count} projections out over {size} sequence-parallel ranks.")
+            # Hand the device memory of the parked weights back.
+            torch.cuda.empty_cache()
+            share = self.pipe.transformer.sharded_modulation.weight.nbytes / 2**30
+            log(
+                f"Shared the timestep modulation of {count} projections out over {size} sequence-parallel ranks: "
+                f"each holds {share:.2f} GiB of its weights."
+            )
 
     def _block_level_offload_components(self) -> List[str]:
         """Components that group CPU offload splits block by block.
@@ -1643,6 +1651,9 @@ class xFuserModel(abc.ABC):
 
         if self.config.use_vae_channels_last_format:
             self._convert_vae_to_channels_last()
+
+        if self.capabilities.shards_modulation:
+            self._shard_modulation()
 
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
         return 1

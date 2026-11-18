@@ -64,3 +64,12 @@ def test_attention_a2a_is_rejected_for_unvalidated_wan_runners():
             attention_backend="aiter_fp8",
             attention_a2a="auto",
         )
+
+
+def test_int8_gemms_are_enabled_for_wan22_t2v():
+    _build("Wan2.2-T2V", gemm_quantization="int8")
+
+
+def test_int8_gemms_are_rejected_for_unvalidated_wan_runners():
+    with pytest.raises(ValueError, match="does not support use_int8_gemms"):
+        _build("Wan2.1-T2V", gemm_quantization="int8")

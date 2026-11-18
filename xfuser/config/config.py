@@ -76,6 +76,7 @@ class RuntimeConfig:
     # AITER MHA v4 Sol-Attn (the AITER_*_SOL backends).
     solattn_beta: float = 0.5
     solattn_beta_schedule: Optional[str] = None
+    solattn_tilt_rank: int = 0
     # NVIDIA Sol-Attn (the SOL_ATTN backend). kv_splits "auto" is 4 on SM90
     # CuTe for sequences of at least 65536 tokens, and 1 otherwise. sink_start
     # None keeps a sink on the suffix.

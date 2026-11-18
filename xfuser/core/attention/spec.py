@@ -99,6 +99,29 @@ class Sparsity(Enum):
     SOL = "sol"
     BSA = "bsa"
 
+    @property
+    def model_capability(self) -> Optional[str]:
+        """The ModelCapabilities flag a model sets to accept backends of this
+        family, or None where the family is gated some other way (SSTA and BSA
+        by base_model, H3 by the MiniMax-H3 runners' backend lists)."""
+        return _MODEL_CAPABILITY.get(self)
+
+    @property
+    def needs_dense_cross_attention(self) -> bool:
+        """Whether a model with cross-attention must serve it on a separate,
+        dense backend: these families select blocks from block statistics, and
+        a short text KV has too few blocks for that."""
+        return self in _NEEDS_DENSE_CROSS_ATTENTION
+
+
+# Sol is its own capability: a model checked for Sparge is not thereby checked for Sol.
+_MODEL_CAPABILITY = {
+    Sparsity.SPARGE: "supports_sparge_attention_backends",
+    Sparsity.VSA: "supports_sparge_attention_backends",
+    Sparsity.SOL: "supports_sol_attention_backends",
+}
+_NEEDS_DENSE_CROSS_ATTENTION = frozenset({Sparsity.SPARGE, Sparsity.VSA, Sparsity.SOL})
+
 
 @dataclass(frozen=True)
 class VarlenPacking:
@@ -123,6 +146,12 @@ class VarlenPacking:
             cu_seqlens_k=kwargs["cu_seqlens_k"],
             max_seqlen_k=kwargs["max_seqlen_k"],
         )
+
+
+# attention_kwargs key a model sets for keys that must not be approximated: a (seqlen_k,) bool
+# mask, or longer by a trailing pad. A backend that selects KV blocks computes every block holding
+# a flagged key exactly, for every query; a dense backend has nothing to do with it.
+EXACT_KV_TOKENS_KEY = "exact_kv_tokens"
 
 
 @dataclass
@@ -262,6 +291,17 @@ class Spec:
     # configuration on this device.
     validates: Optional[Impl | Callable] = None
 
+    # The run-configuration fields this backend reads and no other part of
+    # xDiT does. A run that sets one while no selected backend lists it is
+    # refused before loading, rather than having the option do nothing.
+    options: Tuple[str, ...] = ()
+
+    # Run once the run's step plan is known -- denoising steps and transformer
+    # forwards per step -- outside any compiled region, for per-step state the
+    # backend owns. Called as (runtime_config, denoising_steps,
+    # forwards_per_step), for every backend the run selected.
+    configures: Optional[Impl | Callable] = None
+
     # Filled in by the registry from the module the spec came from, so Impl
     # targets can be written relative to the backend package.
     package: str = ""
@@ -288,6 +328,16 @@ class Spec:
     def is_sparse(self) -> bool:
         return self.sparsity is not None
 
+    @property
+    def model_capability(self) -> Optional[str]:
+        """See Sparsity.model_capability; None for a dense backend."""
+        return None if self.sparsity is None else self.sparsity.model_capability
+
+    @property
+    def needs_dense_cross_attention(self) -> bool:
+        """See Sparsity.needs_dense_cross_attention; False for a dense backend."""
+        return self.sparsity is not None and self.sparsity.needs_dense_cross_attention
+
     def unavailable(self) -> Optional[str]:
         """Why this backend cannot run here, or None. Never says 'update X':
         the same missing symbol means too-old or too-new, and we cannot tell."""
@@ -306,6 +356,14 @@ class Spec:
             check = check.resolve(self.package)
         if check is not None:
             check(runtime_config)
+
+    def configure(self, runtime_config, denoising_steps: Optional[int], forwards_per_step: int) -> None:
+        """Hand the run's step plan to the backend, if it keeps per-step state."""
+        setup = self.configures
+        if isinstance(setup, Impl):
+            setup = setup.resolve(self.package)
+        if setup is not None:
+            setup(runtime_config, denoising_steps, forwards_per_step)
 
     def resolved(self) -> AttnFn:
         """The callable, importing the kernel module if it has not been yet.

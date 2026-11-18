@@ -193,6 +193,7 @@ def _sparge_spec(fmt: MhaV4Format) -> Spec:
         accepts=SPARGE_CALLS,
         requires=SYMBOL(_MHA_V4) & PARAM(_MHA_V4, "block_mask") & _scale_modes(fmt) & fmt.sparge_on,
         validates=Impl("kernel:check_sparse_block_size", {"fmt": fmt}),
+        options=("sparseattn_block_size",),
     )
 
 
@@ -202,7 +203,3 @@ SPECS = [_dense_spec(f) for f in FORMATS if f.dense] + [_sparge_spec(f) for f in
 # call constraints -- MiniMax-H3 checks it before relying on the trailing-pad
 # path. Derived from the table, so a new row joins by being added there.
 DENSE_BACKENDS = frozenset(AttentionBackendType[f"AITER_{fmt.name}"] for fmt in FORMATS if fmt.dense)
-
-# The Sparge rows by backend, for checking --sparseattn_block_size against the
-# format a selected backend dispatches.
-SPARGE_FORMATS = {AttentionBackendType[f"AITER_{fmt.name}_SPARGE"]: fmt for fmt in FORMATS if fmt.sparge_on is not None}

@@ -52,7 +52,8 @@ def configure_run(runtime_config, denoising_steps: Optional[int], forwards_per_s
         return
     if denoising_steps is None:
         raise ValueError("--solattn_beta_schedule needs the run's number of denoising steps, and this run has none.")
-    install_beta_schedule(runtime_config.solattn_beta_schedule, denoising_steps, forwards_per_step)
+    schedule = install_beta_schedule(runtime_config.solattn_beta_schedule, denoising_steps, forwards_per_step)
+    logger.debug("Sol-Attn beta schedule: %s", schedule.per_denoising_step)
 
 
 def clear_beta_schedule() -> None:

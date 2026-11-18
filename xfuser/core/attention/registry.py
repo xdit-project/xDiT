@@ -193,16 +193,17 @@ def refuse_unread_options(config, selected: Iterable[AttentionBackendType]) -> N
     """
     defaults = {f.name: f.default for f in fields(config)}
     chosen = set(selected)
-    readers: Dict[str, List[AttentionBackendType]] = {}
+    readers: Dict[str, List[Spec]] = {}
     for spec in _REGISTRY.values():
         for name in spec.options:
-            readers.setdefault(name, []).append(spec.type)
-    for name, backends in readers.items():
-        if getattr(config, name) == defaults.get(name) or not chosen.isdisjoint(backends):
+            readers.setdefault(name, []).append(spec)
+    for name, specs in readers.items():
+        if getattr(config, name) == defaults.get(name) or not chosen.isdisjoint(s.type for s in specs):
             continue
+        # A family by its sparsity rather than twenty row names; a dense reader by its own name.
+        groups = sorted({s.sparsity.value if s.sparsity is not None else s.type.name for s in specs})
         raise ValueError(
-            f"--{name} applies only to the {', '.join(sorted(b.name for b in backends))} attention "
-            "backends, and none of them is selected."
+            f"--{name} applies only to the {' and '.join(groups)} attention backends, and none of them is selected."
         )
 
 

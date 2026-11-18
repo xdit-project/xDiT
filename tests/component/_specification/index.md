@@ -90,7 +90,7 @@ Where this specification conflicts with the testing skill in
 14. **Launcher.** The process that runs one instance. It starts torchrun and survives crashes and hangs of the
     workers. See [processes.md](processes.md).
 15. **Worker.** One rank of an instance.
-16. **State file.** The file that holds the status and the file paths of one case. See [files.md](files.md).
+16. **State file.** The file that holds rank statuses and the file paths of one case. See [files.md](files.md).
 17. **Metrics file.** The file that collects metric values across runs. See [files.md](files.md), section 9.
 18. **Configuration fixture.** The pytest fixture that runs A and B of one configuration. It has one instance for
     each configuration. See [pytest_integration.md](pytest_integration.md), section 3.

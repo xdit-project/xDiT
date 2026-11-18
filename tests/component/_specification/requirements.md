@@ -48,7 +48,7 @@ obsolete.
 that test from a failure to a warning. The determinism checks of all other tests stay active. B should have
 its own override. Requirements: IA50, IA60.
 *Rationale:* some operations are validly nondeterministic. A model can have one nondeterministic component
-among many, and that component must be testable. Instance B generally use different kernels that might have
+among many, and that component must be testable. Instance B generally uses different kernels that might have
 other determinism expectations.
 
 **UC11. Later use cases.** Compiled mode, a reference at world size 1 (B1), several input sets, MI300X and
@@ -186,10 +186,10 @@ reaches with its call numbers stripped. Call numbers only select calls of that c
 **CP80.** Each callable element of each listed path gets one global call counter and a set of references to
 counters of direct callable descendants (i.e. callable components that directly follow the element in any
 path, ignoring non-callable components in between). The harness knows at path resolution which elements
-are callable and what are their path descendants.
+are callable and what their path descendants are.
 1. The counter is 0 before the pipeline starts.
 2. The element call handler first increments the counter, then walks over its own direct descendant set and
-   invoke "reset_counter()" for each of the descendants. Upon getting a "reset_counter()" request, a counter
+   invokes "reset_counter()" for each of the descendants. Upon getting a "reset_counter()" request, a counter
    sets own call number to 0 and invokes "reset_counter()" on each of counters of its own descendants, so
    counter resetting propagates to each indirect descendant of the original element that started the reset
    chain. Once all descendant counters reset, i.e. counter reset chain finishes, the element makes all other
@@ -199,8 +199,8 @@ are callable and what are their path descendants.
    the last.
 4. Every call of the element counts, whatever code makes it.
 5. When an element counter is found to belong to more than one set of references to counters of direct
-   descendants (which means that the element for which it count calls is shared between several higher-level
-   components) a harness issues a warning, explaining that interleaved calls through respective paths might
+   descendants (which means that the element whose calls it counts is shared between several higher-level
+   components) the harness issues a warning, explaining that interleaved calls through respective paths might
    not be counted properly due to the counter reset.
 
 **CP90.** `:i` refers to the global counter of its element. Example: `a.b:2.c.d[2]:3` selects a call of `d[2]`
@@ -208,7 +208,7 @@ when its counter is 3 and the counter of `b` is 2. During the pipeline run of A,
 of each selected call, and the outputs after the call returns.
 
 **CP100.** An address contains the call numbers of all callable elements that the harness tracks. The first path
-element, such as `pipe` `second_pipe` or `refiner_pipe` is usually callable, but version 1 does not track it
+element, such as `pipe`, `second_pipe` or `refiner_pipe` is usually callable, but version 1 does not track it
 due to complications, and assumes it to be a non-callable instead.
 
 **CP110.** The harness does not care who calls a component. It uses only the inputs and the outputs of each
@@ -221,8 +221,8 @@ numbers differ. Then `pipe.transformer:1` and `second_pipe.transformer:2` in the
 *Rationale for the error:* it is better not to support such cases than to make the implementation more
 complex.
 
-**CP130.** Calls such as `pipe.vae.decode`, where `.vae` isn't callable or not run and `decode` is a method,
-also must be testable. A path through a module that the run never calls must be valid.
+**CP130.** Calls such as `pipe.vae.decode`, where `.vae` isn't callable or doesn't run in the pipeline,
+and `decode` is a method, also must be testable. A path through a module that the run never calls must be valid.
 
 **CP140.** A path must resolve in A and in B. If a path resolves only in A, its case gets FAILED_TO_START_B with
 the path error. Path errors that need a built model show only after the initialization of A; this cost is
@@ -270,16 +270,16 @@ The bitwise checks always run, whatever the policy is.
    B loads the configuration. After that, no instance of the configuration starts or continues. If no case gets
    SUCCESS_A, B does not start (FC20 item 5), so a feature that only B can find stays unknown in that run.
 
-**IA80.** A case gets (the only) successful status SUCCESS_A or SUCCESS_B (depending on the
-instance), collectively called SUCCESS, if it passed all the checks (including getting
-NON_DETERMINISTIC under a policy that permits it), ran replays, successfully
-dumped all the necessary data and the harness is ready to process the next case.
+**IA80.** After passing the end-of-case barrier of FC50, a case replaces its status with (the only) successful status
+SUCCESS_A or SUCCESS_B (depending on the instance), collectively called SUCCESS, if it passed
+all the checks (including getting NON_DETERMINISTIC under a policy that permits it), has done all
+the replays of the case, and successfully dumped all the necessary data.
 
 ### Instance B
 
 **IB10.** Instance B is an eager reference. It uses the same configuration and the same world size and parallel
 layout as A, with these changes:
-1. the reference dtype: fp32 by default; a parameter, because some models might need a smaller dtype; If uses
+1. the reference dtype: fp32 by default; a parameter, because some models might need a smaller dtype; If it uses
    fp32, B forces full fp32 matrix precision: `torch.backends.cuda.matmul.allow_tf32 = False`,
    `torch.backends.cudnn.allow_tf32 = False` and `torch.set_float32_matmul_precision("highest")`.
 2. quantization off, so B loads normal weights;
@@ -405,13 +405,13 @@ failed fidelity check, a hang and a crash. The specification must list these tes
 **PI10.** The harness is a set of pytest tests. The `pytest_integration` prototype is an implementation hint,
 not a binding rule. The harness takes the best of it and adapts it.
 
-**PI20.** **Meaning of the pytest outcomes.** "error" means that the test has nothing to check, for example
+**PI20.** **General meaning of the pytest outcomes.** (This requirement exist to alleviate decisions
+for new statuses. Actual mapping is provided by PI30) "error" means that the test has nothing to check, for example
 because an instance that had to replay the case did not start its replays. "failed" means that an instance
-replayed the case, and the instance or the test found a problem. There are two exceptions:
+replayed the case, and the instance or the test found a problem. Documented exceptions are possible:
 1. UNSUPPORTED_A gives "skipped".
 2. A configuration that is UNSUPPORTED_B gives "error" to every case, whatever its statuses from A are.
 
-PI30 applies these rules to each status.
 *Rationale:* UNSUPPORTED_A is a known limit of the harness, not a problem of the component. B is the reference
 and must handle everything A handles, so UNSUPPORTED_B is not a reason to skip. If B cannot handle the configuration, no
 case of the configuration can have a meaningful test.
@@ -420,14 +420,17 @@ case of the configuration can have a meaningful test.
 1. A failure of the configuration fixture (TD70, FC70, FR60), or a configuration that is UNSUPPORTED_B (IA70 item 2),
    gives "error" to every case of the configuration, whatever its other statuses are. For UNSUPPORTED_B, the
    message of each case also lists its statuses from A.
-2. Otherwise, each case gets its own outcome:
-   1. "error" for FAILED_TO_START, UNSUPPORTED_B and NOT_REACHED_IN_B. The case fixture (function scope) raises
+2. Otherwise, each case gets its own outcome decided in the following order:
+   1. "error" if any rank has FAILED_TO_START, UNSUPPORTED_B, or NOT_REACHED_IN_B. Also if a rank of A
+      has UNSUPPORTED_A, but some other rank of A doesn't have it. The case fixture (function scope) raises
       the exception before the test function starts, because pytest gives "error" only for an exception in
       setup, teardown or a fixture.
-   2. "skipped" for UNSUPPORTED_A.
-   3. "failed" for any other status that is not SUCCESS (PI50), or for a failed check.
-   4. "passed" otherwise.
+   2. "skipped" for UNSUPPORTED_A on all ranks of A.
+   3. "failed" if not all ranks of A and B have SUCCESS (PI50), or for a failed check.
+   4. "passed" otherwise
 3. `record_property` stores the statuses.
+4. If a pytest outcome mandates an exception (i.e. it's a "failure" or "error"), the exception message must contain
+   statuses of all ranks and all other applicable information mandated by other requirements.
 
 **PI40.** The test checks each rank independently against the same tolerance; compares A with the output of the
 first replay of B.

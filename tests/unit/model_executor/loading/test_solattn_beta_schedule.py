@@ -367,3 +367,14 @@ def test_a_call_without_a_step_takes_the_flag(installed):
 
     assert kernel._beta(AttnCall(attention_kwargs={"solattn_beta": 0.75}), "cpu") == pytest.approx(0.75)
     assert kernel._beta(AttnCall(), "cpu") == pytest.approx(0.5)
+
+
+def test_a_schedule_without_a_step_count_is_refused(monkeypatch):
+    """A run that hands over no step count cannot place a per-step beta; saying so beats routing
+    every step at --solattn_beta while the user asked for a schedule."""
+    runtime = _sol_run(monkeypatch, solattn_beta_schedule="1.0:0.0")
+
+    with pytest.raises(ValueError, match="needs the run's number of denoising steps"):
+        runtime.configure_attention_backends(None, 1)
+
+    _sol_run(monkeypatch).configure_attention_backends(None, 1)

@@ -620,10 +620,10 @@ def sol_attn_bhsd(
         mean_v=routing["mean_v"],
         block_bitmap=routing["block_bitmap"],
         # None where the pooled operand reuses the source descale.
+        # Only the MXFP8 row reads past the pooled K scale, and it is the one row that is not raw.
+        # Drop the copy once AITER's sol_prepare pads the scale itself.
         mean_k_scale=(
-            _with_scale_lookahead(routing["mean_k_scale"])
-            if recipe.qk_scale_mode == "block" and recipe.k_packed is None
-            else routing["mean_k_scale"]
+            routing["mean_k_scale"] if recipe.routes_through_raw else _with_scale_lookahead(routing["mean_k_scale"])
         ),
         mean_v_scale=routing["mean_v_scale"],
         block_tile=block_tile,

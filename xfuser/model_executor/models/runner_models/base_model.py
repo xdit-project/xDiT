@@ -101,26 +101,12 @@ def register_model(name: str) -> Callable:
 
 
 # Derived from the backend specs rather than listed here: each backend declares
-# its sparsity strategy, so adding one cannot miss these sets. SPARGE, VSA and
-# SOL are grouped because all three need a separate, dense cross-attention
-# backend. Sol-Attn routes over KV blocks, and a short text KV has too few.
+# its sparsity strategy, so adding one cannot miss these sets.
 _SPARSE_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SSTA)
-_SPARGE_ATTENTION_BACKENDS = (
-    attention_registry.types_where(sparsity=Sparsity.SPARGE)
-    | attention_registry.types_where(sparsity=Sparsity.VSA)
-    | attention_registry.types_where(sparsity=Sparsity.SOL)
-)
+_NEEDS_DENSE_CROSS_ATTENTION = attention_registry.types_where(needs_dense_cross_attention=True)
 # Prism's block-sparse attention needs a token grid that only models declaring the
 # capability publish; anywhere else it would quietly run dense.
 _BSA_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.BSA)
-
-# The capability a model sets to opt into each family of sparse backends that also needs a dense
-# cross-attention backend. Sol is its own capability: support for Sparge does not imply it.
-_SPARSITY_CAPABILITY = {
-    Sparsity.SPARGE: "supports_sparge_attention_backends",
-    Sparsity.VSA: "supports_sparge_attention_backends",
-    Sparsity.SOL: "supports_sol_attention_backends",
-}
 
 
 def _parse_attention_backend(name: Optional[str], kind: str) -> Optional[AttentionBackendType]:
@@ -132,22 +118,13 @@ def _parse_attention_backend(name: Optional[str], kind: str) -> Optional[Attenti
         raise ValueError(f"Invalid {kind}: {name}")
 
 
-def _validate_cross_attention_for_sparge(config: xFuserArgs) -> None:
-    """Cross-attention must be set and must not itself be a Sparge, VSA or Sol backend
-    whenever one of those is in play (either as the explicit backend or via the
-    hybrid schedule)."""
-    if config.cross_attention_backend is None:
+def _refuse_block_selecting_cross_attention(config: xFuserArgs) -> None:
+    """--cross_attention_backend must not select blocks itself: a short text KV has too few."""
+    cross = _parse_attention_backend(config.cross_attention_backend, "cross attention backend")
+    if cross in _NEEDS_DENSE_CROSS_ATTENTION:
         raise ValueError(
-            "A Sparge, VSA or Sol attention backend needs --cross_attention_backend set to a dense backend."
-        )
-    cross = _parse_attention_backend(
-        config.cross_attention_backend,
-        "cross attention backend",
-    )
-    if cross in _SPARGE_ATTENTION_BACKENDS:
-        raise ValueError(
-            f"--cross_attention_backend cannot be {cross.name}, a Sparge, VSA or Sol backend. "
-            f"Pick a dense cross attention backend."
+            f"--cross_attention_backend cannot be {cross.name}, a {attention_registry.get(cross).sparsity.value} "
+            f"backend: a short text KV has too few blocks to select from. Pick a dense cross attention backend."
         )
 
 
@@ -785,23 +762,25 @@ class xFuserModel(abc.ABC):
         log(f"--attention_backend not set, using {self.settings.model_name} default: {default}")
 
     def _validate_sparse_attention_families(self, config: xFuserArgs) -> None:
-        """Refuse a Sparge, VSA or Sol backend the model has not opted into, wherever the run
-        selects it -- including an explicit hybrid schedule -- and require a dense cross-attention
-        backend beside one on a model that has cross-attention."""
-        selects_one = False
+        """Refuse a sparse backend the model has not opted into, wherever the run selects it --
+        including an explicit hybrid schedule -- and require a dense cross-attention backend
+        beside one that selects blocks, on a model that has cross-attention. Which capability a
+        family needs, and whether it needs a dense cross-attention backend, the specs say."""
+        _refuse_block_selecting_cross_attention(config)
+        needs_dense_cross = None
         for backend in _selected_attention_backends(config, include_cross=False):
             spec = attention_registry.find(backend)
-            capability = _SPARSITY_CAPABILITY.get(spec.sparsity) if spec is not None else None
-            if capability is None:
-                continue
-            if not getattr(self.capabilities, capability):
+            capability = spec.model_capability if spec is not None else None
+            if capability is not None and not getattr(self.capabilities, capability):
                 raise ValueError(
                     f"Model {config.model} does not support {backend.name}: it has not opted into "
                     f"{spec.sparsity.value} attention backends."
                 )
-            selects_one = True
-        if selects_one and self.capabilities.cross_attention_backend:
-            _validate_cross_attention_for_sparge(config)
+            if needs_dense_cross is None and spec is not None and spec.needs_dense_cross_attention:
+                needs_dense_cross = backend
+        if needs_dense_cross is not None and self.capabilities.cross_attention_backend:
+            if config.cross_attention_backend is None:
+                raise ValueError(f"{needs_dense_cross.name} needs --cross_attention_backend set to a dense backend.")
 
     def _validate_supported_attn_backends(self, config: xFuserArgs) -> None:
         """Refuse backends this model is not known to be correct with.
@@ -1610,9 +1589,9 @@ class xFuserModel(abc.ABC):
         if self.config.use_hybrid_gemm_schedule:
             self._setup_hybrid_gemm_schedule(input_args)
 
-        if runtime_state_is_initialized() and input_args.get("num_inference_steps") is not None:
+        if runtime_state_is_initialized():
             get_runtime_state().configure_attention_backends(
-                input_args["num_inference_steps"], self._calculate_hybrid_attention_step_multiplier(input_args)
+                input_args.get("num_inference_steps"), self._calculate_hybrid_attention_step_multiplier(input_args)
             )
 
         if self.config.use_vae_channels_last_format:

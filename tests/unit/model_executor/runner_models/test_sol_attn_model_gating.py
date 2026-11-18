@@ -94,3 +94,11 @@ def test_a_model_without_the_capability_refuses_sol():
     """The gate is opt-in, so a Wan runner that has not been checked for Sol-Attn keeps saying no."""
     with pytest.raises(ValueError, match="does not support AITER_FP8_SOL"):
         _build("Wan2.1-VACE-14B", attention_backend="aiter_fp8_sol", cross_attention_backend="aiter_bf16")
+
+
+@pytest.mark.parametrize("model", ["Wan2.2-T2V", "Wan2.1-VACE-14B"])
+def test_a_sol_cross_attention_backend_is_refused_beside_a_dense_one(model):
+    """A short text KV has too few blocks to route over, whatever the main backend is and whether
+    or not the model accepts Sol for self-attention."""
+    with pytest.raises(ValueError, match="cannot be AITER_FP8_SOL"):
+        _build(model, attention_backend="aiter_bf16", cross_attention_backend="aiter_fp8_sol")

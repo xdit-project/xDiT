@@ -148,6 +148,12 @@ class VarlenPacking:
         )
 
 
+# attention_kwargs key a model sets for keys that must not be approximated: a (seqlen_k,) bool
+# mask, or longer by a trailing pad. A backend that selects KV blocks computes every block holding
+# a flagged key exactly, for every query; a dense backend has nothing to do with it.
+EXACT_KV_TOKENS_KEY = "exact_kv_tokens"
+
+
 @dataclass
 class AttnCall:
     """Everything a backend needs about one call that is not q/k/v."""

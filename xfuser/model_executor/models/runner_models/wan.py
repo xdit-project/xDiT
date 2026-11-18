@@ -778,6 +778,7 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
     # See xFuserWan22I2VModel: "fbcache" == DBCache first-block (Fn_compute_blocks=1).
     capabilities = replace(
         xFuserWan21T2VModel.capabilities,
+        use_aiter_int8_gemms=True,
         use_fp8_comms=True,
         supports_attention_a2a=True,
     )
@@ -791,6 +792,7 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
             "dtype": torch.bfloat16,
         }
         self.settings.fp8_gemm_module_list = ["transformer.blocks", "transformer_2.blocks"]
+        self.settings.int8_gemm_module_list = ["transformer.blocks", "transformer_2.blocks"]
         self.settings.fp8_text_encoder_module_list = ["text_encoder.encoder.block"]
         self.settings.fp8_precision_overrides = None
         self.settings.transformer_attr_names = ["transformer", "transformer_2"]

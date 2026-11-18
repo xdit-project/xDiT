@@ -79,12 +79,17 @@ too few blocks to select from.
 - `--solattn_beta_schedule` changes the threshold per denoising step. Use
   `first:last` for a linear ramp or one value per step. Both branches of a guided
   step use the same value.
+- `--solattn_tilt_rank` corrects each skipped block by its leading `RANK` terms
+  of the key-value covariance (default `0`, off). It also adds a second-order
+  term to the block's score. Every Sol backend except `aiter_mxfp6_sol` serves
+  it. Start with `2`.
 - `--sparseattn_block_size` selects another tile that the recipe's row serves.
 - `--use_sparseattn_head_balance` balances the selected-block cost across
   Ulysses ranks.
 
-The runner refuses `--solattn_beta`, `--solattn_beta_schedule`, and
-`--sparseattn_block_size` when no selected backend reads them. A Sol backend in
+The runner refuses `--solattn_beta`, `--solattn_beta_schedule`,
+`--solattn_tilt_rank`, and `--sparseattn_block_size` when no selected backend
+reads them. A Sol backend in
 an explicit `--hybrid_attn_schedule` counts as selected.
 
 ```bash

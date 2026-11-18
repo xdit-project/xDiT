@@ -22,13 +22,17 @@ def _linears():
     return [torch.nn.Linear(4, width) for width in _WIDTHS]
 
 
-def _shard(monkeypatch, linears, rank, size):
-    """Shard `linears` as rank `rank` of `size`, with an all-gather that returns the rank's own share."""
+def _as_rank(monkeypatch, rank, size):
+    """Run as rank `rank` of `size`, with an all-gather that returns the rank's own share."""
     monkeypatch.setattr(sharded_modulation, "get_sequence_parallel_rank", lambda: rank)
     monkeypatch.setattr(sharded_modulation, "get_sequence_parallel_world_size", lambda: size)
     monkeypatch.setattr(
         sharded_modulation, "get_sp_group", lambda: SimpleNamespace(all_gather=lambda local, dim: local)
     )
+
+
+def _shard(monkeypatch, linears, rank, size):
+    _as_rank(monkeypatch, rank, size)
     return ShardedModulation(linears)
 
 
@@ -86,6 +90,36 @@ def test_a_linear_handed_the_leading_samples_returns_their_rows(monkeypatch):
 
     for linear, output in zip(linears, expected):
         assert torch.allclose(linear(embedding[:2]), output, atol=1e-6)
+
+
+def test_a_linear_handed_something_else_than_the_embedding_fails(monkeypatch):
+    linears = _linears()
+    shard = _shard(monkeypatch, linears, 0, 1)
+    with torch.no_grad():
+        shard(torch.zeros(2, 4))
+
+    with pytest.raises(AssertionError):
+        linears[0](torch.zeros(3, 4))
+    with pytest.raises(AssertionError):
+        linears[0](torch.zeros(2, 5))
+
+
+def test_the_embedders_hook_projects_the_row_and_can_be_removed(monkeypatch):
+    linears = _linears()
+    embedder = torch.nn.Linear(4, 4)
+    transformer = torch.nn.Module()
+    embedding = torch.randn(1, 4, generator=torch.Generator().manual_seed(1))
+    with torch.no_grad():
+        expected = linears[0](F.silu(embedder(embedding)))
+    _as_rank(monkeypatch, 0, 1)
+
+    assert sharded_modulation.shard_modulation(transformer, linears, embedder) == len(linears)
+    with torch.no_grad():
+        embedder(embedding)
+    assert torch.allclose(linears[0](torch.zeros(1, 4)), expected, atol=1e-6)
+
+    transformer.sharded_modulation.hook.remove()
+    assert not embedder._forward_hooks
 
 
 def test_the_share_is_a_buffer_outside_the_state_dict(monkeypatch):

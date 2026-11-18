@@ -17,27 +17,32 @@ from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
     get_sp_group,
 )
-from xfuser.model_executor.layers.usp_sdma import plain_linear
+from xfuser.model_executor.layers.plain_linear import plain_linear
 
 
 class SlicedModulation(torch.nn.Linear):
     """A block's modulation linear that returns its slice of the row the ranks projected together.
 
-    Set by class swap, so the state dict keys stay those of the stock module and its weights stay loaded.
+    Set by class swap, so the state dict keys stay those of the stock module. Its own weights are
+    no longer read.
     """
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        # A linear may be handed only the leading samples of the embedding.
+        row = self._modulation["row"]
+        # The row was projected from the embedding the shard was given: the input can only be its leading samples.
+        assert input.shape[-1] == self.in_features and input.shape[0] <= row.shape[0]
         start = self._modulation_start
-        return self._modulation["row"][: input.shape[0], start : start + self.out_features]
+        return row[: input.shape[0], start : start + self.out_features]
 
 
 class ShardedModulation(torch.nn.Module):
     """The modulation of `linears`, which all project the same embedding, shared out over the sequence-parallel ranks.
 
     Holds this rank's share of the stacked weights: a copy, 1 / (sequence-parallel size) of them.
-    Calling it with the embedding the linears would get projects the share, gathers the row of
-    all ranks, and leaves it for the linears, which are turned into `SlicedModulation`.
+    The linears' own weights, which nothing reads from here on, are parked on the CPU, so the
+    device holds only the share. Calling it with the embedding the linears would get projects
+    the share, gathers the row of all ranks, and leaves it for the linears, which are turned
+    into `SlicedModulation`.
     """
 
     def __init__(self, linears: Sequence[torch.nn.Linear]):
@@ -63,6 +68,9 @@ class ShardedModulation(torch.nn.Module):
         self.register_buffer("weight", F.pad(weight, (0, 0, 0, share - weight.shape[0])), persistent=False)
         self.register_buffer("bias", F.pad(bias, (0, share - bias.shape[0])), persistent=False)
         self._row = row
+        for linear in linears:
+            linear.to("cpu")
+        self.hook = None
 
     def forward(self, embedding: torch.Tensor) -> None:
         local = F.linear(embedding, self.weight, self.bias)
@@ -76,10 +84,13 @@ def shard_modulation(
 
     Nothing changes unless every one of them is a plain linear, with whole and unquantized
     weights. A forward hook on `embedder` projects the row, so once per forward of the
-    transformer and inside its compiled graph. Returns the number of linears shared out.
+    transformer and inside its compiled graph; its handle is kept as `sharded_modulation.hook`.
+    Returns the number of linears shared out.
     """
     if not linears or not all(plain_linear(linear) for linear in linears):
         return 0
     transformer.sharded_modulation = ShardedModulation(linears)
-    embedder.register_forward_hook(lambda module, args, embedding: transformer.sharded_modulation(F.silu(embedding)))
+    transformer.sharded_modulation.hook = embedder.register_forward_hook(
+        lambda module, args, embedding: transformer.sharded_modulation(F.silu(embedding))
+    )
     return len(linears)

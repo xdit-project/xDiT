@@ -234,17 +234,45 @@ def test_exact_tokens_force_their_blocks_for_every_query_tile():
     assert torch.equal(forced[..., [b for b in range(last) if b != 2]], routed[..., [b for b in range(last) if b != 2]])
 
 
+def test_routing_passes_force_block_mask_only_when_forcing(monkeypatch):
+    """An aiter whose sol_prepare predates force_block_mask still serves every unforced call, and a
+    forced one on such a build fails with the reason rather than a TypeError."""
+    _require_sol_recipe("mxfp8")
+    from xfuser.core.attention.sparsity import sol
+
+    seen = []
+    prepare = sol._AITER.prepare
+
+    def spy(*args, **kwargs):
+        seen.append("force_block_mask" in kwargs)
+        return prepare(*args, **kwargs)
+
+    monkeypatch.setattr(sol._AITER, "prepare", spy)
+    query, key, value = _operands(seqlen=1024)
+    exact = torch.zeros(1024, dtype=torch.bool, device="cuda")
+    exact[:64] = True
+    with torch.no_grad():
+        # MXFP8 always routes in xDiT, so this reaches sol_prepare without forcing anything.
+        sol.sol_attn_bhsd(query, key, value, beta=0.5, recipe="mxfp8")
+        sol.sol_attn_bhsd(query, key, value, beta=0.5, recipe="mxfp8", exact_tokens=exact)
+    assert seen == [False, True]
+
+    monkeypatch.setattr(sol, "_SOL_PREPARE_FORCES_BLOCKS", False)
+    with pytest.raises(sol.SolAttnUnsupported, match="force_block_mask"):
+        sol.sol_attn_bhsd(query, key, value, beta=0.5, recipe="mxfp8", exact_tokens=exact)
+
+
 @pytest.mark.parametrize("recipe", ["bf16", "fp8"])
 def test_the_backend_hands_exact_tokens_to_the_routing(recipe):
     """Every key flagged makes every block exact: the same output as a threshold nothing passes."""
     _require_sol_recipe(recipe)
-    from xfuser.core.attention.backends.aiter_sol.spec import EXACT_TOKENS_KEY
+    from xfuser.core.attention.spec import EXACT_KV_TOKENS_KEY
 
     backend = _backend(recipe)
     query, key, value = _operands(seqlen=1024)
     every_key = torch.ones(1024, dtype=torch.bool, device="cuda")
     with torch.no_grad():
-        forced, _ = _run(backend, query, key, value, solattn_beta=0.5, **{EXACT_TOKENS_KEY: every_key})
+        forced, _ = _run(backend, query, key, value, solattn_beta=0.5, **{EXACT_KV_TOKENS_KEY: every_key})
         all_exact, _ = _selected_blocks(query, key, value, backend, solattn_beta=-100.0)
 
     assert torch.equal(forced, all_exact)

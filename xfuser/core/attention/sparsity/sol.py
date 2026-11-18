@@ -6,6 +6,7 @@ contribution of the skipped blocks from pooled (mean) K/V, so the mass outside t
 approximated instead of discarded.
 """
 
+import inspect
 from types import SimpleNamespace
 from typing import NamedTuple, Optional
 
@@ -142,6 +143,8 @@ _ragged_kv = _probe_ragged_kv() if _AITER is not None else None
 _block_scale_storage, _SCALE_TILE_ROWS, _SCALE_LOOKAHEAD_ROWS = (
     _probe_scale_storage() if _AITER is not None else (None, 0, 0)
 )
+# Whether sol_prepare can add forced blocks to its selection (exact KV tokens).
+_SOL_PREPARE_FORCES_BLOCKS = _AITER is not None and "force_block_mask" in inspect.signature(_AITER.prepare).parameters
 
 
 def sol_attn_block_tile(recipe, block_tile=None):
@@ -475,8 +478,9 @@ def sol_attn_routing_for(
         k_packed_format=recipe.k_packed,
         v_packed_format=recipe.v_packed,
         block_attn_mask=block_attn_mask,
-        force_block_mask=force_block_mask,
         q_scale=q[1] if qk_block_scaled else None,
+        # Only when set: older sol_prepare builds take no force_block_mask.
+        **({} if force_block_mask is None else {"force_block_mask": force_block_mask}),
     )
 
 
@@ -613,6 +617,10 @@ def sol_attn_bhsd(
     # Before the tile pad, so the caller's pad and the tile pad do not stack.
     if key_seqlen is not None and key_seqlen < key.shape[1]:
         key, value = key[:, :key_seqlen], value[:, :key_seqlen]
+    if exact_tokens is not None and not _SOL_PREPARE_FORCES_BLOCKS:
+        raise SolAttnUnsupported(
+            "exact KV tokens need an aiter whose sol_prepare takes force_block_mask; please update AITER"
+        )
     force_blocks = (
         None if exact_tokens is None else _force_blocks_from_tokens(exact_tokens, key.shape[1], block_tile[1])
     )

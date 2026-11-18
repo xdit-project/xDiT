@@ -21,8 +21,7 @@ from xfuser.core.distributed import (
     get_ulysses_parallel_world_size,
 )
 from xfuser.core.attention import registry as attention_registry
-from xfuser.core.attention.backends.aiter_sol.spec import EXACT_TOKENS_KEY as SOL_EXACT_TOKENS_KEY
-from xfuser.core.attention.spec import AttentionBackendType, Sparsity
+from xfuser.core.attention.spec import EXACT_KV_TOKENS_KEY, AttentionBackendType, Sparsity
 from xfuser.core.attention.backends.vsa_h3.attention import build_h3_vsa_metadata
 from xfuser.model_executor.layers.fused_qk_rope_flydsl import (
     _HAS_FLYDSL,
@@ -41,6 +40,8 @@ from xfuser.model_executor.layers.usp import (
 # from the specs rather than being listed here.
 VSA_H3_BACKENDS = attention_registry.types_where(sparsity=Sparsity.H3)
 SOL_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SOL)
+# The token refiner's backend under a Sol run; the runner selects it before compiling.
+REFINER_DENSE_BACKEND = AttentionBackendType.AITER
 
 
 MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT = 64
@@ -158,7 +159,7 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
 
         backend = self.backend
         if self.dense_for_sol and (backend or get_runtime_state().attention_backend) in SOL_BACKENDS:
-            backend = AttentionBackendType.AITER
+            backend = REFINER_DENSE_BACKEND
 
         use_ulysses = self.use_ulysses_parallel_attention and get_ulysses_parallel_world_size() > 1
         attention_function = USP if use_ulysses else attention
@@ -321,7 +322,7 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
             # The same count on the query side, for Sol-Attn: it routes one
             # selection per query tile, and pad rows would vote on it.
             "valid_q_len": None,
-            SOL_EXACT_TOKENS_KEY: None,
+            EXACT_KV_TOKENS_KEY: None,
             "vsa_h3_metadata": None,
             "vsa_h3_gate": None,
             ULYSSES_EXTRA_INPUTS_KEY: None,
@@ -595,7 +596,7 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
                 # sequence_length rows and nothing beyond them is real.
                 "valid_kv_len": max_seqlen_k,
                 "valid_q_len": max_seqlen_k,
-                SOL_EXACT_TOKENS_KEY: exact_tokens,
+                EXACT_KV_TOKENS_KEY: exact_tokens,
             }
         )
 

@@ -668,7 +668,9 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
         # Select it here, outside the compiled forward, which cannot import its kernel.
         runtime = get_runtime_state()
         if set(runtime.selected_attention_backends()) & _SOL_ATTN_BACKENDS:
-            runtime._check_if_backend_compatible_with_current_configuration(AttentionBackendType.AITER)
+            from xfuser.model_executor.models.transformers.transformer_minimax_h3 import REFINER_DENSE_BACKEND
+
+            runtime._check_if_backend_compatible_with_current_configuration(REFINER_DENSE_BACKEND)
 
     def _validate_config(self, config) -> None:
         if config.task is None:

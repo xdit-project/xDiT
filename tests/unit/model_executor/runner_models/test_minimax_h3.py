@@ -243,7 +243,7 @@ def test_minimax_h3_publishes_the_trailing_pad_length(monkeypatch):
 def test_minimax_h3_declares_the_query_pad_and_its_exact_rows_for_sol(monkeypatch):
     """Sol-Attn drops the query pad by valid_q_len and computes the blocks holding text and audio
     keys exactly. Both keys are present on every forward, like valid_kv_len."""
-    from xfuser.core.attention.backends.aiter_sol.spec import EXACT_TOKENS_KEY
+    from xfuser.core.attention.spec import EXACT_KV_TOKENS_KEY
     from xfuser.core.attention.spec import AttentionBackendType
     from xfuser.model_executor.models.transformers import transformer_minimax_h3
     from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
@@ -264,7 +264,7 @@ def test_minimax_h3_declares_the_query_pad_and_its_exact_rows_for_sol(monkeypatc
 
     kwargs = wrapper._usp_attention_kwargs
     assert kwargs["valid_q_len"] == kwargs["valid_kv_len"] == 65
-    exact = kwargs[EXACT_TOKENS_KEY]
+    exact = kwargs[EXACT_KV_TOKENS_KEY]
     assert exact.shape == (128,)
     expected = torch.zeros(128, dtype=torch.bool)
     expected[inputs["text_indices"]] = True

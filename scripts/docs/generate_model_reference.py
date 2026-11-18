@@ -93,6 +93,15 @@ def _flag(entry: ModelEntry, name: str) -> str:
     return "✓" if entry.capabilities.get(name, False) else "—"
 
 
+def _int8(entry: ModelEntry) -> str:
+    platforms = [
+        platform
+        for flag, platform in (("use_int8_gemms", "CUDA"), ("use_aiter_int8_gemms", "ROCm gfx950"))
+        if entry.capabilities.get(flag, False)
+    ]
+    return ", ".join(platforms) or "—"
+
+
 def _model_link(entry: ModelEntry, index: int) -> str:
     return f"[{_prose(entry.name)}](#{_anchor(entry)})"
 
@@ -110,6 +119,7 @@ def render_models(entries: Sequence[ModelEntry]) -> str:
         "depends on the checkpoint, inputs, hardware, kernels, and flag combinations.",
         "Follow the linked guides for restrictions; a row does not promise every feature",
         "can be enabled together. CUDA, ROCm, and Ascend availability varies by backend.",
+        "INT8 names the platform instead, because its backends differ: torchao on CUDA, AITER on ROCm gfx950.",
         "",
         "- [Parallelism](#parallelism)",
         "- [Memory and precision](#memory-and-precision)",
@@ -181,7 +191,7 @@ def render_models(entries: Sequence[ModelEntry]) -> str:
         "enable_slicing",
     )
     for index, entry in enumerate(entries):
-        values = [_flag(entry, flag) for flag in precision_flags]
+        values = [_int8(entry) if flag == "use_int8_gemms" else _flag(entry, flag) for flag in precision_flags]
         lines.append("| " + " | ".join([_model_link(entry, index), *values]) + " |")
     lines.extend(
         [

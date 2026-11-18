@@ -226,6 +226,7 @@ class ModelCapabilities:
     use_vae_channels_last_format: bool = True
     # Other features
     use_int8_gemms: bool = False
+    use_aiter_int8_gemms: bool = False
     use_fp8_gemms: bool = False
     use_fp8_text_encoder: bool = False
     use_fp4_gemms: bool = False
@@ -843,11 +844,15 @@ class xFuserModel(abc.ABC):
             config_value = getattr(
                 config, key, None
             )  # Some config options might not be set in the CLI, such as support for specific attention backends.
+            supported = getattr(self.capabilities, key)
+            if key == "use_int8_gemms":
+                # Each INT8 backend has its own flag; the load contract refuses the one a model lacks.
+                supported = supported or self.capabilities.use_aiter_int8_gemms
             if isinstance(config_value, int) and not isinstance(config_value, bool):
-                if not getattr(self.capabilities, key) and config_value > 1:
+                if not supported and config_value > 1:
                     raise ValueError(f"Model {self.settings.model_name} does not support {key}.")
             else:
-                if config_value and not getattr(self.capabilities, key):
+                if config_value and not supported:
                     raise ValueError(f"Model {self.settings.model_name} does not support {key}.")
 
         if config.cache_method:
@@ -934,9 +939,6 @@ class xFuserModel(abc.ABC):
 
         if self.settings.model_output_type == "video" and not self.settings.fps:
             raise ValueError(f"Model {self.settings.model_name} produces video output but fps is not set.")
-
-        if config.use_int8_gemms and _is_hip():
-            raise ValueError("Int8 GEMMs on ROCm are not supported.")
 
         if config.use_fp6_gemms and _is_cuda():
             raise ValueError(

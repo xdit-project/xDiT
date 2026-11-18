@@ -74,6 +74,20 @@ def test_the_linears_return_their_slice_and_keep_their_weights(monkeypatch):
         assert torch.allclose(linear(torch.zeros(1, 4)), output, atol=1e-6)
 
 
+def test_a_linear_handed_the_leading_samples_returns_their_rows(monkeypatch):
+    linears = _linears()
+    embedding = torch.randn(4, 4, generator=torch.Generator().manual_seed(1))
+    with torch.no_grad():
+        expected = [linear(embedding[:2]) for linear in linears]
+
+    shard = _shard(monkeypatch, linears, 0, 1)
+    with torch.no_grad():
+        shard(embedding)
+
+    for linear, output in zip(linears, expected):
+        assert torch.allclose(linear(embedding[:2]), output, atol=1e-6)
+
+
 def test_the_share_is_a_buffer_outside_the_state_dict(monkeypatch):
     shard = _shard(monkeypatch, _linears(), 1, 2)
 

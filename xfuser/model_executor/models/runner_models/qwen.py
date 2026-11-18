@@ -320,6 +320,10 @@ class xFuserQwenImageModel(xFuserModel):
             self.settings.output_name = "qwen_image_2512"
         _configure_qwen_pipefusion_stages(config)
 
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        self._shard_modulation()
+
     def _get_compile_mode(self) -> str:
         # CUDA graphs are incompatible with cross-step caching and re-capture pathologically on RDNA4.
         if self.config.cache_method or PACKAGES_CHECKER._on_rdna4():

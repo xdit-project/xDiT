@@ -27,7 +27,9 @@ class SlicedModulation(torch.nn.Linear):
     """
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return self._modulation["row"][:, self._modulation_start : self._modulation_start + self.out_features]
+        # A linear may be handed only the leading samples of the embedding.
+        start = self._modulation_start
+        return self._modulation["row"][: input.shape[0], start : start + self.out_features]
 
 
 class ShardedModulation(torch.nn.Module):

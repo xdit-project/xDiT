@@ -1,8 +1,8 @@
 """What each FLUX.3 attention stage hands the attention layer.
 
 The text stage attends the prompt alone, too few KV blocks for a backend that selects blocks, so it
-runs on the cross-attention backend. The joint stage marks the prompt's keys exact for such a
-backend. Each forward advances the per-step schedules once.
+runs on the cross-attention backend. The joint stage marks the prompt's keys and rows exact for
+such a backend. Each forward advances the per-step schedules once.
 """
 
 from types import SimpleNamespace
@@ -45,7 +45,7 @@ def _inputs():
 
 
 def test_each_stage_gets_its_backend_and_the_joint_stage_marks_the_prompt(monkeypatch):
-    from xfuser.core.attention.spec import EXACT_KV_TOKENS_KEY, AttentionBackendType
+    from xfuser.core.attention.spec import EXACT_KV_TOKENS_KEY, EXACT_Q_TOKENS_KEY, AttentionBackendType
 
     steps = []
     runtime = SimpleNamespace(
@@ -84,6 +84,9 @@ def test_each_stage_gets_its_backend_and_the_joint_stage_marks_the_prompt(monkey
             expected = torch.zeros(TEXT_LEN + IMAGE_GRID[0] * IMAGE_GRID[1], dtype=torch.bool)
             expected[:TEXT_LEN] = True
             assert torch.equal(exact, expected), "the prompt's keys, and only those, are exact"
+            assert torch.equal(kwargs[EXACT_Q_TOKENS_KEY], expected), "and so are the prompt's own rows"
         else:
-            assert kwargs is None or kwargs.get(EXACT_KV_TOKENS_KEY) is None
+            assert kwargs is None or (
+                kwargs.get(EXACT_KV_TOKENS_KEY) is None and kwargs.get(EXACT_Q_TOKENS_KEY) is None
+            )
     assert {id(attn) for attn, _, _ in first_forward} >= text | joint

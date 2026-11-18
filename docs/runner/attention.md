@@ -74,7 +74,7 @@ startup; use `--ulysses_degree` for sequence parallelism. Set
 `--cross_attention_backend` to a dense backend. Short text keys give the routing
 too few blocks to select from. On FLUX.3 that backend serves the text-mode blocks,
 which attend the prompt alone. The joint blocks compute the prompt's KV blocks
-exactly and route the image and reference tokens.
+and its own query rows exactly, and route the image and reference tokens.
 
 - `--solattn_beta` sets the routing threshold (default `0.5`). A larger value
   computes fewer blocks exactly.

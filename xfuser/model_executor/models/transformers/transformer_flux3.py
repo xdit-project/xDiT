@@ -11,7 +11,7 @@ from diffusers.models.transformers.transformer_flux3 import (
     _get_qkv_projections,
 )
 
-from xfuser.core.attention.spec import EXACT_KV_TOKENS_KEY
+from xfuser.core.attention.spec import EXACT_KV_TOKENS_KEY, EXACT_Q_TOKENS_KEY
 from xfuser.core.distributed import (
     get_runtime_state,
     get_sequence_parallel_rank,
@@ -39,7 +39,8 @@ class xFuserFlux3AttnProcessor:
     and runs on the cross-attention backend: the main backend unless
     ``--cross_attention_backend`` names another. ``exact_kv_tokens`` marks the joint
     stage's prompt tokens, over the padded sequence, for backends that select KV
-    blocks; every other backend ignores it.
+    blocks: their keys and their own query rows are computed exactly. Every other
+    backend ignores it.
     """
 
     def __init__(self, text_only: bool = False):
@@ -56,7 +57,11 @@ class xFuserFlux3AttnProcessor:
     def _attention_kwargs(self) -> Optional[Dict[str, Any]]:
         if self.valid_kv_len is None and self.exact_kv_tokens is None:
             return None
-        return {"valid_kv_len": self.valid_kv_len, EXACT_KV_TOKENS_KEY: self.exact_kv_tokens}
+        return {
+            "valid_kv_len": self.valid_kv_len,
+            EXACT_KV_TOKENS_KEY: self.exact_kv_tokens,
+            EXACT_Q_TOKENS_KEY: self.exact_kv_tokens,
+        }
 
     def __call__(
         self,
@@ -342,8 +347,9 @@ class xFuserFlux3Transformer2DWrapper(Flux3Transformer2DModel):
         sp_world_size = get_sequence_parallel_world_size()
         pad = (sp_world_size - joint_seq_len % sp_world_size) % sp_world_size
         self._joint_processor.valid_kv_len = joint_seq_len if pad else None
-        # The prompt is a few percent of the joint sequence, and a backend that selects KV blocks
-        # judges its blocks against statistics the image writes; keep them exact for every query.
+        # The prompt is a few percent of the joint sequence. A backend that selects KV blocks keeps
+        # its keys exact for every query, and computes its own rows exactly: they become the text
+        # stream every later joint block conditions on.
         exact_kv_tokens = torch.zeros(joint_seq_len + pad, dtype=torch.bool, device=joint_states.device)
         exact_kv_tokens[:txt_seq_len] = True
         self._joint_processor.exact_kv_tokens = exact_kv_tokens

@@ -281,6 +281,29 @@ def test_the_backend_hands_exact_tokens_to_the_routing(recipe):
 
 
 @pytest.mark.parametrize("recipe", ["bf16", "fp8"])
+def test_exact_query_rows_compute_their_tiles_exactly(recipe):
+    """A flagged query row computes every KV block of its tile, as a threshold nothing passes would;
+    the other tiles still route, and come out as forcing nothing would leave them."""
+    _require_sol_recipe(recipe)
+    from xfuser.core.attention.spec import EXACT_Q_TOKENS_KEY
+
+    backend = _backend(recipe)
+    q_tile = _default_tile(recipe)[0]
+    # Unclustered, so routing skips blocks in every tile.
+    query, key, value = _operands(seqlen=1024, sharpness=0.0)
+    rows = torch.zeros(1024, dtype=torch.bool, device="cuda")
+    rows[3] = True  # the first query tile
+    with torch.no_grad():
+        forced, _ = _run(backend, query, key, value, solattn_beta=0.5, **{EXACT_Q_TOKENS_KEY: rows})
+        all_exact, _ = _selected_blocks(query, key, value, backend, solattn_beta=-100.0)
+        routed, _ = _selected_blocks(query, key, value, backend, solattn_beta=0.5)
+
+    assert torch.equal(forced[:, :, :q_tile], all_exact[:, :, :q_tile])
+    assert torch.equal(forced[:, :, q_tile:], routed[:, :, q_tile:])
+    assert not torch.equal(routed[:, :, :q_tile], all_exact[:, :, :q_tile]), "routing alone must skip blocks here"
+
+
+@pytest.mark.parametrize("recipe", ["bf16", "fp8"])
 def test_a_padded_call_with_exact_tokens_holds_one_graph(recipe):
     """MiniMax-H3's call: query and key pad dropped, text and audio blocks forced."""
     _require_sol_recipe(recipe)

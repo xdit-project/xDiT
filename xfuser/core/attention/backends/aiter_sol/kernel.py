@@ -11,7 +11,7 @@ from xfuser.core.attention.sparsity.sol import (
     check_sol_tilt,
     sol_attn_bhsd,
 )
-from xfuser.core.attention.spec import EXACT_KV_TOKENS_KEY, AttnCall
+from xfuser.core.attention.spec import EXACT_KV_TOKENS_KEY, EXACT_Q_TOKENS_KEY, AttnCall
 from xfuser.core.distributed.attention_schedule import SolAttnBetaSchedule
 from xfuser.core.distributed.runtime_state import (
     get_runtime_state,
@@ -112,7 +112,8 @@ def sol(query, key, value, call: AttnCall, *, recipe: str):
 
     Builds no block mask: the routing selects the blocks itself. A declared trailing key pad, which
     `accepts` has checked, is dropped by length, and so is a query pad the caller declares as
-    `valid_q_len`. EXACT_KV_TOKENS_KEY names keys whose blocks are always computed exactly.
+    `valid_q_len`. EXACT_KV_TOKENS_KEY names keys whose blocks are always computed exactly, and
+    EXACT_Q_TOKENS_KEY query rows whose tiles compute every block exactly.
     """
     kwargs = call.attention_kwargs
     valid_q_len = kwargs.get("valid_q_len") if call.varlen is not None else None
@@ -130,6 +131,7 @@ def sol(query, key, value, call: AttnCall, *, recipe: str):
         block_tile=_block_tile(),
         query_seqlen=None if valid_q_len is None else int(valid_q_len),
         exact_tokens=kwargs.get(EXACT_KV_TOKENS_KEY),
+        exact_query_tokens=kwargs.get(EXACT_Q_TOKENS_KEY),
         tilt_rank=_tilt_rank(),
     )
     if cost_sink is not None:

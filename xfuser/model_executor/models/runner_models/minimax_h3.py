@@ -23,13 +23,15 @@ from xfuser.core.distributed import (
 )
 from xfuser.core.utils.runner_utils import log
 from xfuser.core.utils.video_utils import encode_video_with_audio
-from xfuser.envs import get_device_name
+from xfuser.envs import PACKAGES_CHECKER, get_device_name
+from xfuser.model_executor.layers import usp_sdma
 from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
     ModelCapabilities,
     ModelSettings,
     _parse_attention_backend,
+    _selected_attention_backends,
     prefer_mha_v4,
     register_model,
     xFuserModel,
@@ -64,6 +66,11 @@ _SUPPORTED_ATTN_BACKENDS = frozenset(
     }
 ) | (AITER_MHA_V4_ONLY_BACKEND_SET - _UNSERVED_MHA_V4_BACKENDS)
 _FASTH3_ATTN_BACKENDS = VSA_H3_BACKENDS
+# MiniMax-H3 attends text, video and audio as one long packed sequence, the shape Sol-Attn's
+# routing is for. Its alignment pad is declared through valid_kv_len and valid_q_len, and the
+# text and audio rows are forced exact; see the transformer wrapper.
+_SOL_ATTN_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SOL)
+_H3_ATTN_BACKENDS = _SUPPORTED_ATTN_BACKENDS | _SOL_ATTN_BACKENDS
 # VDN-H3's window varlen executor only implements these three; it does not use
 # the CUDNN / NVTE_FP8 / MHA-v4 paths the base H3 advertises.
 _VDN_SUPPORTED_ATTN_BACKENDS = frozenset(
@@ -586,6 +593,8 @@ class MiniMaxH3TextEncoderMixin:
 class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
     # From the registered checkpoint's transformer config.
     attention_heads = 56
+    # Measured on the base checkpoint only; the variants keep the runner's compile mode.
+    transformer_cudagraphs = True
 
     # diffusers 0.40.0 is the first release with native MiniMax-H3.
     min_diffusers_version = "0.40.0"
@@ -640,13 +649,14 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
         use_fp8_gemms=True,
         use_fp4_gemms=True,
         use_hybrid_attn_schedule=True,
+        supports_sol_attention_backends=True,
         enable_slicing=False,
         enable_tiling=False,
     )
     _transformer_component_name = "transformer"
     _warmup_num_inference_steps = 3
     _enable_fasth3_vsa = False
-    supported_attn_backends = _SUPPORTED_ATTN_BACKENDS
+    supported_attn_backends = _H3_ATTN_BACKENDS
 
     def _customize_settings(self, config) -> None:
         super()._customize_settings(config)
@@ -658,6 +668,16 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
         if self._transformer_component_name == "transformer":
             return self.pipe
         return SimpleNamespace(transformer=getattr(self.pipe, self._transformer_component_name))
+
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        # Under a Sol backend the token refiner runs on dense AITER (see the transformer wrapper).
+        # Select it here, outside the compiled forward, which cannot import its kernel.
+        runtime = get_runtime_state()
+        if set(runtime.selected_attention_backends()) & _SOL_ATTN_BACKENDS:
+            from xfuser.model_executor.models.transformers.transformer_minimax_h3 import REFINER_DENSE_BACKEND
+
+            runtime._check_if_backend_compatible_with_current_configuration(REFINER_DENSE_BACKEND)
 
     def _validate_config(self, config) -> None:
         if config.task is None:
@@ -676,24 +696,7 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
                 "existing model ranks and does not support dedicated VAE-only "
                 "ranks; leave --vae_parallel_size at 0."
             )
-        if config.use_hybrid_attn_schedule:
-            backend_specs = [
-                (
-                    config.hybrid_attn_high_precision_backend,
-                    "hybrid attention high precision backend",
-                ),
-                (
-                    config.hybrid_attn_low_precision_backend,
-                    "hybrid attention low precision backend",
-                ),
-            ]
-        else:
-            backend_specs = [(config.attention_backend, "attention backend")]
-
-        backends = [
-            backend for value, label in backend_specs if (backend := _parse_attention_backend(value, label)) is not None
-        ]
-        for backend in backends:
+        for backend in _selected_attention_backends(config):
             if backend == AttentionBackendType.AITER_FP8:
                 try:
                     from aiter import flash_attn_varlen_fp8_pertensor_func  # noqa: F401
@@ -856,7 +859,7 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
         original_forward = transformer.forward
         compiled_forward = torch.compile(
             original_forward,
-            mode=mode,
+            mode=self._transformer_compile_mode(mode, use_hybrid),
             fullgraph=not use_hybrid,
         )
 
@@ -867,6 +870,18 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
         if not get_runtime_state().has_attention_schedule():
             compile_args["num_inference_steps"] = self._warmup_num_inference_steps
         self._run_timed_pipe(compile_args)
+
+    def _transformer_compile_mode(self, mode: str, use_hybrid: bool) -> str:
+        """CUDA graphs for the transformer alone: the video VAE decoder reads graph outputs across calls."""
+        if not self.transformer_cudagraphs or use_hybrid or PACKAGES_CHECKER._on_rdna4():
+            return mode
+        return usp_sdma.compile_mode("reduce-overhead")
+
+    def _records_cudagraphs(self) -> bool:
+        if self.config.fully_shard_degree > 1:
+            return super()._records_cudagraphs()
+        mode = self._transformer_compile_mode(self._get_compile_mode(), get_runtime_state().has_attention_schedule())
+        return mode in self.CUDAGRAPH_COMPILE_MODES
 
     def _run_warmup_calls(self, input_args: dict) -> None:
         if not self.config.warmup_calls:
@@ -945,6 +960,8 @@ class xFuserFastH3Model(xFuserMiniMaxH3Model):
     other MiniMax-H3 backends stay dense when selected explicitly.
     """
 
+    transformer_cudagraphs = False
+
     default_input_values = DefaultInputValues(
         height=768,
         width=1344,
@@ -960,7 +977,7 @@ class xFuserFastH3Model(xFuserMiniMaxH3Model):
 
     _warmup_num_inference_steps = 4
     _enable_fasth3_vsa = True
-    supported_attn_backends = _SUPPORTED_ATTN_BACKENDS | _FASTH3_ATTN_BACKENDS
+    supported_attn_backends = _H3_ATTN_BACKENDS | _FASTH3_ATTN_BACKENDS
 
     def _customize_settings(self, config) -> None:
         super()._customize_settings(config)
@@ -1003,7 +1020,7 @@ class xFuserFastH3DenseModel(xFuserFastH3Model):
     settings.default_attention_backend = None
 
     _enable_fasth3_vsa = False
-    supported_attn_backends = _SUPPORTED_ATTN_BACKENDS
+    supported_attn_backends = _H3_ATTN_BACKENDS
 
     def _validate_config(self, config) -> None:
         # Skip V1's VSA/hybrid-schedule check: no VSA backend is supported here,
@@ -1045,6 +1062,8 @@ class xFuserMiniMaxH3TurboModel(xFuserMiniMaxH3Model):
     count and video shift default to their published values and other step counts
     are refused; any other adapter needs ``--num_inference_steps`` and ``--flow_shift``.
     """
+
+    transformer_cudagraphs = False
 
     default_input_values = DefaultInputValues(
         height=768,
@@ -1118,6 +1137,9 @@ class xFuserVDNMiniMaxH3Model(xFuserMiniMaxH3Model):
     position_ids in an eager forward pre-hook outside the compiled blocks.
     """
 
+    # Compiles its blocks in _compile_model below, outside _transformer_compile_mode.
+    transformer_cudagraphs = False
+
     default_input_values = DefaultInputValues(
         height=768,
         width=1344,
@@ -1157,6 +1179,8 @@ class xFuserVDNMiniMaxH3Model(xFuserMiniMaxH3Model):
         use_fp8_gemms=True,
         use_fp4_gemms=False,
         use_hybrid_attn_schedule=False,
+        # The window executor serves none of the Sol rows; see _VDN_SUPPORTED_ATTN_BACKENDS.
+        supports_sol_attention_backends=False,
     )
 
     supported_attn_backends = _VDN_SUPPORTED_ATTN_BACKENDS
@@ -1270,6 +1294,7 @@ class xFuserVDNMiniMaxH3Model(xFuserMiniMaxH3Model):
 
 @register_model("MiniMax-H3-Ref2VA")
 class xFuserMiniMaxH3Ref2VAModel(xFuserMiniMaxH3Model):
+    transformer_cudagraphs = False
     # The reference workflow shares the modular loading and QKV-fusion limitation.
     load_support = LoadSupport(
         meta_transformers=(),

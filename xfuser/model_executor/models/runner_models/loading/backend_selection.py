@@ -77,6 +77,7 @@ class QuantizationBackends:
         return probe_format_backend_capabilities(
             require_mxfp6=self._uses_mxfp6_contract(),
             require_a6w4=self._uses_a6w4_contract(),
+            require_aiter_int8=self._format_value() == "int8",
         )
 
     @functools.cached_property
@@ -122,6 +123,7 @@ class QuantizationBackends:
             select_mixed_mxfp_backend,
             validate_format_fsdp_placement,
         )
+
         adapter = select_mixed_mxfp_backend(
             self.loader.load_contract,
             capabilities=self.format_capabilities,
@@ -207,9 +209,7 @@ class QuantizationBackends:
             return set()
         return {
             f"{component_name}.{wrap_attr}"
-            for component_name, strategy in (
-                self.model.settings.fsdp_strategy or {}
-            ).items()
+            for component_name, strategy in (self.model.settings.fsdp_strategy or {}).items()
             for wrap_attr in strategy.get("wrap_attrs", ())
         }
 
@@ -235,18 +235,11 @@ class QuantizationBackends:
         fp8_only_targets = {
             target
             for target in self.loader.quantization_plan.module_list()
-            if not any(
-                module_path_is_covered(target, fp4_target)
-                for fp4_target in fp4_targets
-            )
+            if not any(module_path_is_covered(target, fp4_target) for fp4_target in fp4_targets)
         }
-        is_torchao = assume_torchao_fp8 or (
-            fp8_adapter is not None and fp8_adapter.backend.value == "torchao"
-        )
+        is_torchao = assume_torchao_fp8 or (fp8_adapter is not None and fp8_adapter.backend.value == "torchao")
         if is_torchao and any(
-            module_paths_overlap(target, fsdp_path)
-            for target in fp8_only_targets
-            for fsdp_path in fsdp_target_paths
+            module_paths_overlap(target, fsdp_path) for target in fp8_only_targets for fsdp_path in fsdp_target_paths
         ):
             return True
 
@@ -261,9 +254,7 @@ class QuantizationBackends:
             config.use_fp4_gemms
             and fp4_can_emit_fp8
             and any(
-                module_paths_overlap(target, fsdp_path)
-                for target in fp4_targets
-                for fsdp_path in fsdp_target_paths
+                module_paths_overlap(target, fsdp_path) for target in fp4_targets for fsdp_path in fsdp_target_paths
             )
         )
 
@@ -272,11 +263,7 @@ class QuantizationBackends:
         if not fsdp_target_paths:
             return False
         targets = set(self._format_entries())
-        return any(
-            module_paths_overlap(target, fsdp_path)
-            for target in targets
-            for fsdp_path in fsdp_target_paths
-        )
+        return any(module_paths_overlap(target, fsdp_path) for target in targets for fsdp_path in fsdp_target_paths)
 
     def places_mxfp6_backend_under_fsdp2(self) -> bool:
         """Whether pure/mixed MXFP6 creates packed parameters inside FSDP2."""
@@ -292,21 +279,11 @@ class QuantizationBackends:
             fp6_targets = {
                 target
                 for target in self.loader.quantization_plan.module_list()
-                if not any(
-                    module_path_is_covered(target, fp4_target)
-                    for fp4_target in fp4_targets
-                )
+                if not any(module_path_is_covered(target, fp4_target) for fp4_target in fp4_targets)
             }
-            if (
-                settings.fp8_precision_overrides
-                or settings.fp8_precision_override_suffixes
-            ):
+            if settings.fp8_precision_overrides or settings.fp8_precision_override_suffixes:
                 fp6_targets.update(fp4_targets)
-        return any(
-            module_paths_overlap(target, fsdp_path)
-            for target in fp6_targets
-            for fsdp_path in fsdp_target_paths
-        )
+        return any(module_paths_overlap(target, fsdp_path) for target in fp6_targets for fsdp_path in fsdp_target_paths)
 
     def requires_blockwise_fp8(self) -> bool:
         """Whether FP4 mode declares whole components owned only by FP8."""
@@ -316,10 +293,7 @@ class QuantizationBackends:
             return False
         fp4_targets = set(self.model.settings.fp4_gemm_module_list or ())
         return any(
-            not any(
-                module_path_is_covered(target, fp4_target)
-                for fp4_target in fp4_targets
-            )
+            not any(module_path_is_covered(target, fp4_target) for fp4_target in fp4_targets)
             for target in self.loader.quantization_plan.module_list()
         )
 
@@ -332,15 +306,10 @@ class QuantizationBackends:
         if self.places_torchao_tensor_subclass_under_fsdp2(None):
             return True
         if contract.requested_format.value == "fp8" and (
-            self.places_torchao_tensor_subclass_under_fsdp2(
-                None, assume_torchao_fp8=True
-            )
+            self.places_torchao_tensor_subclass_under_fsdp2(None, assume_torchao_fp8=True)
         ):
             return True
-        return (
-            contract.materialization_mode.value != "eager"
-            and contract.requested_format.value == "fp8"
-        )
+        return contract.materialization_mode.value != "eager" and contract.requested_format.value == "fp8"
 
     def _format_entries(self):
         """This run's primary-format targets."""
@@ -378,9 +347,7 @@ class QuantizationBackends:
         format_targets = self.format_targets_for(component_name)
         if format_targets:
             return self.format, format_targets
-        fp8_targets = tuple(
-            self.loader.quantization_plan.targets_for(component_name)
-        )
+        fp8_targets = tuple(self.loader.quantization_plan.targets_for(component_name))
         if not fp8_targets:
             return None, ()
         if self._format_value() == "fp4_fp6":

@@ -114,7 +114,9 @@ def _record_sol_calls(monkeypatch, block_size=None):
 
     monkeypatch.setattr(kernel, "sol_attn_bhsd", record)
     if block_size is not None:
-        state = SimpleNamespace(runtime_config=SimpleNamespace(sparseattn_block_size=block_size))
+        from xfuser.config.config import RuntimeConfig
+
+        state = SimpleNamespace(runtime_config=RuntimeConfig(sparseattn_block_size=block_size))
         monkeypatch.setattr(kernel, "runtime_state_is_initialized", lambda: True)
         monkeypatch.setattr(kernel, "get_runtime_state", lambda: state)
     return seen
@@ -143,6 +145,36 @@ def test_the_backend_hands_sparseattn_block_size_to_the_kernel(monkeypatch):
 
     assert seen["block_tile"] == (64, 64)
     assert seen["beta"] == 0.5
+
+
+def test_the_backend_hands_the_tilt_rank_to_the_kernel(monkeypatch):
+    """--solattn_tilt_rank reaches every Sol call through the run config."""
+    from xfuser.config.config import RuntimeConfig
+    from xfuser.core.attention.backends.aiter_sol import kernel
+
+    seen = _record_sol_calls(monkeypatch)
+    state = SimpleNamespace(runtime_config=RuntimeConfig(solattn_tilt_rank=2))
+    monkeypatch.setattr(kernel, "runtime_state_is_initialized", lambda: True)
+    monkeypatch.setattr(kernel, "get_runtime_state", lambda: state)
+    query = torch.zeros((1, 2, 256, 128), dtype=torch.bfloat16)
+
+    _run(AttentionBackendType.AITER_FP8_SOL, query, query, query, attention_kwargs={})
+
+    assert seen["tilt_rank"] == 2
+
+
+@pytest.mark.parametrize(
+    "backend,rank,match",
+    [
+        (AttentionBackendType.AITER_MXFP6_SOL, 2, "no Sol-Attn 'mxfp6' row with the pooled value tilt"),
+        (AttentionBackendType.AITER_FP8_SOL, -1, "must be >= 0"),
+    ],
+)
+def test_a_tilt_the_row_cannot_serve_is_refused_at_selection(backend, rank, match):
+    from xfuser.config.config import RuntimeConfig
+
+    with pytest.raises(ValueError, match=match):
+        registry.get(backend).validate(RuntimeConfig(solattn_tilt_rank=rank))
 
 
 def test_a_block_size_no_sol_kernel_serves_is_refused_at_selection(monkeypatch):

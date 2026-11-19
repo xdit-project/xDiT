@@ -716,6 +716,40 @@ def test_mha_v4_serves_several_packed_sequences_on_the_bf16_rows():
         assert cosine > 0.99, f"sequence {b} of {valid}: {cosine}"
 
 
+def test_mha_v4_regroups_several_packed_sequences_in_one_graph():
+    """The regrouping must trace under torch.compile. An op whose output shape
+    depends on the lengths' values splits the graph at this call, in every
+    block of a model that batches ragged prompts (Qwen-Image-Edit's true CFG).
+
+    An empty sequence in the middle keeps the row search honest: its boundary
+    repeats, and the rows after it must still land in the last sequence."""
+    kernel = _mha_v4_kernel()
+    if not kernel.HAS_SEQLENS_K:
+        pytest.skip("this AITER cannot express per-batch key lengths")
+    fmt = next(fmt for fmt in kernel.FORMATS if fmt.name == "BF16")
+
+    torch.manual_seed(7)
+    heads, head_dim = 4, 128
+    padded, valid = 384, (300, 0, 137)
+    key = torch.randn((len(valid), padded, heads, head_dim), device="cuda", dtype=torch.bfloat16)
+    value = torch.randn_like(key)
+    call = AttnCall(varlen=VarlenPacking(**_packed_kwargs(valid, padded)))
+
+    # explain rather than fullgraph=True, which lets this break through.
+    explanation = torch._dynamo.explain(kernel._shorten_keys)(key, value, call, fmt)
+    assert explanation.graph_break_count == 0, [str(reason.reason) for reason in explanation.break_reasons]
+
+    with torch.no_grad():
+        short_key, short_value, lengths = kernel._shorten_keys(key, value, call, fmt)
+
+    assert lengths.tolist() == list(valid)
+    assert short_key.shape == (len(valid), max(valid), heads, head_dim)
+    for b, n in enumerate(valid):
+        assert torch.equal(short_key[b, :n], key[b, :n])
+        assert torch.equal(short_value[b, :n], value[b, :n])
+        assert not short_key[b, n:].any() and not short_value[b, n:].any()
+
+
 @pytest.mark.parametrize("head_dim", [64, 256])
 def test_mha_v4_falls_back_to_v3_off_head_dim_128(head_dim):
     """LTX-2 pairs 128-wide video blocks with 64-wide audio ones under one

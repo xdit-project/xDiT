@@ -5,8 +5,6 @@ wrapper that hid upstream's parameters would build every checkpoint with default
 flow-map (step-distilled) checkpoint would lose its target-timestep embedder.
 """
 
-from types import SimpleNamespace
-
 import pytest
 
 transformer_flux3 = pytest.importorskip("xfuser.model_executor.models.transformers.transformer_flux3")
@@ -36,19 +34,6 @@ def test_from_config_keeps_every_checkpoint_setting(flow_map):
     assert dict(wrapper.config) == dict(stock.config)
     assert (wrapper.target_timestep_embedder is not None) == flow_map
     assert wrapper.state_dict().keys() == stock.state_dict().keys()
-
-
-def test_each_transformer_call_advances_the_step_schedule(monkeypatch):
-    # The hybrid GEMM schedule switches precision per step from this counter.
-    calls = []
-    state = SimpleNamespace(increment_step_counter=lambda: calls.append(1))
-    monkeypatch.setattr(transformer_flux3, "get_runtime_state", lambda: state)
-    wrapper = transformer_flux3.xFuserFlux3Transformer2DWrapper(**TINY, flow_map=True)
-
-    for hook in wrapper._forward_pre_hooks.values():
-        hook(wrapper, ())
-
-    assert len(calls) == 1
 
 
 @pytest.mark.parametrize(

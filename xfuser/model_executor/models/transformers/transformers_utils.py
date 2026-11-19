@@ -123,6 +123,56 @@ def sp_pad_spans_ranks(seq_len: int, sp_size: int) -> bool:
     return (-seq_len) % sp_size > -(-seq_len // sp_size)
 
 
+def share_fused_weights(fused: torch.nn.Linear, parts) -> None:
+    """Turn `parts` into views of `fused`, the linear that stacks their weights, so that fusing costs no memory.
+
+    The parts compute what they did before; only their own copies of the weights are freed.
+    """
+    offset = 0
+    for part in parts:
+        rows = slice(offset, offset + part.out_features)
+        part.weight.data = fused.weight.data[rows]
+        if part.bias is not None:
+            part.bias.data = fused.bias.data[rows]
+        offset += part.out_features
+
+
+# The fused projections an attention layer may hold, with the projections each one stacks.
+_FUSED_PROJECTIONS = (
+    ("to_qkv", ("to_q", "to_k", "to_v")),
+    ("to_kv", ("to_k", "to_v")),
+    ("to_added_qkv", ("add_q_proj", "add_k_proj", "add_v_proj")),
+)
+
+
+def fuse_plain_qkv_projections(model: torch.nn.Module) -> int:
+    """Fuse Q, K and V in the attention layers of `model` whose projections are all plain linears.
+
+    A layer with a quantized, wrapped or sharded projection keeps its separate projections. The
+    separate projections of a fused layer become views of the fused weights. Returns the number
+    of layers fused.
+    """
+    from diffusers.models.attention import AttentionModuleMixin
+    from xfuser.model_executor.layers.usp_sdma import plain_linear
+
+    fused = 0
+    for module in model.modules():
+        if not isinstance(module, AttentionModuleMixin):
+            continue
+        projections = [getattr(module, name, None) for names in _FUSED_PROJECTIONS for name in names[1]]
+        plain = all(projection is None or plain_linear(projection) for projection in projections)
+        if not plain or not plain_linear(getattr(module, "to_q", None)):
+            continue
+        module.fuse_projections()
+        if not module.fused_projections:
+            continue
+        fused += 1
+        for fused_name, names in _FUSED_PROJECTIONS:
+            if hasattr(module, fused_name):
+                share_fused_weights(getattr(module, fused_name), [getattr(module, name) for name in names])
+    return fused
+
+
 def zero_sp_pad_rows(tensor: torch.Tensor, rows: int) -> None:
     """Clear a tensor's trailing `rows` SP pad rows in place; a no-op when `rows` is 0.
 

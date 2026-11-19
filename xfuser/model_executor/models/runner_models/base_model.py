@@ -367,8 +367,6 @@ class xFuserModel(abc.ABC):
     # torch.compile modes that run the graph under CUDA Graphs, whose outputs live in a fixed
     # buffer pool and are therefore only valid until the next replay.
     CUDAGRAPH_COMPILE_MODES = frozenset({"reduce-overhead", "max-autotune"})
-    # --vae_dtype choices.
-    VAE_DTYPES = {"bf16": torch.bfloat16, "fp32": torch.float32}
 
     # Head dimensions this model's attention runs at, checked against what a backend serves.
     # Left empty where the value is only known from the loaded checkpoint; empty means no claim.
@@ -1708,13 +1706,6 @@ class xFuserModel(abc.ABC):
     def _convert_vae_to_channels_last(self) -> None:
         """Forward channels-last conversion for subclass compatibility."""
         self._vae_manager.convert_to_channels_last(self._decoding_vaes())
-
-    def _resolve_vae_dtype(self, default: torch.dtype) -> torch.dtype:
-        """The dtype ``--vae_dtype`` selects, or the model's ``default`` without the flag.
-
-        Only models that list the ``vae_dtype`` capability accept the flag.
-        """
-        return self.VAE_DTYPES[self.config.vae_dtype] if self.config.vae_dtype else default
 
     def _make_generator(self, seed: int) -> torch.Generator:
         """Generator on the pipe's execution device (cuda normally, cpu under offload).

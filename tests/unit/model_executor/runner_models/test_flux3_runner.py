@@ -109,15 +109,6 @@ def test_compile_warmup_runs_a_whole_schedule(
     assert model._compile_warmup_steps(_args()) == warmup_steps
 
 
-@pytest.mark.parametrize(
-    ("vae_dtype", "dtype"), [(None, torch.bfloat16), ("bf16", torch.bfloat16), ("fp32", torch.float32)]
-)
-def test_the_vae_decodes_in_bf16_unless_asked_for_fp32(build_flux3, vae_dtype, dtype):
-    model = build_flux3(vae_dtype=vae_dtype)
-
-    assert model._resolve_vae_dtype(torch.bfloat16) == dtype
-
-
 def test_the_compiled_text_encoder_keeps_leaf_level_offload(build_flux3):
     model = build_flux3()
 

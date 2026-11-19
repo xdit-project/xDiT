@@ -1054,6 +1054,7 @@ class ExternalRuntimeState(RuntimeState):
 
     def increment_step_counter(self):
         """Components run outside an xDiT pipeline have no step schedule to advance."""
+        pass
 
 
 def _default_engine_config() -> EngineConfig:

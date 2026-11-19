@@ -152,6 +152,9 @@ class VarlenPacking:
 # mask, or longer by a trailing pad. A backend that selects KV blocks computes every block holding
 # a flagged key exactly, for every query; a dense backend has nothing to do with it.
 EXACT_KV_TOKENS_KEY = "exact_kv_tokens"
+# The query-side counterpart, a (seqlen_q,) bool mask: a backend that selects KV blocks computes
+# every block exactly for the query rows it flags.
+EXACT_Q_TOKENS_KEY = "exact_q_tokens"
 
 
 @dataclass

@@ -12,6 +12,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     xFuserModel,
     ModelCapabilities,
+    ModelFeatures,
     DefaultInputValues,
     DiffusionOutput,
     ModelSettings,
@@ -281,8 +282,8 @@ class xFuserQwenImageModel(xFuserModel):
         use_parallel_vae=True,
         enable_tiling=True,
         enable_slicing=True,
-        shards_modulation=True,
     )
+    features = ModelFeatures(shards_modulation=True)
     default_input_values = DefaultInputValues(
         height=928,
         width=1664,

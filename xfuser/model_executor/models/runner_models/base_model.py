@@ -237,8 +237,6 @@ class ModelCapabilities:
     supports_lora: bool = False
     # The runner fuses the LoRA into bf16 weights before quantized GEMMs are materialized.
     supports_lora_with_quantized_gemms: bool = False
-    # The transformer wrapper has `shard_modulation()` and gains from it (see `_shard_modulation`).
-    shards_modulation: bool = False
     use_fp8_comms: bool = False
     supports_attention_a2a: bool = False
     use_hybrid_attn_schedule: bool = False
@@ -250,6 +248,14 @@ class ModelCapabilities:
     supports_bsa_attention_backends: bool = False
     supports_distilled_weights: bool = False
     profile_capture_phase: bool = False
+
+
+@dataclass(frozen=True)
+class ModelFeatures:
+    """What a model always runs with where it applies, unlike a capability, which a user asks for."""
+
+    # The transformer wrapper has `shard_modulation()` and gains from it (see `_shard_modulation`).
+    shards_modulation: bool = False
 
 
 @dataclass(frozen=True)
@@ -391,6 +397,7 @@ class xFuserModel(abc.ABC):
     unsupported_attn_backend_reason: str = ""
 
     capabilities: ModelCapabilities = ModelCapabilities()
+    features: ModelFeatures = ModelFeatures()
     default_input_values: DefaultInputValues = DefaultInputValues()
     settings: ModelSettings = ModelSettings()
     checkpoint_request_defaults: dict = {}
@@ -1048,7 +1055,7 @@ class xFuserModel(abc.ABC):
     def _shard_modulation(self) -> None:
         """Share the transformer's timestep modulation out over the sequence-parallel ranks.
 
-        For runners that declare `shards_modulation`, once the weights are placed. Each rank
+        For runners that set `shards_modulation` in their features, once the weights are placed. Each rank
         then projects one share of the modulation instead of all of it, and its device holds
         that share of the modulation weights instead of all of them. Stays off where a rank does
         not run the whole transformer on whole weights (PipeFusion, sharded or offloaded
@@ -1077,6 +1084,38 @@ class xFuserModel(abc.ABC):
                 f"Shared the timestep modulation of {count} projections out over {size} sequence-parallel ranks: "
                 f"each holds {share:.2f} GiB of its weights."
             )
+
+    def _fuses_qkv_projections(self) -> bool:
+        """Whether the compiled components compute Q, K and V with one fused projection.
+
+        One GEMM three times as wide replaces three, which is faster where a rank holds few
+        tokens and GEMMs that small run far below the GPU's throughput. A runner opts in once
+        its attention processors read the fused projection and its components'
+        `fuse_qkv_projections()` fuses only plain linears and shares their weights
+        (`fuse_plain_qkv_projections`), so that fusing costs no memory.
+        """
+        return False
+
+    def _fuse_qkv_projections(self) -> None:
+        """Fuse the Q/K/V projections of the compiled components, unless their weights are sharded or offloaded."""
+        config = self.config
+        if (
+            config.fully_shard_degree > 1
+            or config.memory_efficient_sharding
+            or config.enable_group_cpu_offload
+            or config.enable_sequential_cpu_offload
+            or config.enable_model_cpu_offload
+        ):
+            return
+        fused = 0
+        for name in self._get_compiled_pipe_components():
+            component = getattr(self.pipe, name)
+            component.fuse_qkv_projections()
+            fused += sum(bool(getattr(module, "fused_projections", False)) for module in component.modules())
+        if fused:
+            # Hand the separate projections' own copies back to the device.
+            torch.cuda.empty_cache()
+            log(f"Fused the Q/K/V projections of {fused} attention layers.")
 
     def _block_level_offload_components(self) -> List[str]:
         """Components that group CPU offload splits block by block.
@@ -1637,6 +1676,8 @@ class xFuserModel(abc.ABC):
         """Hook for any post model-load and state initialization"""
 
         self.loader.materialize_pipeline()
+        if self._fuses_qkv_projections():
+            self._fuse_qkv_projections()
 
         if self.config.use_hybrid_attn_schedule:
             self._setup_hybrid_attn_schedule(input_args)
@@ -1652,7 +1693,7 @@ class xFuserModel(abc.ABC):
         if self.config.use_vae_channels_last_format:
             self._convert_vae_to_channels_last()
 
-        if self.capabilities.shards_modulation:
+        if self.features.shards_modulation:
             self._shard_modulation()
 
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:

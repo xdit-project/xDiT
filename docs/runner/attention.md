@@ -72,7 +72,9 @@ The Sol backends require head dimension 128, BF16 inputs, and non-causal attenti
 Packed keys are accepted only as one sequence's trailing pad. Ring is refused at
 startup; use `--ulysses_degree` for sequence parallelism. Set
 `--cross_attention_backend` to a dense backend. Short text keys give the routing
-too few blocks to select from.
+too few blocks to select from. On FLUX.3 that backend serves the text-mode blocks,
+which attend the prompt alone. The joint blocks compute the prompt's KV blocks
+and its own query rows exactly, and route the image and reference tokens.
 
 - `--solattn_beta` sets the routing threshold (default `0.5`). A larger value
   computes fewer blocks exactly.
@@ -97,6 +99,12 @@ xdit --model Wan2.2-T2V --prompt "Clouds over a mountain lake" \
     --ulysses_degree 8 --num_inference_steps 40 \
     --attention_backend aiter_fp8_sol --cross_attention_backend aiter \
     --solattn_beta_schedule=1.0:0.0 --use_torch_compile
+```
+
+```bash
+xdit --model FLUX.3-image-klein-base --prompt "A lighthouse on a cliff at dawn" \
+    --height 4096 --width 4096 --ulysses_degree 8 \
+    --attention_backend aiter_fp8_sol --cross_attention_backend aiter --use_torch_compile
 ```
 
 ### FlyDSL FP8 behavior

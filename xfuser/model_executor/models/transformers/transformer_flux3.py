@@ -37,7 +37,7 @@ class xFuserFlux3AttnProcessor:
 
     ``text_only`` marks the text stage's instance, which attends the prompt alone
     and runs on the cross-attention backend: the main backend unless
-    ``--cross_attention_backend`` names another. ``exact_kv_tokens`` marks the joint
+    ``--cross_attention_backend`` names another. ``exact_tokens`` marks the joint
     stage's prompt tokens, over the padded sequence, for backends that select KV
     blocks: their keys and their own query rows are computed exactly. Every other
     backend ignores it.
@@ -47,7 +47,7 @@ class xFuserFlux3AttnProcessor:
         self.valid_kv_len: Optional[int] = None
         self.local = False
         self.text_only = text_only
-        self.exact_kv_tokens: Optional[torch.Tensor] = None
+        self.exact_tokens: Optional[torch.Tensor] = None
 
     def _backend(self):
         # The prompt is 80-512 tokens: too few KV blocks for a backend that selects blocks, so a
@@ -55,12 +55,12 @@ class xFuserFlux3AttnProcessor:
         return get_runtime_state().get_cross_attention_backend() if self.text_only else None
 
     def _attention_kwargs(self) -> Optional[Dict[str, Any]]:
-        if self.valid_kv_len is None and self.exact_kv_tokens is None:
+        if self.valid_kv_len is None and self.exact_tokens is None:
             return None
         return {
             "valid_kv_len": self.valid_kv_len,
-            EXACT_KV_TOKENS_KEY: self.exact_kv_tokens,
-            EXACT_Q_TOKENS_KEY: self.exact_kv_tokens,
+            EXACT_KV_TOKENS_KEY: self.exact_tokens,
+            EXACT_Q_TOKENS_KEY: self.exact_tokens,
         }
 
     def __call__(
@@ -194,7 +194,7 @@ class xFuserFlux3Transformer2DWrapper(Flux3Transformer2DModel):
         self._image_processor = xFuserFlux3AttnProcessor()
         self._image_cond_processor = xFuserFlux3AttnProcessor()
         self._joint_processor = xFuserFlux3AttnProcessor()
-        self._exact_tokens_key, self._exact_tokens = None, None
+        self._exact_tokens: Dict[Tuple[int, int, torch.device], torch.Tensor] = {}
         stages = (
             (self.txt_mode_blocks, self._txt_processor),
             (self.mode_blocks["image"], self._image_processor),
@@ -224,14 +224,17 @@ class xFuserFlux3Transformer2DWrapper(Flux3Transformer2DModel):
         # The prompt is a few percent of the joint sequence. A backend that selects KV blocks keeps
         # its keys exact for every query, and computes its own rows exactly: they become the text
         # stream every later joint block conditions on.
-        # The same tensor is reused while the shape holds: the CUDA-graph-compiled joint blocks
-        # read it as a static input, and a new tensor would make every block re-record its graph.
+        # One tensor per shape, kept: the CUDA-graph-compiled joint blocks read it as a static
+        # input, and a new tensor would make every block re-record its graph. Sequential CFG
+        # alternates two shapes when the prompts' text windows differ (a long prompt against the
+        # empty negative one).
         key = (txt_seq_len, padded_len, device)
-        if self._exact_tokens_key != key:
+        exact_tokens = self._exact_tokens.get(key)
+        if exact_tokens is None:
             exact_tokens = torch.zeros(padded_len, dtype=torch.bool, device=device)
             exact_tokens[:txt_seq_len] = True
-            self._exact_tokens_key, self._exact_tokens = key, exact_tokens
-        return self._exact_tokens
+            self._exact_tokens[key] = exact_tokens
+        return exact_tokens
 
     def _run_mode_blocks(
         self,
@@ -361,7 +364,7 @@ class xFuserFlux3Transformer2DWrapper(Flux3Transformer2DModel):
         sp_world_size = get_sequence_parallel_world_size()
         pad = (sp_world_size - joint_seq_len % sp_world_size) % sp_world_size
         self._joint_processor.valid_kv_len = joint_seq_len if pad else None
-        self._joint_processor.exact_kv_tokens = self._joint_exact_tokens(
+        self._joint_processor.exact_tokens = self._joint_exact_tokens(
             txt_seq_len, joint_seq_len + pad, joint_states.device
         )
         joint_states, joint_mod, joint_rotary_emb = self._shard(

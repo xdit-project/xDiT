@@ -878,7 +878,8 @@ def sol_attn_bhsd(
 
     exact_query_tokens is the query-side counterpart, a (seqlen_q,) bool mask or longer: every
     query tile holding a flagged row computes all of its KV blocks exactly. For rows another part
-    of the model reads back, such as a prompt that conditions the blocks after it.
+    of the model reads back, such as a prompt that conditions the blocks after it. The whole tile
+    goes dense with its flagged rows, so flag a contiguous run: scattered rows each bring a tile.
 
     block_tile is the (q_tile, kv_tile) to route and dispatch at, from --sparseattn_block_size.
     None takes the recipe's default.

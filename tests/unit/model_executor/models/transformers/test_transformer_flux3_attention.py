@@ -32,15 +32,15 @@ def _ids(height, width):
     return torch.stack(grid, dim=-1).reshape(-1, 4).float()
 
 
-def _inputs():
+def _inputs(text_len=TEXT_LEN):
     generator = torch.Generator().manual_seed(0)
     image_len = IMAGE_GRID[0] * IMAGE_GRID[1]
     return {
         "hidden_states": torch.randn(1, image_len, 8, generator=generator),
-        "encoder_hidden_states": torch.randn(1, TEXT_LEN, 12, generator=generator),
+        "encoder_hidden_states": torch.randn(1, text_len, 12, generator=generator),
         "timestep": torch.tensor([0.7]),
         "img_ids": _ids(*IMAGE_GRID),
-        "txt_ids": torch.stack([torch.zeros(TEXT_LEN)] * 3 + [torch.arange(TEXT_LEN).float()], dim=-1),
+        "txt_ids": torch.stack([torch.zeros(text_len)] * 3 + [torch.arange(text_len).float()], dim=-1),
     }
 
 
@@ -66,14 +66,15 @@ def test_each_stage_gets_its_backend_and_the_joint_stage_marks_the_prompt(monkey
     monkeypatch.setattr(transformer_flux3, "gather_and_unpad", lambda x, pad, dim: x)
     wrapper = transformer_flux3.xFuserFlux3Transformer2DWrapper(**TINY).eval()
 
+    # Sequential CFG: the prompt and the shorter negative prompt alternate.
     with torch.no_grad():
-        wrapper(**_inputs())
-        wrapper(**_inputs())
+        for text_len in (TEXT_LEN, TEXT_LEN - 2, TEXT_LEN, TEXT_LEN - 2):
+            wrapper(**_inputs(text_len))
 
-    assert len(steps) == 2, "one step per forward"
+    assert len(steps) == 4, "one step per forward"
     text = {id(block.attn) for block in wrapper.txt_mode_blocks}
     joint = {id(block.attn) for block in wrapper.single_transformer_blocks}
-    first_forward = calls[: len(calls) // 2]
+    first_forward = calls[: len(calls) // 4]
     for attn, backend, kwargs in first_forward:
         if id(attn) in text:
             assert backend is AttentionBackendType.AITER, "the text stage runs on the cross-attention backend"
@@ -91,5 +92,10 @@ def test_each_stage_gets_its_backend_and_the_joint_stage_marks_the_prompt(monkey
             )
     assert {id(attn) for attn, _, _ in first_forward} >= text | joint
     # The compiled joint blocks capture CUDA graphs that read the mask as a static input.
-    masks = {id(kwargs[EXACT_KV_TOKENS_KEY]) for attn, _, kwargs in calls if id(attn) in joint}
-    assert len(masks) == 1, "every forward of one shape hands over the same mask tensor"
+    masks = {}
+    for attn, _, kwargs in calls:
+        if id(attn) in joint:
+            mask = kwargs[EXACT_KV_TOKENS_KEY]
+            masks.setdefault(int(mask.sum()), set()).add(id(mask))
+    assert set(masks) == {TEXT_LEN, TEXT_LEN - 2}
+    assert all(len(ids) == 1 for ids in masks.values()), "each shape keeps one mask tensor across forwards"

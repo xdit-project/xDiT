@@ -69,8 +69,8 @@ class _Flux3Model(xFuserModel):
         # The text-mode blocks attend the prompt alone (80-512 tokens) on this backend.
         cross_attention_backend=True,
         # The image, reference and joint stages are long sequences at high resolution (2048² is
-        # ~16.4k image tokens), what Sol-Attn's routing is for. The joint blocks keep the
-        # prompt's KV blocks exact.
+        # ~16.4k image tokens), what Sol-Attn's routing is for. The joint blocks compute the
+        # prompt's KV blocks and its own query rows exactly.
         supports_sol_attention_backends=True,
     )
     # Shared by both checkpoints, which add their model and output names with replace().

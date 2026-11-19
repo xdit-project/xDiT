@@ -6,6 +6,15 @@ import numpy as np
 import PIL.Image
 import torch
 
+# H.264 encoders in order of preference. libx264 is GPL. Some FFmpeg builds
+# are LGPL-only and do not include it. These builds can supply libopenh264.
+_H264_ENCODERS = ("libx264", "libopenh264")
+
+# libopenh264 does not use crf or preset. In "buffer" rate-control mode with the
+# High profile, quality is near x264 CRF 12. Its defaults give a 2 Mbps
+# Constrained Baseline stream instead.
+_OPENH264_OPTIONS = {"profile": "high", "rc_mode": "buffer"}
+
 
 def _import_av():
     try:
@@ -15,6 +24,19 @@ def _import_av():
             "PyAV is required to encode videos with audio. Install it with `pip install av`."
         ) from error
     return av
+
+
+def _select_video_codec(av_module) -> str:
+    for codec in _H264_ENCODERS:
+        if codec in av_module.codecs_available:
+            return codec
+    raise RuntimeError(f"No H.264 encoder is available in the FFmpeg that PyAV uses. Expected one of {_H264_ENCODERS}.")
+
+
+def _video_codec_options(video_codec: str, crf: int, preset: str) -> dict[str, str]:
+    if video_codec == "libopenh264":
+        return dict(_OPENH264_OPTIONS)
+    return {"crf": str(crf), "preset": preset}
 
 
 def _prepare_audio_stream(container, audio_sample_rate: int, audio_bitrate: int):
@@ -70,7 +92,7 @@ def encode_video_with_audio(
     audio: torch.Tensor | None = None,
     audio_sample_rate: int | None = None,
     video_chunks_number: int = 1,
-    video_codec: str = "libx264",
+    video_codec: str | None = None,
     pixel_format: str = "yuv420p",
     crf: int = 12,
     preset: str = "medium",
@@ -80,8 +102,15 @@ def encode_video_with_audio(
 
     Tensor inputs are expected to be uint8 RGB frames in ``[F, H, W, C]`` format.
     NumPy inputs may instead contain normalized floating-point values in ``[0, 1]``.
+
+    If ``video_codec`` is ``None``, the function uses ``libx264`` when it is available.
+    If not, it uses ``libopenh264``. ``crf`` and ``preset`` apply only to codecs that
+    support them. ``libopenh264`` ignores them and uses High profile with buffer
+    rate control.
     """
     av = _import_av()
+    if video_codec is None:
+        video_codec = _select_video_codec(av)
 
     if isinstance(video, list):
         video = torch.from_numpy(np.stack([np.asarray(frame) for frame in video]))
@@ -101,10 +130,7 @@ def encode_video_with_audio(
     video_stream.width = width
     video_stream.height = height
     video_stream.pix_fmt = pixel_format
-    video_stream.options = {
-        "crf": str(crf),
-        "preset": preset,
-    }
+    video_stream.options = _video_codec_options(video_codec, crf, preset)
 
     audio_stream = None
     if audio is not None:

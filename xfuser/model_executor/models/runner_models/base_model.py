@@ -1042,6 +1042,38 @@ class xFuserModel(abc.ABC):
     def _get_compiled_pipe_components(self) -> List[str]:
         return ["transformer"]
 
+    def _fuses_qkv_projections(self) -> bool:
+        """Whether the compiled components compute Q, K and V with one fused projection.
+
+        One GEMM three times as wide replaces three, which is faster where a rank holds few
+        tokens and GEMMs that small run far below the GPU's throughput. A runner opts in once
+        its attention processors read the fused projection and its components'
+        `fuse_qkv_projections()` fuses only plain linears and shares their weights
+        (`fuse_plain_qkv_projections`), so that fusing costs no memory.
+        """
+        return False
+
+    def _fuse_qkv_projections(self) -> None:
+        """Fuse the Q/K/V projections of the compiled components, unless their weights are sharded or offloaded."""
+        config = self.config
+        if (
+            config.fully_shard_degree > 1
+            or config.memory_efficient_sharding
+            or config.enable_group_cpu_offload
+            or config.enable_sequential_cpu_offload
+            or config.enable_model_cpu_offload
+        ):
+            return
+        fused = 0
+        for name in self._get_compiled_pipe_components():
+            component = getattr(self.pipe, name)
+            component.fuse_qkv_projections()
+            fused += sum(bool(getattr(module, "fused_projections", False)) for module in component.modules())
+        if fused:
+            # Hand the separate projections' own copies back to the device.
+            torch.cuda.empty_cache()
+            log(f"Fused the Q/K/V projections of {fused} attention layers.")
+
     def _block_level_offload_components(self) -> List[str]:
         """Components that group CPU offload splits block by block.
 
@@ -1601,6 +1633,8 @@ class xFuserModel(abc.ABC):
         """Hook for any post model-load and state initialization"""
 
         self.loader.materialize_pipeline()
+        if self._fuses_qkv_projections():
+            self._fuse_qkv_projections()
 
         if self.config.use_hybrid_attn_schedule:
             self._setup_hybrid_attn_schedule(input_args)

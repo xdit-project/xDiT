@@ -97,6 +97,10 @@ class xFuserFluxModel(xFuserModel):
             return "default"
         return "reduce-overhead"
 
+    def _fuses_qkv_projections(self) -> bool:
+        # A PipeFusion stage holds only its own blocks; RDNA4 is not measured.
+        return self.config.pipefusion_parallel_degree <= 1 and not PACKAGES_CHECKER._on_rdna4()
+
     def _load_model(self) -> DiffusionPipeline:
         if self.config.pipefusion_parallel_degree > 1:
             dtype = torch.bfloat16 if PACKAGES_CHECKER._on_rdna4() else torch.float16
@@ -235,6 +239,10 @@ class xFuserFluxKontextModel(xFuserModel):
         if PACKAGES_CHECKER._on_rdna4() or self.config.cache_method:
             return "default"
         return "reduce-overhead"
+
+    def _fuses_qkv_projections(self) -> bool:
+        # RDNA4 is not measured.
+        return not PACKAGES_CHECKER._on_rdna4()
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import FluxKontextPipeline

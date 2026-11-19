@@ -247,8 +247,10 @@ are callable and what their path descendants are.
    not be counted properly due to the counter reset.
 
 **CP90.** `:i` refers to the global counter of its element. Example: `a.b:2.c.d[2]:3` selects a call of `d[2]`
-when its counter is 3 and the counter of `b` is 2. During the run of pipelines in A or B, the harness saves the inputs
-of each selected call (in A only), random-number states (in A only) and the outputs after the call returns.
+when its counter is 3 and the counter of `b` is 2. During the run of pipelines in A or B, the harness
+writes the inputs of each selected call, random-number states and the outputs after the call returns
+to data files (it doesn't store them in memory). These data files are read later for replays and
+checks. Only the corresponding test case function can delete these data files.
 
 **CP100.** An address contains the call numbers of all callable elements of a path that the
 harness tracks. The first path element, such as `pipe`, `second_pipe` or `refiner_pipe` is
@@ -323,6 +325,17 @@ warning that names the instances, the ranks with the flag and their call identif
 the outcome are.
 
 **IA60.** REPLAY_MISMATCH always stops the case on all ranks (FC90.4) and fails the test at once.
+
+**IA61.** It's an accepted limitation of UC10 that under a policy that permits non-determinism, fidelity
+check failures (IA40) might be hidden while false REPLAY_MISMATCH might appear.
+*Rationale:* Without invoking HL70 we can't make tolerance tests possible for such a component.
+a. Suppose a component depends on hidden state, so replay 1 differs from the capture, and
+it is also nondeterministic, so replay 2 differs from replay 1. Then the status is
+NON_DETERMINISTIC, and IA80 counts it as passed. The fidelity failure is hidden.
+b. The opposite error also happens. For a validly nondeterministic component, replay 1
+and replay 2 can be equal and differ from the capture. IA60 then always fails the test.
+So the override does not change every nondeterminism result "from a failure to a
+warning", as UC10 says.
 
 **IA70.** UNSUPPORTED marks a known limit of the harness:
 1. If the harness cannot handle an argument (fp8 or MX tensors, types that it cannot serialize), only the
@@ -442,6 +455,7 @@ does not know this in advance.
 5. the number of replays of the inputs of A in B;
 6. the failure of a case in B when the pipeline run of B on any rank did not reach a call that A captured
    (NOT_REACHED_IN_B). B makes no replays of the case (FC100).
+A rank causing a decision and a rank following the decision must write the details to their log files.
 
 **FC100.** If the call addresses of a case differ between the ranks, the case gets FAILED_TO_START on all ranks.
 B makes no replays of a case that it skips before the replays.
@@ -480,7 +494,7 @@ known pattern and inferring participating ranks from it) and appends final statu
 for cases that must run, but didn't finish according to the file records. This enables crashes/hangs detection as per
 TD110, and sets FAILED_TO_START for cases that didn't run (FC20.2). After the launcher
 reconstructs the final states of all cases on all ranks from logs, it aggregates them by case and call,
-and writes final case state report to a corresponding `instance.jsonl` file, where for
+and writes final case state report to a corresponding `instance.json` file, where for
 each case, it writes all information a case results reader in pytest would need
 for further work (applicable rank statuses, determinism flags, call identifiers and
 everything else the reader would need). While aggregating, it must not assume that for

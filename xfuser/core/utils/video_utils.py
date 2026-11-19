@@ -20,9 +20,7 @@ def _import_av():
     try:
         import av
     except ImportError as error:
-        raise ImportError(
-            "PyAV is required to encode videos with audio. Install it with `pip install av`."
-        ) from error
+        raise ImportError("PyAV is required to encode videos with audio. Install it with `pip install av`.") from error
     return av
 
 

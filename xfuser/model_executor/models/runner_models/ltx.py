@@ -20,6 +20,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     LoadRoute,
+    STANDARD_LOAD_ROUTES,
 )
 
 from xfuser.model_executor.cache import (
@@ -477,6 +478,8 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
     )
 
     def _load_model(self) -> DiffusionPipeline:
+        if not self.config.gemm_quantization_spec.is_pure("none") and self.loader.replicated_broadcast_load():
+            raise ValueError("LTX-2.5 distilled replicated loading currently requires unquantized GEMMs.")
         from diffusers import (
             LTX2ImageToVideoPipeline,
             LTX2LatentUpsamplePipeline,
@@ -488,13 +491,16 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
             xFuserLTX2VideoTransformer3DWrapper,
         )
 
-        transformer_cls = xFuserLTX2VideoTransformer3DWrapper
-
-        transformer = transformer_cls.from_pretrained(
-            self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            **self.loader.checkpoint_request(self._TRANSFORMER_SUBFOLDER).from_pretrained_kwargs(),
-        )
+        if self.config.memory_efficient_replicated_load:
+            transformer = self.loader.load_transformer(
+                xFuserLTX2VideoTransformer3DWrapper, subfolder=self._TRANSFORMER_SUBFOLDER
+            )
+        else:
+            transformer = xFuserLTX2VideoTransformer3DWrapper.from_pretrained(
+                self.settings.model_name,
+                torch_dtype=torch.bfloat16,
+                **self.loader.checkpoint_request(self._TRANSFORMER_SUBFOLDER).from_pretrained_kwargs(),
+            )
 
         pipe_cls = LTX2ImageToVideoPipeline if self.config.task == "i2v" else LTX2Pipeline
         pipe = pipe_cls.from_pretrained(
@@ -780,12 +786,12 @@ class xFuserLTX25DistilledVideoModel(_xFuserLTX25VideoModelBase):
         guidance_scale=1.0,
         negative_prompt=DEFAULT_NEGATIVE_PROMPT,
     )
-    # The custom diffusion-decoder pipeline is not wired into shared/meta loading.
+    # Only the transformer is filled by the shared loader; decoder, upsampler and text encoder stay eager.
     load_support = LoadSupport(
-        meta_transformers=(),
+        meta_transformers=("transformer",),
         meta_text_encoders=(),
-        replicated_meta=False,
-        routes=LoadRoute.NONE,
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
     )
     settings = ModelSettings(
         model_name="Lightricks/LTX-2.5-Diffusers",
@@ -796,6 +802,12 @@ class xFuserLTX25DistilledVideoModel(_xFuserLTX25VideoModelBase):
         valid_tasks=["t2v", "i2v"],
         fp8_gemm_module_list=["transformer.transformer_blocks"],
         fp4_gemm_module_list=["transformer.transformer_blocks"],
+        fsdp_strategy={
+            "transformer": {
+                "wrap_attrs": ["transformer_blocks"],
+                "dtype": torch.bfloat16,
+            },
+        },
     )
 
 

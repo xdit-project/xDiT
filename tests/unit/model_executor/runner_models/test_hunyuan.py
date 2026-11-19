@@ -1,3 +1,7 @@
+import sys
+from types import ModuleType
+from unittest import mock
+
 import pytest
 
 
@@ -71,3 +75,86 @@ def test_hunyuanvideo15_distilled_keeps_its_own_checkpoint(build):
     name = f"{COMMUNITY}-720p_i2v_distilled"
 
     assert build(name, "i2v").settings.model_name == name
+
+
+@pytest.mark.parametrize("replicated", [False, True])
+@pytest.mark.parametrize("task", ["t2v", "i2v"])
+def test_hunyuanvideo15_load_preserves_task_and_transformer_identity(build, monkeypatch, replicated, task):
+    import diffusers
+    import torch
+
+    model = build("Hunyuanvideo-1.5", task, memory_efficient_replicated_load=replicated)
+    transformer = object()
+    wrapper = mock.Mock()
+    wrapper.from_pretrained.return_value = transformer
+    wrapper_module = ModuleType("xfuser.model_executor.models.transformers.transformer_hunyuan_video15")
+    wrapper_module.xFuserHunyuanVideo15Transformer3DWrapper = wrapper
+    monkeypatch.setitem(sys.modules, wrapper_module.__name__, wrapper_module)
+    pipeline = mock.Mock()
+    other_pipeline = mock.Mock()
+    name = "HunyuanVideo15Pipeline" if task == "t2v" else "HunyuanVideo15ImageToVideoPipeline"
+    other_name = "HunyuanVideo15ImageToVideoPipeline" if task == "t2v" else "HunyuanVideo15Pipeline"
+    monkeypatch.setattr(diffusers, name, pipeline, raising=False)
+    monkeypatch.setattr(diffusers, other_name, other_pipeline, raising=False)
+    monkeypatch.setattr(model.loader, "load_transformer", mock.Mock(return_value=transformer))
+
+    result = model._load_model()
+
+    assert result is pipeline.from_pretrained.return_value
+    pipeline.from_pretrained.assert_called_once_with(
+        pretrained_model_name_or_path=f"{COMMUNITY}-720p_{task}",
+        transformer=transformer,
+        torch_dtype=torch.bfloat16,
+    )
+    other_pipeline.from_pretrained.assert_not_called()
+    if replicated:
+        model.loader.load_transformer.assert_called_once_with(wrapper, subfolder="transformer")
+        wrapper.from_pretrained.assert_not_called()
+    else:
+        model.loader.load_transformer.assert_not_called()
+        wrapper.from_pretrained.assert_called_once_with(
+            f"{COMMUNITY}-720p_{task}",
+            torch_dtype=torch.bfloat16,
+            **model.loader.checkpoint_request("transformer").from_pretrained_kwargs(),
+        )
+
+
+def test_hunyuanvideo15_replicated_preflight_accepts_unquantized_sequence_parallel(build, monkeypatch):
+    from xfuser.model_executor.models.runner_models.loading import meta_load
+    from xfuser.model_executor.models.runner_models.loading.contracts import MaterializationMode
+
+    monkeypatch.setattr(meta_load, "_is_cuda", lambda: False)
+    model = build("Hunyuanvideo-1.5", "t2v", ulysses_degree=8, memory_efficient_replicated_load=True)
+
+    model.loader.preflight(world_size=8)
+
+    assert model.loader.load_contract.materialization_mode is MaterializationMode.REPLICATED_META
+
+
+@pytest.mark.parametrize(
+    "name, attention_backend",
+    [("Hunyuanvideo-1.5-Distilled", "SDPA"), ("Hunyuanvideo-1.5-Sparse", "FLEX_BLOCK_ATTN")],
+)
+def test_hunyuanvideo15_specialized_weights_refuse_replicated_preflight(build, name, attention_backend, monkeypatch):
+    from xfuser.model_executor.models.runner_models.loading import meta_load
+    from xfuser.model_executor.models.runner_models.loading.contracts import UnsupportedLoadContract
+
+    monkeypatch.setattr(meta_load, "_is_cuda", lambda: False)
+    model = build(name, "i2v", memory_efficient_replicated_load=True, attention_backend=attention_backend)
+
+    with pytest.raises(UnsupportedLoadContract, match="does not support replicated_meta"):
+        model.loader.preflight(world_size=8)
+
+
+def test_hunyuanvideo15_replicated_load_refuses_fp8_before_allocation(build, monkeypatch):
+    from types import SimpleNamespace
+    from xfuser.model_executor.models.runner_models.loading import meta_load
+
+    model = build("Hunyuanvideo-1.5", "t2v", memory_efficient_replicated_load=True, use_fp8_gemms=True)
+    monkeypatch.setattr(meta_load, "get_world_group", lambda: SimpleNamespace(world_size=8))
+    with pytest.raises(ValueError, match="requires unquantized GEMMs"):
+        model._load_model()
+
+
+def test_hunyuanvideo15_single_rank_flag_keeps_quantized_eager_load(build):
+    build("Hunyuanvideo-1.5", "t2v", memory_efficient_replicated_load=True, use_fp8_gemms=True)

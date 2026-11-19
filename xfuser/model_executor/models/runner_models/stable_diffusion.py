@@ -16,7 +16,8 @@ from xfuser.model_executor.models.runner_models.base_model import (
 )
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
-    LoadRoute,
+    STANDARD_LOAD_ROUTES,
+    uses_pipeline_stage_meta,
 )
 
 
@@ -27,12 +28,11 @@ class xFuserStableDiffusionModel(xFuserModel):
     # From the registered checkpoint's transformer config.
     attention_heads = 38
 
-    # The composition wrapper has no config-only transformer construction seam.
     load_support = LoadSupport(
-        meta_transformers=(),
+        meta_transformers=("transformer",),
         meta_text_encoders=(),
         replicated_meta=False,
-        routes=LoadRoute.NONE,
+        routes=STANDARD_LOAD_ROUTES,
     )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
@@ -85,23 +85,33 @@ class xFuserStableDiffusionModel(xFuserModel):
 
     def _validate_config(self, config: xFuserArgs) -> None:
         super()._validate_config(config)
-        if config.pipefusion_parallel_degree > 1 and config.memory_efficient_replicated_load:
-            raise ValueError(
-                "SD3.5 PipeFusion does not support "
-                "--memory_efficient_replicated_load because its composition "
-                "wrapper cannot construct a stage-local transformer on meta."
-            )
+        if uses_pipeline_stage_meta(config) and config.fully_shard_degree > 1:
+            raise ValueError("SD3.5 stage-local replicated loading does not support FSDP.")
+        if config.memory_efficient_sharding and config.fully_shard_degree > 1:
+            raise ValueError("SD3.5 does not support --memory_efficient_sharding.")
+        if uses_pipeline_stage_meta(config) and config.use_fp8_gemms:
+            raise ValueError("SD3.5 replicated loading does not support quantized GEMMs.")
 
     def _load_model(self) -> DiffusionPipeline:
-        # SD3's wrapper is composition-style (wraps a transformer instance) and lacks
-        # ConfigMixin.load_config, so it cannot be built on meta like flux/z_image. Load real on
-        # every rank; the per-rank AITER fp8 walk quantizes the real weights CPU->GPU afterwards.
         dtype = torch.float16 if self.config.pipefusion_parallel_degree > 1 else torch.bfloat16
-        return xFuserStableDiffusion3Pipeline.from_pretrained(
+        transformer = None
+        pipeline_kwargs = {}
+        if uses_pipeline_stage_meta(self.config):
+            from diffusers import SD3Transformer2DModel
+
+            transformer, pipeline_kwargs = self.loader.plan_pipefusion_components(
+                SD3Transformer2DModel,
+                torch_dtype=dtype,
+            )
+        pipe = xFuserStableDiffusion3Pipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             engine_config=self.engine_config,
             torch_dtype=dtype,
+            **pipeline_kwargs,
         )
+        if transformer is not None:
+            self.loader.mark_pipeline_stage_blockwise(pipe.transformer, transformer)
+        return pipe
 
     def _get_compiled_pipe_components(self):
         return ["transformer", "text_encoder", "text_encoder_2", "text_encoder_3"]

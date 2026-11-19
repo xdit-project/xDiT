@@ -759,9 +759,10 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
+        device = self._local_onload_device() if self.config.enable_model_cpu_offload else self.pipe.device
         if self._DISTILLED:
-            self.upsample_pipe.to(self.pipe.device)
-        self.decode_pipe.diffusion_decoder.to(self.pipe.device)
+            self.upsample_pipe.to(device)
+        self.decode_pipe.diffusion_decoder.to(device)
 
 
 @register_model("Lightricks/LTX-2.5-Diffusers")

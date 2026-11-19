@@ -133,3 +133,33 @@ def test_legacy_callback_replacing_latents_is_reported_as_ignored():
 def test_legacy_callback_requesting_an_unavailable_tensor_is_an_error():
     with pytest.raises(ValueError, match="negative_prompt_embeds"):
         _step_end(object(), lambda *a: {}, ["latents", "negative_prompt_embeds"], [torch.zeros(1, 4, 2, 8)])
+
+
+@pytest.mark.parametrize("first_stage", [True, False])
+def test_sync_latent_handoff_broadcasts_from_last_stage(monkeypatch, first_stage):
+    events = []
+    latents = torch.ones(1, 2) if not first_stage else torch.ones(1, 3)
+    metadata = ((1, 2), torch.float32)
+
+    def broadcast_object(value, src):
+        events.append(("metadata", value, src))
+        return metadata
+
+    def broadcast(value, src):
+        events.append(("tensor", tuple(value.shape), src))
+        return value
+
+    group = SimpleNamespace(
+        broadcast_object=broadcast_object,
+        broadcast=broadcast,
+    )
+    monkeypatch.setattr(base_pipeline, "get_pipeline_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(base_pipeline, "get_pp_group", lambda: group)
+    monkeypatch.setattr(base_pipeline, "is_pipeline_first_stage", lambda: first_stage)
+    monkeypatch.setattr(base_pipeline, "is_pipeline_last_stage", lambda: not first_stage)
+
+    result = xFuserPipelineBaseWrapper._pipefusion_handoff_sync_latents(None, latents)
+
+    expected_metadata = None if first_stage else metadata
+    assert events == [("metadata", expected_metadata, 1), ("tensor", (1, 2), 1)]
+    assert result.shape == (1, 2)

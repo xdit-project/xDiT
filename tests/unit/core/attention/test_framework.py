@@ -403,27 +403,6 @@ def test_resolving_a_spec_resolves_its_fallback():
         assert spec._fallback._resolved is not None
 
 
-@pytest.mark.parametrize(
-    "accepts, fallback_accepts, applies",
-    [
-        pytest.param(MASKED_VARLEN & HEAD_DIM(128), None, True, id="masked-varlen"),
-        pytest.param(NO_VARLEN, None, False, id="no-varlen"),
-        pytest.param(MASKED_VARLEN & HEAD_DIM(128), MASKED_VARLEN, True, id="fallback-applies-it-too"),
-        pytest.param(MASKED_VARLEN & HEAD_DIM(128), NO_VARLEN, False, id="fallback-drops-it"),
-    ],
-)
-def test_a_backend_applies_attn_mask_only_if_every_kernel_it_dispatches_to_does(accepts, fallback_accepts, applies):
-    """usp keeps the selected backend for a masked call only when it applies the
-    mask, and run() hands the calls the selected kernel refuses, mask and all,
-    to its fallback."""
-    fallback = None if fallback_accepts is None else AttentionBackendType.SDPA
-    specs = [_spec(AttentionBackendType.AITER_BF16, accepts=accepts, fallback=fallback)]
-    if fallback is not None:
-        specs.append(_spec(AttentionBackendType.SDPA, accepts=fallback_accepts))
-    with registry.using(specs):
-        assert registry.get(AttentionBackendType.AITER_BF16).applies_attn_mask is applies
-
-
 def test_a_warm_spec_does_not_rewalk_its_fallback_chain():
     """The chain is walked after the cache check, so resolving twice costs one
     attribute read. Safe because _resolved is set only after the fallback is,
@@ -513,6 +492,22 @@ def test_a_fallback_cannot_sit_beside_a_fact_it_would_route_around(field, value)
     primary, fallback, _ = _pair(**{field: value})
     with pytest.raises(ValueError, match=field):
         registry.build_registry([_module("pkg.a", primary, fallback)])
+
+
+def test_an_option_no_selected_backend_reads_is_refused():
+    """A backend's option set on a run that selects none of its readers would do nothing."""
+    from xfuser.config import xFuserArgs
+
+    specs = [_spec(AttentionBackendType.SDPA), _spec(AttentionBackendType.AITER_FP8_SOL, options=("solattn_beta",))]
+    sdpa, sol = AttentionBackendType.SDPA, AttentionBackendType.AITER_FP8_SOL
+
+    with registry.using(specs):
+        with pytest.raises(ValueError, match="--solattn_beta applies only to the AITER_FP8_SOL"):
+            registry.refuse_unread_options(xFuserArgs(model="m", solattn_beta=0.25), [sdpa])
+        registry.refuse_unread_options(xFuserArgs(model="m", solattn_beta=0.25), [sdpa, sol])
+        # Unset, or set to its default, the option asks for nothing.
+        registry.refuse_unread_options(xFuserArgs(model="m"), [sdpa])
+        registry.refuse_unread_options(xFuserArgs(model="m", solattn_beta=0.5), [sdpa])
 
 
 def test_get_unregistered_names_the_backend():
@@ -1215,3 +1210,22 @@ def test_dense_mha_v4_serves_packed_keys_but_sparge_does_not():
 
     sparge = registry.get(AttentionBackendType.AITER_FP8_SPARGE)
     assert sparge.rejects(t, t, t, call) is not None
+
+
+@pytest.mark.parametrize("with_mask", [False, True])
+def test_a_backend_can_apply_dense_masks_and_accept_unmasked_packing(with_mask):
+    from xfuser.core.attention.backends.sdpa.kernel import sdpa
+
+    query = torch.zeros(1, 1, 1, 8)
+    key = torch.zeros(1, 1, 2, 8)
+    value = torch.stack([torch.ones(8), torch.full((8,), 100.0)]).view(1, 1, 2, 8)
+    packing = VarlenPacking(torch.tensor([0, 1]), torch.tensor([0, 2], dtype=torch.int32), 2)
+    kwargs = {"indices_k": packing.indices_k, "cu_seqlens_k": packing.cu_seqlens_k, "max_seqlen_k": 2}
+    call = (
+        AttnCall(attention_kwargs={"attn_mask": torch.tensor([[[[True, False]]]])})
+        if with_mask
+        else AttnCall(varlen=packing, attention_kwargs=kwargs)
+    )
+    spec = _spec(AttentionBackendType.AITER_BF16, impl=sdpa, accepts=ANY_CALL, applies_attn_mask=True)
+    output, _ = spec.run(query, key, value, call)
+    torch.testing.assert_close(output, torch.full_like(query, 1.0 if with_mask else 50.5))

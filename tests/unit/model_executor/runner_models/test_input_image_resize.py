@@ -24,6 +24,9 @@ from xfuser.model_executor.models.runner_models.flux import (
 from xfuser.model_executor.models.runner_models.hunyuan import (
     xFuserHunyuanvideo15Model,
 )
+from xfuser.model_executor.models.runner_models.skyreels_v2 import (
+    xFuserSkyReelsV2I2VModel,
+)
 from xfuser.model_executor.models.runner_models.wan import (
     xFuserWan21I2VModel,
     xFuserWan22I2VModel,
@@ -61,6 +64,7 @@ def _conditioning_image(input_args):
         (xFuserHunyuanvideo15Model, "i2v"),
         (xFuserCosmos3SuperModel, None),
         (xFuserCosmos3NanoModel, None),
+        (xFuserSkyReelsV2I2VModel, None),
     ],
     ids=lambda value: getattr(value, "__name__", str(value)),
 )

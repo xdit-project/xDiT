@@ -36,7 +36,7 @@ from xfuser.model_executor.layers.attention_mask import (
 )
 from xfuser.logger import init_logger
 from xfuser.core.attention import registry as attention_registry
-from xfuser.core.attention.spec import VarlenPacking
+from xfuser.core.attention.spec import AttentionBackendType, VarlenPacking
 from xfuser.core.attention.spec import AttnCall
 from xfuser.core.attention.spec import Sparsity
 from xfuser.core.distributed.fp8_comms import (
@@ -372,6 +372,29 @@ def _has_kv_cache(attn_layer) -> bool:
     return attn_layer is not None and get_cache_manager().has_cache_entry(attn_layer)
 
 
+def masked_attention_backend(query, key, value, attention_kwargs, backend=None):
+    """Keep the selected backend when it honors the mask; otherwise select SDPA.
+
+    Call before communication or quantization. Shape constraints remain in dispatch.
+    """
+    kwargs = attention_kwargs or {}
+    if kwargs.get("attn_mask") is None or kwargs.get("indices_k") is not None:
+        return backend
+    selected = backend if backend is not None else get_runtime_state().attention_backend
+    spec = attention_registry.get(selected)
+    while spec is not None:
+        if spec.applies_attn_mask:
+            return selected
+        spec = spec._fallback
+    if (
+        any(tensor.dtype in _FP8_DTYPES for tensor in (query, key, value))
+        or kwargs.get("pre_quantized", False)
+        or any(kwargs.get(name) is not None for name in ("q_descale", "k_descale", "v_descale"))
+    ):
+        raise NotImplementedError("Masked SDPA fallback does not support prequantized inputs")
+    return AttentionBackendType.SDPA
+
+
 def _serves_packed_keys(backend, key, attention_kwargs) -> bool:
     """Whether the selected backend will honour the packing itself."""
     spec = attention_registry.find(backend)
@@ -508,6 +531,25 @@ def key_padding_attention_kwargs(attention_kwargs, key_padding):
     else:
         mask = {"attn_mask": key_padding}
     return {**(attention_kwargs or {}), **mask, "valid_kv_len": None}
+
+
+def packed_key_padding_attention_kwargs(packing, batch_size: int, keys: int):
+    """``attention_kwargs`` that keep a batch to the keys ``packing`` selects, on the selected backend.
+
+    ``packing`` holds per-row varlen keys (``indices_k`` into the ``batch_size * keys``
+    keys USP attends to, ``cu_seqlens_k``, ``max_seqlen_k``), as a model that knows its
+    prompt lengths on the host builds them. A backend that applies ``attn_mask`` gets the
+    ``[batch, 1, 1, keys]`` mask of the same keys and no packing; one that attends over
+    packed keys gets the packing. Any other backend raises, as for ``key_padding_mask``.
+    The packing leaves out the sequence-parallel pad, so ``valid_kv_len`` is dropped.
+    """
+    spec = _key_padding_backend()
+    if spec.applies_attn_mask:
+        mask = torch.zeros(batch_size * keys, dtype=torch.bool, device=packing["indices_k"].device)
+        mask[packing["indices_k"]] = True
+        no_packing = dict.fromkeys(("indices_k", "cu_seqlens_k", "max_seqlen_k"))
+        return {**no_packing, "attn_mask": mask.view(batch_size, 1, 1, keys), "valid_kv_len": None}
+    return {**packing, "attn_mask": None, "valid_kv_len": None}
 
 
 def _key_padding_backend():
@@ -893,6 +935,15 @@ def USP(
     ulysses_world_size = get_ulysses_parallel_world_size()
     ring_world_size = get_ring_parallel_world_size()
     hb_backend = backend if backend is not None else runtime_state.attention_backend
+    # Runtime setup validates its selection; per-call overrides need the same
+    # ring contract here, before communication or quantization.
+    if ring_world_size > 1 and hb_backend != runtime_state.attention_backend:
+        spec = attention_registry.get(hb_backend)
+        while spec is not None:
+            no_ring = spec.ring.unmet()
+            if no_ring is not None:
+                raise NotImplementedError(f"{spec.type.value} cannot be used with ring parallelism: {no_ring}")
+            spec = spec._fallback
     attention_function = _get_attention_function(backend=backend)
 
     fp8_module = attn_layer if attn_layer is not None else head_balance_layer

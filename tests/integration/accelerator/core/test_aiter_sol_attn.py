@@ -15,6 +15,8 @@ The CPU-side contract -- what the backends refuse, and what reaches sol_attn_bhs
 tests/unit/core/test_aiter_sol_contracts.py.
 """
 
+import functools
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -187,6 +189,143 @@ def test_sol_attn_drops_a_caller_alignment_pad():
         dropped, _ = sol_attn_bhsd(query, key, value, beta=0.5, key_seqlen=real)
         unpadded, _ = sol_attn_bhsd(query, key[:, :, :real], value[:, :, :real], beta=0.5)
         assert torch.equal(dropped, unpadded), f"dropping a {fill} pad did not reproduce attention over the real tokens"
+
+
+@pytest.mark.parametrize("recipe", ["bf16", "fp8", "mxfp6"])
+def test_sol_attn_drops_a_query_pad_and_returns_zero_rows_for_it(recipe):
+    """MiniMax-H3 pads its packed sequence on both sides. Its pad query rows share a tile with real
+    rows, and routing picks one selection per tile, so they must not take part. The real rows have
+    to match a call that never saw the pad."""
+    _require_sol_recipe(recipe)
+    from xfuser.core.attention.sparsity.sol import sol_attn_bhsd
+
+    real, padded = 1000, 1024
+    query, key, value = _operands(seqlen=padded)
+    with torch.no_grad():
+        out, _ = sol_attn_bhsd(query, key, value, beta=0.5, recipe=recipe, key_seqlen=real, query_seqlen=real)
+        unpadded, _ = sol_attn_bhsd(query[:, :, :real], key[:, :, :real], value[:, :, :real], beta=0.5, recipe=recipe)
+
+    assert out.shape == query.shape
+    assert torch.equal(out[:, :, :real], unpadded)
+    assert not out[:, :, real:].any(), "pad rows come back as zeros"
+
+
+def test_exact_tokens_force_their_blocks_for_every_query_tile():
+    """A flagged key's block is computed exactly for every query, on top of what routing picks."""
+    _require_sol_recipe("fp8")
+    from xfuser.core.attention.sparsity import sol
+
+    recipe = sol._RECIPES["fp8"]
+    kv_tile = sol.sol_attn_block_tile(recipe)[1]
+    query, key, value = _operands(seqlen=1024)
+    exact = torch.zeros(1024, dtype=torch.bool, device="cuda")
+    exact[[2 * kv_tile + 5, 1023]] = True
+
+    def selection(force):
+        bshd = [t.permute(0, 2, 1, 3).contiguous() for t in (query, key, value)]
+        q, k, v = sol._quantize(recipe, *bshd, query.shape[-1] ** -0.5)
+        return sol.sol_attn_routing_for(q, k, v, 0.5, recipe, force_block_mask=force)["block_attn_mask"]
+
+    with torch.no_grad():
+        routed = selection(None)
+        forced = selection(sol._force_blocks_from_tokens(exact, 1024, kv_tile))
+
+    last = forced.shape[-1] - 1
+    assert forced[..., 2].all() and forced[..., last].all()
+    assert torch.equal(forced & routed, routed), "forcing adds blocks and drops none"
+    assert torch.equal(forced[..., [b for b in range(last) if b != 2]], routed[..., [b for b in range(last) if b != 2]])
+
+
+def test_routing_passes_force_block_mask_only_when_forcing(monkeypatch):
+    """An aiter whose sol_prepare predates force_block_mask still serves every unforced call, and a
+    forced one on such a build fails with the reason rather than a TypeError."""
+    _require_sol_recipe("mxfp8")
+    from xfuser.core.attention.sparsity import sol
+
+    seen = []
+    prepare = sol._AITER.prepare
+
+    def spy(*args, **kwargs):
+        seen.append("force_block_mask" in kwargs)
+        return prepare(*args, **kwargs)
+
+    monkeypatch.setattr(sol._AITER, "prepare", spy)
+    query, key, value = _operands(seqlen=1024)
+    exact = torch.zeros(1024, dtype=torch.bool, device="cuda")
+    exact[:64] = True
+    with torch.no_grad():
+        # MXFP8 always routes in xDiT, so this reaches sol_prepare without forcing anything.
+        sol.sol_attn_bhsd(query, key, value, beta=0.5, recipe="mxfp8")
+        sol.sol_attn_bhsd(query, key, value, beta=0.5, recipe="mxfp8", exact_tokens=exact)
+    assert seen == [False, True]
+
+    monkeypatch.setattr(sol, "_SOL_PREPARE_FORCES_BLOCKS", False)
+    with pytest.raises(sol.SolAttnUnsupported, match="force_block_mask"):
+        sol.sol_attn_bhsd(query, key, value, beta=0.5, recipe="mxfp8", exact_tokens=exact)
+
+
+@pytest.mark.parametrize("recipe", ["bf16", "fp8"])
+def test_the_backend_hands_exact_tokens_to_the_routing(recipe):
+    """Every key flagged makes every block exact: the same output as a threshold nothing passes."""
+    _require_sol_recipe(recipe)
+    from xfuser.core.attention.spec import EXACT_KV_TOKENS_KEY
+
+    backend = _backend(recipe)
+    query, key, value = _operands(seqlen=1024)
+    every_key = torch.ones(1024, dtype=torch.bool, device="cuda")
+    with torch.no_grad():
+        forced, _ = _run(backend, query, key, value, solattn_beta=0.5, **{EXACT_KV_TOKENS_KEY: every_key})
+        all_exact, _ = _selected_blocks(query, key, value, backend, solattn_beta=-100.0)
+
+    assert torch.equal(forced, all_exact)
+
+
+@pytest.mark.parametrize("recipe", ["bf16", "fp8"])
+def test_exact_query_rows_compute_their_tiles_exactly(recipe):
+    """A flagged query row computes every KV block of its tile, as a threshold nothing passes would;
+    the other tiles still route, and come out as forcing nothing would leave them."""
+    _require_sol_recipe(recipe)
+    from xfuser.core.attention.spec import EXACT_Q_TOKENS_KEY
+
+    backend = _backend(recipe)
+    q_tile = _default_tile(recipe)[0]
+    # Unclustered, so routing skips blocks in every tile.
+    query, key, value = _operands(seqlen=1024, sharpness=0.0)
+    rows = torch.zeros(1024, dtype=torch.bool, device="cuda")
+    rows[3] = True  # the first query tile
+    with torch.no_grad():
+        forced, _ = _run(backend, query, key, value, solattn_beta=0.5, **{EXACT_Q_TOKENS_KEY: rows})
+        all_exact, _ = _selected_blocks(query, key, value, backend, solattn_beta=-100.0)
+        routed, _ = _selected_blocks(query, key, value, backend, solattn_beta=0.5)
+
+    assert torch.equal(forced[:, :, :q_tile], all_exact[:, :, :q_tile])
+    assert torch.equal(forced[:, :, q_tile:], routed[:, :, q_tile:])
+    assert not torch.equal(routed[:, :, :q_tile], all_exact[:, :, :q_tile]), "routing alone must skip blocks here"
+
+
+@pytest.mark.parametrize("recipe", ["bf16", "fp8"])
+def test_a_padded_call_with_exact_tokens_holds_one_graph(recipe):
+    """MiniMax-H3's call: query and key pad dropped, text and audio blocks forced."""
+    _require_sol_recipe(recipe)
+    from xfuser.core.attention.sparsity.sol import sol_attn_bhsd
+
+    real = 1000
+    query, key, value = _operands(seqlen=1024)
+    exact = torch.zeros(1024, dtype=torch.bool, device="cuda")
+    exact[:40] = True
+
+    def run(q, k, v, tokens):
+        out, _ = sol_attn_bhsd(
+            q, k, v, beta=0.5, recipe=recipe, key_seqlen=real, query_seqlen=real, exact_tokens=tokens
+        )
+        return out
+
+    torch._dynamo.reset()
+    with torch.no_grad():
+        compiled = torch.compile(run, fullgraph=True)(query, key, value, exact)
+        eager = run(query, key, value, exact)
+
+    assert torch.equal(compiled, eager)
 
 
 @pytest.mark.parametrize("recipe", ALL_RECIPES)
@@ -648,6 +787,39 @@ def test_the_64x64_block_size_routes_and_dispatches_at_64(monkeypatch):
         assert cosine > baseline - 0.02, f"{recipe}: 64x64 lost ground to the default: {cosine:.4f} vs {baseline:.4f}"
 
 
+@pytest.mark.parametrize("block_tile", [None, (64, 64)], ids=["default", "64x64"])
+def test_the_pooled_mxfp8_k_scale_is_backed_past_its_last_row(monkeypatch, block_tile):
+    """aiter's 64x64 MXFP8 Sol row reads the pooled K scale past the rows sol_prepare allocates,
+    and faulted the GPU whenever that allocation ended at an unmapped page. The scale the kernel
+    is handed has to run on, zeroed, past its last row."""
+    _require_sol_recipe("mxfp8")
+    from xfuser.core.attention.sparsity import sol
+
+    seen = {}
+    packed = sol._AITER.packed
+
+    def spy(*args, **kwargs):
+        seen["scale"] = kwargs["mean_k_scale"]
+        return packed(*args, **kwargs)
+
+    monkeypatch.setattr(sol._AITER, "packed", spy)
+    query, key, value = _operands(seqlen=2048)
+    with torch.no_grad():
+        sol.sol_attn_bhsd(query, key, value, beta=0.5, recipe="mxfp8", block_tile=block_tile, return_head_cost=True)
+    torch.cuda.synchronize()
+
+    scale = seen["scale"]
+    end = (scale.storage_offset() + scale.numel()) * scale.element_size()
+    storage = torch.empty(0, dtype=torch.uint8, device=scale.device)
+    storage.set_(scale.untyped_storage(), 0, (scale.untyped_storage().nbytes(),))
+    tail = storage[end:]
+    # The kernels read pooled scales 128 rows at a time, and this row reads on past even that.
+    row = scale[0, 0].numel() * scale.element_size()
+    whole_tiles = -(-scale.shape[1] // 128) * 128
+    assert tail.numel() > (whole_tiles - scale.shape[1]) * row, "nothing mapped past the last 128-row tile"
+    assert not tail.any(), "the backing past the scale must be zero (E8M0 0 is finite)"
+
+
 def test_a_block_size_with_no_kernel_is_rejected_at_setup_by_name():
     """Named at the flag that set it, at setup: this is the check that stands between a mistyped
     launch and a run that loads a model for minutes before dying."""
@@ -661,3 +833,114 @@ def test_a_block_size_with_no_kernel_is_rejected_at_setup_by_name():
         with pytest.raises(SolAttnUnsupported, match=rf"--sparseattn_block_size 512x512 .*'{recipe}'"):
             check_sol_attn_recipe(recipe, block_tile=unserved)
         check_sol_attn_recipe(recipe, block_tile=_default_tile(recipe))
+
+
+# ---------------------------------------------------------------------------
+# the pooled value tilt
+# ---------------------------------------------------------------------------
+
+
+def _tilt_recipes():
+    """Every recipe whose row takes the tilt, in table order; read from the recipe table so a row
+    gaining or losing the tilt is exercised without a second list to keep in step."""
+    from xfuser.core.attention.sparsity.sol import _TILT_RECIPES, SOL_ATTN_RECIPES
+
+    return [r for r in SOL_ATTN_RECIPES if r in _TILT_RECIPES]
+
+
+TILT_RECIPES = _tilt_recipes()
+
+
+def _correlated_operands(seqlen=4096, heads=2, seed=1234):
+    """_operands with V partly a linear function of K: the in-block covariance the tilt models.
+
+    Sharpness 0.5 rather than 2.0, so the skipped blocks keep real attention mass. At 2.0 the
+    selected blocks hold nearly all of it, and there is nothing pooled to correct.
+    """
+    query, key, value = _operands(seqlen=seqlen, heads=heads, seed=seed, sharpness=0.5)
+    generator = torch.Generator(device=key.device).manual_seed(seed + 1)
+    mix = torch.randn(key.shape[-1], value.shape[-1], generator=generator, device=key.device)
+    value = (0.5 * value.float() + key.float() @ (mix / key.shape[-1] ** 0.5)).to(torch.bfloat16)
+    return query, key, value
+
+
+@pytest.mark.parametrize("recipe", TILT_RECIPES)
+@pytest.mark.parametrize("tile", ["default", (64, 64)])
+@pytest.mark.parametrize("options", [dict(_jensen_only=True), dict(tilt_rank=2)], ids=["capped", "tilt2"])
+def test_the_capped_term_and_the_tilt_run_on_every_row_that_has_them(recipe, tile, options):
+    _require_sol_recipe(recipe)
+    from xfuser.core.attention.sparsity.sol import sol_attn_bhsd
+
+    block_tile = None if tile == "default" else tile
+    if block_tile is not None and not _serves(recipe, block_tile):
+        pytest.skip(f"no {recipe} Sol row at 64x64")
+    query, key, value = _correlated_operands(seqlen=2048)
+    with torch.no_grad():
+        out, _ = sol_attn_bhsd(query, key, value, beta=0.5, recipe=recipe, block_tile=block_tile, **options)
+
+    assert out.shape == query.shape and torch.isfinite(out).all()
+
+
+@pytest.mark.parametrize("recipe", ["bf16", "fp8", "f6f6"])
+def test_the_tilt_recovers_what_the_capped_term_leaves(recipe):
+    """With V moving with K inside a block, a block's mean value alone misses Cov(v, k) q."""
+    _require_sol_recipe(recipe)
+    from xfuser.core.attention.sparsity.sol import sol_attn_bhsd
+
+    query, key, value = _correlated_operands()
+    reference = _fp32_attention(query, key, value)
+
+    def error(**options):
+        with torch.no_grad():
+            out, _ = sol_attn_bhsd(query, key, value, beta=0.5, recipe=recipe, **options)
+        return _relative_error(out, reference)
+
+    assert error(tilt_rank=2) < error(_jensen_only=True)
+    assert error(tilt_rank=2) < error()
+
+
+# MXFP6 K's compiled path differs from eager in the low bits even without the tilt.
+_TILT_TOLERANCE = {"f6f6": 1e-1, "f6f4": 1e-1, "mxfp4": 1e-1}
+
+
+@pytest.mark.parametrize("recipe", TILT_RECIPES)
+@pytest.mark.parametrize("options", [dict(_jensen_only=True), dict(tilt_rank=2)], ids=["capped", "tilt2"])
+def test_the_capped_term_and_the_tilt_hold_one_graph(recipe, options):
+    """fullgraph=True: the cap and the tilt builders launch Triton kernels inside the forward, and
+    each recipe builds its tilt through a different one."""
+    _require_sol_recipe(recipe)
+    from xfuser.core.attention.sparsity.sol import sol_attn_bhsd
+
+    query, key, value = _correlated_operands(seqlen=1024)
+
+    def run(q, k, v):
+        return sol_attn_bhsd(q, k, v, beta=0.5, recipe=recipe, **options)[0]
+
+    torch._dynamo.reset()
+    with torch.no_grad():
+        compiled = torch.compile(run, fullgraph=True)(query, key, value)
+        eager = run(query, key, value)
+    if recipe in _TILT_TOLERANCE:
+        torch.testing.assert_close(compiled.float(), eager.float(), atol=_TILT_TOLERANCE[recipe], rtol=0)
+    else:
+        assert torch.equal(compiled, eager)
+
+
+@pytest.mark.parametrize("recipe", ["bf16", "fp8", "f8f6", "f6f6"])
+def test_the_compiled_tilt_is_not_the_capped_term_alone(recipe):
+    """A tilt whose planes 1..rank were dropped would leave only the capped term."""
+    _require_sol_recipe(recipe)
+    from xfuser.core.attention.sparsity.sol import sol_attn_bhsd
+
+    query, key, value = _correlated_operands()
+
+    def run(q, k, v, **options):
+        return sol_attn_bhsd(q, k, v, beta=0.5, recipe=recipe, **options)[0]
+
+    with torch.no_grad():
+        torch._dynamo.reset()
+        capped = torch.compile(functools.partial(run, _jensen_only=True))(query, key, value).float()
+        torch._dynamo.reset()
+        tilted = torch.compile(functools.partial(run, tilt_rank=2))(query, key, value).float()
+
+    assert ((tilted - capped).norm() / capped.norm()).item() > 1e-2

@@ -72,22 +72,39 @@ The Sol backends require head dimension 128, BF16 inputs, and non-causal attenti
 Packed keys are accepted only as one sequence's trailing pad. Ring is refused at
 startup; use `--ulysses_degree` for sequence parallelism. Set
 `--cross_attention_backend` to a dense backend. Short text keys give the routing
-too few blocks to select from.
+too few blocks to select from. On FLUX.3 that backend serves the text-mode blocks,
+which attend the prompt alone. The joint blocks compute the prompt's KV blocks
+and its own query rows exactly, and route the image and reference tokens.
 
 - `--solattn_beta` sets the routing threshold (default `0.5`). A larger value
   computes fewer blocks exactly.
 - `--solattn_beta_schedule` changes the threshold per denoising step. Use
   `first:last` for a linear ramp or one value per step. Both branches of a guided
   step use the same value.
+- `--solattn_tilt_rank` corrects each skipped block by its leading `RANK` terms
+  of the key-value covariance (default `0`, off). It also adds a second-order
+  term to the block's score. Every Sol backend except `aiter_mxfp6_sol` serves
+  it. Start with `2`.
 - `--sparseattn_block_size` selects another tile that the recipe's row serves.
 - `--use_sparseattn_head_balance` balances the selected-block cost across
   Ulysses ranks.
+
+The runner refuses `--solattn_beta`, `--solattn_beta_schedule`,
+`--solattn_tilt_rank`, and `--sparseattn_block_size` when no selected backend
+reads them. A Sol backend in
+an explicit `--hybrid_attn_schedule` counts as selected.
 
 ```bash
 xdit --model Wan2.2-T2V --prompt "Clouds over a mountain lake" \
     --ulysses_degree 8 --num_inference_steps 40 \
     --attention_backend aiter_fp8_sol --cross_attention_backend aiter \
     --solattn_beta_schedule=1.0:0.0 --use_torch_compile
+```
+
+```bash
+xdit --model FLUX.3-image-klein-base --prompt "A lighthouse on a cliff at dawn" \
+    --height 4096 --width 4096 --ulysses_degree 8 \
+    --attention_backend aiter_fp8_sol --cross_attention_backend aiter --use_torch_compile
 ```
 
 ### FlyDSL FP8 behavior

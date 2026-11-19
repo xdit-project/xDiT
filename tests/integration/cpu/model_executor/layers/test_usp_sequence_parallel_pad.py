@@ -101,7 +101,14 @@ def _wire_usp_to_gloo(torch, ulysses, ring):
             query, key, value, dropout_p=0.0, is_causal=call.is_causal
         )[:2]
 
-    spec = Spec(AttentionBackendType.SDPA_FLASH, impl=cpu_flash, ring=ALWAYS, accepts=ANY_CALL, requires=ALWAYS)
+    spec = Spec(
+        AttentionBackendType.SDPA_FLASH,
+        impl=cpu_flash,
+        ring=ALWAYS,
+        accepts=ANY_CALL,
+        requires=ALWAYS,
+        applies_attn_mask=True,
+    )
     attention_function = usp.concat_joint_tensors_decorator(usp._spec_adapter(spec))
     ulysses_rank = dist.get_rank(PROCESS_GROUP.ULYSSES_PG)
     ring_rank = dist.get_rank(PROCESS_GROUP.RING_PG)

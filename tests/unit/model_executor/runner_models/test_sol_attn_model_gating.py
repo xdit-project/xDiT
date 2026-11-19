@@ -72,7 +72,7 @@ def test_a_hybrid_schedule_on_sol_is_gated_like_an_explicit_backend(monkeypatch)
     monkeypatch.setattr(
         model, "capabilities", dataclasses.replace(model.capabilities, supports_sol_attention_backends=False)
     )
-    with pytest.raises(ValueError, match="does not support Sol-Attn"):
+    with pytest.raises(ValueError, match="does not support AITER_FP8_SOL"):
         _build(
             "Wan2.2-T2V",
             use_hybrid_attn_schedule=True,
@@ -80,9 +80,46 @@ def test_a_hybrid_schedule_on_sol_is_gated_like_an_explicit_backend(monkeypatch)
             hybrid_attn_high_precision_backend="aiter_bf16",
             cross_attention_backend="aiter_bf16",
         )
+    # An explicit schedule names its backends too, and used to pass without the gate.
+    with pytest.raises(ValueError, match="does not support AITER_BF16_SOL"):
+        _build(
+            "Wan2.2-T2V",
+            use_hybrid_attn_schedule=True,
+            hybrid_attn_schedule="AITER_BF16,AITER_BF16_SOL,AITER_BF16",
+            cross_attention_backend="aiter_bf16",
+        )
 
 
 def test_a_model_without_the_capability_refuses_sol():
     """The gate is opt-in, so a Wan runner that has not been checked for Sol-Attn keeps saying no."""
-    with pytest.raises(ValueError, match="does not support Sol-Attn"):
+    with pytest.raises(ValueError, match="does not support AITER_FP8_SOL"):
         _build("Wan2.1-VACE-14B", attention_backend="aiter_fp8_sol", cross_attention_backend="aiter_bf16")
+
+
+@pytest.mark.parametrize("model", ["Wan2.2-T2V", "Wan2.1-VACE-14B"])
+def test_a_sol_cross_attention_backend_is_refused_beside_a_dense_one(model):
+    """A short text KV has too few blocks to route over, whatever the main backend is and whether
+    or not the model accepts Sol for self-attention."""
+    with pytest.raises(ValueError, match="cannot be AITER_FP8_SOL"):
+        _build(model, attention_backend="aiter_bf16", cross_attention_backend="aiter_fp8_sol")
+
+
+FLUX3_MODELS = ["FLUX.3-image-klein", "FLUX.3-image-klein-base"]
+
+
+def _build_flux3(model_name, **config):
+    from xfuser import xFuserArgs
+    from xfuser.model_executor.models.runner_models import flux3  # noqa: F401  registers
+    from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY
+
+    return MODEL_REGISTRY[model_name](xFuserArgs(model=model_name, **config))
+
+
+@pytest.mark.parametrize("model", FLUX3_MODELS)
+def test_flux3_serves_sol_beside_a_dense_text_stage(model):
+    """FLUX.3's text-mode blocks attend the prompt alone, on --cross_attention_backend."""
+    _build_flux3(model, attention_backend="aiter_fp8_sol", cross_attention_backend="aiter", ulysses_degree=2)
+    with pytest.raises(ValueError, match="needs --cross_attention_backend set to a dense backend"):
+        _build_flux3(model, attention_backend="aiter_fp8_sol")
+    with pytest.raises(ValueError, match="cannot be AITER_FP8_SOL"):
+        _build_flux3(model, attention_backend="aiter_fp8_sol", cross_attention_backend="aiter_fp8_sol")

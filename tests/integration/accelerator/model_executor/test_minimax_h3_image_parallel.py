@@ -147,6 +147,50 @@ def test_ulysses_matches_single_gpu_diffusers(accelerator_ranks, ulysses_degree)
     accelerator_ranks(_ulysses_worker, world_size=ulysses_degree, timeout=300)
 
 
+def _fsdp_worker(rank, world_size, init_method, fsdp2):
+    import torch
+    from diffusers import MiniMaxH3ImageTransformer2DModel
+
+    from xfuser.core.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
+    from xfuser.core.distributed.sharding import shard_component
+    from xfuser.model_executor.models.transformers.transformer_minimax_h3_image import (
+        xFuserMiniMaxH3ImageTransformer2DWrapper,
+    )
+
+    try:
+        torch.manual_seed(0)
+        stock = MiniMaxH3ImageTransformer2DModel(**_tiny_config()).eval()
+        device = _setup(rank, world_size, init_method, ulysses_degree=world_size, transformer=stock)
+        stock = stock.to(device)
+        wrapper = xFuserMiniMaxH3ImageTransformer2DWrapper.from_config(stock.config).eval()
+        wrapper.load_state_dict(stock.state_dict())
+        # memory_efficient_init shards with FSDP2; the default is FSDP1.
+        wrapper = shard_component(
+            wrapper, wrap_attrs=["transformer_blocks"], device_id=device, memory_efficient_init=fsdp2
+        )
+        # The runner compiles a sharded transformer block by block.
+        blocks = wrapper.transformer_blocks
+        for index in range(len(blocks)):
+            blocks[index] = torch.compile(blocks[index])
+
+        for step in range(NUM_PDD_HEADS):
+            inputs = _inputs(device, *LAYOUTS["edit"], step)
+            with torch.no_grad():
+                reference = stock(**inputs).sample
+                actual = wrapper(**inputs).sample
+            torch.testing.assert_close(
+                actual, reference, rtol=1e-4, atol=1e-4, msg=lambda m: f"FSDP2={fsdp2}, step {step}: {m}"
+            )
+    finally:
+        destroy_model_parallel()
+        destroy_distributed_environment()
+
+
+@pytest.mark.parametrize("fsdp2", [False, True], ids=["fsdp1", "fsdp2"])
+def test_sharded_wrapper_matches_single_gpu_diffusers(accelerator_ranks, fsdp2):
+    accelerator_ranks(_fsdp_worker, world_size=2, timeout=300, args=(fsdp2,))
+
+
 def _tiny_vae(device):
     import torch
     from diffusers import AutoencoderKLMiniMaxH3Image

@@ -50,6 +50,7 @@ def _model(*, local_rank, monkeypatch, **offload_flags):
         _decoding_vaes=lambda: [],
         _get_compiled_pipe_components=lambda: [],
     )
+    model._block_level_offload_components = lambda: xFuserModel._block_level_offload_components(model)
     model._local_onload_device = lambda: xFuserModel._local_onload_device(model)
     model._group_offload_kwargs = lambda offload_type: xFuserModel._group_offload_kwargs(model, offload_type)
     model._enable_cpu_offload = lambda: xFuserModel._enable_cpu_offload(model)
@@ -94,6 +95,42 @@ def test_group_offload_onloads_to_this_ranks_device(monkeypatch, local_rank):
     xFuserModel._enable_options(model)
 
     assert str(offloaded["onload_device"]) == f"cuda:{local_rank}"
+
+
+def test_group_offload_splits_only_the_components_block_level_reaches(monkeypatch):
+    """A component whose blocks block-level grouping cannot reach stays on leaf level."""
+    model, _ = _model(
+        local_rank=0,
+        monkeypatch=monkeypatch,
+        enable_group_cpu_offload=True,
+    )
+    model._get_compiled_pipe_components = lambda: ["transformer", "text_encoder"]
+    model._block_level_offload_components = lambda: ["transformer"]
+    offload_types = {}
+
+    class Component(torch.nn.Module):
+        """The loop filters on Module, so each recorder has to be one."""
+
+        def __init__(self, name):
+            super().__init__()
+            self.name = name
+
+        def enable_group_offload(self, **kwargs):
+            offload_types[self.name] = kwargs["offload_type"]
+
+    model.pipe.components = {
+        "transformer": Component("transformer"),
+        "text_encoder": Component("text_encoder"),
+        "vae": Component("vae"),
+    }
+
+    xFuserModel._enable_options(model)
+
+    assert offload_types == {
+        "transformer": "block_level",
+        "text_encoder": "leaf_level",
+        "vae": "leaf_level",
+    }
 
 
 def test_offload_places_only_the_runners_resident_components(monkeypatch):

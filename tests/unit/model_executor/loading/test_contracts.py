@@ -283,11 +283,24 @@ def test_fsdp_and_replicated_meta_support_are_derived_separately(contracts):
         fsdp_strategy=strategy,
     )
 
+    only_fsdp = contracts.LoadDeclaration.for_runner(
+        capable,
+        load_support=contracts.LoadSupport(
+            meta_transformers=("transformer",),
+            replicated_meta=False,
+            routes=contracts.STANDARD_LOAD_ROUTES,
+        ),
+        fsdp_strategy=strategy,
+    )
+
     assert both.fsdp_meta_transformers == ("transformer",)
     assert both.replicated_meta_transformers == ("transformer",)
     assert only_replicated.fsdp_meta_transformers == ()
     assert only_replicated.replicated_meta_transformers == ("transformer",)
     assert contracts.MaterializationMode.FSDP_META not in (only_replicated.materialization_modes)
+    assert only_fsdp.fsdp_meta_transformers == ("transformer",)
+    assert only_fsdp.replicated_meta_transformers == ()
+    assert contracts.MaterializationMode.REPLICATED_META not in only_fsdp.materialization_modes
 
 
 @pytest.mark.parametrize(

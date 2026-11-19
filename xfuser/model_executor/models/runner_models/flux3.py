@@ -66,6 +66,12 @@ class _Flux3Model(xFuserModel):
         enable_tiling=True,
         enable_slicing=True,
         use_parallel_vae=True,
+        # The text-mode blocks attend the prompt alone (80-512 tokens) on this backend.
+        cross_attention_backend=True,
+        # The image, reference and joint stages are long sequences at high resolution (2048² is
+        # ~16.4k image tokens), what Sol-Attn's routing is for. The joint blocks compute the
+        # prompt's KV blocks and its own query rows exactly.
+        supports_sol_attention_backends=True,
     )
     # Shared by both checkpoints, which add their model and output names with replace().
     settings = ModelSettings(
@@ -290,6 +296,15 @@ class xFuserFlux3KleinBaseModel(_Flux3Model):
         # The guider turns guidance off at a scale of 1 (math.isclose), leaving one branch.
         if self.config.use_cfg_parallel and guidance_scale is not None and math.isclose(guidance_scale, 1.0):
             raise ValueError("--use_cfg_parallel needs classifier-free guidance; --guidance_scale 1 disables it.")
+
+    def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
+        # The guider runs the two branches as two forwards on one rank, unless CFG parallel puts
+        # them on two rank groups or a scale of 1 leaves one. Per-step schedules count forwards,
+        # so a step's two branches must share an entry.
+        guidance_scale = input_args.get("guidance_scale")
+        if guidance_scale is not None and not math.isclose(guidance_scale, 1.0) and not self.config.use_cfg_parallel:
+            return 2
+        return 1
 
     def _extra_pipe_kwargs(self, input_args: dict) -> dict:
         negative_prompt = input_args.get("negative_prompt")

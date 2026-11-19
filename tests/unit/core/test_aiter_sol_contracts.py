@@ -147,6 +147,25 @@ def test_the_backend_hands_sparseattn_block_size_to_the_kernel(monkeypatch):
     assert seen["beta"] == 0.5
 
 
+def test_the_backend_hands_exact_keys_and_rows_to_the_kernel(monkeypatch):
+    """Both masks a model publishes reach sol_attn_bhsd, each under its own name."""
+    from xfuser.core.attention.spec import EXACT_KV_TOKENS_KEY, EXACT_Q_TOKENS_KEY
+
+    seen = _record_sol_calls(monkeypatch)
+    query = torch.zeros((1, 2, 256, 128), dtype=torch.bfloat16)
+    keys, rows = torch.ones(256, dtype=torch.bool), torch.zeros(256, dtype=torch.bool)
+
+    _run(
+        AttentionBackendType.AITER_FP8_SOL,
+        query,
+        query,
+        query,
+        attention_kwargs={EXACT_KV_TOKENS_KEY: keys, EXACT_Q_TOKENS_KEY: rows},
+    )
+
+    assert seen["exact_tokens"] is keys and seen["exact_query_tokens"] is rows
+
+
 def test_the_backend_hands_the_tilt_rank_to_the_kernel(monkeypatch):
     """--solattn_tilt_rank reaches every Sol call through the run config."""
     from xfuser.config.config import RuntimeConfig

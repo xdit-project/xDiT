@@ -6,13 +6,21 @@ import numpy as np
 import PIL.Image
 import torch
 
+from xfuser.logger import init_logger
+
+logger = init_logger(__name__)
+
+_DEFAULT_CRF = 12
+_DEFAULT_PRESET = "medium"
+
 # H.264 encoders in order of preference. libx264 is GPL. Some FFmpeg builds
 # are LGPL-only and do not include it. These builds can supply libopenh264.
 _H264_ENCODERS = ("libx264", "libopenh264")
 
-# libopenh264 does not use crf or preset. In "buffer" rate-control mode with the
-# High profile, quality is near x264 CRF 12. Its defaults give a 2 Mbps
-# Constrained Baseline stream instead.
+# libopenh264 does not use crf or preset. Its defaults give a 2 Mbps Constrained
+# Baseline stream. With the High profile and "buffer" rate control, quality is
+# near x264 CRF 12 at about 1.5x the bitrate. The bitrate cannot be set in
+# "buffer" mode.
 _OPENH264_OPTIONS = {"profile": "high", "rc_mode": "buffer"}
 
 
@@ -92,8 +100,8 @@ def encode_video_with_audio(
     video_chunks_number: int = 1,
     video_codec: str | None = None,
     pixel_format: str = "yuv420p",
-    crf: int = 12,
-    preset: str = "medium",
+    crf: int = _DEFAULT_CRF,
+    preset: str = _DEFAULT_PRESET,
     audio_bitrate: int = 192_000,
 ) -> None:
     """Encode RGB video frames with optional stereo audio and explicit quality controls.
@@ -109,6 +117,9 @@ def encode_video_with_audio(
     av = _import_av()
     if video_codec is None:
         video_codec = _select_video_codec(av)
+        logger.info(f"Encoding video with {video_codec}")
+    if video_codec == "libopenh264" and (crf != _DEFAULT_CRF or preset != _DEFAULT_PRESET):
+        logger.warning(f"libopenh264 ignores crf and preset. Using {_OPENH264_OPTIONS} instead.")
 
     if isinstance(video, list):
         video = torch.from_numpy(np.stack([np.asarray(frame) for frame in video]))

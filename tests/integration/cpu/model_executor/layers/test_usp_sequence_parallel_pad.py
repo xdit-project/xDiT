@@ -108,7 +108,7 @@ def _wire_usp_to_gloo(torch, ulysses, ring):
     runtime_state = SimpleNamespace(
         fp8_comms=None,
         # Selected for the mask: the registry's SDPA applies attn_mask, as the kernel above does.
-        attention_backend=AttentionBackendType.SDPA_FLASH,
+        attention_backend=AttentionBackendType.SDPA,
         runtime_config=SimpleNamespace(use_sparseattn_head_balance=False),
     )
     usp.PROCESS_GROUP = PROCESS_GROUP

@@ -55,7 +55,9 @@ other determinism expectations.
 **UC11. Later use cases.** Compiled mode, a reference at world size 1 (B1), several input sets, MI300X and
 other hardware, and benchmark and determinism scripts that use the foundation of the harness.
 
-## High-level requirements
+## Requirements
+
+### High-level requirements
 
 **HL10.** The harness tests individual components of xDiT diffusion models, for example a VAE, a transformer, a
 transformer block, an attention module, a text encoder, or a method such as the VAE decode. It uses exactly
@@ -84,7 +86,9 @@ detectable issue. "Flaky" includes a crash and a hang.
 identifier. A wrong report is acceptable as a documented limitation, possibly with a corresponding future-work
 item. A deviation from some requirements that a working test needs is permitted with a due documentation.
 
-**HL80.** Decisions rest on facts that the code shows directly.
+**HL80.** **Traceability and debuggability.** Each rank executing a model and its components
+should save a structured log of all events and situations related to execution decisions and
+defined by this document.
 
 **HL90.** Where possible, xDiT gets a refactor that makes components testable, instead of a hack around hidden
 coupling. Examples: compile code only compiles, and the warmup is not part of the compile function.
@@ -94,40 +98,64 @@ In version 1, xDiT changes only where the first configuration needs a change.
 scripts come later. They use the same foundation that the tests use to load and build a model and to get its
 components. Version 1 plans nothing for benchmarks, but it identifies the code that benchmarks will use.
 
-**HL110.** One model initialization of an instance serves the tests of many components.
-*Rationale:* a model can need 5–10 minutes to load and initialize. That is too long for each test.
+**HL110.** One model load and initialization serves the tests of many, preferably all, components.
+A process that loads and initializes a model, and dumps components execution data for testing later
+is called "an instance". There are two instances: an instance A works with the model to test, and
+an instance B works with the same model as A, but configured to perform computations in a higher
+precision to obtain reference values to compare against.
+*Rationale:* it may take 5–10 minutes to fully load and initialize a model, so we have to perform
+test data acquisition in batches: one batch gathers data to test (A), and the other batch gather
+reference data (B).
+
+**HL120.** Multi-node model execution isn't supported, but single node multi-GPU is supported,
+hence a term "rank" is an alias to "local rank". A term "worker" is an alias to "local rank" too.
+
+#### Statuses
+
+**HLS10.** When a rank executes a model or does something else mandated by this document, it gets a status label that identifies a certain event, situation, state or a condition, that the rank seen. Statues are written in CAPITAL_LETTERS. Status only describe what the rank observed last. When this document say "status applies to a case" or "something gets status X", it describes the state the rank was in during or after execution of the case or that something.
+
+**HLS20.** This document follows a convention: when a certain status X has _A or _B suffix, that means
+that status X applies to a rank of A or B correspondingly. There are no distinct statuses
+X_A or X_B, there's only a status X and a rank of instance A or B on which it appears.
+It's always known to which instance a rank belongs, so instance specific statuses aren't
+generally needed.
+
+**HLS30.** Status is written to the rank's log file immediately when it happens (FC150) as `status=X` record (the record should have other fields providing additional information). In the rank's log, when `status=` field is recorded with `case=` entry (setting a current test case identifier), the status applies to the test case also. It's an error to have a `case=` field without `status=` field.
+
+**HLS40.** When the harness processes data obtained from instances A and B, it loads individual case data
+from each of the instances and by aggregating statuses from all ranks decides how it's going
+to handle case testing. During that, rank statuses might trigger standard pytest
+states: error (an exception is thrown from setup/teardown or fixture code),
+failure (an exception is thrown from a test function), test skip or test pass. If an exception
+is raised, it's message contain all important information to explain the reason for that.
+
+**HLS50.** In some cases a rank getting a certain status may cause a "shared decision", making after
+a synchronization point all other rank to not do what they were going to do (for example,
+to skip case execution, or a replay). These decisions don't affect these other rank statuses (they
+keep their own); they only affect on what the ranks will do next. When a shared decision is made,
+if it is different from what a rank was going to do, the rank logs it into their own log file.
 
 ### Tests definition
 
-**TD10.** The definition is in Python. One call defines one configuration: its run settings,
-its list of components, the tolerances for each output of each component, special parameters
+**TD10.** The definition is in Python. One call defines one configuration: its xDiT settings,
+its list of components to test, the tolerances for each output of each component, special parameters
 of B instance, per component path determinism overrides, deadlines and other things the
 requirements mandate to be user-overridable.
 Each entry (a component path) of the list of components defines a separate test case,
 selectable with `-k` pytest parameter.
 Each configuration is a separate call.
 
-**TD20.** The run settings come from an entry of a CI benchmark YAML file, in the same format as the benchmark
-configurations. A helper reads the entry, builds the command-line flags as CI does, and parses them with the
-parser of the xDiT runner.
-*Rationale:* the parser applies its defaults and conversions, for example to
-`gemm_quantization: low=fp4,high=fp6`.
+**TD20.** The xDiT settings usually come from an entry of a CI benchmark YAML file. The `yaml_path` configuration (TD10) parameter defines path to the file (in the same format as the benchmark configurations), and the `entry` field defines name of the entry in the file. There's a helper that reads an entry from a file.  If both `yaml_path` and `entry` are `None` (default), helper returns an empty dictionary. If `yaml_path` can be read and it has an entry with `name` field equal to the `entry`, - the helper returns the read dictionary of xDiT settings. Otherwise the helper raise an exception.
 
-**TD30.** Test configuration (TD10) can override every field of the YAML entry, and overrides
-can be sufficient to define the configuration alone, without a YAML file.
-`overrides` is a dictionary with the structure of a YAML entry. The
-permitted fields are only those of the `Experiment` class of CI; other fields are an error.
-`args` merges key by key: a key replaces the value of the entry, and `None` removes the key.
-Other fields replace the value of the entry, and `None` removes the field.
+**TD30.** Test configuration call (TD10) can override every field of the xDiT settings, and overrides can be sufficient to define these settings alone, without a YAML file. `overrides` is a dictionary with the structure of a YAML entry. The permitted fields are only those of the `Experiment` class of CI; other fields are an error. After the helper of TD20 returns a dictionary read from `yaml_path` and `entry`, the `overrides` is used to override some fields: `args` key is a dictionary and it is merged key by key: if its key is `None`, the corresponding key is remove from final dictionary, otherwise its value replaces the value in the final xDiT settings dictionary. Similarly, other fields replace the value of the entry, and `None` removes the field.
 
-**TD40.** The resulting overrides apply both to A and to B. A and B can apply own overrides later (TD90, IB10, IB70).
+**TD40.** The resulting xDiT settings dictionary of TD30 apply both to A and to B. Each configuration has its own fixture, which applies instance-specific overrides (TD90, IB10, IB70) to the xDiT settings, launches instances A and B, processes results and lets individual test fixtures + test cases of the configuration run later.
 
-**TD50.** Each configuration has its own fixture, which runs A and B of that configuration. The tests of the
-configuration run before the next configuration starts its instances.
+**TD50.** After the configuration fixture (TD40) prepares instance-specific xDiT settings, it passes them to the instance. The instance uses these settings to build the command-line flags as CI does, and then to parse them with the parser of the xDiT runner.
 
-**TD60.** The configuration name is the `name` of the entry by default. It is an error if neither a name nor an
-entry is set, or if the name is absent, `None`, not a string, or empty. The name selects the data directory
-and the metrics file of the configuration. Note that `name` can be overridden with `overrides` (TD30).
+*Rationale:* the xDiT parser applies its defaults and conversions, for example to `gemm_quantization: low=fp4,high=fp6`, so it must not be skipped.
+
+**TD60.** The configuration call has no explicit `name` parameter. The configuration name is the `name` field of the merged xDiT settings (TD30). Hence, if `yaml_path` and `entry` aren't used (i.e. have default `None` value), the `overrides` parameter must have a valid `name` value. The `name` value of the merged xDiT settings (TD30) becomes the configuration name. The name selects the data directory and the metrics file of the configuration.
 
 **TD70.** Configuration names are unique. The harness raises an error for two configurations with the same
 name. The check runs during collection, and it also covers the configurations that `-k` deselects. A separate
@@ -146,12 +174,7 @@ in terms of xDiT runner), and `use_torch_compile` off.
 3. each replayed call (measured between pre-call and post-call barriers): 2 minutes in A and
    5 minutes in B.
 
-**TD110.** **Deadlines enforcement.** Pytest launches each instance sequentially using a
-supplementary launcher process that takes care of deadlines and child processes cleanup.
-Each rank of the instance writes its deadline -related progress and timestamps to a
-certain rank-specific log file known to the launcher. The launcher then periodically reads these files
-and uses progress records and timestamps to enforce deadlines. A missed deadline leads to
-a warning message and killing the instance and all its descendant processes.
+**TD110.** **Deadlines enforcement.** The configuration fixture (TD40) launches each instance sequentially using a supplementary launcher process that takes care of deadlines and child processes cleanup. Each rank of the instance writes its deadline -related progress and timestamps to a certain rank-specific log file known to the launcher. The launcher then periodically reads these files and uses progress records and timestamps to enforce deadlines. A missed deadline leads to a warning message and killing the instance and all its descendant processes.
 
 **TD120.** Since the launcher is the only entity that knows of missed deadlines, and also
 only it can detect crashes or other premature exits, it's responsible for maintaining proper
@@ -197,15 +220,12 @@ to apply.
 
 ### Components, paths and calls
 
-**CP10.** The harness tests only an explicit list of components (component path strings).
-Each string is the path from the runner model object to the callable component or a method.
-Only the listed components are captured. A listed component must run at least once during pipeline
-run.
+**CP10.** The harness tests only components mentioned in an explicit list of component path strings. Each path string defines a component to test and is the path from the runner model object to the callable component or a method. Only the listed components are captured. A listed component must run at least once during pipeline run.
 
-**CP20.** The list is known before the run. The harness makes the test cases from the definition, without a
-model.
+**CP20.** The list is known before the run. The harness makes the test cases from the list only (without a
+model) and list's items (component paths) serve as test case identifiers, so there is an exact 1-to-1 relationship between a component path and a test case.
 
-**CP30.** A component path defines a component to test. Path syntax: dots separate the path
+**CP30.** Component path syntax: dots separate the path
 elements, and `[i]` indexes a container, for example
 `pipe.transformer.blocks[0].attn1` and `pipe.transformer.blocks[-1]`. A path has no leading dot. `[key]`
 selects an item of an `nn.ModuleDict`.
@@ -277,6 +297,25 @@ accepted.
 
 **CP150.** The harness can change the test case names before pytest sees them, if the `-k` grammar needs it.
 
+### Rank lifecycle
+
+**RL10.** In its lifetime a rank comes through a sequence of phases and cross-rank synchronization points (in which all ranks must participate), described in order below. Getting to the next phase is reflected in the rank's log with a corresponding entry `phase=`.
+
+**RL20.** When a rank just starts, it gets a status STARTED.
+
+**RL30.** **Configuration parsing phase.** This is where the rank parses its xDiT setting (TD50) and determines if it can run the configuration. If the configuration gets `status=UNSUPPORTED` record with a `reason=` field describing what exactly isn't supported, and then rank exits with an error (no special synchronization points are needed). This automatically forces torchrun to kill all other ranks. By reading the log files the launcher is able to correctly identify the cause and not render rank statuses as CRASH.
+
+**RL40.** **Model loading phase.** Doesn't have specific statuses and synchronization points.
+
+**RL50.** **Model run phase.** During this phase rank runs the model pipeline and captures data.
+
+4. Replays phase
+
+1. During pipeline execution ranks doesn't communicate with each other, but only:
+   1. if rank 
+
+2. After the pipeline finishes, 
+
 ### Instance A
 
 **IA10.** Instance A runs the component as production does: low-precision math, custom kernels, and the other
@@ -341,13 +380,12 @@ warning", as UC10 says.
 1. If the harness cannot handle an argument (fp8 or MX tensors, types that it cannot serialize), only the
    affected case gets UNSUPPORTED. The message names the argument.
 2. If the harness cannot handle a feature of a configuration, every case of the configuration gets
-   UNSUPPORTED_A if A cannot handle the feature, otherwise UNSUPPORTED_B. The message names the feature and the
-   run argument with its value. The harness finds this at collection, from the run settings (TD20), or when A or
+   UNSUPPORTED. The message names the feature and the
+   run argument with its value. The harness finds this at collection, from the xDiT settings (TD20), or when A or
    B loads the configuration. After that, no instance of the configuration starts or continues. If no case gets
    SUCCESS_A, B does not start (FC20.5), so a feature that only B can find stays unknown in that run.
 
-**IA80.** After passing the end-of-case barrier of FC50, each rank replaces its status with SUCCESS_A or
-SUCCESS_B (depending on the instance), collectively called SUCCESS, if it passed all the checks (a
+**IA80.** After passing the end-of-case barrier of FC50, each rank replaces its status with SUCCESS, if it passed all the checks (a
 NON_DETERMINISTIC under a policy that permits it counts as passed), has done all the replays of the case, and
 successfully dumped all the necessary data. SUCCESS is the only successful status. Otherwise the rank keeps its
 last status; a rank whose case another rank stopped (FC90.4) keeps ABOUT_TO_START (FR50).
@@ -477,7 +515,7 @@ hook adds a section that lists each UNSUPPORTED case with its reason.
 **FC140.** If the ranks report different statuses for one case, PI30 decides the outcome from the statuses of
 all ranks. The message shows each status with the ranks that have it.
 
-**FC150.** Each worker (a worker is one rank of an instance) has a log file that only the worker
+**FC150.** Each worker (a worker is one rank of an instance) has a structured log file that only the worker
 can write to (the launcher can read from the file, TD110) during instance execution. On a worker startup,
 it gets from the launcher a path to data directory to store the dumps and the status file.
 The status file name is `rank_<rank_number>.jsonl`. It's an error if the file existed when
@@ -492,7 +530,11 @@ After an instance ends, the ownership of the log files of all
 workers is passed to the launcher: it reads the records of all ranks (grepping for files with a
 known pattern and inferring participating ranks from it) and appends final statuses
 for cases that must run, but didn't finish according to the file records. This enables crashes/hangs detection as per
-TD110, and sets FAILED_TO_START for cases that didn't run (FC20.2). After the launcher
+TD110, and sets FAILED_TO_START for cases that didn't run (FC20.2).
+
+** * vvv TODO vvv * **
+
+ After the launcher
 reconstructs the final states of all cases on all ranks from logs, it aggregates them by case and call,
 and writes final case state report to a corresponding `instance.json` file, where for
 each case, it writes all information a case results reader in pytest would need
@@ -500,6 +542,8 @@ for further work (applicable rank statuses, determinism flags, call identifiers 
 everything else the reader would need). While aggregating, it must not assume that for
 a certain case all ranks necessary always ran the same calls; it must identify the
 discrepancies between ranks whenever possible, issue a diagnostics message and fail the execution.
+
+** * ^^^ TODO ^^^ * **
 
 **FC160.** A process that survives SIGKILL (uninterruptible sleep) must not hang the pytest session. After
 SIGKILL, the harness waits only for a limited time, and then it reports the surviving processes. The

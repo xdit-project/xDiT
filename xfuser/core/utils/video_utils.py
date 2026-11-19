@@ -45,6 +45,13 @@ def _video_codec_options(video_codec: str, crf: int, preset: str) -> dict[str, s
     return {"crf": str(crf), "preset": preset}
 
 
+def _frames_to_uint8(video: np.ndarray) -> np.ndarray:
+    """Return ``video`` as uint8. Scale floating-point frames from ``[0, 1]`` to ``[0, 255]``."""
+    if np.issubdtype(video.dtype, np.floating):
+        return (np.clip(video, 0.0, 1.0) * 255).round().astype(np.uint8)
+    return video
+
+
 def _prepare_audio_stream(container, audio_sample_rate: int, audio_bitrate: int):
     audio_stream = container.add_stream("aac", rate=audio_sample_rate)
     audio_stream.bit_rate = audio_bitrate
@@ -107,7 +114,8 @@ def encode_video_with_audio(
     """Encode RGB video frames with optional stereo audio and explicit quality controls.
 
     Tensor inputs are expected to be uint8 RGB frames in ``[F, H, W, C]`` format.
-    NumPy inputs may instead contain normalized floating-point values in ``[0, 1]``.
+    NumPy inputs, and lists of PIL images or NumPy frames, may instead contain
+    floating-point values in ``[0, 1]``.
 
     If ``video_codec`` is ``None``, the function uses ``libx264`` when it is available.
     If not, it uses ``libopenh264``. ``crf`` and ``preset`` apply only to codecs that
@@ -122,11 +130,9 @@ def encode_video_with_audio(
         logger.warning(f"libopenh264 ignores crf and preset. Using {_OPENH264_OPTIONS} instead.")
 
     if isinstance(video, list):
-        video = torch.from_numpy(np.stack([np.asarray(frame) for frame in video]))
-    elif isinstance(video, np.ndarray):
-        if np.all((video >= 0) & (video <= 1)):
-            video = (video * 255).round().astype(np.uint8)
-        video = torch.from_numpy(video)
+        video = np.stack([np.asarray(frame) for frame in video])
+    if isinstance(video, np.ndarray):
+        video = torch.from_numpy(_frames_to_uint8(video))
 
     if isinstance(video, torch.Tensor):
         video = iter(torch.tensor_split(video, video_chunks_number, dim=0))
@@ -170,3 +176,30 @@ def encode_video_with_audio(
         )
 
     container.close()
+
+
+def encode_video(
+    video: list[PIL.Image.Image] | list[np.ndarray] | np.ndarray | torch.Tensor | Iterator[torch.Tensor],
+    fps: int,
+    output_path: str,
+    video_chunks_number: int = 1,
+    video_codec: str | None = None,
+    pixel_format: str = "yuv420p",
+    crf: int = _DEFAULT_CRF,
+    preset: str = _DEFAULT_PRESET,
+) -> None:
+    """Encode RGB video frames without audio.
+
+    This function uses the same input formats, H.264 encoder selection, and quality
+    controls as :func:`encode_video_with_audio`.
+    """
+    encode_video_with_audio(
+        video,
+        fps=fps,
+        output_path=output_path,
+        video_chunks_number=video_chunks_number,
+        video_codec=video_codec,
+        pixel_format=pixel_format,
+        crf=crf,
+        preset=preset,
+    )

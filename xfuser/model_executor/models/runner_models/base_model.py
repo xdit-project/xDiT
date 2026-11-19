@@ -11,7 +11,7 @@ from torch.profiler import profile, record_function, ProfilerActivity
 from torch.utils._pytree import tree_map_only
 import diffusers
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from diffusers.utils import load_image, export_to_video
+from diffusers.utils import load_image
 import numpy as np
 from xfuser.compat import is_diffusers_import_error
 from xfuser.config import xFuserArgs
@@ -22,6 +22,7 @@ from xfuser.envs import (
     bind_group_norm,
 )
 from xfuser.core.utils.outputs_equal import outputs_equal
+from xfuser.core.utils.video_utils import encode_video
 from xfuser.logger import warn_once
 from xfuser.core.utils.runner_utils import (
     log,
@@ -1539,7 +1540,7 @@ class xFuserModel(abc.ABC):
             for video_index, (video, pipe_args) in enumerate(output.get_outputs()):
                 output_name = self.get_output_name(pipe_args)
                 output_path = f"{self.config.output_directory}/{output_name}_{video_index}.mp4"
-                export_to_video(video, output_path, fps=self.settings.fps)
+                encode_video(video, fps=self.settings.fps, output_path=output_path)
                 log(f"Output video saved to {output_path}")
         else:
             raise NotImplementedError("No output to save.")

@@ -59,9 +59,9 @@ def test_the_ranks_shares_gather_to_every_linears_projection(monkeypatch, size):
             assert torch.allclose(linear(embedding), output, atol=1e-6)
 
 
-def test_the_linears_return_their_slice_and_keep_their_weights(monkeypatch):
+def test_the_linears_return_their_slice_and_release_their_weights(monkeypatch):
     linears = _linears()
-    before = [copy.deepcopy(linear.state_dict()) for linear in linears]
+    keys = [linear.state_dict().keys() for linear in linears]
     embedding = torch.randn(1, 4, generator=torch.Generator().manual_seed(1))
     with torch.no_grad():
         expected = [linear(embedding) for linear in linears]
@@ -71,9 +71,9 @@ def test_the_linears_return_their_slice_and_keep_their_weights(monkeypatch):
         shard(embedding)
 
     assert all(type(linear) is SlicedModulation for linear in linears)
-    for linear, state, output in zip(linears, before, expected):
-        assert linear.state_dict().keys() == state.keys()
-        assert all(torch.equal(linear.state_dict()[key], state[key]) for key in state)
+    for linear, state_keys, output in zip(linears, keys, expected):
+        assert linear.state_dict().keys() == state_keys
+        assert linear.weight.shape == (0, 4) and linear.bias.shape == (0,)
         # The input is ignored: the row was projected from the embedding the shard was given.
         assert torch.allclose(linear(torch.zeros(1, 4)), output, atol=1e-6)
 

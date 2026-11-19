@@ -24,7 +24,7 @@ class SlicedModulation(torch.nn.Linear):
     """A block's modulation linear that returns its slice of the row the ranks projected together.
 
     Set by class swap, so the state dict keys stay those of the stock module. Its own weights are
-    no longer read.
+    released: nothing reads them any more, and the parameters are left empty.
     """
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
@@ -39,10 +39,10 @@ class ShardedModulation(torch.nn.Module):
     """The modulation of `linears`, which all project the same embedding, shared out over the sequence-parallel ranks.
 
     Holds this rank's share of the stacked weights: a copy, 1 / (sequence-parallel size) of them.
-    The linears' own weights, which nothing reads from here on, are parked on the CPU, so the
-    device holds only the share. Calling it with the embedding the linears would get projects
-    the share, gathers the row of all ranks, and leaves it for the linears, which are turned
-    into `SlicedModulation`.
+    The linears' own weights, which nothing reads from here on, are released, so the rank holds
+    only the share. Calling it with the embedding the linears would get projects the share,
+    gathers the row of all ranks, and leaves it for the linears, which are turned into
+    `SlicedModulation`.
     """
 
     def __init__(self, linears: Sequence[torch.nn.Linear]):
@@ -68,8 +68,11 @@ class ShardedModulation(torch.nn.Module):
         self.register_buffer("weight", F.pad(weight, (0, 0, 0, share - weight.shape[0])), persistent=False)
         self.register_buffer("bias", F.pad(bias, (0, share - bias.shape[0])), persistent=False)
         self._row = row
+        # Empty rather than parked on the CPU: host copies that large slowed runs under automatic NUMA balancing.
         for linear in linears:
-            linear.to("cpu")
+            empty = linear.weight.data.new_empty((0, linear.in_features))
+            linear.weight = torch.nn.Parameter(empty, requires_grad=False)
+            linear.bias = torch.nn.Parameter(empty.new_empty((0,)), requires_grad=False)
         self.hook = None
 
     def forward(self, embedding: torch.Tensor) -> None:

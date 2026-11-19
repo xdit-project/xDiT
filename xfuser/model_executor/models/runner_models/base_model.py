@@ -1070,7 +1070,7 @@ class xFuserModel(abc.ABC):
             return
         count = self.pipe.transformer.shard_modulation()
         if count:
-            # Hand the device memory of the parked weights back.
+            # Hand the device memory of the released weights back.
             torch.cuda.empty_cache()
             share = self.pipe.transformer.sharded_modulation.weight.nbytes / 2**30
             log(

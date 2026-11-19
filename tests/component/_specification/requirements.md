@@ -146,16 +146,28 @@ in terms of xDiT runner), and `use_torch_compile` off.
 3. each replayed call (measured between pre-call and post-call barriers): 2 minutes in A and
    5 minutes in B.
 
-**TD110.** **Deadlines enforcement**. Pytest launches each instance sequentially using a
+**TD110.** **Deadlines enforcement.** Pytest launches each instance sequentially using a
 supplementary launcher process that takes care of deadlines and child processes cleanup.
 Each rank of the instance writes its deadline -related progress and timestamps to a
-certain rank-specific file known to the launcher. The launcher then periodically read these files
-and using progress records and timestamps enforces deadlines. A missed deadline leads to
-a warning message and killing the instance and all its descendant processes. Launcher does not
-modify any rank or case statuses, or leftover files. User is responsible for setting
-appropriate deadlines and proper interpretation of testing results in case of missed deadlines.
+certain rank-specific log file known to the launcher. The launcher then periodically reads these files
+and uses progress records and timestamps to enforce deadlines. A missed deadline leads to
+a warning message and killing the instance and all its descendant processes.
 
-**TD120.** Configurations with step caching or hybrid schedules aren't supported.
+**TD120.** Since the launcher is the only entity that knows of missed deadlines, and also
+only it can detect crashes or other premature exits, it's responsible for maintaining proper
+rank statuses for the cases that were executed last according to the rank progress reports,
+upon the instance finishing execution (whatever the reasons for instance process ending were).
+
+**TD130.** If `HSA_DISABLE_COREDUMP_ON_EXCEPTION` environment variable isn't defined for the
+launcher process, it must set `HSA_DISABLE_COREDUMP_ON_EXCEPTION=1` for self and all child
+processes it runs.
+
+**TD140.** For instance B only (to reduce memory pressure), if none of `PYTORCH_ALLOC_CONF`,
+`PYTORCH_CUDA_ALLOC_CONF` and `PYTORCH_HIP_ALLOC_CONF` environment variables are defined,
+the launcher sets `PYTORCH_ALLOC_CONF=expandable_segments:True` for self and all child
+processes it runs.
+
+**TD200.** Configurations with step caching or hybrid schedules aren't supported.
 
 ### Tolerances and metrics
 
@@ -272,8 +284,18 @@ settings of the configuration. In version 1 it runs eagerly.
 saves the CPU and CUDA random-number states before each call, and each replay restores them.
 
 **IA30.** A runs the pipeline once, captures the calls of the listed components, and replays them with the
-captured inputs (a standalone replay). If a component is listed, but never run on a rank, the rank get
+captured inputs afterwards (a standalone replay). If a component is listed, but never run on a rank, the rank get
 NOT_REACHED_IN_A status for the component.
+*Rationale for standalone replays:* replaying a component outside of its pipeline ensures that the
+component is fully isolated from everything else in the pipeline and always computes a
+purely functional `y=f(x)`. This is especially important for component benchmarking implementation later.
+Given the huge component coupling observed in xDiT this will likely create an issue someday
+that a certain component can't be correctly isolated: in that case, if a proper refactoring isn't
+possible, a test case definition could be augmented to supply a code that is going to capture from a
+pipeline run an additional information needed to make a correct replay, and then setup/teardown that
+for doing the replay.
+Potential sources of issues: use of `torch.Generator` by the component, internal caches,
+asynchronous work that is still running, hooks by other features running, higher memory use, & etc.
 
 **IA40.** **Fidelity and determinism checks (A and B).** The instance replays a captured call once (replay 1). If
 the output equals the captured output bit for bit, the fidelity check passes. Otherwise it replays the call
@@ -319,8 +341,9 @@ last status; a rank whose case another rank stopped (FC90.4) keeps ABOUT_TO_STAR
 
 ### Instance B
 
-**IB10.** Instance B is an eager reference. It uses the same configuration and the same world size and parallel
-layout as A, with these changes:
+**IB10.** Instance B is an eager reference. It inherits requirements of A by default (see "Instance A"
+section); requirements of this section overrides some of them. B uses the same configuration and
+the same world size and parallel layout as A, with these changes:
 1. the reference dtype for calculating in extended precision: fp32 by default; a parameter,
    because some models might need a smaller dtype; If it uses
    fp32, B forces full fp32 matrix precision: `torch.backends.cuda.matmul.allow_tf32 = False`,
@@ -334,12 +357,16 @@ The classification is: the trusted eager path replaces compile, the attention ke
 communication and the hybrid precision schedules. B keeps the parallel degrees and layout, the parallel VAE,
 VAE tiling and its tile shape, distilled weights, LoRA and channels-last.
 
-**IB20.** A `TorchDispatchMode` audit checks the dtypes in B. It warns about custom calls and does not fail.
-(it's a known limitation of version 1 needs to be addressed in future versions that these warnings
-aren't recorded and are produced only during instance B runs)
+**IB20.** B always loads in bf16 and casts to the reference dtype if the data dtype offers less
+precision (less mantissa bits) than the reference dtype (so if the reference dtype is bf16
+and there's fp32 data, that higher precision data stays unmodified). It does not load a
+checkpoint in the reference dtype. B converts all components at once.
 
-**IB30.** B always loads in bf16 and casts to the reference dtype. It does not load a checkpoint
-in the reference dtype. B converts all components at once.
+**IB30.** After B loads a model, a `TorchDispatchMode` audit checks all dtypes used to
+run the model (including replays). It warns about dtypes with less precision than the reference dtype, and about
+custom calls. The check does not fail, only prints a warning informing about an imprecise dtype use,
+or a custom call. (it's a known limitation of version 1 needs to be addressed in future
+versions that these warnings aren't recorded and are produced only during instance B runs)
 
 **IB40.** B runs the pipeline in the reference dtype with the same run arguments as A (changes of IB10 applied).
 It captures its own calls and runs its own fidelity check on them.
@@ -360,7 +387,7 @@ cross-attention backend, and also own per-path determinism override setting, and
 
 **IB80.** An attention backend that declares a fallback, or that needs a blocked vendor package, makes the
 configuration UNSUPPORTED_B (IA70.2). A cross-attention parameter for a model without a separate
-cross-attention backend is an error. The default cross-attention backend is `SDPA_MATH`.
+cross-attention backend is an error. The default attention backend is `sdpa_efficient`.
 
 ### Failures, crashes and hangs
 
@@ -436,12 +463,29 @@ hook adds a section that lists each UNSUPPORTED case with its reason.
 **FC140.** If the ranks report different statuses for one case, PI30 decides the outcome from the statuses of
 all ranks. The message shows each status with the ranks that have it.
 
-**FC150.** One result path carries all results of the workers. Each worker appends result records to its own
-progress file. After torchrun ends, the launcher reads the records of all ranks, merges them by case, call and
-rank, and writes each state file (while merging, it must not assume that for a certain case all
-ranks necessary always ran the same calls; it must identify the discrepancies whenever possible,
-issue a diagnostics message and fail the execution). While an instance runs, the launcher is the
-only writer of state files.
+**FC150.** Each worker (a worker is one rank of an instance) has a log file that only the worker
+can write to (the launcher can read from the file, TD110) during instance execution. On a worker startup,
+it gets from the launcher a path to data directory to store the dumps and the status file.
+The status file name is `rank_<rank_number>.jsonl`. It's an error if the file existed when
+the worker started. Each worker appends (and flushes immediately) their own file
+with a progress record (TD110, TD120), statuses change and all other information that
+requirements of this document mandate to keep. Each record must have
+at least one common field: a timestamp. Records related to a case must have another common field
+the case identifier, so one can use it to find entries related to the case.
+The file hence serves as a structured timestamped log of all important events the worker observed.
+A worker never deletes anything from the file, only appends to it.
+After an instance ends, the ownership of the log files of all
+workers is passed to the launcher: it reads the records of all ranks (grepping for files with a
+known pattern and inferring participating ranks from it) and appends final statuses
+for cases that must run, but didn't finish according to the file records. This enables crashes/hangs detection as per
+TD110, and sets FAILED_TO_START for cases that didn't run (FC20.2). After the launcher
+reconstructs the final states of all cases on all ranks from logs, it aggregates them by case and call,
+and writes final case state report to a corresponding `instance.jsonl` file, where for
+each case, it writes all information a case results reader in pytest would need
+for further work (applicable rank statuses, determinism flags, call identifiers and
+everything else the reader would need). While aggregating, it must not assume that for
+a certain case all ranks necessary always ran the same calls; it must identify the
+discrepancies between ranks whenever possible, issue a diagnostics message and fail the execution.
 
 **FC160.** A process that survives SIGKILL (uninterruptible sleep) must not hang the pytest session. After
 SIGKILL, the harness waits only for a limited time, and then it reports the surviving processes. The

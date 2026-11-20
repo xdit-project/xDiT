@@ -104,15 +104,13 @@ hence a term "rank" is an alias to "local rank". A term "worker" is an alias to 
 
 #### Statuses
 
-**HLS10.** When a rank executes a model or does something else mandated by this document, it gets a status label that identifies a certain event, situation, state or a condition, that the rank seen. Statues are written in CAPITAL_LETTERS. Status only describe what the rank observed last. When this document say "status applies to a case" or "something gets status X", it describes the state the rank was in during or after execution of the case or that something.
+**HLS10.** When a rank executes a model or does something else mandated by this document, it gets a status label that identifies a certain event, situation, state or a condition, that the rank seen. Statues are written in CAPITAL_LETTERS. Status only describe what the rank observed last and might apply to a component (i.e. its test case as a set of calls the component made during model execution), or to an individual case call.
 
-**HLS20.** This document follows a convention: when a certain status X has _A or _B suffix, that means
-that status X applies to a rank of A or B correspondingly. There are no distinct statuses
-X_A or X_B, there's only a status X and a rank of instance A or B on which it appears.
-It's always known to which instance a rank belongs, so instance specific statuses aren't
-generally needed.
+**HLS15.** A case call status progression as the document describes it must follow directed acyclic graph rules.
 
-**HLS30.** Status is written to the rank's log file immediately when it happens (FC150) as `status=X` record (the record should have other fields providing additional information). In the rank's log, when `status=` field is recorded with `case=` entry (setting a current test case identifier), the status applies to the test case also. It's an error to have a `case=` field without `status=` field.
+**HLS20.** This document follows a convention: if a certain status X has _A or _B suffix, that only means that status X applies to a rank of instance A or B correspondingly. There are no distinct statuses X_A or X_B, there's only a status X and a rank of instance A or B on which it appears. It's always known to which instance a rank belongs, so instance specific statuses aren't generally needed.
+
+**HLS30.** Status is written to the rank's log file immediately when it happens (FC150) as `status=X` record (the record should have other fields providing additional information). In the rank's log, when `status=` field is recorded with `case=` entry (setting a current test case identifier), the status applies to the test case. It's an error to have a `case=` field without `status=` field. When `status=` is recorded together with `case=` and `call=` identifiers, the status applies to the given call of the given case.
 
 **HLS40.** When the harness processes data obtained from instances A and B, it loads individual case data
 from each of the instances and by aggregating statuses from all ranks decides how it's going
@@ -120,8 +118,6 @@ to handle case testing. During that, rank statuses might trigger standard pytest
 states: error (an exception is thrown from setup/teardown or fixture code),
 failure (an exception is thrown from a test function), test skip or test pass. If an exception
 is raised, it's message contain all important information to explain the reason for that.
-
-**HLS50.** In some cases a rank getting a certain status may cause a "shared decision", making all other ranks after a synchronization point to not do what they were going to do (for example, to skip a call replay). These decisions don't affect these other rank statuses (they keep their own); they only affect on what the ranks will do next. When a shared decision is made, if it is different from what a rank was going to do, the rank logs it into their own log file.
 
 ### Tests definition
 
@@ -164,7 +160,9 @@ in terms of xDiT runner), and `use_torch_compile` off.
 
 **TD110.** **Deadlines enforcement.** The configuration fixture (TD40) launches each instance sequentially using a supplementary launcher process that takes care of deadlines and child processes cleanup. Each rank of the instance writes its deadline -related progress and timestamps to a certain rank-specific log file known to the launcher. The launcher then periodically reads these files and uses progress records and timestamps to enforce deadlines. A missed deadline leads to a warning message and killing the instance and all its descendant processes.
 
-**TD120.** Since the launcher is the only entity that knows of missed deadlines, and also only it can detect crashes or other premature exits, it's responsible for reading rank log files and appending correct rank statuses to rank log files for the cases that were executed last (might need CRASHED or HANGED) or don't have records at all (these need FAILED_TO_START), upon the instance finishing execution (whatever the reasons for instance process ending were).
+**TD120.** Since the launcher is the only entity that knows of missed deadlines, and also only it can detect crashes or other premature exits, upon the instance finishing execution (whatever the reasons for instance process ending were) the launcher is responsible for reading rank log files and appending correct statuses to rank log files for the cases that were executed last (these might need `status=CRASHED` or `status=HANGED` if that happened) or don't have records at all (these might need UNSUPPORTED if whole configuration is unsupported, or FAILED_TO_START if the rank crashed or hanged and just didn't have an opportunity to try to run the case).
+
+**TD125.** *Sanity check* The launcher knows which cases the instance should run, so after completing the above it validates that each case is mentioned on the log at least once. It's a harness bug if the launcher detects cases that are still absent.
 
 **TD130.** If `HSA_DISABLE_COREDUMP_ON_EXCEPTION` environment variable isn't defined for the
 launcher process, it must set `HSA_DISABLE_COREDUMP_ON_EXCEPTION=1` for self and all child
@@ -219,10 +217,7 @@ selects an item of an `nn.ModuleDict`.
 `refiner_pipe`. The harness does not check that the attribute holds a pipeline. An attribute that holds `None`
 is a path error.
 
-**CP50.** A call number follows the element after a colon, for example `pipe.transformer:3.blocks[0]:3`. A path
-without a call number selects all calls, and its one case checks every call. The case fails if one call fails,
-and the message names the failing calls. Version 1 has accepted limitation: the first path element
-ignores its call number.
+**CP50.** A call number follows the element after a colon, for example `pipe.transformer:3.blocks[0]:3`. A path without a call number selects all calls, and its one case checks every call. The case fails if one call fails, and the message names the failing calls. Version 1 has accepted limitation: the first path element ignores its call number.
 
 **CP60.** Call numbers are not negative.
 *Rationale:* then the harness can save the tensors of a call at once.
@@ -276,11 +271,76 @@ complex.
 **CP130.** Calls such as `pipe.vae.decode`, where `.vae` isn't callable or doesn't run in the pipeline,
 and `decode` is a method, also must be testable. A path through a module that the run never calls must be valid.
 
-**CP140.** A path must resolve in A and in B. If a path resolves only in A, its case gets FAILED_TO_START_B with
-the path error. Path errors that need a built model show only after the initialization of A; this cost is
-accepted.
+**CP140.** A path must resolve in A and in B. If it doesn't, the case gets (logs) `status=UNRESOLVABLE_PATH case=<case_id>`. Path errors that need a built model show only after the initialization of A; this cost is accepted.
 
 **CP150.** The harness can change the test case names before pytest sees them, if the `-k` grammar needs it.
+
+### Instance A
+
+**IA10.** Instance A runs the component as production does: low-precision math, custom kernels, and the other
+settings of the configuration. In version 1 it runs eagerly. 
+
+**IA20.** One instance A do call captures and the replays. There is no separate capture instance. The capture
+saves the CPU and CUDA random-number states before each call, and each replay restores them.
+
+**IA30.** A runs the pipeline once, captures the calls of the listed components, and replays them with the captured inputs afterwards (a standalone replay). If a component/case is listed, but never run on a rank, the rank get NOT_REACHED status for the case.
+
+*Rationale for standalone replays:* replaying a component outside of its pipeline ensures that the
+component is fully isolated from everything else in the pipeline and always computes a
+purely functional `y=f(x)`. This is especially important for component benchmarking implementation later.
+Given the huge component coupling observed in xDiT this will likely create an issue someday
+that a certain component can't be correctly isolated: in that case, if a proper refactoring isn't
+possible, a test case definition could be augmented to supply a code that is going to capture from a
+pipeline run an additional information needed to make a correct replay, and then setup/teardown that
+for doing the replay.
+Potential sources of issues: use of `torch.Generator` by the component, internal caches,
+asynchronous work that is still running, hooks by other features running, higher memory use, & etc.
+
+**IA40.** **Fidelity check (A and B).** Each instance replays a captured call once to ensure the component was properly isolated and rerunning it yields binary the same result. B also needs it since it run different dtype specific code. Fidelity check may also fail for another reason: if the component is non-deterministic.
+
+**IA50.** Some components may be validly non-deterministic, hence each case / component path may have an instance-specific fidelity check override flag (set on per-case basic during configuration call TD10), that if set, simply excludes all case calls from fidelity check replays. By default, each case (all calls of the case/component) must pass fidelity check in A and in B, so when the flag isn't set it's assumed to be `false`
+The harness arranges the following behavior: if set, A's instance flag value is used for B if B doesn't set own flag value.
+
+**IA60.** If the case policy requires fidelity check and the check fails on any rank of A or B, this necessary fails the pytest tests function outcome even if output tolerances are within bounds.
+
+**IA70.** UNSUPPORTED marks a known limit of the harness:
+1. If the harness cannot handle an argument (fp8 or MX tensors, types that it cannot serialize), only the affected case call gets UNSUPPORTED. The message names the argument.
+2. If the harness cannot handle a feature of a configuration, every case of the configuration gets UNSUPPORTED. The message names the feature and the run argument with its value. The harness finds this at collection, from the xDiT settings (TD20), or when A or B loads the configuration (RL40). After that, no instance of the configuration starts or continues.
+
+### Instance B
+
+**IB10.** Instance B is an eager reference. It inherits requirements of A by default (see "Instance A"
+section); requirements of this section overrides some of them. B uses the same configuration and
+the same world size and parallel layout as A, with these changes:
+1. the reference dtype for calculating in extended precision: fp32 by default; a parameter,
+   because some models might need a smaller dtype; If it uses
+   fp32, B forces full fp32 matrix precision: `torch.backends.cuda.matmul.allow_tf32 = False`,
+   `torch.backends.cudnn.allow_tf32 = False` and `torch.set_float32_matmul_precision("highest")`.
+2. quantization off, so B loads normal weights;
+3. dense attention;
+4. vendor packages blocked;
+5. no compile, no step cache, no FP8 communication, no hybrid schedules.
+6. B gets the same list of component paths (cases) to work on as A. B knows where A stores its dump files, and for the case calls for which it can run replays, it can try to read dump files that A produced to replay them with higher precision. Calls that exist in A (have at least status DUMPED) but never replayed in B (this means replay on A's data, since other replay is fidelity check and it's irrelevant in the context, i.e. calls in B with status REPLAYED), or calls that have at least status DUMPED in B, but never had that status in A, necessary fail its pytest test function even if other calls of the case might pass tolerance checks.
+
+**IB20.** B always loads in bf16 and casts to the reference dtype if the data dtype offers less
+precision (less mantissa bits) than the reference dtype (so if the reference dtype is bf16
+and there's fp32 data, that higher precision data stays unmodified). It does not load a
+checkpoint in the reference dtype. B converts all components at once.
+
+**IB30.** After B loads a model, a `TorchDispatchMode` audit checks all dtypes used to run the model (including replays). It warns about dtypes with less precision than the reference dtype, and about custom calls. The check does not fail, only prints a warning informing about an imprecise dtype use, or a custom call. (it's a known limitation of version 1 needs to be addressed in future versions that these warnings aren't recorded and are produced only during instance B runs)
+
+**IB40.** B runs the pipeline in the reference dtype with the same run arguments as A (changes of IB10 applied). It captures its own calls and runs its own fidelity check on them.
+
+*Rationale:* if the replay is faithful with B's inputs, it is also faithful with A's inputs. That
+holds if faithfulness depends on the context and state of the replay and not on the input values.
+A component whose behavior depends on its inputs and on hidden state could break this assumption,
+so a fidelity check on own inputs is needed.
+
+**IB50.** After pipeline run and components fidelity check B replays the inputs of A (using A's random-number states, but restoring the original state after a replay).
+
+**IB70.** B has three run-related parameters for the user: the reference dtype, the self-attention backend and the cross-attention backend, and also own per-path determinism override setting, and deadlines.
+
+**IB80.** An attention backend that declares a fallback, or that needs a blocked vendor package, makes the configuration UNSUPPORTED (IA70.2). A cross-attention parameter for a model without a separate cross-attention backend is an error. The default attention backend is `sdpa_efficient`.
 
 ### Rank lifecycle
 
@@ -290,7 +350,7 @@ accepted.
 
 **RL30.** When a rank just starts, it gets a status STARTED.
 
-**RL40.** **phase=initialization** This is where the rank parses its xDiT setting (TD50) and determines if it can run the configuration. If the configuration gets `status=UNSUPPORTED` record with an appropriate value of `reason=` field describing what exactly isn't supported, and then rank exits with an error. This automatically forces torchrun to kill all other ranks. By reading the log files the launcher is able to correctly identify the cause and not render rank statuses as CRASH.
+**RL40.** **phase=initialization** This is where the rank parses its xDiT setting (TD50) and determines if it can run the configuration. If the configuration gets `status=UNSUPPORTED` record with an appropriate value of `reason=` field describing what exactly isn't supported, and then rank exits with an error. This automatically forces torchrun to kill all other ranks. By reading the log files the launcher is able to correctly identify the cause and set all cases statuses to UNSUPPORTED too (IA70.2).
 *Rationale for not setting case statuses:* In case of a hang or a crash, the launcher have to identify cases that didn't run to assign them appropriate statuses. We simply reuse this machinery for setting case statuses for unsupported configuration too.
 
 **RL50.** **phase=loading** Doesn't have specific statuses.
@@ -311,13 +371,13 @@ If during steps 2 or 4 the rank finds that it can't process the call data correc
 2. the call could have completed successfully (this doesn't need a changed status, the original ABOUT_TO_START is ok).
 3. the whole case never had a single call; the case is in the "unseen cases set" (RL60)
 
-For each case in the "unseen cases set" the rank logs `status=FAILED_TO_START case=<case_id>`.
+For each case in the "unseen cases set" the rank logs `status=NOT_REACHED case=<case_id>`.
 In version 1 no cross-rank synchronization about which cases to replay is performed, and the user is responsible for choosing components that runs equally successfully (in terms of statuses) on all ranks simultaneously.
 
 *Rationale for the absence of replay synchronization:* Synchronization adds considerable complexity to the code. Instead we assume that each component runs on every rank the same number of calls, and each of the calls is handled by the rank successfully, so ordered "replay lists" are identical across all ranks, therefore letting each rank to use its private "replay list" is harmless. The user is responsible to ensure the component they select meets the assumptions.
 
 **RL90.** **phase=replay** Two kind of replays are needed:
-- both instance A and B should replay each call capture to ensure the component was properly isolated and rerunning it yields binary the same result (fidelity check; B also needs it since it run different dtype specific code). Fidelity check may also fail for another reason: if the component is non-deterministic. Since some non-determinism may be valid, each case may have an instance-specific fidelity check override flag (set on per-case basic during configuration call TD10), that if set, simply excludes all case calls from fidelity check replays.
+- both instance A and B should replay each call for fidelity check IA40-IA60;
 - instance B also replays all calls that got status=DUMPED on A and then either passed B's fidelity check or the check was disabled for a call by instance-specific override flag, using A's data casted to reference dtype to obtain reference outputs of the component.
 
 Instance B runs both replays: first it runs fidelity check replays on its own inputs and outputs, then it runs replays on A's inputs.
@@ -332,134 +392,9 @@ Instance B runs both replays: first it runs fidelity check replays on its own in
 7. if this is a fidelity check, the rank perform bitwise comparison of each of the elements of obtained output with expected (read in point 2). Any mismatch in the outputs structure or content gives `status=FIDELITY_FAILED case=<case_id> call=<call_id>`. If the check passes, the rank logs instead `status=FIDELITY_PASSED case=<case_id> call=<call_id>`.
 8. Otherwise if this isn't a fidelity check, the rank logs `status=REPLAYED case=<case_id> call=<call_id>`.
 
-
-*Rationale:* strict order and synchronization with barriers are necessary to ensure proper collectives functioning and along with detailed logging help to correctly attribute crashes. A fault that silently
-damages memory and shows only in a later case is an accepted limit.
+*Rationale:* strict call execution order and synchronization with barriers are necessary to ensure proper collectives functioning and along with detailed logging help to correctly attribute crashes. A fault that silently damages memory and shows only in a later case is an accepted limit.
 
 
-### Instance A
-
-**IA10.** Instance A runs the component as production does: low-precision math, custom kernels, and the other
-settings of the configuration. In version 1 it runs eagerly. 
-
-**IA20.** One instance A do call captures and the replays. There is no separate capture instance. The capture
-saves the CPU and CUDA random-number states before each call, and each replay restores them.
-
-**IA30.** A runs the pipeline once, captures the calls of the listed components, and replays them with the
-captured inputs afterwards (a standalone replay). If a component is listed, but never run on a rank, the rank get
-NOT_REACHED_IN_A status for the component.
-*Rationale for standalone replays:* replaying a component outside of its pipeline ensures that the
-component is fully isolated from everything else in the pipeline and always computes a
-purely functional `y=f(x)`. This is especially important for component benchmarking implementation later.
-Given the huge component coupling observed in xDiT this will likely create an issue someday
-that a certain component can't be correctly isolated: in that case, if a proper refactoring isn't
-possible, a test case definition could be augmented to supply a code that is going to capture from a
-pipeline run an additional information needed to make a correct replay, and then setup/teardown that
-for doing the replay.
-Potential sources of issues: use of `torch.Generator` by the component, internal caches,
-asynchronous work that is still running, hooks by other features running, higher memory use, & etc.
-
-**IA40.** **Fidelity and determinism checks (A and B).** The instance replays a captured call once (replay 1). If
-the output equals the captured output bit for bit, the fidelity check passes. Otherwise it replays the call
-again (replay 2):
-1. if the two replays differ, the status is NON_DETERMINISTIC_A or NON_DETERMINISTIC_B (depending on
-   the instance), collectively called NON_DETERMINISTIC;
-2. if the two replays are equal but differ from the capture, the status is REPLAY_MISMATCH_A or
-   REPLAY_MISMATCH_B (depending on the instance), collectively called REPLAY_MISMATCH.
-
-Rare nondeterminism can give a false REPLAY_MISMATCH. This is a false failure, never a hidden one.
-
-**IA50.** By default, each test must be deterministic in A and in B. A test is one case: all calls or the
-selected calls of one component path (CP50, CP120). Each test can have two determinism overrides:
-1. The general override sets the policy for A. It also sets the policy for B if the test has no B override.
-2. The B override sets the policy for B only. If it is set, it takes precedence over the general override.
-
-If the policy of an instance requires determinism, NON_DETERMINISTIC stops the case on all ranks (FC90.4)
-and fails the test at once. If the policy permits nondeterminism, NON_DETERMINISTIC does not stop the case, and
-SUCCESS can replace it (IA80). The bitwise checks always run, whatever the policy is.
-
-Each rank also has a nondeterminism status flag for each case. Each NON_DETERMINISTIC status that the rank gets sets
-the flag, and nothing clears it; the rank also records the call identifier of each nondeterministic execution.
-The flag of a case is the OR of the flags of all ranks of A and B. If it is set, the test issues a pytest
-warning that names the instances, the ranks with the flag and their call identifiers, whatever the policy and
-the outcome are.
-
-**IA60.** REPLAY_MISMATCH always stops the case on all ranks (FC90.4) and fails the test at once.
-
-**IA61.** It's an accepted limitation of UC10 that under a policy that permits non-determinism, fidelity
-check failures (IA40) might be hidden while false REPLAY_MISMATCH might appear.
-*Rationale:* Without invoking HL70 we can't make tolerance tests possible for such a component.
-a. Suppose a component depends on hidden state, so replay 1 differs from the capture, and
-it is also nondeterministic, so replay 2 differs from replay 1. Then the status is
-NON_DETERMINISTIC, and IA80 counts it as passed. The fidelity failure is hidden.
-b. The opposite error also happens. For a validly nondeterministic component, replay 1
-and replay 2 can be equal and differ from the capture. IA60 then always fails the test.
-So the override does not change every nondeterminism result "from a failure to a
-warning", as UC10 says.
-
-**IA70.** UNSUPPORTED marks a known limit of the harness:
-1. If the harness cannot handle an argument (fp8 or MX tensors, types that it cannot serialize), only the
-   affected case gets UNSUPPORTED. The message names the argument.
-2. If the harness cannot handle a feature of a configuration, every case of the configuration gets
-   UNSUPPORTED. The message names the feature and the
-   run argument with its value. The harness finds this at collection, from the xDiT settings (TD20), or when A or
-   B loads the configuration. After that, no instance of the configuration starts or continues. If no case gets
-   SUCCESS_A, B does not start (FC20.5), so a feature that only B can find stays unknown in that run.
-
-**IA80.** After passing the end-of-case barrier of FC50, each rank replaces its status with SUCCESS, if it passed all the checks (a
-NON_DETERMINISTIC under a policy that permits it counts as passed), has done all the replays of the case, and
-successfully dumped all the necessary data. SUCCESS is the only successful status. Otherwise the rank keeps its
-last status; a rank whose case another rank stopped (FC90.4) keeps ABOUT_TO_START (FR50).
-
-### Instance B
-
-**IB10.** Instance B is an eager reference. It inherits requirements of A by default (see "Instance A"
-section); requirements of this section overrides some of them. B uses the same configuration and
-the same world size and parallel layout as A, with these changes:
-1. the reference dtype for calculating in extended precision: fp32 by default; a parameter,
-   because some models might need a smaller dtype; If it uses
-   fp32, B forces full fp32 matrix precision: `torch.backends.cuda.matmul.allow_tf32 = False`,
-   `torch.backends.cudnn.allow_tf32 = False` and `torch.set_float32_matmul_precision("highest")`.
-2. quantization off, so B loads normal weights;
-3. dense attention;
-4. vendor packages blocked;
-5. no compile, no step cache, no FP8 communication, no hybrid schedules.
-
-The classification is: the trusted eager path replaces compile, the attention kernel, fused kernels, FP8
-communication and the hybrid precision schedules. B keeps the parallel degrees and layout, the parallel VAE,
-VAE tiling and its tile shape, distilled weights, LoRA and channels-last.
-
-**IB20.** B always loads in bf16 and casts to the reference dtype if the data dtype offers less
-precision (less mantissa bits) than the reference dtype (so if the reference dtype is bf16
-and there's fp32 data, that higher precision data stays unmodified). It does not load a
-checkpoint in the reference dtype. B converts all components at once.
-
-**IB30.** After B loads a model, a `TorchDispatchMode` audit checks all dtypes used to
-run the model (including replays). It warns about dtypes with less precision than the reference dtype, and about
-custom calls. The check does not fail, only prints a warning informing about an imprecise dtype use,
-or a custom call. (it's a known limitation of version 1 needs to be addressed in future
-versions that these warnings aren't recorded and are produced only during instance B runs)
-
-**IB40.** B runs the pipeline in the reference dtype with the same run arguments as A (changes of IB10 applied).
-It captures its own calls and runs its own fidelity check on them.
-*Rationale:* if the replay is faithful with B's inputs, it is also faithful with A's inputs. That
-holds if faithfulness depends on the context and state of the replay and not on the input values.
-A component whose behavior depends on its inputs and on hidden state could break this assumption,
-so a fidelity check on own inputs is needed.
-
-**IB50.** B replays the inputs of A at least two times (using A's random-number states, but
-restoring the original state after a replay) and compares each replay with the first one bit for
-bit. Nondeterminism in B gives NON_DETERMINISTIC_B.
-
-**IB60.** If a case gets REPLAY_MISMATCH_B, or NON_DETERMINISTIC_B under a policy that requires determinism, only
-that case fails. The other cases continue.
-
-**IB70.** B has three run-related parameters for the user: the reference dtype, the self-attention backend and the
-cross-attention backend, and also own per-path determinism override setting, and deadlines.
-
-**IB80.** An attention backend that declares a fallback, or that needs a blocked vendor package, makes the
-configuration UNSUPPORTED_B (IA70.2). A cross-attention parameter for a model without a separate
-cross-attention backend is an error. The default attention backend is `sdpa_efficient`.
 
 ### Failures, crashes and hangs
 

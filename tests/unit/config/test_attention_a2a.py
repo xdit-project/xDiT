@@ -131,6 +131,47 @@ def test_profiles_use_validated_wan_launch_geometry():
         assert AttentionA2AConfig(profile=profile).block_num == 512
 
 
+def test_output_hop_requires_an_enabled_profile():
+    assert AttentionA2AConfig(profile="auto", output=" MORI ").output == "mori"
+
+    with pytest.raises(ValueError, match="requires an enabled --attention_a2a profile"):
+        AttentionA2AConfig(output="mori")
+    with pytest.raises(ValueError, match="unsupported Attention A2A output hop"):
+        AttentionA2AConfig(profile="auto", output="rccl")
+
+
+def test_auto_resolution_keeps_the_output_hop():
+    resolved = AttentionA2AConfig(profile="auto", output="mori").resolve_for_backend("aiter_mxfp6")
+
+    assert (resolved.profile, resolved.output) == ("mxfp6-e4m3", "mori")
+    assert resolved.output_enabled
+
+
+def _output_hop_args(gemm_quantization):
+    return xFuserArgs(
+        model="test",
+        ulysses_degree=8,
+        attention_backend="aiter_fp8",
+        attention_a2a="auto",
+        attention_a2a_output="mori",
+        gemm_quantization=gemm_quantization,
+    )
+
+
+@pytest.mark.parametrize(
+    "gemm_quantization",
+    ("fp8", "fp4", "fp6", "a6w4", "low=fp4,high=fp8", "low=fp4,high=fp6", "low=fp4,high=a6w4"),
+)
+def test_output_hop_accepts_gemm_profiles_with_quantized_projections(gemm_quantization):
+    assert _output_hop_args(gemm_quantization).attention_a2a_output == "mori"
+
+
+@pytest.mark.parametrize("gemm_quantization", (None, "none", "int8"))
+def test_output_hop_rejects_gemm_profiles_without_quantized_projections(gemm_quantization):
+    with pytest.raises(ValueError, match="--attention_a2a_output mori requires --gemm_quantization"):
+        _output_hop_args(gemm_quantization)
+
+
 @pytest.mark.parametrize(
     ("profile", "scale_modes", "v_pack"),
     (

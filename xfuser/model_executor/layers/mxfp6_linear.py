@@ -53,8 +53,49 @@ def _(
     )
 
 
+@torch.library.custom_op("xfuser::mxfp6_gemm_prequantized", mutates_args=())
+def _mxfp6_gemm_prequantized(
+    activation_packed: torch.Tensor,
+    activation_scale: torch.Tensor,
+    weight_packed: torch.Tensor,
+    weight_scale: torch.Tensor,
+    rows: int,
+    out_features: int,
+    in_features: int,
+) -> torch.Tensor:
+    return gemm_a6w6(
+        activation_packed,
+        weight_packed,
+        activation_scale,
+        weight_scale,
+        rows,
+        out_features,
+        in_features,
+        dtype=torch.bfloat16,
+    )
+
+
+@_mxfp6_gemm_prequantized.register_fake
+def _(
+    activation_packed: torch.Tensor,
+    activation_scale: torch.Tensor,
+    weight_packed: torch.Tensor,
+    weight_scale: torch.Tensor,
+    rows: int,
+    out_features: int,
+    in_features: int,
+) -> torch.Tensor:
+    return torch.empty(
+        (rows, out_features),
+        dtype=torch.bfloat16,
+        device=activation_packed.device,
+    )
+
+
 class xFuserMXFP6Linear(nn.Module):
     """Drop-in BF16 linear using AITER's MXFP6 A6W6 GEMM."""
+
+    prequantized_input_codec = "mxfp6"
 
     def __init__(
         self,
@@ -72,9 +113,7 @@ class xFuserMXFP6Linear(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         factory_kwargs = {"device": device, "dtype": dtype}
-        self.weight = nn.Parameter(
-            torch.empty((out_features, in_features), **factory_kwargs)
-        )
+        self.weight = nn.Parameter(torch.empty((out_features, in_features), **factory_kwargs))
         if bias:
             self.bias = nn.Parameter(torch.empty(out_features, **factory_kwargs))
         else:
@@ -112,9 +151,7 @@ class xFuserMXFP6Linear(nn.Module):
         weight_scale: torch.Tensor,
     ) -> None:
         current_packed = getattr(self, "weight_packed", None)
-        if current_packed is not None and self._is_fsdp_managed_parameter(
-            current_packed
-        ):
+        if current_packed is not None and self._is_fsdp_managed_parameter(current_packed):
             raise RuntimeError("Replace MXFP6 packed state before fully_shard")
         self._remove_packed_state()
         if self.weight is not None:
@@ -135,8 +172,7 @@ class xFuserMXFP6Linear(nn.Module):
     ) -> None:
         if weights.shape != (self.out_features, self.in_features):
             raise ValueError(
-                "MXFP6 weight shape must be "
-                f"({self.out_features}, {self.in_features}), got {tuple(weights.shape)}"
+                f"MXFP6 weight shape must be ({self.out_features}, {self.in_features}), got {tuple(weights.shape)}"
             )
         if weights.dtype != torch.bfloat16:
             raise TypeError("AITER MXFP6 weights must use torch.bfloat16")
@@ -182,21 +218,15 @@ class xFuserMXFP6Linear(nn.Module):
         has_packed = packed_key in state_dict or scale_key in state_dict
 
         if (packed_key in state_dict) != (scale_key in state_dict):
-            raise RuntimeError(
-                "MXFP6 packed state requires both weight_packed and weight_scale"
-            )
+            raise RuntimeError("MXFP6 packed state requires both weight_packed and weight_scale")
         if has_packed and weight_key in state_dict:
-            raise RuntimeError(
-                "MXFP6 state cannot contain both full and packed weights"
-            )
+            raise RuntimeError("MXFP6 state cannot contain both full and packed weights")
 
         destination = None
         if has_packed:
             incoming_packed = state_dict[packed_key]
             incoming_scale = state_dict[scale_key]
-            expected_packed, expected_scale = mxfp6_gemm_pack_size(
-                self.out_features, self.in_features
-            )
+            expected_packed, expected_scale = mxfp6_gemm_pack_size(self.out_features, self.in_features)
             if (
                 incoming_packed.dtype != torch.uint8
                 or incoming_scale.dtype != torch.uint8
@@ -204,9 +234,7 @@ class xFuserMXFP6Linear(nn.Module):
                 or incoming_scale.numel() != expected_scale
             ):
                 raise ValueError("MXFP6 packed state has an invalid dtype or size")
-            current = (
-                self.weight_packed if hasattr(self, "weight_packed") else self.weight
-            )
+            current = self.weight_packed if hasattr(self, "weight_packed") else self.weight
             if self._is_fsdp_managed_parameter(current):
                 raise RuntimeError("Load MXFP6 packed state before fully_shard")
             destination = self._destination_device(current, incoming_packed)
@@ -243,11 +271,7 @@ class xFuserMXFP6Linear(nn.Module):
                 )
 
         bias_key = prefix + "bias"
-        if (
-            bias_key in state_dict
-            and self.bias is not None
-            and self.bias.device.type == "meta"
-        ):
+        if bias_key in state_dict and self.bias is not None and self.bias.device.type == "meta":
             incoming_bias = state_dict[bias_key]
             self.bias = nn.Parameter(
                 torch.empty_like(
@@ -268,10 +292,7 @@ class xFuserMXFP6Linear(nn.Module):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         if input.shape[-1] != self.in_features:
-            raise ValueError(
-                f"MXFP6 input has {input.shape[-1]} features, "
-                f"expected {self.in_features}"
-            )
+            raise ValueError(f"MXFP6 input has {input.shape[-1]} features, expected {self.in_features}")
         if input.dtype != torch.bfloat16:
             raise TypeError("AITER MXFP6 activations must use torch.bfloat16")
         if not hasattr(self, "weight_packed"):
@@ -289,8 +310,36 @@ class xFuserMXFP6Linear(nn.Module):
             output = output + self.bias
         return output.reshape(*original_shape[:-1], self.out_features)
 
-    def extra_repr(self) -> str:
-        return (
-            f"in_features={self.in_features}, "
-            f"out_features={self.out_features}, bias={self.bias is not None}"
+    def forward_prequantized(
+        self,
+        payload: torch.Tensor,
+        scale: torch.Tensor,
+        logical_shape: tuple[int, ...],
+    ) -> torch.Tensor:
+        """Run the GEMM on an activation already packed in the A6W6 layout."""
+        rows = math.prod(logical_shape[:-1])
+        if logical_shape[-1] != self.in_features or (payload.numel(), scale.numel()) != tuple(
+            mxfp6_gemm_pack_size(rows, self.in_features)
+        ):
+            raise ValueError(
+                f"MXFP6 packed sizes {(payload.numel(), scale.numel())} do not match "
+                f"logical input shape {tuple(logical_shape)}"
+            )
+        if not hasattr(self, "weight_packed"):
+            self._quantize_weights()
+
+        output = torch.ops.xfuser.mxfp6_gemm_prequantized(
+            payload,
+            scale,
+            self.weight_packed,
+            self.weight_scale,
+            rows,
+            self.out_features,
+            self.in_features,
         )
+        if self.bias is not None:
+            output = output + self.bias
+        return output.reshape(*logical_shape[:-1], self.out_features)
+
+    def extra_repr(self) -> str:
+        return f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}"

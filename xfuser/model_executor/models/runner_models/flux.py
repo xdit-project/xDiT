@@ -14,6 +14,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
     ModelSettings,
+    prefer_mha_v4,
 )
 from xfuser.envs import PACKAGES_CHECKER
 from xfuser.core.utils.runner_utils import (
@@ -93,6 +94,12 @@ class xFuserFluxModel(xFuserModel):
             ),
         },
     )
+
+    def _customize_settings(self, config) -> None:
+        super()._customize_settings(config)
+        # PipeFusion runs FLUX.1 in FP16, which AITER_BF16 does not serve.
+        if config.pipefusion_parallel_degree <= 1:
+            prefer_mha_v4(self.settings, "auto")
 
     def _get_compile_mode(self) -> str:
         if PACKAGES_CHECKER._on_rdna4() or self.config.cache_method:
@@ -236,6 +243,10 @@ class xFuserFluxKontextModel(xFuserModel):
             )
         },
     )
+
+    def _customize_settings(self, config) -> None:
+        super()._customize_settings(config)
+        prefer_mha_v4(self.settings, "auto")
 
     def _get_compile_mode(self) -> str:
         # One transformer pass per step, so CUDA graphs replay safely; as for FLUX.1.

@@ -38,6 +38,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     LoadRoute,
+    STANDARD_LOAD_ROUTES,
 )
 
 
@@ -630,12 +631,10 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
         valid_tasks=["t2va", "i2va", "l2va", "fl2va"],
     )
 
-    # Modular loading and QKV fusion leave no collective-safe checkpoint mapping.
     load_support = LoadSupport(
-        meta_transformers=(),
-        meta_text_encoders=(),
-        replicated_meta=False,
-        routes=LoadRoute.NONE,
+        meta_transformers=("transformer",),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
     )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
@@ -664,6 +663,8 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
+        if self.loader.replicated_broadcast_load():
+            self.pipe.transformer.fuse_qkv_projections()
         # Under a Sol backend the token refiner runs on dense AITER (see the transformer wrapper).
         # Select it here, outside the compiled forward, which cannot import its kernel.
         runtime = get_runtime_state()
@@ -673,6 +674,8 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
             runtime._check_if_backend_compatible_with_current_configuration(REFINER_DENSE_BACKEND)
 
     def _validate_config(self, config) -> None:
+        if getattr(config, "memory_efficient_sharding", False) and config.fully_shard_degree > 1:
+            raise ValueError("MiniMax-H3 does not support memory-efficient FSDP loading.")
         if config.task is None:
             if self.settings.valid_tasks == ["ref2va"]:
                 config.task = "ref2va"
@@ -739,6 +742,11 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
         return args
 
     def _load_model(self):
+        if (self.config.use_fp8_gemms or self.config.use_fp4_gemms) and self.loader.replicated_broadcast_load():
+            raise ValueError(
+                "MiniMax-H3 --memory_efficient_replicated_load does not support FP8/FP4 GEMMs: "
+                "checkpoint materialization must finish before QKV fusion."
+            )
         from diffusers import ModularPipeline
         from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
             xFuserMiniMaxH3Transformer3DWrapper,
@@ -752,16 +760,25 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
             self.settings.model_name,
             workflow=workflow,
         )
-        transformer = xFuserMiniMaxH3Transformer3DWrapper.from_pretrained(
-            self.settings.model_name,
-            dtype=torch.bfloat16,
-            **self.loader.checkpoint_request("transformer").from_pretrained_kwargs(),
-            enable_fasth3_vsa=self._enable_fasth3_vsa,
-            attention_backend=_parse_attention_backend(
+        init_kwargs = {
+            "enable_fasth3_vsa": self._enable_fasth3_vsa,
+            "attention_backend": _parse_attention_backend(
                 getattr(self.config, "attention_backend", None),
                 "attention backend",
             ),
-        )
+        }
+        if self.loader.replicated_broadcast_load():
+            transformer = self.loader.load_transformer(
+                xFuserMiniMaxH3Transformer3DWrapper,
+                init_kwargs=init_kwargs,
+            )
+        else:
+            transformer = xFuserMiniMaxH3Transformer3DWrapper.from_pretrained(
+                self.settings.model_name,
+                dtype=torch.bfloat16,
+                **self.loader.checkpoint_request("transformer").from_pretrained_kwargs(),
+                **init_kwargs,
+            )
         pipe.update_components(transformer=transformer)
         _load_minimax_h3_components(pipe)
         if self.config.lora_path:
@@ -770,7 +787,10 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
                 _resolve_lora_file(self.config.lora_path, self.config.lora_weight_name),
                 scale=self.config.lora_scale,
             )
-        pipe.transformer.fuse_qkv_projections()
+        # Keep checkpoint projections unfused until replicated weights are materialized.
+        # _post_load_and_state_initialization performs fusion on that path.
+        if not self.loader.replicated_broadcast_load():
+            pipe.transformer.fuse_qkv_projections()
         pipe.text_encoder.lm_head = None
         self._parallelize_text_encoder(pipe.text_encoder)
         _count_steps_as_forwards(pipe.scheduler)
@@ -953,6 +973,8 @@ class xFuserFastH3Model(xFuserMiniMaxH3Model):
     other MiniMax-H3 backends stay dense when selected explicitly.
     """
 
+    load_support = LoadSupport()
+
     transformer_cudagraphs = False
 
     default_input_values = DefaultInputValues(
@@ -1056,6 +1078,8 @@ class xFuserMiniMaxH3TurboModel(xFuserMiniMaxH3Model):
     are refused; any other adapter needs ``--num_inference_steps`` and ``--flow_shift``.
     """
 
+    load_support = LoadSupport()
+
     transformer_cudagraphs = False
 
     default_input_values = DefaultInputValues(
@@ -1129,6 +1153,8 @@ class xFuserVDNMiniMaxH3Model(xFuserMiniMaxH3Model):
     transformer block (fullgraph=True); the packed-layout geometry is primed from
     position_ids in an eager forward pre-hook outside the compiled blocks.
     """
+
+    load_support = LoadSupport()
 
     # Compiles its blocks in _compile_model below, outside _transformer_compile_mode.
     transformer_cudagraphs = False

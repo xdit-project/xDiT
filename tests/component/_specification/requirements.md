@@ -129,11 +129,7 @@ states: error (an exception is thrown from setup/teardown or fixture code),
 failure (an exception is thrown from a test function), test skip or test pass. If an exception
 is raised, it's message contain all important information to explain the reason for that.
 
-**HLS50.** In some cases a rank getting a certain status may cause a "shared decision", making after
-a synchronization point all other rank to not do what they were going to do (for example,
-to skip case execution, or a replay). These decisions don't affect these other rank statuses (they
-keep their own); they only affect on what the ranks will do next. When a shared decision is made,
-if it is different from what a rank was going to do, the rank logs it into their own log file.
+**HLS50.** In some cases a rank getting a certain status may cause a "shared decision", making all other ranks after a synchronization point to not do what they were going to do (for example, to skip a call replay). These decisions don't affect these other rank statuses (they keep their own); they only affect on what the ranks will do next. When a shared decision is made, if it is different from what a rank was going to do, the rank logs it into their own log file.
 
 ### Tests definition
 
@@ -169,17 +165,14 @@ allowed. The `--ff` option of pytest, `pytest-xdist` and random-order pytest plu
 in terms of xDiT runner), and `use_torch_compile` off.
 
 **TD100.** Deadlines have default values, and a configuration can override them. The defaults are:
-1. A: 10 minutes for the initialization, 20 minutes for the pipeline run;
-2. B: 15 minutes for the initialization, 40 minutes for the pipeline run;
+1. A: 5 minutes for the `phase=initialization`, 10 minutes for the `phase=run`, 5 minutes to the lack of new records in the log file in all other cases.
+2. B: 10 minutes for the `phase=initialization`, 20 minutes for the `phase=run`, 10 minutes to the lack of new records in the log file in all other cases.
 3. each replayed call (measured between pre-call and post-call barriers): 2 minutes in A and
    5 minutes in B.
 
 **TD110.** **Deadlines enforcement.** The configuration fixture (TD40) launches each instance sequentially using a supplementary launcher process that takes care of deadlines and child processes cleanup. Each rank of the instance writes its deadline -related progress and timestamps to a certain rank-specific log file known to the launcher. The launcher then periodically reads these files and uses progress records and timestamps to enforce deadlines. A missed deadline leads to a warning message and killing the instance and all its descendant processes.
 
-**TD120.** Since the launcher is the only entity that knows of missed deadlines, and also
-only it can detect crashes or other premature exits, it's responsible for maintaining proper
-rank statuses for the cases that were executed last according to the rank progress reports,
-upon the instance finishing execution (whatever the reasons for instance process ending were).
+**TD120.** Since the launcher is the only entity that knows of missed deadlines, and also only it can detect crashes or other premature exits, it's responsible for reading rank log files and appending correct rank statuses to rank log files for the cases that were executed last (might need CRASHED or HANGED) or don't have records at all (these need FAILED_TO_START), upon the instance finishing execution (whatever the reasons for instance process ending were).
 
 **TD130.** If `HSA_DISABLE_COREDUMP_ON_EXCEPTION` environment variable isn't defined for the
 launcher process, it must set `HSA_DISABLE_COREDUMP_ON_EXCEPTION=1` for self and all child
@@ -251,7 +244,7 @@ component paths) call counter and a set of references to counters of direct call
 (i.e. callable components that directly follow the element in any
 path, ignoring non-callable components in between). The harness knows at path resolution which elements
 are callable and what their path descendants are.
-1. The counter is 0 before the pipeline starts and can only be modified during pipeline run (replays excluded).
+1. The counter is 0 before the pipeline starts and can only be modified during pipeline run (replays are excluded).
 2. The element call handler first increments the counter, then walks over its own direct descendant set and
    invokes "reset_counter()" for each of the descendants. Upon getting a "reset_counter()" request, a counter
    sets own call number to 0 and invokes "reset_counter()" on each of counters of its own descendants, so
@@ -269,7 +262,7 @@ are callable and what their path descendants are.
 **CP90.** `:i` refers to the global counter of its element. Example: `a.b:2.c.d[2]:3` selects a call of `d[2]`
 when its counter is 3 and the counter of `b` is 2. During the run of pipelines in A or B, the harness
 writes the inputs of each selected call, random-number states and the outputs after the call returns
-to data files (it doesn't store them in memory). These data files are read later for replays and
+to data files (it doesn't store them in memory). These data files are read later for call replays and
 checks. Only the corresponding test case function can delete these data files.
 
 **CP100.** An address contains the call numbers of all callable elements of a path that the
@@ -299,29 +292,63 @@ accepted.
 
 ### Rank lifecycle
 
-**RL10.** In its lifetime a rank comes through a sequence of phases and cross-rank synchronization points (in which all ranks must participate), described in order below. Getting to the next phase is reflected in the rank's log with a corresponding entry `phase=`.
+**RL10.** In its lifetime a rank comes through a sequence of phases (in which all ranks must participate), described in order below.
 
-**RL20.** When a rank just starts, it gets a status STARTED.
+**RL20.** Getting to the next phase is recorded in the rank's log with a corresponding field `phase=`. These records are used by the launcher to enforce deadlines (TD110).
 
-**RL30.** **Configuration parsing phase.** This is where the rank parses its xDiT setting (TD50) and determines if it can run the configuration. If the configuration gets `status=UNSUPPORTED` record with a `reason=` field describing what exactly isn't supported, and then rank exits with an error (no special synchronization points are needed). This automatically forces torchrun to kill all other ranks. By reading the log files the launcher is able to correctly identify the cause and not render rank statuses as CRASH.
+**RL30.** When a rank just starts, it gets a status STARTED.
 
-**RL40.** **Model loading phase.** Doesn't have specific statuses and synchronization points.
+**RL40.** **phase=initialization** This is where the rank parses its xDiT setting (TD50) and determines if it can run the configuration. If the configuration gets `status=UNSUPPORTED` record with an appropriate value of `reason=` field describing what exactly isn't supported, and then rank exits with an error. This automatically forces torchrun to kill all other ranks. By reading the log files the launcher is able to correctly identify the cause and not render rank statuses as CRASH.
+*Rationale for not setting case statuses:* In case of a hang or a crash, the launcher have to identify cases that didn't run to assign them appropriate statuses. We simply reuse this machinery for setting case statuses for unsupported configuration too.
 
-**RL50.** **Model run phase.** During this phase rank runs the model pipeline and captures data.
+**RL50.** **phase=loading** Doesn't have specific statuses.
 
-4. Replays phase
+**RL60.** **phase=run** During this phase rank runs the model pipeline and captures data. From the beginning, the rank has a set of cases it has to run; it makes a copy of this set into "unseen cases set". The rank installs hooks to tracked components and when a hook fires, if the case call conditions are met, the rank:
+1. removes the case from "unseen cases set" if it's still there; logs `status=ABOUT_TO_START case=<case_id> call=<call_id> files=<files>` (where `<files>` is a 2-element tuple, each element of which is a list of filepaths to files that will contain dumped data for the call of the case. The first element is for files having data necessary to start the call, such as inputs, rng states & etc, and the second element is for outputs; Filepaths follow a pattern and can be recovered by the rank later from the generic data path it has and a call identifier),
+2. saves component inputs and other applicable runtime data to the case call specific dump file it previously allocated (or files, depending on what is more convenient),
+3. runs the call and
+4. similarly saves outputs on the call return
+5. if dumps were successful: the rank writes a `status=DUMPED case=<case_id> call=<call_id>` record to the log and appends the call identifier to an internal ordered list of calls to replay (called "replay list").
 
-1. During pipeline execution ranks doesn't communicate with each other, but only:
-   1. if rank 
+If during steps 2 or 4 the rank finds that it can't process the call data correctly (for example, some of the data to dump isn't serializable, or a tensor has quantized dtype, which can't be de-quantized without special knowledge and hence used for B), instead of step 5 that case call records `status=UNSUPPORTED case=<case_id> call=<call_id> reason=<why>`. If that happened on step 2 the rank still runs the call, but don't do steps 4 and 5. Then the pipeline run proceeds further.
 
-2. After the pipeline finishes, 
+**RL70.** **Duration of phase=run for the timeouts of TD110.** Since this phase execute a potentially lengthy code that isn't meant to be accounted for in the phase's deadline timeout calculation, the rank maintains an internal counter `duration_excluded` that is set to 0 when the phase starts. Execution of the code doesn't belong to the pipeline duration deadline threshold (such as dumping input, output & etc) is timed and added to the `duration_excluded`. During the phase, to each log record the rank produces, it automatically adds a  `duration_excluded=` field with the current value of the counter. Hence the launcher can always calculate a true duration of the phase for TD100-TD110 by subtracting from the `now()` timestamp, the timestamp of the latest `phase=` change, and the latest observed `duration_excluded=`.
+
+**RL80.** Once the model finishes running, only these things could have happened to each of the calls of each of the cases that the rank should have run during the model run phase:
+1. the call could have obtained UNSUPPORTED status. It makes the call excluded from replays.
+2. the call could have completed successfully (this doesn't need a changed status, the original ABOUT_TO_START is ok).
+3. the whole case never had a single call; the case is in the "unseen cases set" (RL60)
+
+For each case in the "unseen cases set" the rank logs `status=FAILED_TO_START case=<case_id>`.
+In version 1 no cross-rank synchronization about which cases to replay is performed, and the user is responsible for choosing components that runs equally successfully (in terms of statuses) on all ranks simultaneously.
+
+*Rationale for the absence of replay synchronization:* Synchronization adds considerable complexity to the code. Instead we assume that each component runs on every rank the same number of calls, and each of the calls is handled by the rank successfully, so ordered "replay lists" are identical across all ranks, therefore letting each rank to use its private "replay list" is harmless. The user is responsible to ensure the component they select meets the assumptions.
+
+**RL90.** **phase=replay** Two kind of replays are needed:
+- both instance A and B should replay each call capture to ensure the component was properly isolated and rerunning it yields binary the same result (fidelity check; B also needs it since it run different dtype specific code). Fidelity check may also fail for another reason: if the component is non-deterministic. Since some non-determinism may be valid, each case may have an instance-specific fidelity check override flag (set on per-case basic during configuration call TD10), that if set, simply excludes all case calls from fidelity check replays.
+- instance B also replays all calls that got status=DUMPED on A and then either passed B's fidelity check or the check was disabled for a call by instance-specific override flag, using A's data casted to reference dtype to obtain reference outputs of the component.
+
+Instance B runs both replays: first it runs fidelity check replays on its own inputs and outputs, then it runs replays on A's inputs.
+
+**RL100.** Call replays run in "replay list" order (RL60), and in a lock step, with a stream synchronization and a barrier before and after replay. This helps to time execution properly to ensure correct call timeouts (TD100.3), and help to correctly attribute crashes, should they happen. For each call in ordered "replay list", the rank does:
+1. if this is a fidelity check replay and call's case has the instance-specific fidelity check override flag set: the rank logs `status=FIDELITY_SKIPPED case=<case_id> call=<call_id>` and proceeds to the next call in the list (since all ranks obtain the same "replay list" (RL80) and have the same flag value, the same case calls will be skipped on all ranks simultaneously and that can't lead to a hang).
+2. the rank reads inputs, rng states and outputs (only if it's a fidelity check), from the call replay files (the paths are recoverable from data directory path and the call identifier), and enters replay mode by executing a stream synchronization and a barrier.
+3. the rank logs `status=<status> case=<case_id> call=<call_id> file=<file>` where the `<status>` is `PRE_FIDELITY` if this is fidelity check, or `PRE_REPLAY` if this is B replaying inputs from A; `<file>` is a file path that will contain outputs of the call.
+4. the rank saves current CPU and CUDA rng states into a temporary variable; restores rng states from loaded from the input file values, execute the call with loaded inputs (B must have casted them to the reference dtype first), obtains the replayed call outputs and saves them to the `<file>`. Finally it restores the original CPU and CUDA rng states from the temporary variable.
+5. if this is a fidelity check, the rank perform bitwise comparison of each of the elements of obtained output with expected (read in point 2). Any mismatch in the outputs structure or content gives `status=FIDELITY_FAILED case=<case_id> call=<call_id>`. If the check passes, the rank logs instead `status=FIDELITY_PASSED case=<case_id> call=<call_id>`.
+6. Otherwise if this isn't a fidelity check, the rank logs `status=REPLAYED case=<case_id> call=<call_id>`.
+7. The rank exits replay mode by executing a stream synchronization and a barrier.
+
+*Rationale:* strict order and synchronization with barriers are necessary to ensure proper collectives functioning and along with detailed logging help to correctly attribute crashes. A fault that silently
+damages memory and shows only in a later case is an accepted limit.
+
 
 ### Instance A
 
 **IA10.** Instance A runs the component as production does: low-precision math, custom kernels, and the other
 settings of the configuration. In version 1 it runs eagerly. 
 
-**IA20.** One instance A does the capture and the replays. There is no separate capture instance. The capture
+**IA20.** One instance A do call captures and the replays. There is no separate capture instance. The capture
 saves the CPU and CUDA random-number states before each call, and each replay restores them.
 
 **IA30.** A runs the pipeline once, captures the calls of the listed components, and replays them with the
@@ -485,7 +512,6 @@ sequence is shared, or it ends the instance on all ranks through an exception.
 does not know this in advance.
 
 **FC90.** These decisions are shared across all ranks of the instance:
-1. the support check of the configuration, in A and B;
 2. the skip of a case before the replays: a path error, UNSUPPORTED_A or UNSUPPORTED_B from the capture of A
    or B, UNSUPPORTED_B for inputs of A that B cannot use, and call lists that differ between ranks;
 3. the second replay of a call;

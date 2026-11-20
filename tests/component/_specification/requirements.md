@@ -491,11 +491,6 @@ called NOT_REACHED_IN.
 
 **FC40.** An exception that ends the instance counts as a crash (FC20).
 
-**FC50.** A synchronization and a barrier at the end of each case, and progress records of each
-rank, attribute crashes. Before each call of a listed component in a pipeline run, and before each
-replayed call, each rank writes a progress record with the call identifier. A fault that silently
-damages memory and shows only in a later case is an accepted limit.
-
 **FC60.** Statuses can be extended later. There is no
 NOT_EVALUATED status. Users do not need to see status identifiers: the harness raises verbose exceptions with
 explanations that a person can read.

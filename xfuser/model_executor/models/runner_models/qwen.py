@@ -16,6 +16,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
     ModelSettings,
+    prefer_mha_v4,
 )
 from xfuser import xFuserArgs
 from xfuser.core.attention.spec import AttentionBackendType
@@ -26,6 +27,7 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     STANDARD_LOAD_ROUTES,
 )
+
 
 _QWEN_IMAGE_NUM_LAYERS = 60
 
@@ -139,6 +141,7 @@ class xFuserQwenImageEditModel(xFuserModel):
 
     def _customize_settings(self, config: xFuserArgs) -> None:
         super()._customize_settings(config)
+        prefer_mha_v4(self.settings, "auto")
         # 2509 and 2511 are Edit Plus checkpoints: diffusers loads them with
         # QwenImageEditPlusPipeline, which conditions on a list of images.
         self._is_edit_plus = False
@@ -317,6 +320,7 @@ class xFuserQwenImageModel(xFuserModel):
 
     def _customize_settings(self, config: xFuserArgs) -> None:
         super()._customize_settings(config)
+        prefer_mha_v4(self.settings, "auto")
         if "2512" in config.model:
             self.settings.model_name = "Qwen/Qwen-Image-2512"
             self.settings.output_name = "qwen_image_2512"
@@ -382,6 +386,8 @@ class xFuserQwenImage21Model(xFuserModel):
 
     min_diffusers_version = "0.41.0"
     attention_head_dims = frozenset({128})
+    # Measured on the base checkpoint only; Turbo keeps the global default.
+    default_mha_v4 = True
 
     load_support = LoadSupport(
         meta_transformers=("transformer",),
@@ -419,6 +425,11 @@ class xFuserQwenImage21Model(xFuserModel):
             },
         },
     )
+
+    def _customize_settings(self, config: xFuserArgs) -> None:
+        super()._customize_settings(config)
+        if self.default_mha_v4:
+            prefer_mha_v4(self.settings, "auto")
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import QwenImage21Pipeline
@@ -537,6 +548,7 @@ class xFuserQwenImage21TurboModel(xFuserQwenImage21Model):
     """
 
     _TURBO_STEPS = 8
+    default_mha_v4 = False
 
     default_input_values = replace(xFuserQwenImage21Model.default_input_values, num_inference_steps=_TURBO_STEPS)
     settings = replace(

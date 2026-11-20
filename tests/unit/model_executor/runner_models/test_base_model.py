@@ -1,7 +1,9 @@
 import json
 import logging
+from dataclasses import replace
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
@@ -351,3 +353,18 @@ def test_eval_pass_is_silent_when_everything_is_already_in_eval_mode(runner_warn
     model._set_eval_mode()
 
     assert runner_warnings() == []
+
+
+def test_save_output_encodes_each_video_with_encode_video(monkeypatch, tmp_path):
+    encoded = []
+    monkeypatch.setattr(base_model, "encode_video", lambda video, **kwargs: encoded.append((video, kwargs)))
+    model = _StubModel(xFuserArgs(model="test/model", output_directory=str(tmp_path)))
+    model.settings = replace(model.settings, fps=16, output_name="clip")
+    videos = np.zeros((2, 3, 8, 8, 3), dtype=np.float32)
+
+    model.save_output(base_model.DiffusionOutput(videos=videos, pipe_args={"height": 8, "width": 8}))
+
+    assert [kwargs for _, kwargs in encoded] == [
+        {"fps": 16, "output_path": f"{tmp_path}/clip_u1r1_tc_False_8x8_{index}.mp4"} for index in range(2)
+    ]
+    assert all(video.shape == (3, 8, 8, 3) for video, _ in encoded)

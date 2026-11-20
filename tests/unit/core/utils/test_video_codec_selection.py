@@ -125,3 +125,14 @@ def test_encode_video_selects_the_encoder_and_adds_no_audio_stream(
     (stream,) = av.container.streams
     assert stream.codec == expected_codec
     assert stream.options == expected_options
+
+
+def test_encode_video_with_audio_is_encode_video():
+    assert video_utils.encode_video_with_audio is video_utils.encode_video
+
+
+def test_float_frames_are_clipped_and_rounded_to_uint8():
+    frames = video_utils._frames_to_uint8(torch.tensor([-0.5, 0.0, 0.5, 1.0, 1.5]).numpy())
+
+    assert str(frames.dtype) == "uint8"
+    assert frames.tolist() == [0, 0, 128, 255, 255]

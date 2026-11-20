@@ -28,7 +28,7 @@ def _import_av():
     try:
         import av
     except ImportError as error:
-        raise ImportError("PyAV is required to encode videos with audio. Install it with `pip install av`.") from error
+        raise ImportError("PyAV is required to encode videos. Install it with `pip install av`.") from error
     return av
 
 
@@ -47,9 +47,13 @@ def _video_codec_options(video_codec: str, crf: int, preset: str) -> dict[str, s
 
 def _frames_to_uint8(video: np.ndarray) -> np.ndarray:
     """Return ``video`` as uint8. Scale floating-point frames from ``[0, 1]`` to ``[0, 255]``."""
-    if np.issubdtype(video.dtype, np.floating):
-        return (np.clip(video, 0.0, 1.0) * 255).round().astype(np.uint8)
-    return video
+    if not np.issubdtype(video.dtype, np.floating):
+        return video
+    # Reuse one float buffer. Each full-video float copy can be close to 1 GB at 720p.
+    scaled = np.clip(video, 0.0, 1.0)
+    scaled *= 255
+    np.rint(scaled, out=scaled)
+    return scaled.astype(np.uint8)
 
 
 def _prepare_audio_stream(container, audio_sample_rate: int, audio_bitrate: int):
@@ -98,10 +102,11 @@ def _write_audio(container, audio_stream, samples, audio_sample_rate: int, av_mo
         container.mux(packet)
 
 
-def encode_video_with_audio(
-    video: list[PIL.Image.Image] | np.ndarray | torch.Tensor | Iterator[torch.Tensor],
+def encode_video(
+    video: list[PIL.Image.Image] | list[np.ndarray] | np.ndarray | torch.Tensor | Iterator[torch.Tensor],
     fps: int,
     output_path: str,
+    *,
     audio: torch.Tensor | None = None,
     audio_sample_rate: int | None = None,
     video_chunks_number: int = 1,
@@ -111,11 +116,13 @@ def encode_video_with_audio(
     preset: str = _DEFAULT_PRESET,
     audio_bitrate: int = 192_000,
 ) -> None:
-    """Encode RGB video frames with optional stereo audio and explicit quality controls.
+    """Encode RGB video frames, with optional stereo audio, to an H.264 file.
 
-    Tensor inputs are expected to be uint8 RGB frames in ``[F, H, W, C]`` format.
-    NumPy inputs, and lists of PIL images or NumPy frames, may instead contain
-    floating-point values in ``[0, 1]``.
+    Frames are in ``[F, H, W, C]`` format. Tensor inputs must be uint8. Float NumPy
+    arrays, and lists of float NumPy frames, must be in ``[0, 1]``. The function
+    scales them to uint8. PIL images and integer NumPy arrays are used as they are.
+
+    If ``audio`` is ``None``, the file contains only a video stream.
 
     If ``video_codec`` is ``None``, the function uses ``libx264`` when it is available.
     If not, it uses ``libopenh264``. ``crf`` and ``preset`` apply only to codecs that
@@ -178,28 +185,5 @@ def encode_video_with_audio(
     container.close()
 
 
-def encode_video(
-    video: list[PIL.Image.Image] | list[np.ndarray] | np.ndarray | torch.Tensor | Iterator[torch.Tensor],
-    fps: int,
-    output_path: str,
-    video_chunks_number: int = 1,
-    video_codec: str | None = None,
-    pixel_format: str = "yuv420p",
-    crf: int = _DEFAULT_CRF,
-    preset: str = _DEFAULT_PRESET,
-) -> None:
-    """Encode RGB video frames without audio.
-
-    This function uses the same input formats, H.264 encoder selection, and quality
-    controls as :func:`encode_video_with_audio`.
-    """
-    encode_video_with_audio(
-        video,
-        fps=fps,
-        output_path=output_path,
-        video_chunks_number=video_chunks_number,
-        video_codec=video_codec,
-        pixel_format=pixel_format,
-        crf=crf,
-        preset=preset,
-    )
+# The LTX, MiniMax-H3 and Prism runners use this name.
+encode_video_with_audio = encode_video

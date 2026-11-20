@@ -491,7 +491,7 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
             xFuserLTX2VideoTransformer3DWrapper,
         )
 
-        if self.config.memory_efficient_replicated_load:
+        if self.loader.replicated_broadcast_load():
             transformer = self.loader.load_transformer(
                 xFuserLTX2VideoTransformer3DWrapper, subfolder=self._TRANSFORMER_SUBFOLDER
             )

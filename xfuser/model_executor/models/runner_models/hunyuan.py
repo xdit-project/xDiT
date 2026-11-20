@@ -257,7 +257,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
 
         task = self.config.task
         pipeline = HunyuanVideo15Pipeline if task == "t2v" else HunyuanVideo15ImageToVideoPipeline
-        if self.config.memory_efficient_replicated_load:
+        if self.loader.replicated_broadcast_load():
             transformer = self.loader.load_transformer(
                 xFuserHunyuanVideo15Transformer3DWrapper, subfolder="transformer"
             )

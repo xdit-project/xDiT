@@ -1521,12 +1521,26 @@ class _FakeTransformer:
     ("task", "expected_workflow"),
     [("t2va", "t2va"), ("i2va", "fl2va"), ("fl2va", "fl2va")],
 )
-@pytest.mark.parametrize("replicated_load", [False, True])
+@pytest.mark.parametrize(
+    "requested, world_size, quantization",
+    [
+        (False, 1, "none"),
+        (True, 1, "none"),
+        (True, 8, "none"),
+        (False, 1, "fp8"),
+        (True, 1, "fp8"),
+        (False, 1, "fp4"),
+        (True, 1, "fp4"),
+    ],
+)
 def test_minimax_h3_loads_task_workflow(
     monkeypatch,
+    tmp_path,
     task,
     expected_workflow,
-    replicated_load,
+    requested,
+    world_size,
+    quantization,
 ):
     from diffusers import ModularPipeline
 
@@ -1560,20 +1574,26 @@ def test_minimax_h3_loads_task_workflow(
     )
     monkeypatch.setattr(minimax_h3, "log", lambda message: None)
 
-    model = object.__new__(xFuserMiniMaxH3Model)
-    model.config = SimpleNamespace(
-        task=task,
-        text_encoder_tp_degree=1,
-        lora_path=None,
-        attention_backend="SDPA",
-        memory_efficient_replicated_load=replicated_load,
-        use_fp8_gemms=False,
-        use_fp4_gemms=False,
+    from xfuser.config import xFuserArgs
+    from xfuser.model_executor.models.runner_models.loading import meta_load
+
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "1")
+    model = xFuserMiniMaxH3Model(
+        xFuserArgs(
+            model="MiniMax-H3",
+            task=task,
+            output_directory=str(tmp_path),
+            attention_backend="SDPA",
+            memory_efficient_replicated_load=requested,
+            gemm_quantization=quantization,
+        )
     )
     model._parallelize_text_encoder = lambda text_encoder: None
 
-    _attach_online_loader(model, monkeypatch)
-    model.loader._replicated_decision = replicated_load
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_OFFLINE", False)
+    monkeypatch.setattr(meta_load, "get_world_group", lambda: SimpleNamespace(world_size=world_size))
+    replicated_load = requested and world_size > 1
     loader_calls = []
     model.loader.load_transformer = lambda cls, **kwargs: loader_calls.append((cls, kwargs)) or transformer
 
@@ -2505,21 +2525,3 @@ def test_minimax_h3_eager_variant_does_not_fuse_in_post_load(monkeypatch, runner
     model._post_load_and_state_initialization({})
     assert fusion_calls == []
     assert transformer.qkv_fused
-
-
-@pytest.mark.parametrize("quantization", ["use_fp8_gemms", "use_fp4_gemms"])
-def test_minimax_h3_single_rank_flag_keeps_quantized_eager_load(tmp_path, quantization, monkeypatch):
-    from xfuser.config import xFuserArgs
-    from xfuser.model_executor.models.runner_models.minimax_h3 import xFuserMiniMaxH3Model
-
-    monkeypatch.setenv("RANK", "0")
-    monkeypatch.setenv("WORLD_SIZE", "1")
-    xFuserMiniMaxH3Model(
-        xFuserArgs(
-            model="MiniMax-H3",
-            task="t2va",
-            output_directory=str(tmp_path),
-            memory_efficient_replicated_load=True,
-            **{quantization: True},
-        )
-    )

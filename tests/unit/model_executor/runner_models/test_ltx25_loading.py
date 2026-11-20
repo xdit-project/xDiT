@@ -28,12 +28,26 @@ def _model(tmp_path, cls=xFuserLTX25DistilledVideoModel, **config):
     return cls(xFuserArgs(model="LTX-2.5", output_directory=str(tmp_path), **config))
 
 
-@pytest.mark.parametrize("requested", [False, True])
+@pytest.mark.parametrize(
+    "requested, world_size, gemm_quantization",
+    [
+        (False, 1, "none"),
+        (True, 1, "none"),
+        (True, 8, "none"),
+        (False, 1, "fp8"),
+        (True, 1, "fp8"),
+        (False, 1, "fp4"),
+        (True, 1, "fp4"),
+    ],
+)
 @pytest.mark.parametrize("task", ["t2v", "i2v"])
-def test_only_transformer_uses_replicated_loader(monkeypatch, tmp_path, requested, task):
+def test_only_transformer_uses_replicated_loader(monkeypatch, tmp_path, requested, world_size, gemm_quantization, task):
     import diffusers
 
-    model = _model(tmp_path, task=task, memory_efficient_replicated_load=requested)
+    from xfuser.model_executor.models.runner_models.loading import meta_load
+
+    model = _model(tmp_path, task=task, memory_efficient_replicated_load=requested, gemm_quantization=gemm_quantization)
+    monkeypatch.setattr(meta_load, "get_world_group", lambda: SimpleNamespace(world_size=world_size))
     transformer_cls = mock.Mock()
     decoder_cls = mock.Mock()
     upsampler_cls = mock.Mock()
@@ -79,7 +93,7 @@ def test_only_transformer_uses_replicated_loader(monkeypatch, tmp_path, requeste
     assert pipe is selected.from_pretrained.return_value
     other.from_pretrained.assert_not_called()
     kwargs = selected.from_pretrained.call_args.kwargs
-    if requested:
+    if requested and world_size > 1:
         load_transformer.assert_called_once_with(transformer_cls, subfolder="transformer")
         transformer_cls.from_pretrained.assert_not_called()
         assert kwargs["transformer"] is load_transformer.return_value
@@ -119,9 +133,3 @@ def test_replicated_load_refuses_quantized_gemms_before_loading(tmp_path, monkey
     monkeypatch.setattr(meta_load, "get_world_group", lambda: SimpleNamespace(world_size=8))
     with pytest.raises(ValueError, match="requires unquantized GEMMs"):
         model._load_model()
-
-
-@pytest.mark.parametrize("gemm_quantization", ["fp8", "fp4"])
-@pytest.mark.parametrize("flag", [False, True])
-def test_single_rank_keeps_quantized_eager_load(tmp_path, gemm_quantization, flag):
-    _model(tmp_path, gemm_quantization=gemm_quantization, memory_efficient_replicated_load=flag)

@@ -77,13 +77,22 @@ def test_hunyuanvideo15_distilled_keeps_its_own_checkpoint(build):
     assert build(name, "i2v").settings.model_name == name
 
 
-@pytest.mark.parametrize("replicated", [False, True])
+@pytest.mark.parametrize(
+    "requested, world_size, use_fp8_gemms",
+    [(False, 1, False), (True, 1, False), (True, 8, False), (False, 1, True), (True, 1, True)],
+)
 @pytest.mark.parametrize("task", ["t2v", "i2v"])
-def test_hunyuanvideo15_load_preserves_task_and_transformer_identity(build, monkeypatch, replicated, task):
+def test_hunyuanvideo15_load_preserves_task_and_transformer_identity(
+    build, monkeypatch, requested, world_size, use_fp8_gemms, task
+):
     import diffusers
     import torch
 
-    model = build("Hunyuanvideo-1.5", task, memory_efficient_replicated_load=replicated)
+    from types import SimpleNamespace
+    from xfuser.model_executor.models.runner_models.loading import meta_load
+
+    model = build("Hunyuanvideo-1.5", task, memory_efficient_replicated_load=requested, use_fp8_gemms=use_fp8_gemms)
+    monkeypatch.setattr(meta_load, "get_world_group", lambda: SimpleNamespace(world_size=world_size))
     transformer = object()
     wrapper = mock.Mock()
     wrapper.from_pretrained.return_value = transformer
@@ -107,7 +116,7 @@ def test_hunyuanvideo15_load_preserves_task_and_transformer_identity(build, monk
         torch_dtype=torch.bfloat16,
     )
     other_pipeline.from_pretrained.assert_not_called()
-    if replicated:
+    if requested and world_size > 1:
         model.loader.load_transformer.assert_called_once_with(wrapper, subfolder="transformer")
         wrapper.from_pretrained.assert_not_called()
     else:
@@ -154,7 +163,3 @@ def test_hunyuanvideo15_replicated_load_refuses_fp8_before_allocation(build, mon
     monkeypatch.setattr(meta_load, "get_world_group", lambda: SimpleNamespace(world_size=8))
     with pytest.raises(ValueError, match="requires unquantized GEMMs"):
         model._load_model()
-
-
-def test_hunyuanvideo15_single_rank_flag_keeps_quantized_eager_load(build):
-    build("Hunyuanvideo-1.5", "t2v", memory_efficient_replicated_load=True, use_fp8_gemms=True)

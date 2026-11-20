@@ -767,7 +767,7 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
                 "attention backend",
             ),
         }
-        if getattr(self.config, "memory_efficient_replicated_load", False):
+        if self.loader.replicated_broadcast_load():
             transformer = self.loader.load_transformer(
                 xFuserMiniMaxH3Transformer3DWrapper,
                 init_kwargs=init_kwargs,

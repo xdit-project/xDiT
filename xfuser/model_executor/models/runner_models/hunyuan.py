@@ -1,7 +1,6 @@
 import torch
 import copy
 import dataclasses
-from typing import Optional
 import json
 import numpy as np
 from safetensors.torch import load_file
@@ -17,7 +16,6 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
     ModelSettings,
 )
-from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.core.utils.runner_utils import (
     resize_and_crop_image,
     fix_llama_tokenizer_pretokenizer,
@@ -149,10 +147,6 @@ class xFuserHunyuanvideoModel(xFuserModel):
         )
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
-    def _get_compile_warmup_steps(self, input_args: dict) -> Optional[int]:
-        # A per-step attention schedule needs a full warmup to trigger every backend path.
-        return None if get_runtime_state().has_attention_schedule() else 2
-
     def _compile_model(self, input_args: dict) -> None:
         """Compile the model using torch.compile"""
         # Install Inductor post-grad pass that defeats a scheduler bug in the
@@ -168,7 +162,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
         self.pipe.transformer.compile()
 
         compile_args = copy.deepcopy(input_args)
-        warmup_steps = self._get_compile_warmup_steps(input_args)
+        warmup_steps = self._compile_warmup_steps(input_args)
         if warmup_steps is not None:
             compile_args["num_inference_steps"] = warmup_steps
         self._run_timed_pipe(compile_args)

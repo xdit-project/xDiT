@@ -224,6 +224,7 @@ class ModelCapabilities:
     enable_slicing: bool = False
     enable_tiling: bool = False
     use_vae_channels_last_format: bool = True
+    vae_dtype: bool = False
     # Other features
     use_int8_gemms: bool = False
     use_aiter_int8_gemms: bool = False
@@ -1088,6 +1089,19 @@ class xFuserModel(abc.ABC):
     def _get_compile_warmup_steps(self, input_args: dict) -> Optional[int]:
         return 2  # None = skip step reduction, run full warmup cycle
 
+    def _compile_warmup_steps(self, input_args: dict) -> Optional[int]:
+        """``_get_compile_warmup_steps``, or None (the full cycle) under a per-step schedule.
+
+        An attention or GEMM schedule advances once per transformer call and restarts only
+        after its last step, so a shortened warmup would leave every later call starting
+        partway through the schedule, and some of its backend paths uncompiled.
+        """
+        if runtime_state_is_initialized():
+            runtime_state = get_runtime_state()
+            if runtime_state.has_attention_schedule() or runtime_state.has_gemm_schedule():
+                return None
+        return self._get_compile_warmup_steps(input_args)
+
     def _enable_compute_comm_overlap(self) -> None:
         """Enables compute-communication overlap for the model while caring for
         pipeline-parallel models that don't respect the SPMD assumption and could
@@ -1176,7 +1190,7 @@ class xFuserModel(abc.ABC):
         cache_targets = set(self.settings.transformer_attr_names if self.config.cache_method else ())
         requested_shards = getattr(self.config, "fully_shard_components", None)
         compile_args = copy.deepcopy(input_args)
-        warmup_steps = self._get_compile_warmup_steps(input_args)
+        warmup_steps = self._compile_warmup_steps(input_args)
         if warmup_steps is not None:
             compile_args["num_inference_steps"] = warmup_steps
 

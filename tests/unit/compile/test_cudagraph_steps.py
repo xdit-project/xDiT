@@ -128,7 +128,12 @@ def test_sdma_ulysses_drops_cuda_graphs_for_the_transformer_only(monkeypatch):
     from xfuser.model_executor.layers import usp_sdma
 
     config = UlyssesA2AConfig("sdma", 2)
-    monkeypatch.setattr(runtime_state, "_RUNTIME", SimpleNamespace(runtime_config=SimpleNamespace(ulysses_a2a=config)))
+    state = SimpleNamespace(
+        runtime_config=SimpleNamespace(ulysses_a2a=config),
+        has_attention_schedule=lambda: False,
+        has_gemm_schedule=lambda: False,
+    )
+    monkeypatch.setattr(runtime_state, "_RUNTIME", state)
     monkeypatch.setattr(usp_sdma, "get_ulysses_parallel_world_size", lambda: 8)
     model, transformer = _model("reduce-overhead", fully_shard_degree=1)
     model.pipe.vae = vae = torch.nn.Linear(4, 4)

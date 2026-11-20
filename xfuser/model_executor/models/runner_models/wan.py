@@ -314,13 +314,6 @@ class xFuserWan21I2VModel(xFuserWanModel):
         if len(images) != 1:
             raise ValueError("Exactly one input image is required for Wan I2V model.")
 
-    def _get_compile_warmup_steps(self, input_args: dict) -> Optional[int]:
-        # Full warmup when a per-step attention or GEMM schedule is active,
-        # to trigger all backend paths; reduce to 2 steps otherwise.
-        if not get_runtime_state().has_attention_schedule() and not get_runtime_state().has_gemm_schedule():
-            return 2
-        return None
-
 
 @register_model("Wan-AI/Wan2.2-I2V-A14B-Diffusers")
 @register_model("Wan2.2-I2V")
@@ -738,11 +731,6 @@ class xFuserWan21T2VModel(xFuserWanModel):
             generator=self._make_generator(input_args["seed"]),
         )
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
-
-    def _get_compile_warmup_steps(self, input_args: dict) -> Optional[int]:
-        if not get_runtime_state().has_attention_schedule() and not get_runtime_state().has_gemm_schedule():
-            return 2
-        return None
 
 
 @register_model("Wan-AI/Wan2.1-T2V-1.3B-Diffusers")

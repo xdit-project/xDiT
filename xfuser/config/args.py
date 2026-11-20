@@ -96,6 +96,10 @@ def block_size(val: str) -> Tuple[int, int]:
     return q_tile, kv_tile
 
 
+# --vae_dtype choices.
+VAE_DTYPES = {"bf16": torch.bfloat16, "fp32": torch.float32}
+
+
 _DETERMINISM_CHECK_HELP = (
     "Set to a positive failure threshold to compare every timed iteration with "
     "the first using exact equality, not a tolerance. The failure handler is "
@@ -346,6 +350,7 @@ class xFuserArgs:
     memory_efficient_sharding: bool = False
     memory_efficient_replicated_load: bool = False
     use_vae_channels_last_format: bool = False
+    vae_dtype: Optional[torch.dtype] = None
     # Hybrid attention schedule
     use_hybrid_attn_schedule: bool = False
     hybrid_attn_low_precision_backend: Optional[str] = None
@@ -401,6 +406,10 @@ class xFuserArgs:
     def __post_init__(self):
         if isinstance(self.sparseattn_block_size, str):
             self.sparseattn_block_size = block_size(self.sparseattn_block_size)
+        if isinstance(self.vae_dtype, str):
+            if self.vae_dtype not in VAE_DTYPES:
+                raise ValueError(f"--vae_dtype must be one of {', '.join(VAE_DTYPES)}; got {self.vae_dtype!r}")
+            self.vae_dtype = VAE_DTYPES[self.vae_dtype]
         if not math.isfinite(self.lora_scale):
             raise ValueError("lora_scale must be finite")
         if not self.lora_path and (self.lora_weight_name or self.lora_scale != 1.0):
@@ -1515,6 +1524,13 @@ class xFuserArgs:
             action="store_true",
             default=False,
             help="Use channels last memory format for the VAE.",
+        )
+        parser.add_argument(
+            "--vae_dtype",
+            choices=list(VAE_DTYPES),
+            default=None,
+            help="Load the VAE in this dtype instead of the model's default. Faster in bf16, "
+            "at some image fidelity. Only for models that list it.",
         )
         parser.add_argument(
             "--use_ssta_sparse_text_to_image",

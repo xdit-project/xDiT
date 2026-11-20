@@ -15,8 +15,7 @@ HL10–HL60, TD10–TD40, TM10–TM50, IA10–IA80, IB10–IB80.
 *Rationale:* some operations of xDiT diffusion models can be flaky (produce wrong numerics, or cause hangs or
 crashes). Component-wise testing could help with QA of the implementation.
 
-**UC2. Find flaky kernels.** A test shows a deviation beyond the tolerance, nondeterminism, a crash or a hang.
-The report names the instance and the case. At least for a deviation or nondeterminism, it also names the calls.
+**UC2. Find flaky kernels.** A test shows a deviation beyond the tolerance, nondeterminism, a crash or a hang. The report names the instance and the case. At least for a deviation or nondeterminism, it also names the calls.
 Requirements: HL60, IA40–IA60, IB50, FC10–FC160.
 
 **UC3. Test the configurations of the CI benchmark files.** Tests run on selected components
@@ -45,15 +44,12 @@ Requirements: CP150.
 *Rationale:* xDiT changes fast, and its components get new augmentations all the time. Hard-coded tests become
 obsolete.
 
-**UC10. Accept nondeterminism that is valid.** An override of one test changes the result of nondeterminism in
-that test from a failure to a warning. The determinism checks of all other tests stay active. B should have
-its own override. Requirements: IA50, IA60.
+**UC10. Accept nondeterminism that is valid.** An override of one test changes the result of nondeterminism in that test from a failure to a warning. The determinism checks of all other tests stay active. B should have its own override. Requirements: IA50, IA60.
 *Rationale:* some operations are validly nondeterministic. A model can have one nondeterministic component
 among many, and that component must be testable. Instance B generally uses different kernels that might have
 other determinism expectations.
 
-**UC11. Later use cases.** Compiled mode, a reference at world size 1 (B1), several input sets, MI300X and
-other hardware, and benchmark and determinism scripts that use the foundation of the harness.
+**UC11. Later use cases.** Compiled mode, a reference at world size 1 (B1), several input sets, MI300X and other than this machine hardware, and benchmark and determinism scripts that use the foundation of the harness.
 
 ## Requirements
 
@@ -82,9 +78,7 @@ crashes or hangs are an accepted limitation of version 1).
 **HL60.** A test fails for a deviation beyond its tolerance, a crash, a hang, nondeterminism, or any other
 detectable issue. "Flaky" includes a crash and a hang.
 
-**HL70.** **Working tests first.** Test coverage has priority over correct reports, for example a correct call
-identifier. A wrong report is acceptable as a documented limitation, possibly with a corresponding future-work
-item. A deviation from some requirements that a working test needs is permitted with a due documentation.
+**HL70.** **Working tests first.** Test coverage has priority over correct reports, for example a correct call identifier. A wrong report is acceptable as a documented limitation, possibly with a corresponding future-work item. A deviation from some requirements that a working test needs is permitted with a due documentation.
 
 **HL80.** **Traceability and debuggability.** Each rank executing a model and its components
 should save a structured log of all events and situations related to execution decisions and
@@ -94,9 +88,7 @@ defined by this document.
 coupling. Examples: compile code only compiles, and the warmup is not part of the compile function.
 In version 1, xDiT changes only where the first configuration needs a change.
 
-**HL100.** Tests and benchmarks are separate from the entry point on. Benchmark scripts and determinism-check
-scripts come later. They use the same foundation that the tests use to load and build a model and to get its
-components. Version 1 plans nothing for benchmarks, but it identifies the code that benchmarks will use.
+**HL100.** Tests and benchmarks are separate from the entry point on. Benchmark scripts and determinism-check scripts come later. They use the same foundation that the tests use to load and build a model and to get its components. Version 1 plans nothing for benchmarks, but it identifies the code that benchmarks will use.
 
 **HL110.** One model load and initialization serves the tests of many, preferably all, components.
 A process that loads and initializes a model, and dumps components execution data for testing later
@@ -164,11 +156,11 @@ allowed. The `--ff` option of pytest, `pytest-xdist` and random-order pytest plu
 **TD90.** The harness forces these settings in A and B: no warmup calls, one execution ("iteration"
 in terms of xDiT runner), and `use_torch_compile` off.
 
-**TD100.** Deadlines have default values, and a configuration can override them. The defaults are:
-1. A: 5 minutes for the `phase=initialization`, 10 minutes for the `phase=run`, 5 minutes to the lack of new records in the log file in all other cases.
-2. B: 10 minutes for the `phase=initialization`, 20 minutes for the `phase=run`, 10 minutes to the lack of new records in the log file in all other cases.
-3. each replayed call (measured between pre-call and post-call barriers): 2 minutes in A and
-   5 minutes in B.
+**TD100.** Deadlines have default values, and a configuration (TD10) can override them. The defaults are:
+1. A: 5 minutes for the `phase=initialization` (RL40), 10 minutes for the `phase=run` (RL60-RL70).
+2. B: 10 minutes for the `phase=initialization` (RL40), 20 minutes for the `phase=run` (RL60-RL70).
+3. each replayed call (measured between the call's starting replay status (PRE_FIDELITY or PRE_REPLAY) and ending status (FIDELITY_FAILED or FIDELITY_PASSED or REPLAYED), see RL100): 2 minutes in A and 5 minutes in B.
+4. 5 (for A) or 10 (for B) minutes since the last record in the log file in all other cases
 
 **TD110.** **Deadlines enforcement.** The configuration fixture (TD40) launches each instance sequentially using a supplementary launcher process that takes care of deadlines and child processes cleanup. Each rank of the instance writes its deadline -related progress and timestamps to a certain rank-specific log file known to the launcher. The launcher then periodically reads these files and uses progress records and timestamps to enforce deadlines. A missed deadline leads to a warning message and killing the instance and all its descendant processes.
 
@@ -332,12 +324,14 @@ Instance B runs both replays: first it runs fidelity check replays on its own in
 
 **RL100.** Call replays run in "replay list" order (RL60), and in a lock step, with a stream synchronization and a barrier before and after replay. This helps to time execution properly to ensure correct call timeouts (TD100.3), and help to correctly attribute crashes, should they happen. For each call in ordered "replay list", the rank does:
 1. if this is a fidelity check replay and call's case has the instance-specific fidelity check override flag set: the rank logs `status=FIDELITY_SKIPPED case=<case_id> call=<call_id>` and proceeds to the next call in the list (since all ranks obtain the same "replay list" (RL80) and have the same flag value, the same case calls will be skipped on all ranks simultaneously and that can't lead to a hang).
-2. the rank reads inputs, rng states and outputs (only if it's a fidelity check), from the call replay files (the paths are recoverable from data directory path and the call identifier), and enters replay mode by executing a stream synchronization and a barrier.
+2. the rank reads inputs, rng states and outputs (only if it's a fidelity check), from the call replay files (the paths are recoverable from data directory path and the call identifier).
 3. the rank logs `status=<status> case=<case_id> call=<call_id> file=<file>` where the `<status>` is `PRE_FIDELITY` if this is fidelity check, or `PRE_REPLAY` if this is B replaying inputs from A; `<file>` is a file path that will contain outputs of the call.
-4. the rank saves current CPU and CUDA rng states into a temporary variable; restores rng states from loaded from the input file values, execute the call with loaded inputs (B must have casted them to the reference dtype first), obtains the replayed call outputs and saves them to the `<file>`. Finally it restores the original CPU and CUDA rng states from the temporary variable.
-5. if this is a fidelity check, the rank perform bitwise comparison of each of the elements of obtained output with expected (read in point 2). Any mismatch in the outputs structure or content gives `status=FIDELITY_FAILED case=<case_id> call=<call_id>`. If the check passes, the rank logs instead `status=FIDELITY_PASSED case=<case_id> call=<call_id>`.
-6. Otherwise if this isn't a fidelity check, the rank logs `status=REPLAYED case=<case_id> call=<call_id>`.
-7. The rank exits replay mode by executing a stream synchronization and a barrier.
+4. The rank executes a stream synchronization and a barrier.
+5. the rank saves current CPU and CUDA rng states into a temporary variable; restores rng states from loaded from the input file values, execute the call with loaded inputs (B must have casted them to the reference dtype first), obtains the replayed call outputs and saves them to the `<file>`. Finally it restores the original CPU and CUDA rng states from the temporary variable.
+6. The rank executes a stream synchronization and a barrier.
+7. if this is a fidelity check, the rank perform bitwise comparison of each of the elements of obtained output with expected (read in point 2). Any mismatch in the outputs structure or content gives `status=FIDELITY_FAILED case=<case_id> call=<call_id>`. If the check passes, the rank logs instead `status=FIDELITY_PASSED case=<case_id> call=<call_id>`.
+8. Otherwise if this isn't a fidelity check, the rank logs `status=REPLAYED case=<case_id> call=<call_id>`.
+
 
 *Rationale:* strict order and synchronization with barriers are necessary to ensure proper collectives functioning and along with detailed logging help to correctly attribute crashes. A fault that silently
 damages memory and shows only in a later case is an accepted limit.

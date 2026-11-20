@@ -6,8 +6,6 @@ to diffusers' ChromaTransformer2DModel, mask included. Runs a tiny random config
 CPU against a real single-rank Gloo group; nothing is downloaded.
 """
 
-from unittest.mock import patch
-
 import pytest
 import torch
 
@@ -15,8 +13,6 @@ pytest.importorskip("diffusers.models.transformers.transformer_chroma")
 
 from diffusers import ChromaTransformer2DModel  # noqa: E402
 
-from xfuser.config.args import xFuserArgs  # noqa: E402
-from xfuser.core.distributed import parallel_state, runtime_state  # noqa: E402
 from xfuser.model_executor.models.transformers.transformer_chroma import (  # noqa: E402
     xFuserChromaAttnProcessor,
     xFuserChromaTransformer2DWrapper,
@@ -35,31 +31,6 @@ _TINY_CONFIG = dict(
     approximator_hidden_dim=32,
     approximator_layers=1,
 )
-
-
-@pytest.fixture
-def single_rank(tmp_path, monkeypatch):
-    if torch.distributed.is_initialized():
-        pytest.skip("a process group is already initialized in this process")
-    # Restore whatever runtime state the session had once this test is done.
-    monkeypatch.setattr(runtime_state, "_RUNTIME", None)
-    with patch.object(parallel_state, "set_device"):
-        parallel_state.init_distributed_environment(
-            backend="gloo",
-            world_size=1,
-            rank=0,
-            local_rank=0,
-            distributed_init_method=f"file://{tmp_path / 'dist-init'}",
-        )
-    try:
-        parallel_state.initialize_model_parallel(backend="gloo")
-        args = xFuserArgs(attention_backend="SDPA")
-        engine_config, _ = args.create_config()
-        runtime_state.initialize_runtime_state(engine_config=engine_config)
-        yield
-    finally:
-        parallel_state.destroy_model_parallel()
-        parallel_state.destroy_distributed_environment()
 
 
 def _inputs(dtype, batch=2, num_txt=7, height=4, width=5):

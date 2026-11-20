@@ -179,6 +179,8 @@ def test_dense_hybrid_steps_remove_sparse_text_padding_and_use_joint_prompt(monk
             output = model(**inputs).sample
             assert output.shape == inputs["hidden_states"].shape
             for length, joint, kwargs in calls:
+                # SSTA applies the per-sample text mask itself; a dense step has no use for it.
+                assert (kwargs["text_mask"] is not None) == (backend == AttentionBackendType.FLEX_BLOCK_ATTN)
                 if backend == AttentionBackendType.FLEX_BLOCK_ATTN:
                     assert length == 5  # local image length 3 + padded local text length 2
                     assert joint is None

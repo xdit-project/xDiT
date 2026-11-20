@@ -14,7 +14,8 @@ from diffusers.utils import (
     scale_lora_layers,
     unscale_lora_layers,
 )
-from xfuser.model_executor.layers.usp import USP, masked_attention_backend
+from xfuser.model_executor.layers.attention_mask import MaskMetaCache
+from xfuser.model_executor.layers.usp import USP, masked_attention_backend, packed_key_padding_attention_kwargs
 from xfuser.model_executor.layers.sharded_modulation import shard_modulation
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
 from xfuser.core.distributed import (
@@ -378,10 +379,12 @@ class xFuserQwenImageTransformerWrapper(QwenImageTransformer2DModel):
             "indices_k": None,
             "cu_seqlens_k": None,
             "max_seqlen_k": None,
+            "attn_mask": None,
         }
         self._sp_pad = {"local_rows": 0}
         self._text_sp_pad = {"local_rows": 0}
         self._key_packing = (None, None)
+        self._key_padding_cache = MaskMetaCache()
         for block in self.transformer_blocks:
             block.attn.processor = xFuserQwenDoubleStreamAttnProcessor(self._self_attn_kwargs)
             # Qwen returns (encoder, image); each stream tracks its own SP pad.
@@ -403,6 +406,30 @@ class xFuserQwenImageTransformerWrapper(QwenImageTransformer2DModel):
             packing = per_sample_key_packing(text_lens, max(text_lens), image_seq_len, key[2], device)
             self._key_packing = (key, packing)
         return self._key_packing[1]
+
+    def _prompt_key_padding(self, prompt_mask: torch.Tensor, image_seq_len: int, sp_world_size: int):
+        """``attention_kwargs`` that keep each row off its prompt padding, or None without any.
+
+        diffusers' Qwen-Image pipelines pad each prompt to the longest one and pass the
+        mask only when some prompt is padded. The keys come from per_sample_key_packing,
+        built once per mask: reading the prompt lengths costs a host sync.
+        """
+        text_lens = prompt_mask.sum(1).tolist()
+        text_seq_len = prompt_mask.shape[1]
+        if all(text_len == text_seq_len for text_len in text_lens):
+            return None
+        packing = per_sample_key_packing(text_lens, text_seq_len, image_seq_len, sp_world_size, prompt_mask.device)
+        if packing is None:
+            # The replicated-prompt layout keeps the prompt out of the gathered keys, so no
+            # per-row packing describes it. Delete this guard once one does.
+            raise NotImplementedError(
+                "Batched prompts of different lengths need the prompt sharded across the sequence parallel "
+                f"ranks, but at {image_seq_len} image and {text_seq_len} prompt tokens the padding spans more "
+                f"than one of the {sp_world_size} ranks. Use equal-length prompts, one prompt per call, or a "
+                "smaller sequence parallel degree."
+            )
+        keys = image_seq_len + (-image_seq_len) % sp_world_size + text_seq_len + (-text_seq_len) % sp_world_size
+        return packed_key_padding_attention_kwargs(packing, len(text_lens), keys)
 
     def shard_modulation(self) -> int:
         """Share the blocks' timestep modulation out over the sequence-parallel ranks.
@@ -472,6 +499,8 @@ class xFuserQwenImageTransformerWrapper(QwenImageTransformer2DModel):
             # weight the lora layers by setting `lora_scale` for each PEFT layer
             scale_lora_layers(self, lora_scale)
 
+        # The pipeline's own mask tensor, the same object at every step, keys the key-padding cache.
+        prompt_mask = encoder_hidden_states_mask
         hidden_states = self.img_in(hidden_states)
 
         timestep = timestep.to(hidden_states.dtype)
@@ -521,6 +550,16 @@ class xFuserQwenImageTransformerWrapper(QwenImageTransformer2DModel):
         if key_packing["indices_k"] is not None:
             # The packing already leaves out the SP pad, row by row.
             self._self_attn_kwargs["valid_kv_len"] = None
+        self._self_attn_kwargs["attn_mask"] = None
+        uses_pipefusion = runtime_state_is_initialized() and get_runtime_state().num_pipeline_patch > 1
+        if prompt_mask is not None and key_packing["indices_k"] is None and not uses_pipefusion:
+            # Prompts of different lengths, padded to the longest: without a packing or mask from the
+            # caller, each row would attend to its padding. PipeFusion masks the prompt itself.
+            prompt_padding = self._key_padding_cache.get(
+                prompt_mask, self._prompt_key_padding, image_seq_len, sp_world_size
+            )
+            if prompt_padding is not None:
+                self._self_attn_kwargs.update(prompt_padding)
         txt_freqs = image_rotary_emb[1]
         if not replicated_text:
             encoder_hidden_states = chunk_and_pad_sequence(

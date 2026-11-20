@@ -69,7 +69,8 @@ class MaskMetaCache:
         """``build(mask, *extra)``, called only when no entry matches.
 
         ``extra`` is whatever else the metadata depends on, such as a padded length,
-        and is compared as part of the key.
+        and is compared as part of the key. A model that knows its lengths on the host
+        rather than in a mask tensor passes None for ``mask`` and the lengths in ``extra``.
         """
         for i, entry in enumerate(self._entries):
             if entry.mask is mask and entry.extra == extra:

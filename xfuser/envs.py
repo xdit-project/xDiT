@@ -64,6 +64,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "XDIT_SDMA_LIB": lambda: os.environ.get("XDIT_SDMA_LIB", ""),
     "XDIT_SDMA_WAIT_S": lambda: os.environ.get("XDIT_SDMA_WAIT_S", "30"),
     "XDIT_SDMA_ALLOW_UNTESTED": lambda: os.environ.get("XDIT_SDMA_ALLOW_UNTESTED", "0"),
+    # Convolution of the sharded Wan VAE decode (--parallel_vae_impl sharded): empty uses AITER's FlyDSL
+    # implicit-GEMM conv when available, "triton" forces the built-in Triton kernel, "module:function" names
+    # another conv with flydsl_conv_implicit's signature.
+    "XDIT_WAN_VAE_CONV": lambda: os.environ.get("XDIT_WAN_VAE_CONV", ""),
 }
 
 

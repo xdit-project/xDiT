@@ -103,6 +103,8 @@ enable a setting and their `--no-...` spellings disable it.
 | Syntax | Parser default | Description |
 | --- | --- | --- |
 | <a id="-use_parallel_vae"></a><a id="--use_parallel_vae"></a>`--use_parallel_vae` | `False` | Distribute supported VAE work across existing ranks. DistVAE uses row sharding by default; tiling can select tile dispatch. |
+| <a id="-parallel_vae_impl"></a><a id="--parallel_vae_impl"></a>`--parallel_vae_impl` `{distvae,sharded}` | `'distvae'` | With --use\_parallel\_vae: DistVAE adapters, or the row-sharded Wan VAE decode (AutoencoderKLWan only). |
+| <a id="-parallel_vae_halo"></a><a id="--parallel_vae_halo"></a>`--parallel_vae_halo` `{auto,nccl,sdma}` | `'auto'` | Halo-row transport of the sharded Wan VAE decode: SDMA copy engines (ROCm), NCCL, or auto. |
 | <a id="-enable_tiling"></a><a id="--enable_tiling"></a>`--enable_tiling` | `False` | Enable VAE tiling to save GPU memory. |
 | <a id="-enable_slicing"></a><a id="--enable_slicing"></a>`--enable_slicing` | `False` | Decode one batch item at a time to reduce GPU memory use. This has no effect when the batch size is 1. |
 | <a id="-vae_tile_size_height"></a><a id="--vae_tile_size_height"></a>`--vae_tile_size_height` `INT` | `None` | Exact output-pixel height of each VAE tile. Requires --enable\_tiling. Must be used with --vae\_tile\_size\_width. |

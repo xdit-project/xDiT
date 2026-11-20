@@ -61,11 +61,13 @@ class _Flux3Model(xFuserModel):
         ring_degree=True,
         use_cfg_parallel=False,
         use_fp8_gemms=True,
+        use_hybrid_gemm_schedule=True,
         use_fp8_comms=True,
         fully_shard_degree=True,
         enable_tiling=True,
         enable_slicing=True,
         use_parallel_vae=True,
+        vae_dtype=True,
         # The text-mode blocks attend the prompt alone (80-512 tokens) on this backend.
         cross_attention_backend=True,
         # The image, reference and joint stages are long sequences at high resolution (2048² is
@@ -137,8 +139,10 @@ class _Flux3Model(xFuserModel):
         # By name: the checkpoints also list the prompt upsampler, a separate 9B model.
         pipe.load_components(names=["text_encoder", "tokenizer"], dtype=torch.bfloat16)
         trim_text_encoder(pipe.text_encoder, _deepest_text_encoder_layer(pipe.blocks))
-        # The VAE runs in fp32, as in BFL's reference and the diffusers FLUX.3 docs.
-        pipe.load_components(names=["vae"], dtype=torch.float32)
+        # The VAE runs in bf16 by default, as the transformer does: its decode of a 1024x1024
+        # image is 53.4 dB PSNR from the fp32 one. --vae_dtype fp32 is BFL's reference and the
+        # diffusers FLUX.3 docs' choice.
+        pipe.load_components(names=["vae"], dtype=self.config.vae_dtype or torch.bfloat16)
         return pipe
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
@@ -168,6 +172,16 @@ class _Flux3Model(xFuserModel):
         # Compiling the blocks keeps the transformer object, and with it the forward
         # signature the denoise step reads, and leaves the SP shard and gather glue eager.
         return True
+
+    def _get_compiled_pipe_components(self) -> list[str]:
+        # Eager, the text encoder is launch-bound: about 2200 small kernels per prompt. Its
+        # decoder layers compile blockwise (fsdp_strategy wrap_attrs) like the transformer.
+        return ["transformer", "text_encoder"]
+
+    def _block_level_offload_components(self) -> list[str]:
+        # The text encoder's decoder layers nest at model.language_model.layers, out of reach
+        # of block-level grouping, which would offload the whole encoder as one group.
+        return ["transformer"]
 
     def _get_compile_mode(self) -> str:
         # A sharded forward is launch-bound: graphs cut a compiled u8 1024² forward on
@@ -232,17 +246,20 @@ class _Flux3Model(xFuserModel):
             pipe_kwargs["max_sequence_length"] = input_args["max_sequence_length"]
 
         images, args_per_image = [], []
-        for prompt in prompts:
-            # The pipeline draws the noise in fp32 from a CPU generator, as in the model
-            # card, so a seed gives the same image as the documented diffusers usage.
-            image = self.pipe(
-                prompt=prompt,
-                generator=torch.Generator().manual_seed(input_args["seed"]),
-                **pipe_kwargs,
-            )[0]
-            images.append(image)
-            # Edits size the output from the reference unless told otherwise.
-            args_per_image.append({**input_args, "prompt": prompt, "height": image.height, "width": image.width})
+        try:
+            for prompt in prompts:
+                # The pipeline draws the noise in fp32 from a CPU generator, as in the model
+                # card, so a seed gives the same image as the documented diffusers usage.
+                image = self.pipe(
+                    prompt=prompt,
+                    generator=torch.Generator().manual_seed(input_args["seed"]),
+                    **pipe_kwargs,
+                )[0]
+                images.append(image)
+                # Edits size the output from the reference unless told otherwise.
+                args_per_image.append({**input_args, "prompt": prompt, "height": image.height, "width": image.width})
+        finally:
+            self.pipe.transformer.release_step_constants()
         return DiffusionOutput(images=images, pipe_args=args_per_image)
 
 
@@ -289,6 +306,14 @@ class xFuserFlux3KleinBaseModel(_Flux3Model):
         model_name="black-forest-labs/flux-3-image-klein-base",
         output_name="flux_3_image_klein_base",
     )
+
+    def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
+        # Without CFG parallel the guider calls the transformer once per branch; it turns
+        # guidance off only at a scale of 1 (math.isclose).
+        guidance_scale = input_args["guidance_scale"]
+        if guidance_scale is not None and not math.isclose(guidance_scale, 1.0) and not self.config.use_cfg_parallel:
+            return 2
+        return 1
 
     def _validate_args(self, input_args: dict) -> None:
         super()._validate_args(input_args)

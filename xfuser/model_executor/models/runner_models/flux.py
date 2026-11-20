@@ -10,6 +10,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
     register_model,
     ModelCapabilities,
+    ModelFeatures,
     DefaultInputValues,
     DiffusionOutput,
     ModelSettings,
@@ -55,6 +56,7 @@ class xFuserFluxModel(xFuserModel):
         supports_lora=True,
         profile_capture_phase=True,
     )
+    features = ModelFeatures(shards_modulation=True)
     default_input_values = DefaultInputValues(
         height=1024,
         width=1024,
@@ -197,6 +199,7 @@ class xFuserFluxKontextModel(xFuserModel):
         use_fp8_comms=True,
         supports_step_caching=True,
     )
+    features = ModelFeatures(shards_modulation=True)
     default_input_values = DefaultInputValues(
         height=1024,
         width=1024,

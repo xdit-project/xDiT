@@ -56,6 +56,7 @@ from xfuser.model_executor.layers.attention_processor import (
     xFuserAttentionProcessorRegister,
 )
 from xfuser.model_executor.layers.usp import USP
+from xfuser.model_executor.layers.sharded_modulation import shard_modulation
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
 from xfuser.model_executor.layers.usp_sdma import plain_linear
 from xfuser.model_executor.models.transformers.transformers_utils import (
@@ -439,6 +440,16 @@ def flux_attn_modules(transformer) -> list[torch.nn.Module]:
     ]
 
 
+def flux_modulation_linears(transformer) -> list[torch.nn.Module]:
+    """The linears that project the conditioning embedding to each FLUX.1 block's modulation."""
+    double, single = transformer.transformer_blocks, transformer.single_transformer_blocks
+    return [
+        *(block.norm1.linear for block in double),
+        *(block.norm1_context.linear for block in double),
+        *(block.norm.linear for block in single),
+    ]
+
+
 class xFuserFlux1Transformer2DWrapper(FluxTransformer2DModel):
     def __init__(
         self,
@@ -474,6 +485,15 @@ class xFuserFlux1Transformer2DWrapper(FluxTransformer2DModel):
             block.attn.processor = xFuserFluxAttnProcessor()
             block.register_forward_hook(zero_sp_pad_rows_hook(self._sp_pad, index=1))
         register_fp8_comms_eligible_modules(self, flux_attn_modules(self))
+
+    def shard_modulation(self) -> int:
+        """Share the blocks' timestep modulation out over the sequence-parallel ranks.
+
+        Every rank holds the same conditioning embedding, so each projects a share of the
+        blocks' modulation and the ranks gather it (`ShardedModulation`), in place of every
+        rank projecting all of it. Returns the number of linears shared out.
+        """
+        return shard_modulation(self, flux_modulation_linears(self), self.time_text_embed)
 
     def fuse_qkv_projections(self) -> None:
         """Compute each layer's projections of one input with one GEMM, where they are plain linears.

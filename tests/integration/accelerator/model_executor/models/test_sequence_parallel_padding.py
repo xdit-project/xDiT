@@ -299,6 +299,7 @@ _MODELS = {
     "ltx2": _ltx2,
     "ltx2_interleaved": functools.partial(_ltx2, rope_type="interleaved"),
     "qwen_image": _qwen_image,
+    "qwen_image_sharded_modulation": _qwen_image,
     "flux2": _flux2,
     "z_image": _z_image,
     "cosmos3": _cosmos3,
@@ -361,6 +362,9 @@ def _build(model, tokens, device, engine_config, ring, backend=None, dtype=None)
     assert not incompatible.unexpected_keys
     assert all(key.endswith("._ones_weight") for key in incompatible.missing_keys)
     parallel = parallel.to(device).eval()
+    if model == "qwen_image_sharded_modulation":
+        # As the runner does once the weights are placed: an image and a prompt linear per block.
+        assert parallel.shard_modulation() == 4
     # The runtime state a pipeline would set up, which the wrappers step.
     initialize_runtime_state(pipeline=_Pipeline(parallel), engine_config=engine_config)
     # SDPA proper has no ring path (ring=NEVER); its memory-efficient kernel does.
@@ -452,6 +456,14 @@ _PARITY_CASES = [
     pytest.param("qwen_image", 2, ((4, 6), (7, 3)), id="qwen_image-batched-replicated-text"),
     pytest.param("qwen_image", 3, ((5, 5), (9, 4)), id="qwen_image-batched-padded-image-u3"),
     pytest.param("qwen_image", 3, ((5, 5), (7, 4)), id="qwen_image-batched-padded-image-replicated-text-u3"),
+    # Each rank projects a share of the blocks' timestep modulation.
+    pytest.param("qwen_image_sharded_modulation", 2, ((4, 6), 8), id="qwen_image-sharded-modulation-divisible"),
+    pytest.param(
+        "qwen_image_sharded_modulation",
+        3,
+        ((5, 5), 7),
+        id="qwen_image-sharded-modulation-padded-image-replicated-text",
+    ),
     # FLUX.2: (image tokens, text tokens). A text that does not divide the degree is replicated.
     pytest.param("flux2", 2, (16, 8), id="flux2-divisible"),
     pytest.param("flux2", 2, (15, 8), id="flux2-padded"),

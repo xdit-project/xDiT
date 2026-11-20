@@ -11,7 +11,7 @@ from torch.profiler import profile, record_function, ProfilerActivity
 from torch.utils._pytree import tree_map_only
 import diffusers
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from diffusers.utils import load_image, export_to_video
+from diffusers.utils import load_image
 import numpy as np
 from xfuser.compat import is_diffusers_import_error
 from xfuser.config import xFuserArgs
@@ -22,6 +22,7 @@ from xfuser.envs import (
     bind_group_norm,
 )
 from xfuser.core.utils.outputs_equal import outputs_equal
+from xfuser.core.utils.video_utils import encode_video
 from xfuser.logger import warn_once
 from xfuser.core.utils.runner_utils import (
     log,
@@ -50,6 +51,7 @@ from xfuser.core.distributed import (
     get_data_parallel_rank,
     get_data_parallel_world_size,
     get_sequence_parallel_rank,
+    get_sequence_parallel_world_size,
     get_classifier_free_guidance_rank,
     get_pipeline_parallel_world_size,
     get_pp_group,
@@ -224,6 +226,7 @@ class ModelCapabilities:
     enable_slicing: bool = False
     enable_tiling: bool = False
     use_vae_channels_last_format: bool = True
+    vae_dtype: bool = False
     # Other features
     use_int8_gemms: bool = False
     use_aiter_int8_gemms: bool = False
@@ -247,6 +250,14 @@ class ModelCapabilities:
     supports_bsa_attention_backends: bool = False
     supports_distilled_weights: bool = False
     profile_capture_phase: bool = False
+
+
+@dataclass(frozen=True)
+class ModelFeatures:
+    """What a model always runs with where it applies, unlike a capability, which a user asks for."""
+
+    # The transformer wrapper has `shard_modulation()` and gains from it (see `_shard_modulation`).
+    shards_modulation: bool = False
 
 
 @dataclass(frozen=True)
@@ -388,6 +399,7 @@ class xFuserModel(abc.ABC):
     unsupported_attn_backend_reason: str = ""
 
     capabilities: ModelCapabilities = ModelCapabilities()
+    features: ModelFeatures = ModelFeatures()
     default_input_values: DefaultInputValues = DefaultInputValues()
     settings: ModelSettings = ModelSettings()
     checkpoint_request_defaults: dict = {}
@@ -1042,6 +1054,39 @@ class xFuserModel(abc.ABC):
     def _get_compiled_pipe_components(self) -> List[str]:
         return ["transformer"]
 
+    def _shard_modulation(self) -> None:
+        """Share the transformer's timestep modulation out over the sequence-parallel ranks.
+
+        For runners that set `shards_modulation` in their features, once the weights are placed. Each rank
+        then projects one share of the modulation instead of all of it, and its device holds
+        that share of the modulation weights instead of all of them. Stays off where a rank does
+        not run the whole transformer on whole weights (PipeFusion, sharded or offloaded
+        weights), and with step caching and on RDNA4, where it is not tested.
+        """
+        config = self.config
+        size = get_sequence_parallel_world_size()
+        if (
+            size <= 1
+            or config.pipefusion_parallel_degree > 1
+            or config.fully_shard_degree > 1
+            or config.memory_efficient_sharding
+            or config.enable_group_cpu_offload
+            or config.enable_sequential_cpu_offload
+            or config.enable_model_cpu_offload
+            or config.cache_method
+            or PACKAGES_CHECKER._on_rdna4()
+        ):
+            return
+        count = self.pipe.transformer.shard_modulation()
+        if count:
+            # Hand the device memory of the released weights back.
+            torch.cuda.empty_cache()
+            share = self.pipe.transformer.sharded_modulation.weight.nbytes / 2**30
+            log(
+                f"Shared the timestep modulation of {count} projections out over {size} sequence-parallel ranks: "
+                f"each holds {share:.2f} GiB of its weights."
+            )
+
     def _fuses_qkv_projections(self) -> bool:
         """Whether the compiled components compute Q, K and V with one fused projection.
 
@@ -1087,6 +1132,19 @@ class xFuserModel(abc.ABC):
 
     def _get_compile_warmup_steps(self, input_args: dict) -> Optional[int]:
         return 2  # None = skip step reduction, run full warmup cycle
+
+    def _compile_warmup_steps(self, input_args: dict) -> Optional[int]:
+        """``_get_compile_warmup_steps``, or None (the full cycle) under a per-step schedule.
+
+        An attention or GEMM schedule advances once per transformer call and restarts only
+        after its last step, so a shortened warmup would leave every later call starting
+        partway through the schedule, and some of its backend paths uncompiled.
+        """
+        if runtime_state_is_initialized():
+            runtime_state = get_runtime_state()
+            if runtime_state.has_attention_schedule() or runtime_state.has_gemm_schedule():
+                return None
+        return self._get_compile_warmup_steps(input_args)
 
     def _enable_compute_comm_overlap(self) -> None:
         """Enables compute-communication overlap for the model while caring for
@@ -1176,7 +1234,7 @@ class xFuserModel(abc.ABC):
         cache_targets = set(self.settings.transformer_attr_names if self.config.cache_method else ())
         requested_shards = getattr(self.config, "fully_shard_components", None)
         compile_args = copy.deepcopy(input_args)
-        warmup_steps = self._get_compile_warmup_steps(input_args)
+        warmup_steps = self._compile_warmup_steps(input_args)
         if warmup_steps is not None:
             compile_args["num_inference_steps"] = warmup_steps
 
@@ -1539,7 +1597,7 @@ class xFuserModel(abc.ABC):
             for video_index, (video, pipe_args) in enumerate(output.get_outputs()):
                 output_name = self.get_output_name(pipe_args)
                 output_path = f"{self.config.output_directory}/{output_name}_{video_index}.mp4"
-                export_to_video(video, output_path, fps=self.settings.fps)
+                encode_video(video, fps=self.settings.fps, output_path=output_path)
                 log(f"Output video saved to {output_path}")
         else:
             raise NotImplementedError("No output to save.")
@@ -1649,6 +1707,9 @@ class xFuserModel(abc.ABC):
 
         if self.config.use_vae_channels_last_format:
             self._convert_vae_to_channels_last()
+
+        if self.features.shards_modulation:
+            self._shard_modulation()
 
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
         return 1

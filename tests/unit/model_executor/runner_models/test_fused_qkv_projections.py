@@ -14,8 +14,8 @@ import torch.nn.functional as F
 pytest.importorskip("diffusers.models.transformers.transformer_flux")
 
 from xfuser.core.attention.spec import AttentionBackendType  # noqa: E402
-from xfuser.model_executor.layers import usp_sdma  # noqa: E402
-from xfuser.model_executor.models.runner_models import flux as flux_runner  # noqa: E402
+from xfuser.model_executor.layers import plain_linear as plain_linear_module  # noqa: E402
+from xfuser.model_executor.models.runner_models import base_model, flux as flux_runner  # noqa: E402
 from xfuser.model_executor.models.runner_models.flux import (  # noqa: E402
     xFuserFlux2Model,
     xFuserFluxKontextModel,
@@ -193,7 +193,9 @@ def test_linears_whose_weights_are_not_plain_tensors_are_left_alone(monkeypatch,
             linear.weight.placements = ("shard",)
     else:
         monkeypatch.setattr(
-            usp_sdma, "_weight_is_torchao_quantized", lambda module: any(module is linear for linear in special)
+            plain_linear_module,
+            "_weight_is_torchao_quantized",
+            lambda module: any(module is linear for linear in special),
         )
 
     _runner(xFuserFluxModel, transformer)._fuse_qkv_projections()
@@ -240,6 +242,7 @@ def test_which_runs_fuse(monkeypatch, model_cls, config, rdna4, expected):
 @pytest.mark.parametrize(("model_cls", "fused"), [(xFuserFluxModel, True), (xFuserFlux2Model, False)])
 def test_the_post_load_step_fuses_once_the_weights_are_placed(monkeypatch, transformer, model_cls, fused):
     monkeypatch.setattr(flux_runner.PACKAGES_CHECKER, "_on_rdna4", lambda: False)
+    monkeypatch.setattr(base_model, "get_sequence_parallel_world_size", lambda: 1)
     runner = _runner(
         model_cls,
         transformer,

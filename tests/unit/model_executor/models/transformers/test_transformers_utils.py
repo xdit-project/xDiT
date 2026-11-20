@@ -1,9 +1,13 @@
-"""The helpers the wrappers share: the pad-row hook fits every output layout, the prompt mask follows the keys."""
+"""Shared transformer helpers: the block hook that clears sequence-parallel pad rows serves every
+wrapper's output layout, the prompt mask follows the keys, and the static block inputs and per-call
+cache keep what a model's steps share."""
 
 import pytest
 import torch
 
 from xfuser.model_executor.models.transformers.transformers_utils import (
+    PerCallCache,
+    StaticBlockInputs,
     sp_pad_spans_ranks,
     text_image_key_mask,
     zero_sp_pad_rows_hook,
@@ -78,3 +82,76 @@ def test_a_replicated_prompt_mask_joins_the_padded_image_keys_where_usp_joins_th
     mask = text_image_key_mask(text_mask, image_tokens=3, sp_pad=1, sp_world_size=2, joint_strategy=joint_strategy)
 
     _mask_rows(mask, keys, text_mask)
+
+
+def test_block_inputs_keep_one_static_address_per_shape():
+    inputs = StaticBlockInputs()
+    first = inputs("joint.cos", torch.ones(4, 2))
+    second = inputs("joint.cos", torch.zeros(4, 2))
+    other_shape = inputs("joint.cos", torch.zeros(5, 2))
+
+    assert second.data_ptr() == first.data_ptr() and torch.equal(second, torch.zeros(4, 2))
+    assert other_shape.data_ptr() != first.data_ptr()
+    assert getattr(first, "_dynamo_static_input_type", None) == "unguarded"
+    # CFG's two text lengths alternate without a new address.
+    assert inputs("joint.cos", torch.ones(4, 2)).data_ptr() == first.data_ptr()
+
+
+def test_block_inputs_keep_only_the_latest_shapes_per_name():
+    inputs = StaticBlockInputs(shapes_per_name=2)
+    first = inputs("txt.cos", torch.ones(1, 2))
+    inputs("txt.cos", torch.ones(2, 2))
+    inputs("txt.cos", torch.ones(3, 2))
+
+    assert [tuple(buffer.shape) for buffer in inputs._buffers["txt.cos"]] == [(2, 2), (3, 2)]
+    assert inputs("txt.cos", torch.ones(1, 2)).data_ptr() != first.data_ptr()
+    inputs.clear()
+    assert inputs._buffers == {}
+
+
+def test_per_call_cache_recomputes_for_a_new_or_modified_source():
+    cache = PerCallCache()
+    calls = []
+
+    def compute(x):
+        calls.append(1)
+        return x * 2
+
+    ids = torch.ones(3)
+    with torch.no_grad():
+        first = cache("ids", ids, compute)
+        assert cache("ids", ids, compute) is first and len(calls) == 1
+        ids.add_(1)
+        assert torch.equal(cache("ids", ids, compute), torch.full((3,), 4.0)) and len(calls) == 2
+        cache("ids", torch.ones(3), compute)
+        assert len(calls) == 3
+    cache("ids", ids, compute)
+    cache("ids", ids, compute)
+    assert len(calls) == 5
+    with torch.inference_mode():
+        inference_ids = torch.ones(3)
+        first = cache("ids", inference_ids, compute)
+        assert cache("ids", inference_ids, compute) is first and len(calls) == 6
+
+
+def test_per_call_cache_serves_both_cfg_branches():
+    cache = PerCallCache(entries_per_name=2)
+    calls = []
+
+    def compute(x):
+        calls.append(1)
+        return x * 2
+
+    conditional, unconditional, third = torch.ones(3), torch.zeros(3), torch.ones(4)
+    with torch.no_grad():
+        results = [cache("context", source, compute) for source in (conditional, unconditional) * 3]
+        assert len(calls) == 2
+        assert results[4] is results[0] and results[5] is results[1]
+        cache("context", third, compute)
+        cache("context", unconditional, compute)
+        assert len(calls) == 3  # the third source evicted the oldest entry only
+        cache("context", conditional, compute)
+        assert len(calls) == 4
+        cache.clear()
+        cache("context", conditional, compute)
+        assert len(calls) == 5

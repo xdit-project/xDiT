@@ -13,7 +13,7 @@ def flux_runtime_state(monkeypatch):
     token row) on ``sp_degree`` sequence-parallel ranks, without a process
     group, as a runner sees it before its first request."""
 
-    def make(sp_degree: int) -> DiTRuntimeState:
+    def make(sp_degree: int, vae_scale_factor: int = 16, backbone_patch_size: int = 1) -> DiTRuntimeState:
         monkeypatch.setattr(runtime_state_module, "get_sequence_parallel_world_size", lambda: sp_degree)
         monkeypatch.setattr(runtime_state_module, "get_sequence_parallel_rank", lambda: 0)
         monkeypatch.setattr(
@@ -28,8 +28,8 @@ def flux_runtime_state(monkeypatch):
         state.num_pipeline_patch = 1
         state.ready = False
         state.split_latents_by_rows = True
-        state.vae_scale_factor = 16
-        state.backbone_patch_size = 1
+        state.vae_scale_factor = vae_scale_factor
+        state.backbone_patch_size = backbone_patch_size
         return state
 
     return make

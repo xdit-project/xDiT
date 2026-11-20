@@ -10,21 +10,6 @@ child documents in section 8 give the details.
 Where this specification conflicts with the testing skill in
 [SKILL.md](../../../.github/skills/testing/SKILL.md), this specification takes priority.
 
-## 2. Purpose
-
-1. The harness tests individual components of xDiT diffusion models. Examples of components are a transformer,
-   one transformer block, one attention module, and the decode method of a VAE.
-2. The harness tests each component with the configuration and the weights that the xDiT runner uses in
-   production.
-3. The harness takes each component from the model that the xDiT runner builds. The harness never builds a
-   component itself. Thus the tests stay valid when xDiT changes.
-4. Two instances run each component:
-   1. Instance A runs the component as production runs it.
-   2. Instance B is an eager reference. It runs the component in the reference dtype. The default reference dtype
-      is fp32.
-5. The harness compares the outputs of A and B against tolerances.
-6. A test fails for a deviation, a crash, a hang, nondeterminism, or any other error.
-
 ## 3. Version 1
 
 ### 3.1 Building principle
@@ -138,14 +123,6 @@ Where this specification conflicts with the testing skill in
    3. It computes the metrics for each call, output and rank, and checks them against the tolerances.
    4. It writes the metrics to the metrics file.
    5. It deletes the files of the case if the case passed.
-
-## 6. Open questions
-
-1. **Default self-attention backend of B (Not confirmed).** Version 1 has no confirmed default. See
-   [instance_b.md](instance_b.md), section 3.2.
-2. **Interface of the determinism overrides (Not confirmed).** Each case can have a general override and a B
-   override ([checks.md](checks.md), section 3). How a test definition sets them is not defined.
-3. Other statements marked "Not confirmed" in the child documents are proposals. The user did not confirm them.
 
 ## 7. Conventions in this specification
 

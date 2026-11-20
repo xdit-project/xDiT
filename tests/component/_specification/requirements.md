@@ -80,9 +80,7 @@ detectable issue. "Flaky" includes a crash and a hang.
 
 **HL70.** **Working tests first.** Test coverage has priority over correct reports, for example a correct call identifier. A wrong report is acceptable as a documented limitation, possibly with a corresponding future-work item. A deviation from some requirements that a working test needs is permitted with a due documentation.
 
-**HL80.** **Traceability and debuggability.** Each rank executing a model and its components
-should save a structured log of all events and situations related to execution decisions and
-defined by this document.
+**HL80.** **Traceability and debuggability.** Each rank executing a model or its components should save a structured log of all events and situations related to execution decisions and defined by this document.
 
 **HL90.** Where possible, xDiT gets a refactor that makes components testable, instead of a hack around hidden
 coupling. Examples: compile code only compiles, and the warmup is not part of the compile function.
@@ -99,12 +97,19 @@ precision to obtain reference values to compare against.
 test data acquisition in batches: one batch gathers data to test (A), and the other batch gather
 reference data (B).
 
-**HL120.** Multi-node model execution isn't supported, but single node multi-GPU is supported,
-hence a term "rank" is an alias to "local rank". A term "worker" is an alias to "local rank" too.
+**HL120.** Multi-node model execution isn't supported, but single node multi-GPU is supported, hence a term "rank" is an alias to "local rank". A term "worker" is an alias to "local rank" too.
+
+**HL130.** The pytest prototype integration in [_prototypes/pytest_integration/](../_prototypes/pytest_integration/) shows how a set of tests can share two expensive processes, select single cases, show live output, and leave no processes behind. The harness takes the parts that fit and changes them as this document requires to adapt to the requirements. The prototype is an implementation hint, not a binding rule, but the final implementation must have no weaker child process handling guarantees and child process console output visibility, than the prototype.
+
+**HL140.** The harness itself must have a test set, ensuring the harness adheres to the requirements. Most important tests are (not exhaustive list):
+- random rank fails fidelity check, or crashes, or hangs - correctly changes pytest outcomes for all cases of the configuration
+- all possible values for logged statuses in rank log files correctly reflected by pytest outcomes
 
 #### Statuses
 
 **HLS10.** When a rank executes a model or does something else mandated by this document, it gets a status label that identifies a certain event, situation, state or a condition, that the rank seen. Statues are written in CAPITAL_LETTERS. Status only describe what the rank observed last and might apply to a component (i.e. its test case as a set of calls the component made during model execution), or to an individual case call.
+
+**HS11.** Users do not need to see status identifiers: the harness raises verbose exceptions with explanations that a person can read.
 
 **HLS15.** A case call status progression as the document describes it must follow directed acyclic graph rules.
 
@@ -158,20 +163,15 @@ in terms of xDiT runner), and `use_torch_compile` off.
 3. each replayed call (measured between the call's starting replay status (PRE_FIDELITY or PRE_REPLAY) and ending status (FIDELITY_FAILED or FIDELITY_PASSED or REPLAYED), see RL100): 2 minutes in A and 5 minutes in B.
 4. 5 (for A) or 10 (for B) minutes since the last record in the log file in all other cases
 
-**TD110.** **Deadlines enforcement.** The configuration fixture (TD40) launches each instance sequentially using a supplementary launcher process that takes care of deadlines and child processes cleanup. Each rank of the instance writes its deadline -related progress and timestamps to a certain rank-specific log file known to the launcher. The launcher then periodically reads these files and uses progress records and timestamps to enforce deadlines. A missed deadline leads to a warning message and killing the instance and all its descendant processes.
+**TD110.** **Deadlines enforcement.** The configuration fixture (TD40) launches each instance sequentially using a supplementary launcher process that takes care of deadlines, child processes cleanup, actually launching an instance with torchrun and statuses of instance's case in some cases. Each rank of the instance writes its deadline -related progress and timestamps to a certain rank-specific log file known to the launcher. The launcher then periodically reads these files and uses progress records and timestamps to enforce deadlines. A missed deadline leads to a warning message and killing the instance and all its descendant processes.
 
 **TD120.** Since the launcher is the only entity that knows of missed deadlines, and also only it can detect crashes or other premature exits, upon the instance finishing execution (whatever the reasons for instance process ending were) the launcher is responsible for reading rank log files and appending correct statuses to rank log files for the cases that were executed last (these might need `status=CRASHED` or `status=HANGED` if that happened) or don't have records at all (these might need UNSUPPORTED if whole configuration is unsupported, or FAILED_TO_START if the rank crashed or hanged and just didn't have an opportunity to try to run the case).
 
 **TD125.** *Sanity check* The launcher knows which cases the instance should run, so after completing the above it validates that each case is mentioned on the log at least once. It's a harness bug if the launcher detects cases that are still absent.
 
-**TD130.** If `HSA_DISABLE_COREDUMP_ON_EXCEPTION` environment variable isn't defined for the
-launcher process, it must set `HSA_DISABLE_COREDUMP_ON_EXCEPTION=1` for self and all child
-processes it runs.
+**TD130.** At the launcher start, if `HSA_DISABLE_COREDUMP_ON_EXCEPTION` environment variable isn't defined for the launcher process, it must set `HSA_DISABLE_COREDUMP_ON_EXCEPTION=1` for self and all child processes it runs. For instance B only (to reduce memory pressure), if none of `PYTORCH_ALLOC_CONF`, `PYTORCH_CUDA_ALLOC_CONF` and `PYTORCH_HIP_ALLOC_CONF` environment variables are defined, the launcher sets `PYTORCH_ALLOC_CONF=expandable_segments:True` for self and all child processes it runs.
 
-**TD140.** For instance B only (to reduce memory pressure), if none of `PYTORCH_ALLOC_CONF`,
-`PYTORCH_CUDA_ALLOC_CONF` and `PYTORCH_HIP_ALLOC_CONF` environment variables are defined,
-the launcher sets `PYTORCH_ALLOC_CONF=expandable_segments:True` for self and all child
-processes it runs.
+**TD140.** The launcher exits with 0 when it worked; the detailed statuses and other run information go through rank log files. A nonzero launcher exit means that the launcher failed and that no data exists, so every case of the configuration fails triggering a pytest error.
 
 **TD200.** Configurations with step caching or hybrid schedules aren't supported.
 
@@ -307,6 +307,8 @@ The harness arranges the following behavior: if set, A's instance flag value is 
 1. If the harness cannot handle an argument (fp8 or MX tensors, types that it cannot serialize), only the affected case call gets UNSUPPORTED. The message names the argument.
 2. If the harness cannot handle a feature of a configuration, every case of the configuration gets UNSUPPORTED. The message names the feature and the run argument with its value. The harness finds this at collection, from the xDiT settings (TD20), or when A or B loads the configuration (RL40). After that, no instance of the configuration starts or continues.
 
+**IA80.** A crash or a hang ends the instance. Version 1 does not recover. An exception that ends the instance counts as a crash.
+
 ### Instance B
 
 **IB10.** Instance B is an eager reference. It inherits requirements of A by default (see "Instance A"
@@ -344,7 +346,11 @@ so a fidelity check on own inputs is needed.
 
 ### Rank lifecycle
 
-**RL10.** In its lifetime a rank comes through a sequence of phases (in which all ranks must participate), described in order below.
+**RL10.** **Logging.** In its lifetime a rank comes through a sequence of phases (in which all ranks must participate), described in the order below. To preserve events happened/observed during rank's lifetime, each rank has a structured log file that only the rank can write to (the launcher can read from the file, TD110) during instance execution. On a rank startup, rank gets from the launcher a path to data directory to store the dumps and the status file. The status file name is `rank_<rank_number>.jsonl`. It's an error if the file existed when the rank started. Each rank appends (and flushes immediately) to their own log file progress records (TD110, TD120), status changes and all other information that requirements of this document mandate to save and pass to pytest/user.
+
+Each log record must have at least one common field: a timestamp. Records related to a case must have another common field `case=<case_id>` - the case identifier, so one can use it to find entries related to the case. A case call related records must also have `call=<call_id>` field set. The file hence serves as a structured timestamped log of all important events the rank observed. Neither rank, nor launcher never deletes anything from the file, only appends to it.
+
+After the instance ends, the ownership of the log files of all ranks is passed to the launcher: it reads the records of all ranks (grepping for files with a known pattern and inferring ranks from it, instead of assuming a certain number of ranks) and appends final statuses for cases that must run, but didn't finish according to the file records. This enables crashes/hangs detection as per TD110, and sets FAILED_TO_START for cases that didn't run (TD120).
 
 **RL20.** Getting to the next phase is recorded in the rank's log with a corresponding field `phase=`. These records are used by the launcher to enforce deadlines (TD110).
 
@@ -394,123 +400,7 @@ Instance B runs both replays: first it runs fidelity check replays on its own in
 
 *Rationale:* strict call execution order and synchronization with barriers are necessary to ensure proper collectives functioning and along with detailed logging help to correctly attribute crashes. A fault that silently damages memory and shows only in a later case is an accepted limit.
 
-
-
-### Failures, crashes and hangs
-
-**FC10.** The harness must detect each crash and each hang, wherever it occurs, and attribute it to the
-instance (A or B) and, for a failure during a replay, to the case, the component and the call identifier (FC20.3)
-
-**FC20.** Each instance computes the results of many cases in one go and saves them to files. A crash or a
-hang ends the instance. Version 1 does not recover.
-1. A case with complete data (A and B) is checked as usual.
-2. A case that an instance had to run but did not start gets FAILED_TO_START.
-3. The case whose replay was running gets a status that shows what happened and in which instance, for example
-   CRASHED_A, CRASHED_B, HUNG_A or HUNG_B. The message names the instance, the kind of failure
-   (crash or hang) and, if available, the call identifier of the last progress record of each rank
-   (not a proven cause, HL70).
-4. A failure outside the replays gives FAILED_TO_START to every case that the instance did not start.
-   The message names the instance and the kind of failure (crash or hang).
-5. B runs only on cases with SUCCESS_A (IA80). If there are no such cases, or if processes of A survive
-   SIGKILL (FC160), B does not start.
-
-**FC30.** Each status that an instance gives has a form for A and a form for B, for example CRASHED_A and
-CRASHED_B, collectively called CRASHED, or NOT_REACHED_IN_A and NOT_REACHED_IN_B, collectively
-called NOT_REACHED_IN.
-
-**FC40.** An exception that ends the instance counts as a crash (FC20).
-
-**FC60.** Statuses can be extended later. There is no
-NOT_EVALUATED status. Users do not need to see status identifiers: the harness raises verbose exceptions with
-explanations that a person can read.
-
-**FC70.** One launcher runs each instance, between the fixture and torchrun. It exits with 0 when it worked;
-the detailed statuses go through another channel. A nonzero exit means that the launcher failed and that no
-data exists, so every case of the configuration fails triggering a pytest error. The launcher enforces the deadlines.
-
-**FC80.** **Lock step.** When an instance has more than one rank, all ranks run every execution that can
-contain a collective in the same order: the initialization, the pipeline run, each replay, and the collectives
-of the harness. Work without collectives does not need lock step. Each per-rank decision that changes this
-sequence is shared, or it ends the instance on all ranks through an exception.
-*Rationale:* almost every execution of a pipeline or a component can contain a collective, and the harness
-does not know this in advance.
-
-**FC90.** These decisions are shared across all ranks of the instance:
-2. the skip of a case before the replays: a path error, UNSUPPORTED_A or UNSUPPORTED_B from the capture of A
-   or B, UNSUPPORTED_B for inputs of A that B cannot use, and call lists that differ between ranks;
-3. the second replay of a call;
-4. the stop of a case after a call;
-5. the number of replays of the inputs of A in B;
-6. the failure of a case in B when the pipeline run of B on any rank did not reach a call that A captured
-   (NOT_REACHED_IN_B). B makes no replays of the case (FC100).
-A rank causing a decision and a rank following the decision must write the details to their log files.
-
-**FC100.** If the call addresses of a case differ between the ranks, the case gets FAILED_TO_START on all ranks.
-B makes no replays of a case that it skips before the replays.
-
-**FC110.** If a rank fails, torchrun stops the other ranks, and the failure is a crash, not a hang.
-
-**FC120.** If a rank of A or B does not do its work because a configuration or a case is UNSUPPORTED, the cause
-and its details reach pytest as the skip reason (UNSUPPORTED_A) or the error message (UNSUPPORTED_B) of each
-affected case. If a single rank gets UNSUPPORTED status all other ranks must also get UNSUPPORTED (shared
-decision, FC90).
-The state keeps the reason for later re-runs. The details are:
-1. the instance and the ranks;
-2. for a configuration: the feature, and the run argument with its value;
-3. for a case: the call identifier, the argument name, and its type or dtype.
-
-**FC130.** Every run shows the UNSUPPORTED reasons without extra pytest options. A `pytest_terminal_summary`
-hook adds a section that lists each UNSUPPORTED case with its reason.
-
-**FC140.** If the ranks report different statuses for one case, PI30 decides the outcome from the statuses of
-all ranks. The message shows each status with the ranks that have it.
-
-**FC150.** Each worker (a worker is one rank of an instance) has a structured log file that only the worker
-can write to (the launcher can read from the file, TD110) during instance execution. On a worker startup,
-it gets from the launcher a path to data directory to store the dumps and the status file.
-The status file name is `rank_<rank_number>.jsonl`. It's an error if the file existed when
-the worker started. Each worker appends (and flushes immediately) their own file
-with a progress record (TD110, TD120), statuses change and all other information that
-requirements of this document mandate to keep. Each record must have
-at least one common field: a timestamp. Records related to a case must have another common field
-the case identifier, so one can use it to find entries related to the case.
-The file hence serves as a structured timestamped log of all important events the worker observed.
-A worker never deletes anything from the file, only appends to it.
-After an instance ends, the ownership of the log files of all
-workers is passed to the launcher: it reads the records of all ranks (grepping for files with a
-known pattern and inferring participating ranks from it) and appends final statuses
-for cases that must run, but didn't finish according to the file records. This enables crashes/hangs detection as per
-TD110, and sets FAILED_TO_START for cases that didn't run (FC20.2).
-
-** * vvv TODO vvv * **
-
- After the launcher
-reconstructs the final states of all cases on all ranks from logs, it aggregates them by case and call,
-and writes final case state report to a corresponding `instance.json` file, where for
-each case, it writes all information a case results reader in pytest would need
-for further work (applicable rank statuses, determinism flags, call identifiers and
-everything else the reader would need). While aggregating, it must not assume that for
-a certain case all ranks necessary always ran the same calls; it must identify the
-discrepancies between ranks whenever possible, issue a diagnostics message and fail the execution.
-
-** * ^^^ TODO ^^^ * **
-
-**FC160.** A process that survives SIGKILL (uninterruptible sleep) must not hang the pytest session. After
-SIGKILL, the harness waits only for a limited time, and then it reports the surviving processes. The
-harness then reports the results of this configuration and stops the session: if the processes belong
-to A, B does not start, and each case with SUCCESS_A gets FAILED_TO_START_B with the list of surviving
-processes, and the fixture stops the session before the next configuration. The stop message names the
-configuration, the instance and the surviving processes, and says that the GPUs may need a reset.
-
-**FC170.** The harness itself must have a test set. The tests make sure that the instances and the launcher
-handle each behavior of a component correctly, as the specification requires: a failed determinism check, a
-failed fidelity check, a hang and a crash. The specification must list these tests.
-*Rationale:* the instances have complex rules for correct behavior across ranks.
-
 ### pytest integration
-
-**PI10.** The harness is a set of pytest tests. The `pytest_integration` prototype is an implementation hint,
-not a binding rule. The harness takes the best of it and adapts it.
 
 **PI20.** **General meaning of the pytest outcomes.** (This requirement exists to alleviate decisions
 for new statuses. Actual mapping is provided by PI30.) "error" means that the test has nothing to check, for example

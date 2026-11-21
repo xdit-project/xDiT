@@ -10,6 +10,7 @@ from diffusers.models.transformers.transformer_2d import Transformer2DModelOutpu
 from diffusers.models.embeddings import apply_rotary_emb
 
 from xfuser.core.distributed import (
+    get_runtime_state,
     get_sequence_parallel_rank,
     get_sequence_parallel_world_size,
 )
@@ -119,6 +120,8 @@ class xFuserKrea2Transformer2DWrapper(Krea2Transformer2DModel):
         attention_kwargs: Optional[Dict[str, Any]] = None,
         return_dict: bool = True,
     ) -> Union[torch.FloatTensor, Transformer2DModelOutput]:
+        get_runtime_state().increment_step_counter()
+
         sp_world_size = get_sequence_parallel_world_size()
         sp_rank = get_sequence_parallel_rank()
 

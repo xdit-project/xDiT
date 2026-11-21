@@ -420,6 +420,10 @@ class xFuserQwenImage21Model(xFuserModel):
         },
     )
 
+    def _fuses_qkv_projections(self) -> bool:
+        # RDNA4 is not measured.
+        return not PACKAGES_CHECKER._on_rdna4()
+
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import QwenImage21Pipeline
         from xfuser.model_executor.models.transformers.transformer_qwenimage21 import (

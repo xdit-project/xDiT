@@ -174,3 +174,96 @@ def test_padded_prompt_decode_falls_back_to_diffusers(xfuser_sdpa_calls, process
     assert xfuser_sdpa_calls == []
     for ref, out in zip(reference, actual):
         torch.testing.assert_close(out, ref, rtol=1e-4, atol=1e-5)
+
+
+def _count_calls(modules):
+    """Forward calls of each of `modules`, counted from now on."""
+    counts = [0] * len(modules)
+
+    def counter(index):
+        def count(module, args):
+            counts[index] += 1
+
+        return count
+
+    for index, module in enumerate(modules):
+        module.register_forward_pre_hook(counter(index))
+    return counts
+
+
+def _weight_bytes(model):
+    """Bytes of the distinct storages behind a model's parameters."""
+    storages = {
+        parameter.untyped_storage().data_ptr(): parameter.untyped_storage().nbytes() for parameter in model.parameters()
+    }
+    return sum(storages.values())
+
+
+def test_fused_projections_replace_the_separate_gemms_and_keep_the_output(xfuser_sdpa_calls):
+    stock = _tiny_model()
+    processor_cls = xfuser_qwenimage21.xFuserQwenImage21AttnProcessor
+    reference = _prefill_then_decode(_xfuser_model(stock, processor_cls))
+    model = _xfuser_model(stock, processor_cls)
+
+    model.fuse_qkv_projections()
+
+    blocks = model.transformer_blocks
+    separate = _count_calls(
+        [
+            module
+            for block in blocks
+            for module in (
+                block.attn.to_q,
+                block.attn.to_k,
+                block.attn.to_v,
+                block.img_mlp.gate_layer,
+                block.img_mlp.proj,
+            )
+        ]
+    )
+    fused = _count_calls([module for block in blocks for module in (block.attn.to_qkv, block.img_mlp.gate_proj)])
+    actual = _prefill_then_decode(model)
+
+    assert separate == [0] * (5 * NUM_LAYERS)
+    assert fused == [1 + DECODE_STEPS] * (2 * NUM_LAYERS)
+    for ref, out in zip(reference, actual):
+        torch.testing.assert_close(out, ref, rtol=1e-4, atol=1e-5)
+
+
+def test_fusing_projections_costs_no_memory():
+    model = _xfuser_model(_tiny_model(), xfuser_qwenimage21.xFuserQwenImage21AttnProcessor)
+    before = _weight_bytes(model)
+
+    model.fuse_qkv_projections()
+
+    assert _weight_bytes(model) == before
+
+
+def test_the_separate_swiglu_projections_compute_the_same_from_the_fused_weights():
+    model = _xfuser_model(_tiny_model(), xfuser_qwenimage21.xFuserQwenImage21AttnProcessor)
+    mlp = model.transformer_blocks[0].img_mlp
+    sample = torch.randn(3, mlp.proj.in_features, generator=torch.Generator().manual_seed(2))
+    with torch.no_grad():
+        expected = mlp.gate_layer(sample), mlp.proj(sample)
+
+    model.fuse_qkv_projections()
+
+    with torch.no_grad():
+        assert torch.equal(mlp.gate_layer(sample), expected[0])
+        assert torch.equal(mlp.proj(sample), expected[1])
+
+
+def test_a_feed_forward_whose_projections_are_not_plain_linears_keeps_its_forward():
+    class WrappedLinear(torch.nn.Linear):
+        pass
+
+    model = _xfuser_model(_tiny_model(), xfuser_qwenimage21.xFuserQwenImage21AttnProcessor)
+    wrapped, plain = (block.img_mlp for block in model.transformer_blocks)
+    wrapped.proj.__class__ = WrappedLinear
+
+    assert xfuser_qwenimage21.fuse_swiglu_projections(model) == NUM_LAYERS - 1
+
+    assert not hasattr(wrapped, "gate_proj") and "forward" not in vars(wrapped)
+    assert hasattr(plain, "gate_proj") and "forward" in vars(plain)
+    # Fusing twice leaves the fused feed-forward as it is.
+    assert xfuser_qwenimage21.fuse_swiglu_projections(model) == 0

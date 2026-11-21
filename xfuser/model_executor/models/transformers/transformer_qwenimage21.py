@@ -27,6 +27,7 @@ from xfuser.core.distributed import (
     get_ulysses_parallel_world_size,
 )
 from xfuser.model_executor.layers.fused_qk_rope_flydsl import _HAS_FLYDSL, flydsl_fused_qk_norm_rope
+from xfuser.model_executor.layers.plain_linear import plain_linear
 from xfuser.model_executor.layers.usp import (
     _combined_qkv_all_to_all,
     _ft_c_output_all_to_all,
@@ -34,7 +35,9 @@ from xfuser.model_executor.layers.usp import (
 )
 from xfuser.model_executor.models.transformers.transformers_utils import (
     chunk_and_pad_sequence,
+    fuse_plain_qkv_projections,
     gather_and_unpad,
+    share_fused_weights,
 )
 
 
@@ -236,9 +239,11 @@ class _xFuserQwenImage21AttnMixin:
         segments: list[tuple[int, int, bool]] | None = None,
         key_valid: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        query = attn.to_q(hidden_states).unflatten(-1, (attn.heads, -1))
-        key = attn.to_k(hidden_states).unflatten(-1, (attn.heads, -1))
-        value = attn.to_v(hidden_states).unflatten(-1, (attn.heads, -1))
+        if attn.fused_projections:
+            query, key, value = attn.to_qkv(hidden_states).chunk(3, dim=-1)
+        else:
+            query, key, value = attn.to_q(hidden_states), attn.to_k(hidden_states), attn.to_v(hidden_states)
+        query, key, value = (t.unflatten(-1, (attn.heads, -1)) for t in (query, key, value))
 
         key_slot = _cached_key_slot(key, layer_cache, kv_cache_mode)
         query, key = _qk_norm_rope(attn, query, key, rotary_emb, key_out=key_slot)
@@ -269,6 +274,42 @@ class xFuserQwenImage21FlexAttnProcessor(_xFuserQwenImage21AttnMixin, QwenImage2
     """Compiled path: single flex_attention prefill, xDiT-backend decode."""
 
 
+def _fused_swiglu_forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    """``QwenImage21SwiGLUFeedForward.forward`` with the gate and the projection out of one GEMM."""
+    gate, proj = self.gate_proj(hidden_states).chunk(2, dim=-1)
+    return self.out(self.activation_fn(gate) * proj)
+
+
+def fuse_swiglu_projections(transformer) -> int:
+    """Stack the gate and the projection of each block's SwiGLU feed-forward into one linear.
+
+    Both read the same input, so one GEMM twice as wide computes them. A feed-forward is left
+    alone unless both are plain linears. They become views of the stacked weights, so this
+    costs no memory. Returns the number of feed-forwards fused.
+    """
+    fused_count = 0
+    for block in transformer.transformer_blocks:
+        mlp = block.img_mlp
+        gate, proj = mlp.gate_layer, mlp.proj
+        if hasattr(mlp, "gate_proj") or not (plain_linear(gate) and plain_linear(proj)):
+            continue
+        fused = torch.nn.Linear(
+            gate.in_features,
+            gate.out_features + proj.out_features,
+            bias=False,
+            device=gate.weight.device,
+            dtype=gate.weight.dtype,
+        )
+        with torch.no_grad():
+            fused.weight.copy_(torch.cat([gate.weight, proj.weight]))
+        share_fused_weights(fused, (gate, proj))
+        mlp.gate_proj = fused
+        # Bound per instance: Module.__call__ resolves `self.forward` per call, so hooks still run.
+        mlp.forward = _fused_swiglu_forward.__get__(mlp, type(mlp))
+        fused_count += 1
+    return fused_count
+
+
 class _DecodeLayout(NamedTuple):
     """The target-only inputs of a cached-prefix step, which depend only on the prompt and image layout."""
 
@@ -297,6 +338,17 @@ class xFuserQwenImage21TransformerWrapper(QwenImage21Transformer2DModel):
     ``target_token_mask=block_modulation_mask`` and the gather after it differ. Also, steps after the one that fills the KV cache reuse its rotary table and
     masks and skip building the joint sequence, whose data-dependent shapes would block on the GPU every step.
     """
+
+    def fuse_qkv_projections(self) -> None:
+        """Compute each block's projections of one input with one GEMM, where they are plain linears.
+
+        Fuses Q, K and V of every attention layer, and the gate and the projection of every SwiGLU
+        feed-forward. The separate projections become views of the fused weights, so this costs no memory.
+        """
+        fuse_plain_qkv_projections(self)
+        # Before the feed-forwards allocate: the freed Q/K/V copies would otherwise sit cached under them.
+        torch.cuda.empty_cache()
+        fuse_swiglu_projections(self)
 
     @apply_lora_scale("attention_kwargs")
     def forward(

@@ -64,6 +64,22 @@ def test_name_selects_its_checkpoint(build_qwen_image21, name, checkpoint):
     assert model.loader.checkpoint_request().model_name_or_path == checkpoint
 
 
+@pytest.mark.parametrize(
+    ("name", "rdna4", "expected"),
+    [
+        ("Qwen-Image-2.1", False, True),
+        ("Qwen-Image-2.1", True, False),
+        ("Qwen-Image-2.1-Turbo", False, True),
+    ],
+)
+def test_which_runs_fuse_projections(monkeypatch, build_qwen_image21, name, rdna4, expected):
+    from xfuser.model_executor.models.runner_models import qwen
+
+    monkeypatch.setattr(qwen.PACKAGES_CHECKER, "_on_rdna4", lambda: rdna4)
+
+    assert build_qwen_image21(name)._fuses_qkv_projections() is expected
+
+
 def _turbo_args(model, **overrides):
     args = {"prompt": "a cat", "dataset_path": None, "height": 1024, "width": 1024}
     args["num_inference_steps"] = model.default_input_values.num_inference_steps

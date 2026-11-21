@@ -17,6 +17,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     ModelSettings,
 )
 from xfuser.core.utils.runner_utils import (
+    log,
     resize_and_crop_image,
     fix_llama_tokenizer_pretokenizer,
 )
@@ -180,6 +181,9 @@ class xFuserHunyuanvideo15Model(xFuserModel):
 
     min_diffusers_version = "0.36.0"
 
+    # True for checkpoints whose guider has scale 1.0 (no CFG): the distilled and sparse variants.
+    guidance_free = False
+
     # The 1.5 wrapper's config-only construction and checkpoint layout are unverified.
     load_support = LoadSupport(
         meta_transformers=(),
@@ -259,11 +263,15 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
+        prompt, negative_prompt = input_args["prompt"], input_args["negative_prompt"] or None
+        if isinstance(prompt, list) and isinstance(negative_prompt, str):
+            negative_prompt = [negative_prompt] * len(prompt)  # the pipeline wants one per prompt
         kwargs = {
             "num_inference_steps": input_args["num_inference_steps"],
             "num_frames": input_args["num_frames"],
             "generator": self._make_generator(input_args["seed"]),
-            "prompt": input_args["prompt"],
+            "prompt": prompt,
+            "negative_prompt": negative_prompt,
         }
         if self.config.task == "i2v":
             kwargs["image"] = input_args["image"]
@@ -271,7 +279,14 @@ class xFuserHunyuanvideo15Model(xFuserModel):
             kwargs["height"] = input_args["height"]
             kwargs["width"] = input_args["width"]
 
-        output = self.pipe(**kwargs)
+        # HunyuanVideo-1.5 reads its CFG scale from the pipeline's guider, not a call argument.
+        guider = self.pipe.guider
+        if input_args["guidance_scale"] is not None:
+            self.pipe.guider = guider.new(guidance_scale=input_args["guidance_scale"])
+        try:
+            output = self.pipe(**kwargs)
+        finally:
+            self.pipe.guider = guider
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
     def _preprocess_args_images(self, input_args: dict) -> dict:
@@ -296,6 +311,21 @@ class xFuserHunyuanvideo15Model(xFuserModel):
             images = input_args.get("input_images", [])
             if len(images) != 1:
                 raise ValueError("Exactly one input image is required for HunyuanVideo-1.5 model when task is 'i2v'.")
+        if self.guidance_free and input_args.get("negative_prompt"):
+            raise ValueError(f"{self.settings.model_name} is guidance-distilled and does not accept a negative prompt.")
+        # A guider with scale 1.0 skips the unconditional branch, so the negative prompt would go unused.
+        if input_args.get("negative_prompt") and input_args.get("guidance_scale") == 1:
+            raise ValueError(
+                f"--guidance_scale 1 turns guidance off, so {self.settings.model_name} would ignore --negative_prompt."
+            )
+
+    def preprocess_args(self, input_args: dict) -> dict:
+        args = super().preprocess_args(input_args)
+        # As for FLUX.3 klein: scripts pass --guidance_scale to every model, so it is only noted.
+        if self.guidance_free and args.get("guidance_scale") is not None:
+            log(f"{self.settings.model_name} is guidance-distilled; ignoring --guidance_scale.")
+            args["guidance_scale"] = None
+        return args
 
     def _compile_model(self, input_args: dict) -> None:
         """Compile the model using torch.compile"""
@@ -312,6 +342,8 @@ class xFuserHunyuanvideo15Model(xFuserModel):
 @register_model("tencent/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled")
 @register_model("Hunyuanvideo-1.5-Distilled")
 class xFuserHunyuanvideo15DistilledModel(xFuserHunyuanvideo15Model):
+    guidance_free = True
+
     # The distilled 1.5 wrapper is unverified for config-only collective loading.
     load_support = LoadSupport(
         meta_transformers=(),
@@ -368,6 +400,8 @@ HUNYUANVIDEO_15_SPARSE_SINGLE_BLOCK_KEY_MAP = {
 @register_model("Hunyuanvideo-1.5-Sparse")
 @register_model("tencent/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled_sparse")
 class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
+    guidance_free = True
+
     # Sparse weights are composed and remapped outside loader.load_transformer.
     load_support = LoadSupport(
         meta_transformers=(),

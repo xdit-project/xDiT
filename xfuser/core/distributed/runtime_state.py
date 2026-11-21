@@ -363,6 +363,9 @@ class RuntimeState(metaclass=ABCMeta):
             configured.append(hook)
             spec.configure(self.runtime_config, denoising_steps, forwards_per_step)
 
+    def reset_step_counter(self) -> None:
+        """Only DiTRuntimeState has a per-step schedule to restart."""
+
 
 class UnetRuntimeState(RuntimeState):
     def __init__(self, pipeline: DiffusionPipeline, config: EngineConfig):

@@ -71,6 +71,8 @@ def _worker(rank, world_size, init_method):
         engine_config, _ = args.create_config()
         initialize_runtime_state(engine_config=engine_config)
         assert get_runtime_state().attention_backend.name == "CUDNN"
+        # The external state has no per-step schedule; the forward only advances it.
+        get_runtime_state().increment_step_counter = lambda: None
 
         device = torch.device("cuda", rank)
         torch.manual_seed(0)

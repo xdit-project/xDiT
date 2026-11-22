@@ -33,6 +33,7 @@ from xfuser.core.utils.runner_utils import (
 )
 from xfuser.model_executor.models.runner_models.image_postprocess import enable_fast_pil_postprocess
 from xfuser.model_executor.layers import usp_sdma
+from xfuser.model_executor.layers.transposed_linear import transpose_plain_linears
 from xfuser.model_executor.pipelines.base_pipeline import xFuserPipelineBaseWrapper
 from xfuser.model_executor.models.runner_models.vae_manager import (
     VAEManager,
@@ -62,6 +63,7 @@ from xfuser.core.distributed import (
     init_distributed_environment,
 )
 from xfuser.core.attention import registry as attention_registry
+from xfuser.core.attention.requirements import device_arch
 from xfuser.core.attention.spec import AttentionBackendType, Sparsity
 from xfuser.core.distributed.fp8_comms import setup_fp8_comms, validate_fp8_comms_config
 from xfuser.core.distributed.attention_schedule import (
@@ -258,6 +260,8 @@ class ModelFeatures:
 
     # The transformer wrapper has `shard_modulation()` and gains from it (see `_shard_modulation`).
     shards_modulation: bool = False
+    # The transformer gains from linear weights stored transposed on gfx942 (see `_transpose_linears`).
+    transposes_linears: bool = False
 
 
 @dataclass(frozen=True)
@@ -1087,6 +1091,31 @@ class xFuserModel(abc.ABC):
                 f"each holds {share:.2f} GiB of its weights."
             )
 
+    def _transpose_linears(self) -> None:
+        """Store the transformer's plain linear weights transposed, on gfx942.
+
+        For runners that set `transposes_linears` in their features, once the weights are placed
+        and fused. On gfx942 the GEMM behind a linear is slower when its weight is a transposed
+        operand, which is what `F.linear` hands it; on gfx950 it is the other way round. Stays
+        off where the weights are sharded or offloaded, and with a LoRA, which expects [out, in].
+        """
+        config = self.config
+        if (
+            "gfx942" not in device_arch()
+            or config.fully_shard_degree > 1
+            or config.memory_efficient_sharding
+            or config.enable_group_cpu_offload
+            or config.enable_sequential_cpu_offload
+            or config.enable_model_cpu_offload
+            or config.lora_path
+        ):
+            return
+        count = transpose_plain_linears(self.pipe.transformer)
+        if count:
+            # Hand the weights' old copies back to the device.
+            torch.cuda.empty_cache()
+            log(f"Stored the weights of {count} linears transposed.")
+
     def _fuses_projections(self) -> bool:
         """Whether the compiled components compute the projections of one input with one fused GEMM.
 
@@ -1710,6 +1739,9 @@ class xFuserModel(abc.ABC):
 
         if self.features.shards_modulation:
             self._shard_modulation()
+
+        if self.features.transposes_linears:
+            self._transpose_linears()
 
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
         return 1

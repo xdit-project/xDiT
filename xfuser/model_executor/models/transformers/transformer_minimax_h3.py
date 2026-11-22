@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import math
 from typing import Any
 
@@ -23,6 +24,7 @@ from xfuser.core.distributed import (
 from xfuser.core.attention import registry as attention_registry
 from xfuser.core.attention.spec import EXACT_KV_TOKENS_KEY, AttentionBackendType, Sparsity
 from xfuser.core.attention.backends.vsa_h3.attention import build_h3_vsa_metadata
+from xfuser.core.sparge_attention.sparge import get_gilbert_perm
 from xfuser.model_executor.layers.fused_qk_rope_flydsl import (
     _HAS_FLYDSL,
     flydsl_fused_qk_norm_rope,
@@ -98,6 +100,40 @@ def pad_packed_rows(
         dim=0,
     )
     return hidden_states, timestep_indices, token_tags, position_ids, pad_amount
+
+
+def curve_ordered_video_rows(
+    position_ids: torch.Tensor,
+    video_indices: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """Place a packed sequence's video tokens along a Gilbert curve over their (t, h, w) grid.
+
+    Returns ``(row_order, video_indices)``: the rows the per-row inputs are gathered from, and
+    where each video token now sits. Text, audio and every other non-video row keep their
+    places, and the video tokens take the same set of rows. Returns None when the video rows
+    do not fill a whole grid.
+
+    Every op in a block but attention is per token, so the order changes only which tokens share
+    an attention block. In raster order a block holds a few whole frame rows; along the curve it
+    holds a compact patch, which a backend that pools and selects KV blocks needs.
+    """
+    video_positions = position_ids.index_select(0, video_indices)
+    grid, coordinates = [], []
+    for axis in range(video_positions.shape[-1]):
+        values, coordinate = torch.unique(video_positions[:, axis], return_inverse=True)
+        grid.append(values.numel())
+        coordinates.append(coordinate)
+    frames, height, width = grid
+    cells = (coordinates[0] * height + coordinates[1]) * width + coordinates[2]
+    if math.prod(grid) != video_indices.numel() or torch.unique(cells).numel() != cells.numel():
+        return None
+    # get_gilbert_perm returns (cell of each curve step, curve step of each cell).
+    _, curve_step = get_gilbert_perm((frames, height, width), position_ids.device)
+    video_rows = video_indices.sort().values
+    curve_video_indices = video_rows.index_select(0, curve_step.index_select(0, cells))
+    row_order = torch.arange(position_ids.shape[0], device=position_ids.device)
+    row_order[curve_video_indices] = video_indices
+    return row_order, curve_video_indices
 
 
 class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
@@ -375,8 +411,40 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
             )
 
         self.register_forward_pre_hook(lambda module, args: get_runtime_state().increment_step_counter())
+        # The runner sets this when a Sol backend is selected, which routes KV blocks.
+        self.curve_order_video = False
+        self._curve_order = None
+        self.register_forward_pre_hook(self._order_video_along_curve, with_kwargs=True)
 
     _pad_rows = staticmethod(pad_packed_rows)
+
+    def _order_video_along_curve(self, module, args, kwargs):
+        """Hand the forward its video rows in curve order (see curve_ordered_video_rows).
+
+        A pre-hook, so it runs before the runner's compiled forward: the grid is read from
+        position_ids values, which cannot be traced. Only the per-row inputs and video_indices
+        change, and the outputs still come back in the caller's order through video_indices.
+        VSA-H3 builds its tiles from the packed order, so it keeps that order.
+        """
+        if not self.curve_order_video or self.use_vsa_h3:
+            return None
+        bound = inspect.signature(type(self).forward).bind(self, *args, **kwargs)
+        arguments = bound.arguments
+        position_ids, video_indices = arguments["position_ids"], arguments["video_indices"]
+        # As for VSA-H3, sizes alone do not tell two geometries apart (768x1344 and 1344x768),
+        # so the key carries the first and last video rows and their coordinates.
+        ends = video_indices[[0, -1]]
+        corners = torch.cat((ends.to(position_ids.dtype), position_ids.index_select(0, ends).flatten()))
+        key = (position_ids.shape[0], video_indices.numel(), position_ids.device, *corners.tolist())
+        if self._curve_order is None or self._curve_order[0] != key:
+            self._curve_order = (key, curve_ordered_video_rows(position_ids, video_indices))
+        order = self._curve_order[1]
+        if order is None:
+            return None
+        row_order, arguments["video_indices"] = order
+        for name in ("position_ids", "timestep_indices", "token_tags"):
+            arguments[name] = arguments[name].index_select(0, row_order)
+        return bound.args[1:], bound.kwargs
 
     def prepare_vsa_h3_metadata(
         self,

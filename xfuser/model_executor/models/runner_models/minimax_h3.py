@@ -671,6 +671,8 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
             from xfuser.model_executor.models.transformers.transformer_minimax_h3 import REFINER_DENSE_BACKEND
 
             runtime._check_if_backend_compatible_with_current_configuration(REFINER_DENSE_BACKEND)
+            # Sol routes KV blocks, which need spatially compact video tokens.
+            getattr(self.pipe, self._transformer_component_name).curve_order_video = True
 
     def _validate_config(self, config) -> None:
         if config.task is None:

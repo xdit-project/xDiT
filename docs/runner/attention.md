@@ -75,6 +75,9 @@ startup; use `--ulysses_degree` for sequence parallelism. Set
 too few blocks to select from. On FLUX.3 that backend serves the text-mode blocks,
 which attend the prompt alone. The joint blocks compute the prompt's KV blocks
 and its own query rows exactly, and route the image and reference tokens.
+On MiniMax-H3 the text and audio blocks are always computed exactly, and the
+video tokens are ordered along a space-filling curve over their frame grid. A KV
+block then holds a compact patch of the video instead of a few frame rows.
 
 - `--solattn_beta` sets the routing threshold (default `0.5`). A larger value
   computes fewer blocks exactly.

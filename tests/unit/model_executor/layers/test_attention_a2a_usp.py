@@ -9,7 +9,6 @@ from torch import nn
 from xfuser.core.attention.backends.aiter_mha_v4 import attention_a2a as aiter_attention_a2a
 from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.model_executor.layers import usp
-from xfuser.model_executor.layers.quantized_attention_output import QuantizedAttentionOutput
 
 
 def _runtime_state():
@@ -103,50 +102,60 @@ def _patch_packed_usp(stack, *, output_hop):
     )
 
 
-def _call_usp(output_projection):
+class _Projection:
+    prequantized_input_codec = "mxfp4"
+
+    def __init__(self):
+        self.calls = []
+
+    def forward_prequantized(self, payload, scale, logical_shape):
+        self.calls.append((payload, scale, logical_shape))
+        return torch.ones(logical_shape)
+
+
+def _call_projected(projection):
     query = torch.randn(1, 4, 8, 128)
-    return usp.USP(
+    return usp.usp_attention_a2a_projected(
         query,
         torch.randn_like(query),
         torch.randn_like(query),
-        backend=AttentionBackendType.AITER_FP8,
+        projection=projection,
         attn_layer=object(),
-        attention_a2a_enabled=True,
-        output_projection=output_projection,
     )
 
 
-def test_output_hop_returns_the_quantized_output_instead_of_rccl():
+def test_projected_output_hop_projects_the_mori_output_instead_of_rccl():
     output = torch.randn(1, 16, 2, 128, dtype=torch.bfloat16)
     payload, scale = torch.empty(4, dtype=torch.uint8), torch.empty(1, 1)
+    projection = _Projection()
 
     with contextlib.ExitStack() as stack:
         _patch_packed_usp(stack, output_hop=True)
         stack.enter_context(mock.patch.object(usp, "launch_attention_a2a_packed", return_value=output))
         output_hop = stack.enter_context(mock.patch.object(usp, "fused_a2a_output", return_value=(payload, scale)))
         rccl_output = stack.enter_context(mock.patch.object(usp, "_ft_c_output_all_to_all"))
-        result = _call_usp(SimpleNamespace(prequantized_input_codec="mxfp4"))
+        result = _call_projected(projection)
         output_hop.assert_called_once_with(output, usp.PROCESS_GROUP.ULYSSES_PG, 0, "mxfp4")
 
     rccl_output.assert_not_called()
-    assert isinstance(result, QuantizedAttentionOutput)
-    assert result.payload is payload and result.scale is scale and result.codec == "mxfp4"
+    assert projection.calls == [(payload, scale, (1, 8, 4 * 128))]
+    assert torch.equal(result, torch.ones(1, 8, 4 * 128))
 
 
-def test_output_hop_rejects_a_bf16_projection_before_transport():
+def test_projected_output_hop_rejects_a_bf16_projection_before_transport():
     with contextlib.ExitStack() as stack:
         input_a2a = _patch_packed_usp(stack, output_hop=True)
         with pytest.raises(RuntimeError, match="requires a quantized output projection; Linear consumes"):
-            _call_usp(nn.Linear(8, 8))
+            _call_projected(nn.Linear(8, 8))
 
     input_a2a.assert_not_called()
 
 
-def test_output_projection_requires_the_output_hop():
+def test_projected_output_hop_requires_the_output_hop():
     with contextlib.ExitStack() as stack:
         input_a2a = _patch_packed_usp(stack, output_hop=False)
-        with pytest.raises(ValueError, match="output_projection requires the Attention A2A output hop"):
-            _call_usp(SimpleNamespace(prequantized_input_codec="mxfp4"))
+        with pytest.raises(ValueError, match="requires the Attention A2A output hop"):
+            _call_projected(_Projection())
 
     input_a2a.assert_not_called()
 

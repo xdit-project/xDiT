@@ -60,6 +60,7 @@ from xfuser.model_executor.layers import usp_sdma
 from xfuser.model_executor.layers.quantized_attention_output import (
     QuantizedAttentionOutput,
     attention_output_codec,
+    project_attention_output,
 )
 
 # Backends whose kernel cost can be load-balanced across Ulysses ranks, i.e. the
@@ -641,7 +642,7 @@ def usp_fused_a2a_input_v(input, pending, valid_kv_len=None):
     )
 
 
-def _attention_a2a_usp(
+def _attention_a2a_mha(
     query,
     key,
     value,
@@ -653,9 +654,11 @@ def _attention_a2a_usp(
     attention_kwargs,
     kv_head_repeat,
     pending,
-    output_projection,
 ):
-    """Run the deliberately narrow AITER/MORI Ulysses input path and, for ``output_projection``, the output hop."""
+    """Run the deliberately narrow AITER/MORI Ulysses input path and packed MHA.
+
+    Returns the BSHD attention output of this rank's heads over the full sequence.
+    """
     runtime_state = get_runtime_state()
     ulysses_world_size = get_ulysses_parallel_world_size()
     ring_world_size = get_ring_parallel_world_size()
@@ -680,14 +683,6 @@ def _attention_a2a_usp(
         raise RuntimeError("Attention A2A runtime did not activate a concrete profile")
     if pending is not None and not use_fused_a2a_interleave():
         raise ValueError("interleaved input requires eligible Attention A2A transport")
-    output_codec = None
-    if output_projection is not None:
-        output_codec = attention_output_codec(output_projection)
-        if output_codec is None:
-            raise RuntimeError(
-                "--attention_a2a_output mori requires a quantized output projection; "
-                f"{type(output_projection).__name__} consumes a BF16 activation"
-            )
 
     unsupported = []
     if _ulysses_extra_inputs(attention_kwargs, query):
@@ -722,7 +717,7 @@ def _attention_a2a_usp(
         get_fused_a2a_codecs(),
         profile,
     )
-    output = launch_attention_a2a_packed(
+    return launch_attention_a2a_packed(
         query,
         key,
         value,
@@ -730,15 +725,53 @@ def _attention_a2a_usp(
         profile,
         query.shape[-1] ** -0.5,
     )
-    if output_codec is not None:
-        payload, scale = fused_a2a_output(
-            output,
-            PROCESS_GROUP.ULYSSES_PG,
-            get_ulysses_parallel_rank(),
-            output_codec,
+
+
+def usp_attention_a2a_projected(
+    query,
+    key,
+    value,
+    *,
+    projection,
+    attn_layer=None,
+    attention_kwargs=None,
+    pending=None,
+):
+    """Attention A2A with the output hop: return ``projection`` applied to the attention output.
+
+    Takes the same BHSD inputs as ``USP`` and returns the projection's BF16 output for
+    this rank's sequence shard, ``[B, S, output features]``. The attention output is
+    quantized for the projection's GEMM and exchanged through MoRI instead of the
+    regular output all-to-all. The quantized activation aliases transport buffers that
+    later attention calls rewrite, so it is projected before this function returns.
+    """
+    b, h, s, d = query.shape
+    logical_shape = (b, s, h * d)
+    if _compile_capture_bypasses_attention():
+        return projection(query.new_zeros(logical_shape))
+    if not (get_fused_a2a_mode() > 0 and use_fused_a2a_output()):
+        raise ValueError("usp_attention_a2a_projected requires the Attention A2A output hop")
+    codec = attention_output_codec(projection)
+    if codec is None:
+        raise RuntimeError(
+            "--attention_a2a_output mori requires a quantized output projection; "
+            f"{type(projection).__name__} consumes a BF16 activation"
         )
-        return QuantizedAttentionOutput(payload, scale, output_codec)
-    return _ft_c_output_all_to_all(output.transpose(1, 2))
+
+    output = _attention_a2a_mha(
+        query,
+        key,
+        value,
+        dropout_p=0.0,
+        is_causal=False,
+        joint_strategy=None,
+        attn_layer=attn_layer,
+        attention_kwargs=attention_kwargs,
+        kv_head_repeat=1,
+        pending=pending,
+    )
+    payload, scale = fused_a2a_output(output, PROCESS_GROUP.ULYSSES_PG, get_ulysses_parallel_rank(), codec)
+    return project_attention_output(projection, QuantizedAttentionOutput(payload, scale, codec), logical_shape)
 
 
 def USP(
@@ -759,7 +792,6 @@ def USP(
     kv_head_repeat: int = 1,
     attention_a2a_enabled: bool = False,
     attention_a2a_pending=None,
-    output_projection=None,
 ):
     """
     Unified Sequence Parallelism (USP) attention call, supporting combinations of Ulysses and
@@ -788,12 +820,6 @@ def USP(
     the Ulysses input all-to-all, then repeats each local KV head immediately
     before attention. With ``combine_qkv_a2a=True``, unequal Q and KV payloads
     are packed into one collective.
-
-    ``output_projection`` (optional) is the linear that consumes the attention
-    output. Passing it requires the Attention A2A output hop: USP then quantizes
-    the MHA output for that projection's GEMM, performs the inverse all-to-all
-    through MoRI, and returns a ``QuantizedAttentionOutput`` for
-    ``project_attention_output`` instead of the BF16 output.
     """
     if combine_qkv_a2a is None:
         combine_qkv_a2a = False
@@ -811,10 +837,8 @@ def USP(
     use_attention_a2a = attention_a2a_enabled and get_fused_a2a_mode() > 0
     if attention_a2a_pending is not None and not use_attention_a2a:
         raise ValueError("interleaved input requires eligible Attention A2A transport")
-    if output_projection is not None and not (use_attention_a2a and use_fused_a2a_output()):
-        raise ValueError("output_projection requires the Attention A2A output hop")
     if use_attention_a2a:
-        return _attention_a2a_usp(
+        output = _attention_a2a_mha(
             query,
             key,
             value,
@@ -825,8 +849,8 @@ def USP(
             attention_kwargs=attention_kwargs,
             kv_head_repeat=kv_head_repeat,
             pending=attention_a2a_pending,
-            output_projection=output_projection,
         )
+        return _ft_c_output_all_to_all(output.transpose(1, 2))
 
     runtime_state = get_runtime_state()
     ulysses_world_size = get_ulysses_parallel_world_size()

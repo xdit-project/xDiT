@@ -12,6 +12,7 @@ from xfuser.model_executor.layers.usp import (
     usp_fused_a2a_input_k,
     usp_fused_a2a_input_q,
     usp_fused_a2a_input_v,
+    usp_attention_a2a_projected,
 )
 from xfuser.core.distributed.attention_a2a import (
     fused_a2a_pad_multiple,
@@ -19,10 +20,6 @@ from xfuser.core.distributed.attention_a2a import (
     get_fused_a2a_mode,
     use_fused_a2a_interleave,
     use_fused_a2a_output,
-)
-from xfuser.model_executor.layers.quantized_attention_output import (
-    QuantizedAttentionOutput,
-    project_attention_output,
 )
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
 from xfuser.core.distributed import (
@@ -263,6 +260,17 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
                 key = wan_flydsl_hadamard(key)
             value = value.unflatten(2, (attn.heads, -1))
 
+        if use_fused_a2a_output():
+            hidden_states = usp_attention_a2a_projected(
+                query.transpose(1, 2),
+                key.transpose(1, 2),
+                value.transpose(1, 2),
+                projection=attn.to_out[0],
+                attn_layer=attn,
+                attention_kwargs=self.attention_kwargs,
+                pending=pending,
+            )
+            return attn.to_out[1](hidden_states)
         output = self.attention_function(
             query.transpose(1, 2),
             key.transpose(1, 2),
@@ -273,12 +281,8 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
             attn_layer=attn,
             attention_a2a_enabled=True,
             attention_a2a_pending=pending,
-            output_projection=attn.to_out[0] if use_fused_a2a_output() else None,
-        )
-        if isinstance(output, QuantizedAttentionOutput):
-            logical_shape = (*query.shape[:2], query.shape[2] * query.shape[3])
-            return attn.to_out[1](project_attention_output(attn.to_out[0], output, logical_shape))
-        return self._finish_attention(attn, output.transpose(1, 2), activation_dtype)
+        ).transpose(1, 2)
+        return self._finish_attention(attn, output, activation_dtype)
 
     @staticmethod
     def _split_i2v_context(attn, encoder_hidden_states):

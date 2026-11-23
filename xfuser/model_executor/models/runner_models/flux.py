@@ -99,7 +99,7 @@ class xFuserFluxModel(xFuserModel):
             return "default"
         return "reduce-overhead"
 
-    def _fuses_qkv_projections(self) -> bool:
+    def _fuses_projections(self) -> bool:
         # A PipeFusion stage holds only its own blocks; RDNA4 is not measured.
         return self.config.pipefusion_parallel_degree <= 1 and not PACKAGES_CHECKER._on_rdna4()
 
@@ -243,7 +243,7 @@ class xFuserFluxKontextModel(xFuserModel):
             return "default"
         return "reduce-overhead"
 
-    def _fuses_qkv_projections(self) -> bool:
+    def _fuses_projections(self) -> bool:
         # RDNA4 is not measured.
         return not PACKAGES_CHECKER._on_rdna4()
 

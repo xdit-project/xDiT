@@ -1,7 +1,79 @@
+from typing import Any, Callable
+
 import torch
+from torch._dynamo import mark_static_address
+
 from xfuser.core.distributed import (
     get_sp_group,
 )
+
+
+class StaticBlockInputs:
+    """Persistent buffers for the inputs every compiled block of a step reads.
+
+    Compiled blocks that replay as CUDA/HIP graphs copy each input of unknown address into
+    their own memory before every replay, so 28 blocks reading the same RoPE table copy it
+    28 times. A buffer marked static keeps one address and is filled once per step instead;
+    stream order keeps a later fill behind earlier readers.
+
+    Each name keeps its ``shapes_per_name`` most recent shapes (two: CFG's branches may
+    differ in text length). A graph replayed with a static input at a new address is
+    recorded again, so a name that cycled through more shapes would re-record every call.
+    """
+
+    def __init__(self, shapes_per_name: int = 2):
+        self.shapes_per_name = shapes_per_name
+        self._buffers: dict[str, list[torch.Tensor]] = {}
+
+    def __call__(self, name: str, tensor: torch.Tensor) -> torch.Tensor:
+        """``tensor``, copied into the buffer that ``name`` keeps for its shape."""
+        buffers = self._buffers.setdefault(name, [])
+        for index, buffer in enumerate(buffers):
+            if buffer.shape == tensor.shape and buffer.dtype == tensor.dtype and buffer.device == tensor.device:
+                buffers.append(buffers.pop(index))
+                break
+        else:
+            buffer = torch.empty(tensor.shape, dtype=tensor.dtype, device=tensor.device)
+            mark_static_address(buffer)
+            buffers[:] = [*buffers[max(0, len(buffers) + 1 - self.shapes_per_name) :], buffer]
+        buffer.copy_(tensor)
+        return buffer
+
+    def clear(self) -> None:
+        self._buffers.clear()
+
+
+class PerCallCache:
+    """``compute(source)``, reused while the steps of a call pass the same, unmodified ``source``.
+
+    A denoise loop hands every step the same prompt embeddings and position ids, so what is
+    derived from them (a text projection, RoPE tables) needs computing once per call, or once
+    per branch under CFG: each name keeps its ``entries_per_name`` most recent sources. An
+    entry holds its ``source``, so a later tensor cannot reuse its identity; in-place writes
+    bump its version. Inference tensors have no version counter, so for them identity alone
+    decides, which needs a pipeline that never writes its conditioning in place. Autograd
+    always recomputes. :meth:`clear` drops the entries, and with them the sources they hold.
+    """
+
+    def __init__(self, entries_per_name: int = 2):
+        self.entries_per_name = entries_per_name
+        self._entries: dict[str, list[tuple[torch.Tensor, Any, Any]]] = {}
+
+    def __call__(self, name: str, source: torch.Tensor, compute: Callable[[torch.Tensor], Any]) -> Any:
+        if torch.is_grad_enabled():
+            return compute(source)
+        version = None if source.is_inference() else source._version
+        entries = self._entries.setdefault(name, [])
+        for cached_source, cached_version, result in entries:
+            if cached_source is source and cached_version == version:
+                return result
+        result = compute(source)
+        kept = [entry for entry in entries if entry[0] is not source]
+        entries[:] = [*kept[max(0, len(kept) + 1 - self.entries_per_name) :], (source, version, result)]
+        return result
+
+    def clear(self) -> None:
+        self._entries.clear()
 
 
 def chunk_and_pad_sequence(
@@ -49,6 +121,56 @@ def sp_pad_spans_ranks(seq_len: int, sp_size: int) -> bool:
     squared, so no real image reaches it.
     """
     return (-seq_len) % sp_size > -(-seq_len // sp_size)
+
+
+def share_fused_weights(fused: torch.nn.Linear, parts) -> None:
+    """Turn `parts` into views of `fused`, the linear that stacks their weights, so that fusing costs no memory.
+
+    The parts compute what they did before; only their own copies of the weights are freed.
+    """
+    offset = 0
+    for part in parts:
+        rows = slice(offset, offset + part.out_features)
+        part.weight.data = fused.weight.data[rows]
+        if part.bias is not None:
+            part.bias.data = fused.bias.data[rows]
+        offset += part.out_features
+
+
+# The fused projections an attention layer may hold, with the projections each one stacks.
+_FUSED_PROJECTIONS = (
+    ("to_qkv", ("to_q", "to_k", "to_v")),
+    ("to_kv", ("to_k", "to_v")),
+    ("to_added_qkv", ("add_q_proj", "add_k_proj", "add_v_proj")),
+)
+
+
+def fuse_plain_qkv_projections(model: torch.nn.Module) -> int:
+    """Fuse Q, K and V in the attention layers of `model` whose projections are all plain linears.
+
+    A layer with a quantized, wrapped or sharded projection keeps its separate projections. The
+    separate projections of a fused layer become views of the fused weights. Returns the number
+    of layers fused.
+    """
+    from diffusers.models.attention import AttentionModuleMixin
+    from xfuser.model_executor.layers.usp_sdma import plain_linear
+
+    fused = 0
+    for module in model.modules():
+        if not isinstance(module, AttentionModuleMixin):
+            continue
+        projections = [getattr(module, name, None) for names in _FUSED_PROJECTIONS for name in names[1]]
+        plain = all(projection is None or plain_linear(projection) for projection in projections)
+        if not plain or not plain_linear(getattr(module, "to_q", None)):
+            continue
+        module.fuse_projections()
+        if not module.fused_projections:
+            continue
+        fused += 1
+        for fused_name, names in _FUSED_PROJECTIONS:
+            if hasattr(module, fused_name):
+                share_fused_weights(getattr(module, fused_name), [getattr(module, name) for name in names])
+    return fused
 
 
 def zero_sp_pad_rows(tensor: torch.Tensor, rows: int) -> None:

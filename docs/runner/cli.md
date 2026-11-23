@@ -110,6 +110,7 @@ enable a setting and their `--no-...` spellings disable it.
 | <a id="-vae_tile_overlap_height"></a><a id="--vae_tile_overlap_height"></a>`--vae_tile_overlap_height` `INT` | `None` | Exact VAE tile overlap along the height axis, in output pixels. Requires --enable\_tiling. Must be used with --vae\_tile\_overlap\_width. Height and width may differ; use 0 for an inactive strip axis. |
 | <a id="-vae_tile_overlap_width"></a><a id="--vae_tile_overlap_width"></a>`--vae_tile_overlap_width` `INT` | `None` | Exact VAE tile overlap along the width axis, in output pixels. Requires --enable\_tiling. Must be used with --vae\_tile\_overlap\_height. Height and width may differ; use 0 for an inactive strip axis. |
 | <a id="-use_vae_channels_last_format"></a><a id="--use_vae_channels_last_format"></a>`--use_vae_channels_last_format` | `False` | Use channels last memory format for the VAE. |
+| <a id="-vae_dtype"></a><a id="--vae_dtype"></a>`--vae_dtype` `{bf16,fp32}` | `None` | Load the VAE in this dtype instead of the model's default. Faster in bf16, at some image fidelity. Only for models that list it. |
 
 ## Compilation and GEMM quantization
 

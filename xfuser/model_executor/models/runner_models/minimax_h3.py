@@ -70,6 +70,7 @@ _FASTH3_ATTN_BACKENDS = VSA_H3_BACKENDS
 # routing is for. Its alignment pad is declared through valid_kv_len and valid_q_len, and the
 # text and audio rows are forced exact; see the transformer wrapper.
 _SOL_ATTN_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SOL)
+_LOCAL_TOKEN_ORDER_BACKENDS = attention_registry.types_where(prefers_local_token_order=True)
 _H3_ATTN_BACKENDS = _SUPPORTED_ATTN_BACKENDS | _SOL_ATTN_BACKENDS
 # VDN-H3's window varlen executor only implements these three; it does not use
 # the CUDNN / NVTE_FP8 / MHA-v4 paths the base H3 advertises.
@@ -672,6 +673,9 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
             from xfuser.model_executor.models.transformers.transformer_minimax_h3 import REFINER_DENSE_BACKEND
 
             runtime._check_if_backend_compatible_with_current_configuration(REFINER_DENSE_BACKEND)
+        # A backend that pools runs of consecutive tokens gets the video in curve order.
+        if set(runtime.selected_attention_backends()) & _LOCAL_TOKEN_ORDER_BACKENDS:
+            getattr(self.pipe, self._transformer_component_name).curve_order_video = True
 
     def _validate_config(self, config) -> None:
         if getattr(config, "memory_efficient_sharding", False) and config.fully_shard_degree > 1:

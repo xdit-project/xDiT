@@ -301,6 +301,107 @@ def test_the_token_refiner_stays_dense_under_sol(monkeypatch):
     assert backends == refiner + blocks
 
 
+def _with_video_grid(inputs, grid):
+    """Give the video rows raster (t, h, w) coordinates on `grid`, as the pipeline packs them."""
+    axes = torch.meshgrid(*(torch.arange(size) for size in grid), indexing="ij")
+    coordinates = torch.stack(axes, dim=-1).reshape(-1, 3).float()
+    inputs["position_ids"][inputs["video_indices"]] = coordinates
+    return inputs
+
+
+def test_video_rows_follow_the_curve_and_nothing_else_moves():
+    from xfuser.model_executor.models.transformers.transformer_minimax_h3 import curve_ordered_video_rows
+
+    inputs = _with_video_grid(_tiny_inputs(torch.device("cpu")), (2, 4, 6))
+    position_ids, video_indices = inputs["position_ids"], inputs["video_indices"]
+
+    row_order, curve_video_indices = curve_ordered_video_rows(position_ids, video_indices)
+
+    rows = torch.arange(row_order.numel())
+    others = ~torch.isin(rows, video_indices)
+    assert torch.equal(row_order[others], rows[others]), "text and audio rows keep their places"
+    assert torch.equal(curve_video_indices.sort().values, video_indices), "the video takes the same rows"
+    reordered = position_ids.index_select(0, row_order)
+    assert torch.equal(reordered[curve_video_indices], position_ids[video_indices]), (
+        "each video token sits on a row carrying its own coordinates"
+    )
+    steps = reordered[video_indices].diff(dim=0).abs().sum(dim=-1)
+    assert torch.all(steps == 1), "consecutive video rows are neighbouring cells"
+
+
+def test_video_rows_that_do_not_fill_a_grid_keep_their_order():
+    from xfuser.model_executor.models.transformers.transformer_minimax_h3 import curve_ordered_video_rows
+
+    inputs = _with_video_grid(_tiny_inputs(torch.device("cpu")), (2, 4, 6))
+    inputs["position_ids"][inputs["video_indices"][-1]] = inputs["position_ids"][inputs["video_indices"][0]]
+
+    assert curve_ordered_video_rows(inputs["position_ids"], inputs["video_indices"]) is None
+
+
+def test_curve_ordered_video_changes_only_what_attention_sees(monkeypatch):
+    """Every op but attention is per token, so the outputs match the packed order's; the blocks see
+    neighbouring video tokens next to each other."""
+    from xfuser.core.attention.spec import AttentionBackendType
+    from xfuser.model_executor.models.transformers import transformer_minimax_h3
+    from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
+        xFuserMiniMaxH3Transformer3DWrapper,
+    )
+
+    monkeypatch.setattr(transformer_minimax_h3, "get_ulysses_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(transformer_minimax_h3, "get_ulysses_parallel_rank", lambda: 0)
+    _patch_minimax_runtime_state(monkeypatch)
+    wrapper = xFuserMiniMaxH3Transformer3DWrapper(
+        **_tiny_config(),
+        attention_backend=AttentionBackendType.SDPA,
+    ).eval()
+    seen = []
+    wrapper.rope.register_forward_hook(lambda module, args, output: seen.append(args[0]))
+    inputs = _with_video_grid(_tiny_inputs(torch.device("cpu")), (2, 4, 6))
+
+    with torch.no_grad():
+        packed = wrapper(**inputs)
+        wrapper.curve_order_video = True
+        curve = wrapper(**inputs)
+
+    torch.testing.assert_close(curve.sample, packed.sample)
+    torch.testing.assert_close(curve.audio_sample, packed.audio_sample)
+    video_rows = inputs["video_indices"]
+    assert not torch.all(seen[0][video_rows].diff(dim=0).abs().sum(dim=-1) == 1), "raster order jumps rows"
+    assert torch.all(seen[1][video_rows].diff(dim=0).abs().sum(dim=-1) == 1), "the curve does not"
+
+
+def test_the_curve_order_is_built_once_per_layout(monkeypatch):
+    """The pipeline passes the same layout tensors at every step; the order is read from their
+    values, a device sync, only when a new layout arrives."""
+    from xfuser.core.attention.spec import AttentionBackendType
+    from xfuser.model_executor.models.transformers import transformer_minimax_h3
+    from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
+        xFuserMiniMaxH3Transformer3DWrapper,
+    )
+
+    monkeypatch.setattr(transformer_minimax_h3, "get_ulysses_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(transformer_minimax_h3, "get_ulysses_parallel_rank", lambda: 0)
+    _patch_minimax_runtime_state(monkeypatch)
+    built = []
+    build = transformer_minimax_h3.curve_ordered_video_rows
+    monkeypatch.setattr(
+        transformer_minimax_h3, "curve_ordered_video_rows", lambda *args: built.append(True) or build(*args)
+    )
+    wrapper = xFuserMiniMaxH3Transformer3DWrapper(
+        **_tiny_config(),
+        attention_backend=AttentionBackendType.SDPA,
+    ).eval()
+    wrapper.curve_order_video = True
+    inputs = _with_video_grid(_tiny_inputs(torch.device("cpu")), (2, 4, 6))
+
+    with torch.no_grad():
+        wrapper(**inputs)
+        wrapper(**inputs)
+        assert len(built) == 1, "a repeated layout reuses its order"
+        wrapper(**{**inputs, "position_ids": inputs["position_ids"].clone()})
+    assert len(built) == 2, "a new layout gets its own"
+
+
 @pytest.mark.parametrize(
     "backend,schedule,prepared",
     [
@@ -309,8 +410,9 @@ def test_the_token_refiner_stays_dense_under_sol(monkeypatch):
         ("AITER_BF16", None, False),
     ],
 )
-def test_the_refiners_dense_backend_is_selected_before_compile(monkeypatch, backend, schedule, prepared):
-    """The refiner's AITER is reached only inside the compiled forward, which cannot import it."""
+def test_sol_prepares_the_refiner_and_the_video_order_before_compile(monkeypatch, backend, schedule, prepared):
+    """The refiner's AITER is reached only inside the compiled forward, which cannot import it, and
+    the video rows go in curve order for Sol's KV blocks."""
     from xfuser.core.attention.spec import AttentionBackendType
     from xfuser.model_executor.models.runner_models import minimax_h3 as minimax_h3_runner
     from xfuser.model_executor.models.runner_models.base_model import xFuserModel
@@ -324,10 +426,13 @@ def test_the_refiners_dense_backend_is_selected_before_compile(monkeypatch, back
     monkeypatch.setattr(minimax_h3_runner, "get_runtime_state", lambda: runtime)
     monkeypatch.setattr(xFuserModel, "_post_load_and_state_initialization", lambda self, input_args: None)
     model = object.__new__(minimax_h3_runner.xFuserMiniMaxH3Model)
+    model.pipe = SimpleNamespace(transformer=SimpleNamespace(curve_order_video=False))
+    model.loader = SimpleNamespace(replicated_broadcast_load=lambda: False)
 
     model._post_load_and_state_initialization({})
 
     assert checked == ([AttentionBackendType.AITER] if prepared else [])
+    assert model.pipe.transformer.curve_order_video is prepared
 
 
 def test_minimax_h3_accepts_sol_backends_where_h3_image_does_not(monkeypatch):
@@ -1485,6 +1590,10 @@ def _attach_online_loader(model, monkeypatch):
     monkeypatch.setattr("huggingface_hub.constants.HF_HUB_OFFLINE", False)
     model.loader = object.__new__(ModelLoader)
     model.loader.model = model
+    model.loader._replicated_decision = False
+    for field in ("use_fp8_gemms", "use_fp4_gemms"):
+        if not hasattr(model.config, field):
+            setattr(model.config, field, False)
 
 
 class _FakeMiniMaxPipe:
@@ -1516,10 +1625,26 @@ class _FakeTransformer:
     ("task", "expected_workflow"),
     [("t2va", "t2va"), ("i2va", "fl2va"), ("fl2va", "fl2va")],
 )
+@pytest.mark.parametrize(
+    "requested, world_size, quantization",
+    [
+        (False, 1, "none"),
+        (True, 1, "none"),
+        (True, 8, "none"),
+        (False, 1, "fp8"),
+        (True, 1, "fp8"),
+        (False, 1, "fp4"),
+        (True, 1, "fp4"),
+    ],
+)
 def test_minimax_h3_loads_task_workflow(
     monkeypatch,
+    tmp_path,
     task,
     expected_workflow,
+    requested,
+    world_size,
+    quantization,
 ):
     from diffusers import ModularPipeline
 
@@ -1540,10 +1665,11 @@ def test_minimax_h3_loads_task_workflow(
         return pipe
 
     monkeypatch.setattr(ModularPipeline, "from_pretrained", fake_from_pretrained)
+    eager_calls = []
     monkeypatch.setattr(
         xFuserMiniMaxH3Transformer3DWrapper,
         "from_pretrained",
-        lambda *args, **kwargs: transformer,
+        lambda *args, **kwargs: eager_calls.append(kwargs) or transformer,
     )
     monkeypatch.setattr(
         minimax_h3,
@@ -1552,18 +1678,45 @@ def test_minimax_h3_loads_task_workflow(
     )
     monkeypatch.setattr(minimax_h3, "log", lambda message: None)
 
-    model = object.__new__(xFuserMiniMaxH3Model)
-    model.config = SimpleNamespace(task=task, text_encoder_tp_degree=1, lora_path=None)
+    from xfuser.config import xFuserArgs
+    from xfuser.model_executor.models.runner_models.loading import meta_load
+
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "1")
+    model = xFuserMiniMaxH3Model(
+        xFuserArgs(
+            model="MiniMax-H3",
+            task=task,
+            output_directory=str(tmp_path),
+            attention_backend="SDPA",
+            memory_efficient_replicated_load=requested,
+            gemm_quantization=quantization,
+        )
+    )
     model._parallelize_text_encoder = lambda text_encoder: None
 
-    _attach_online_loader(model, monkeypatch)
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_OFFLINE", False)
+    monkeypatch.setattr(meta_load, "get_world_group", lambda: SimpleNamespace(world_size=world_size))
+    replicated_load = requested and world_size > 1
+    loader_calls = []
+    model.loader.load_transformer = lambda cls, **kwargs: loader_calls.append((cls, kwargs)) or transformer
 
     actual = model._load_model()
 
     assert actual is pipe
     assert workflows == [(model.settings.model_name, expected_workflow)]
     assert pipe.transformer is transformer
-    assert transformer.qkv_fused
+    assert transformer.qkv_fused is not replicated_load
+    from xfuser.core.attention.spec import AttentionBackendType
+
+    init_kwargs = {"enable_fasth3_vsa": False, "attention_backend": AttentionBackendType.SDPA}
+    if replicated_load:
+        assert eager_calls == []
+        assert loader_calls == [(xFuserMiniMaxH3Transformer3DWrapper, {"init_kwargs": init_kwargs})]
+    else:
+        assert loader_calls == []
+        assert len(eager_calls) == 1
+        assert all(eager_calls[0][key] == value for key, value in init_kwargs.items())
     assert pipe.loaded_dtype == torch.bfloat16
     assert pipe.text_encoder.lm_head is None
 
@@ -2361,3 +2514,118 @@ def test_fasth3_accepts_torch_compile(monkeypatch):
     )
     monkeypatch.setattr(xFuserFastH3Model.__mro__[1], "_validate_config", lambda self, config: None)
     xFuserFastH3Model._validate_config(object.__new__(xFuserFastH3Model), config)
+
+
+@pytest.mark.parametrize("replicated", [False, True])
+def test_minimax_h3_replicated_load_fuses_materialized_weights(monkeypatch, replicated):
+    from xfuser.model_executor.models.runner_models import base_model, minimax_h3
+
+    model = object.__new__(minimax_h3.xFuserMiniMaxH3Model)
+    model.config = SimpleNamespace(
+        memory_efficient_replicated_load=True,
+        use_hybrid_attn_schedule=False,
+        use_hybrid_gemm_schedule=False,
+        use_vae_channels_last_format=False,
+    )
+    events = []
+    transformer = _FakeTransformer()
+
+    def materialize():
+        assert not transformer.qkv_fused
+        events.append("materialize")
+
+    def fuse():
+        assert events == ["materialize"]
+        transformer.qkv_fused = True
+        events.append("fuse")
+
+    transformer.fuse_qkv_projections = fuse
+    model.pipe = SimpleNamespace(transformer=transformer)
+    model.loader = SimpleNamespace(materialize_pipeline=materialize, replicated_broadcast_load=lambda: replicated)
+    monkeypatch.setattr(base_model, "runtime_state_is_initialized", lambda: False)
+    monkeypatch.setattr(
+        minimax_h3, "get_runtime_state", lambda: SimpleNamespace(selected_attention_backends=lambda: [])
+    )
+
+    model._post_load_and_state_initialization({})
+
+    assert events == (["materialize", "fuse"] if replicated else ["materialize"])
+    assert transformer.qkv_fused is replicated
+
+
+@pytest.mark.parametrize("quantization", ["use_fp8_gemms", "use_fp4_gemms"])
+def test_minimax_h3_replicated_load_refuses_quantization_before_fusion(quantization, monkeypatch):
+    from xfuser.config import xFuserArgs
+    from xfuser.model_executor.models.runner_models.minimax_h3 import xFuserMiniMaxH3Model
+
+    config = xFuserArgs(model="MiniMax-H3", task="t2va", memory_efficient_replicated_load=True, **{quantization: True})
+    from xfuser.model_executor.models.runner_models.loading import meta_load
+
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "1")
+    model = xFuserMiniMaxH3Model(config)
+    monkeypatch.setattr(meta_load, "get_world_group", lambda: SimpleNamespace(world_size=8))
+    with pytest.raises(ValueError, match="does not support FP8/FP4 GEMMs"):
+        model._load_model()
+
+
+def test_minimax_h3_refuses_memory_efficient_fsdp():
+    from xfuser.config import xFuserArgs
+    from xfuser.model_executor.models.runner_models.minimax_h3 import xFuserMiniMaxH3Model
+
+    config = xFuserArgs(model="MiniMax-H3", task="t2va", memory_efficient_sharding=True, fully_shard_degree=2)
+    with pytest.raises(ValueError, match="does not support memory-efficient FSDP"):
+        xFuserMiniMaxH3Model(config)
+
+
+@pytest.mark.parametrize(
+    "runner",
+    [
+        "xFuserFastH3Model",
+        "xFuserFastH3DenseModel",
+        "xFuserFastH3V2Model",
+        "xFuserMiniMaxH3TurboModel",
+        "xFuserVDNMiniMaxH3Model",
+        "xFuserMiniMaxH3Ref2VAModel",
+    ],
+)
+def test_minimax_h3_variants_refuse_replicated_materialization(runner):
+    from xfuser.model_executor.models.runner_models import minimax_h3
+    from xfuser.model_executor.models.runner_models.loading.contracts import (
+        LoadDeclaration,
+        MaterializationMode,
+        UnsupportedLoadContract,
+        validate_materialization_contract,
+    )
+
+    cls = getattr(minimax_h3, runner)
+    declaration = LoadDeclaration.for_runner(
+        cls.capabilities, fsdp_strategy=cls.settings.fsdp_strategy, load_support=cls.load_support
+    )
+    with pytest.raises(UnsupportedLoadContract, match="does not support replicated_meta"):
+        validate_materialization_contract(
+            declaration, MaterializationMode.REPLICATED_META, cls.settings.fsdp_strategy, runner_name=runner
+        )
+
+
+@pytest.mark.parametrize("runner", ["xFuserVDNMiniMaxH3Model", "xFuserMiniMaxH3Ref2VAModel"])
+def test_minimax_h3_eager_variant_does_not_fuse_in_post_load(monkeypatch, runner):
+    from xfuser.model_executor.models.runner_models import base_model, minimax_h3
+
+    cls = getattr(minimax_h3, runner)
+    model = object.__new__(cls)
+    model.config = SimpleNamespace(memory_efficient_replicated_load=True)
+    # Ref2VA owns transformer_ref; VDN already fused during its eager load.
+    transformer = _FakeTransformer()
+    transformer.qkv_fused = True
+    fusion_calls = []
+    transformer.fuse_qkv_projections = lambda: fusion_calls.append("fuse")
+    model.pipe = SimpleNamespace(**{cls._transformer_component_name: transformer})
+    model.loader = SimpleNamespace(replicated_broadcast_load=lambda: False)
+    monkeypatch.setattr(base_model.xFuserModel, "_post_load_and_state_initialization", lambda self, args: None)
+    monkeypatch.setattr(
+        minimax_h3, "get_runtime_state", lambda: SimpleNamespace(selected_attention_backends=lambda: [])
+    )
+    model._post_load_and_state_initialization({})
+    assert fusion_calls == []
+    assert transformer.qkv_fused

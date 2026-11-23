@@ -6,6 +6,7 @@ from packaging import version
 
 from xfuser.compat import declared_floor, version_at_least
 from xfuser.config.attention_a2a import AttentionA2AConfig
+from xfuser.config.defaults import DEFAULT_FP8_COMMS_SAFETY_FACTOR
 from xfuser.config.ulysses_a2a import UlyssesA2AConfig
 from xfuser.envs import CUDA_VERSION, PACKAGES_CHECKER, TORCH_VERSION
 from xfuser.logger import init_logger
@@ -15,7 +16,6 @@ logger = init_logger(__name__)
 env_info = PACKAGES_CHECKER.get_packages_info()
 HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
 
-DEFAULT_FP8_COMMS_SAFETY_FACTOR = 0.85
 HAS_FLASH_ATTN = env_info["has_flash_attn"]
 
 

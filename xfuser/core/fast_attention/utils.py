@@ -10,7 +10,6 @@ from xfuser.core.distributed import (
 )
 from diffusers import DiffusionPipeline
 from diffusers.models.transformers.transformer_2d import Transformer2DModel
-from xfuser.model_executor.layers.attention_processor import xFuserAttentionBaseWrapper
 from collections import Counter
 import os
 import json
@@ -75,6 +74,10 @@ def compression_loss(a, b):
 
 
 def transformer_forward_pre_hook(m: Transformer2DModel, args, kwargs):
+    # Import at call time: xfuser.model_executor.layers imports
+    # xfuser.model_executor.base_wrapper, which imports this package.
+    from xfuser.model_executor.layers.attention_processor import xFuserAttentionBaseWrapper
+
     attn_name = get_fast_attn_layer_name()
     now_stepi = getattr(m.transformer_blocks[0], attn_name).stepi
     # batch_size = get_fast_attn_calib()

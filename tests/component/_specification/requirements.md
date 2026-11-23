@@ -115,7 +115,7 @@ reference data (B).
 
 **HLS20.** This document follows a convention: if a certain status X has _A or _B suffix, that only means that status X applies to a rank of instance A or B correspondingly. There are no distinct statuses X_A or X_B, there's only a status X and a rank of instance A or B on which it appears. It's always known to which instance a rank belongs, so instance specific statuses aren't generally needed.
 
-**HLS30.** Status is written to the rank's log file immediately when it happens (FC150) as `status=X` record (the record should have other fields providing additional information). In the rank's log, when `status=` field is recorded with `case=` entry (setting a current test case identifier), the status applies to the test case. It's an error to have a `case=` field without `status=` field. When `status=` is recorded together with `case=` and `call=` identifiers, the status applies to the given call of the given case.
+**HLS30.** Status is written to the rank's log file immediately when it happens as `status=X` record (the record should have other fields providing additional information). In the rank's log, when `status=` field is recorded with `case=` entry (setting a current test case identifier), the status applies to the test case. It's an error to have a `case=` field without `status=` field. When `status=` is recorded together with `case=` and `call=` identifiers, the status applies to the given call of the given case.
 
 **HLS40.** When the harness processes data obtained from instances A and B, it loads individual case data
 from each of the instances and by aggregating statuses from all ranks decides how it's going
@@ -346,7 +346,7 @@ so a fidelity check on own inputs is needed.
 
 ### Rank lifecycle
 
-**RL10.** **Logging.** In its lifetime a rank comes through a sequence of phases (in which all ranks must participate), described in the order below. To preserve events happened/observed during rank's lifetime, each rank has a structured log file that only the rank can write to (the launcher can read from the file, TD110) during instance execution. On a rank startup, rank gets from the launcher a path to data directory to store the dumps and the status file. The status file name is `rank_<rank_number>.jsonl`. It's an error if the file existed when the rank started. Each rank appends (and flushes immediately) to their own log file progress records (TD110, TD120), status changes and all other information that requirements of this document mandate to save and pass to pytest/user.
+**RL10.** **Logging.** In its lifetime a rank comes through a sequence of phases (in which all ranks must participate), described in the order below. To preserve events happened/observed during rank's lifetime, each rank creates a structured log file that, during the instance execution, only the rank can write to. On a rank startup, rank gets from the launcher a path to data directory to store the dumps and the status file. The status file name is `rank_<rank_number>.jsonl`. It's an error if the file existed when the rank started. Each rank appends (and flushes immediately) to their own log file progress records (TD110, TD120), status changes and all other information that requirements of this document mandate to save and pass to pytest/user.
 
 Each log record must have at least one common field: a timestamp. Records related to a case must have another common field `case=<case_id>` - the case identifier, so one can use it to find entries related to the case. A case call related records must also have `call=<call_id>` field set. The file hence serves as a structured timestamped log of all important events the rank observed. Neither rank, nor launcher never deletes anything from the file, only appends to it.
 
@@ -402,47 +402,28 @@ Instance B runs both replays: first it runs fidelity check replays on its own in
 
 ### pytest integration
 
-**PI20.** **General meaning of the pytest outcomes.** (This requirement exists to alleviate decisions
-for new statuses. Actual mapping is provided by PI30.) "error" means that the test has nothing to check, for example
-because an instance that had to replay the case did not start its replays. "failed" means that an instance
-replayed the case, and the instance or the test found a problem. Documented exceptions are possible:
-1. UNSUPPORTED_A gives "skipped".
-2. A configuration that is UNSUPPORTED_B gives "error" to every case, whatever its statuses from A are.
+**PI10.** Due to a cost of running instance A and instance B, there are 2 modes of testing: a "fresh run" runs everything in full, and a rerun reuses pre-existing results from a previous fresh run. To save storage space, tests passed in fresh runs or reruns, are generally marked as passed internally and their data files are deleted, so subsequent reruns skip them.
 
-*Rationale:* UNSUPPORTED_A is a known limit of the harness, not a problem of the component. B is the reference
-and must handle everything A handles, so UNSUPPORTED_B is not a reason to skip. If B cannot handle the configuration, no
-case of the configuration can have a meaningful test.
+#### Fresh runs
 
-**PI30.** pytest outcomes (PI20; for re-runs FR50 takes precedence):
-1. A failure of the configuration fixture (TD70, FC70, FR60), or a configuration that is UNSUPPORTED_B (IA70.2),
-   gives "error" to every case of the configuration, whatever its other statuses are. For UNSUPPORTED_B, the
-   message of each case also lists its statuses from A.
-2. Otherwise, each case gets its own outcome decided in the following order:
-   1. "error" if any rank has FAILED_TO_START, UNSUPPORTED_B, or NOT_REACHED_IN.
-      Also if a rank of A has UNSUPPORTED_A, but some other rank of A doesn't have it.
-      Also if all ranks of an instance that had to run the case still have ABOUT_TO_START
-      ("the previous run did not finish"): A always has to run a case, B only if all ranks
-      of A have SUCCESS (FC20.5). The case fixture (function scope) raises
-      the exception before the test function starts, because pytest gives "error" only for an exception in
-      setup, teardown or a fixture.
-   2. "skipped" for UNSUPPORTED_A on all ranks of A.
-   3. "failed" if not all ranks of A and B have SUCCESS (PI50), or for a failed check.
-   4. "passed" otherwise
-3. `record_property` stores the statuses, the nondeterminism flags and applicable information mandated by other
-   requirements such as call identifiers of all ranks.
-4. If a pytest outcome mandates an exception (i.e. it's a "failure" or "error"), the exception message must contain
-   the statuses and the nondeterminism flags of all ranks and all other applicable information mandated by other
-   requirements.
+**PIF10.** **Mapping statuses to pytest outcomes for the fresh run**
+1. "error" means that not a single rank of the test case reached DUMPED status on the same ranks of A and B (configuration level fixture might also trigger it for all its cases).
+2. A test or a whole configuration can be "skipped" only if it's explicitly not supported on the current hardware (not the case for harness version 1).
+3. A test get "passed" if and only if these conditions holds simultaneously:
+   1. all ranks of A and B reached successful final state for the case (RL100), i.e.
+      - for A, which only does a fidelity check: it's FIDELITY_SKIPPED when fidelity check override flag is set, or FIDELITY_PASSED otherwise
+      - for B, which does a fidelity check and replay of A inputs: it's REPLAYED.
+   2. for all calls observed for the case/component, all outputs obtained on all ranks of A are within specified tolerances from outputs obtained from corresponding ranks of B.
+4. Every other combination whenever possible still runs tolerances checks, but even if the checks passes, necessary leads to a "failed" test outcome. Failure message MUST list all independent reasons that led to the failure.
 
-**PI40.** The test checks each rank independently against the same tolerance. It compares the output that A
-captured with the output of replay 1 of B with the inputs of A.
+**PIF20.** A test reached test function (i.e. configuration and test fixture didn't generate errors) independently checks captured outputs of each rank of A versus corresponding outputs of a replay with the inputs A that B rank did, against the same tolerance. The test runs as many checks as possible before it fails, like the `EXPECT_` macros of GoogleTest. It uses the installed `pytest-check` package. After the checks, it writes the metrics lines with the values and the outcome.
 
-**PI50.** If the statuses give "failed" (PI30.2.3), the test fails at once. The failure message lists every
-rank with its status and, if known, the call identifier at which the rank got it; the case writes one metrics line
-with its outcome only.
-Otherwise, the test runs as many checks as possible before it fails, like the `EXPECT_` macros of
-GoogleTest. It uses the installed `pytest-check` package. After the checks, it writes the metrics
-lines with the values and the outcome.
+**PIF30.** The error or failure message lists every rank with its status and, if known, the call identifier, the reason and other applicable information the requirements of this file require to present to a user.
+
+**PIF40.** If and only if a test case passed, the harness appends to each rank log file a record `case=<case_id> pass=true` and deletes all data files (with dumped outputs) related to the case.
+
+
+
 
 ### Files, re-runs and metrics
 

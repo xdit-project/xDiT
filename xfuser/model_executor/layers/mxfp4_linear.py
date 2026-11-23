@@ -10,6 +10,7 @@ except ImportError:
 from typing import Optional
 from xfuser.core.distributed.attention_a2a_codecs import MXFP4
 from xfuser.core.distributed.runtime_state import get_runtime_state
+from xfuser.model_executor.layers.quantized_attention_output import prequantized_consumer
 
 
 @torch.library.custom_op("xfuser::mxfp4_gemm", mutates_args=())
@@ -310,6 +311,20 @@ class xFuserHybridMXFP4Linear(nn.Module):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return self.active_linear()(input)
+
+    @property
+    def prequantized_input_codec(self) -> str | None:
+        """Codec of the linear the current step runs, or None if it consumes BF16."""
+        consumer = prequantized_consumer(self.active_linear())
+        return None if consumer is None else consumer.prequantized_input_codec
+
+    def forward_prequantized(
+        self,
+        payload: torch.Tensor,
+        scale: torch.Tensor,
+        logical_shape: tuple[int, ...],
+    ) -> torch.Tensor:
+        return prequantized_consumer(self.active_linear()).forward_prequantized(payload, scale, logical_shape)
 
     def extra_repr(self):
         return "hybrid_gemm_schedule=True"

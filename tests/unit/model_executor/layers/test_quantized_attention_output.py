@@ -6,7 +6,7 @@ import pytest
 import torch
 from torch import nn
 
-from xfuser.model_executor.layers import mixed_mxfp_linear, mxfp4_linear, mxfp6_linear
+from xfuser.model_executor.layers import mixed_mxfp_linear, mxfp4_linear, mxfp6_linear, quantized_attention_output
 from xfuser.core.distributed.attention_a2a_codecs import E4M3_EXTERNAL_SCALE, e4m3_external_scale_from_amax
 from xfuser.model_executor.layers.quantized_attention_output import (
     QuantizedAttentionOutput,
@@ -123,6 +123,20 @@ def test_hybrid_projection_follows_the_active_linear(monkeypatch, use_high_preci
     active, inactive = (high, low) if use_high_precision else (low, high)
     assert active.calls == [(payload, scale, (1, 2, IN_FEATURES))]
     assert inactive.calls == []
+
+
+def test_registered_adapter_provides_the_consumer_for_modules_it_supports(monkeypatch):
+    linear = nn.Linear(IN_FEATURES, OUT_FEATURES)
+    consumer = _Consumer("mxfp4")
+    monkeypatch.setattr(
+        quantized_attention_output, "_ADAPTERS", [lambda module: consumer if module is linear else None]
+    )
+    payload, scale = torch.zeros(2, dtype=torch.uint8), torch.ones(1, dtype=torch.uint8)
+
+    assert attention_output_codec(linear) == "mxfp4"
+    assert attention_output_codec(nn.Linear(IN_FEATURES, OUT_FEATURES)) is None
+    assert _project(linear, payload, scale, "mxfp4", (1, 2, IN_FEATURES)) is payload
+    assert consumer.calls == [(payload, scale, (1, 2, IN_FEATURES))]
 
 
 def test_projection_rejects_an_output_quantized_for_another_gemm():

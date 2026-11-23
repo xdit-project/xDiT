@@ -77,7 +77,7 @@ def test_which_runs_fuse_projections(monkeypatch, build_qwen_image21, name, rdna
 
     monkeypatch.setattr(qwen.PACKAGES_CHECKER, "_on_rdna4", lambda: rdna4)
 
-    assert build_qwen_image21(name)._fuses_qkv_projections() is expected
+    assert build_qwen_image21(name)._fuses_projections() is expected
 
 
 def _turbo_args(model, **overrides):

@@ -103,7 +103,7 @@ def _ulysses_worker(rank, world_size, init_method):
                     for block in wrapper.transformer_blocks:
                         block.attn.set_processor(processor_cls())
                     if fused:
-                        wrapper.fuse_qkv_projections()
+                        wrapper.fuse_projections_for_inference()
                     actual = _prefill_then_decode(wrapper, device, mask)
 
                     for ref, out in zip(reference, actual):

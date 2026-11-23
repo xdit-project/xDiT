@@ -14,6 +14,7 @@ from diffusers.models.transformers.transformer_qwenimage21 import (
     QwenImage21FlexAttnProcessor,
     QwenImage21KVCache,
     QwenImage21KVLayerCache,
+    QwenImage21SwiGLUFeedForward,
     QwenImage21Transformer2DModel,
     _qwenimage21_prefix_segments,
     apply_rotary_emb_qwen,
@@ -35,7 +36,7 @@ from xfuser.model_executor.layers.usp import (
 )
 from xfuser.model_executor.models.transformers.transformers_utils import (
     chunk_and_pad_sequence,
-    fuse_plain_qkv_projections,
+    fuse_projections,
     gather_and_unpad,
     share_fused_weights,
 )
@@ -274,10 +275,12 @@ class xFuserQwenImage21FlexAttnProcessor(_xFuserQwenImage21AttnMixin, QwenImage2
     """Compiled path: single flex_attention prefill, xDiT-backend decode."""
 
 
-def _fused_swiglu_forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-    """``QwenImage21SwiGLUFeedForward.forward`` with the gate and the projection out of one GEMM."""
-    gate, proj = self.gate_proj(hidden_states).chunk(2, dim=-1)
-    return self.out(self.activation_fn(gate) * proj)
+class _FusedSwiGLUFeedForward(QwenImage21SwiGLUFeedForward):
+    """`QwenImage21SwiGLUFeedForward` with the gate and the projection out of one GEMM, `gate_proj`."""
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        gate, proj = self.gate_proj(hidden_states).chunk(2, dim=-1)
+        return self.out(self.activation_fn(gate) * proj)
 
 
 def fuse_swiglu_projections(transformer) -> int:
@@ -291,21 +294,16 @@ def fuse_swiglu_projections(transformer) -> int:
     for block in transformer.transformer_blocks:
         mlp = block.img_mlp
         gate, proj = mlp.gate_layer, mlp.proj
-        if hasattr(mlp, "gate_proj") or not (plain_linear(gate) and plain_linear(proj)):
+        if isinstance(mlp, _FusedSwiGLUFeedForward) or not (plain_linear(gate) and plain_linear(proj)):
             continue
-        fused = torch.nn.Linear(
-            gate.in_features,
-            gate.out_features + proj.out_features,
-            bias=False,
-            device=gate.weight.device,
-            dtype=gate.weight.dtype,
-        )
+        # On meta: the stacked weights are assigned, so nothing is allocated or initialized first.
+        fused = torch.nn.Linear(gate.in_features, gate.out_features + proj.out_features, bias=False, device="meta")
         with torch.no_grad():
-            fused.weight.copy_(torch.cat([gate.weight, proj.weight]))
+            weight = torch.cat([gate.weight, proj.weight])
+        fused.weight = torch.nn.Parameter(weight, requires_grad=gate.weight.requires_grad)
         share_fused_weights(fused, (gate, proj))
         mlp.gate_proj = fused
-        # Bound per instance: Module.__call__ resolves `self.forward` per call, so hooks still run.
-        mlp.forward = _fused_swiglu_forward.__get__(mlp, type(mlp))
+        mlp.__class__ = _FusedSwiGLUFeedForward
         fused_count += 1
     return fused_count
 
@@ -339,16 +337,14 @@ class xFuserQwenImage21TransformerWrapper(QwenImage21Transformer2DModel):
     masks and skip building the joint sequence, whose data-dependent shapes would block on the GPU every step.
     """
 
-    def fuse_qkv_projections(self) -> None:
+    def fuse_projections_for_inference(self) -> dict[str, int]:
         """Compute each block's projections of one input with one GEMM, where they are plain linears.
 
         Fuses Q, K and V of every attention layer, and the gate and the projection of every SwiGLU
         feed-forward. The separate projections become views of the fused weights, so this costs no memory.
+        Returns the number fused by each pass.
         """
-        fuse_plain_qkv_projections(self)
-        # Before the feed-forwards allocate: the freed Q/K/V copies would otherwise sit cached under them.
-        torch.cuda.empty_cache()
-        fuse_swiglu_projections(self)
+        return fuse_projections(self, swiglu=fuse_swiglu_projections)
 
     @apply_lora_scale("attention_kwargs")
     def forward(

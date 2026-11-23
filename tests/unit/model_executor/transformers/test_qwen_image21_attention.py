@@ -205,7 +205,7 @@ def test_fused_projections_replace_the_separate_gemms_and_keep_the_output(xfuser
     reference = _prefill_then_decode(_xfuser_model(stock, processor_cls))
     model = _xfuser_model(stock, processor_cls)
 
-    model.fuse_qkv_projections()
+    assert model.fuse_projections_for_inference() == {"qkv": NUM_LAYERS, "swiglu": NUM_LAYERS}
 
     blocks = model.transformer_blocks
     separate = _count_calls(
@@ -234,7 +234,7 @@ def test_fusing_projections_costs_no_memory():
     model = _xfuser_model(_tiny_model(), xfuser_qwenimage21.xFuserQwenImage21AttnProcessor)
     before = _weight_bytes(model)
 
-    model.fuse_qkv_projections()
+    model.fuse_projections_for_inference()
 
     assert _weight_bytes(model) == before
 
@@ -246,7 +246,7 @@ def test_the_separate_swiglu_projections_compute_the_same_from_the_fused_weights
     with torch.no_grad():
         expected = mlp.gate_layer(sample), mlp.proj(sample)
 
-    model.fuse_qkv_projections()
+    model.fuse_projections_for_inference()
 
     with torch.no_grad():
         assert torch.equal(mlp.gate_layer(sample), expected[0])
@@ -263,7 +263,8 @@ def test_a_feed_forward_whose_projections_are_not_plain_linears_keeps_its_forwar
 
     assert xfuser_qwenimage21.fuse_swiglu_projections(model) == NUM_LAYERS - 1
 
-    assert not hasattr(wrapped, "gate_proj") and "forward" not in vars(wrapped)
-    assert hasattr(plain, "gate_proj") and "forward" in vars(plain)
+    assert type(wrapped) is qwenimage21.QwenImage21SwiGLUFeedForward and not hasattr(wrapped, "gate_proj")
+    assert type(plain) is xfuser_qwenimage21._FusedSwiGLUFeedForward
+    assert plain.gate_proj.weight.dtype == plain.out.weight.dtype
     # Fusing twice leaves the fused feed-forward as it is.
     assert xfuser_qwenimage21.fuse_swiglu_projections(model) == 0

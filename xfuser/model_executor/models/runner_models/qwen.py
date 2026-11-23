@@ -420,7 +420,7 @@ class xFuserQwenImage21Model(xFuserModel):
         },
     )
 
-    def _fuses_qkv_projections(self) -> bool:
+    def _fuses_projections(self) -> bool:
         # RDNA4 is not measured.
         return not PACKAGES_CHECKER._on_rdna4()
 

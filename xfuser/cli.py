@@ -40,6 +40,37 @@ def _spellings(flag: str) -> List[str]:
     return [flag, "--" + flag[2:].replace("_", "-")]
 
 
+_LAUNCHER_HELP = {
+    "--nproc_per_node": "Processes to start on each node. Default: the product of the parallel degrees "
+    "(doubled with --use_cfg_parallel), divided by --nnodes.",
+    "--nnodes": "Number of nodes. Default: %(default)s.",
+    "--node_rank": "Rank of this node. Default: %(default)s.",
+    "--master_addr": "Address of the rank 0 node. Default: %(default)s.",
+    "--master_port": "Port of the rank 0 node. Default: %(default)s.",
+}
+
+
+def _launcher_parser() -> argparse.ArgumentParser:
+    """The runner's parser, with the torchrun options that xdit takes.
+
+    The launcher uses it to show --help and to check the arguments before it
+    starts torchrun. The parser loads without torch and the runtime.
+    """
+    from xfuser.config.args import FlexibleArgumentParser, xFuserArgs
+
+    parser = FlexibleArgumentParser(
+        prog="xdit",
+        description="Run xDiT inference. xdit starts torchrun with the processes that the parallel "
+        "degrees need, and gives the other options to xfuser.runner.",
+    )
+    launcher = parser.add_argument_group(
+        "launcher options", "Options for torchrun. xdit does not give them to the runner."
+    )
+    for flag, help_text in _LAUNCHER_HELP.items():
+        launcher.add_argument(flag, default=TORCHRUN_ARGS[flag], help=help_text)
+    return xFuserArgs.add_runner_args(parser)
+
+
 def _degree_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="xdit", add_help=False, allow_abbrev=False)
     for flag in DEGREE_ARGS:
@@ -114,6 +145,10 @@ def main(args: Optional[List[str]] = None) -> None:
     """
     if args is None:
         args = sys.argv[1:]
+
+    # Show --help and report argument errors here, before torchrun starts:
+    # one message, and no torch import in torchrun and in each runner process.
+    _launcher_parser().parse_args(args)
 
     # Extract torchrun args and get runner args
     torchrun_values, runner_args = extract_torchrun_args(args)

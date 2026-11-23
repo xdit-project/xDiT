@@ -92,3 +92,32 @@ def test_a_malformed_degree_is_reported_as_an_xdit_usage_error(monkeypatch, caps
     assert launched == []
     assert exit_status.code == 2
     assert "xdit: error: argument --ulysses_degree" in capsys.readouterr().err
+
+
+def test_help_lists_launcher_and_runner_options_without_starting_torchrun(monkeypatch, capsys):
+    launched, exit_status = _launch(monkeypatch, ["--help"])
+
+    assert launched == []
+    assert exit_status.code == 0
+    help_text = capsys.readouterr().out
+    assert help_text.startswith("usage: xdit")
+    assert "launcher options" in help_text
+    assert "--nproc_per_node" in help_text
+    assert "--model" in help_text
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["--ulysses_degree", "2"], "the following arguments are required: --model"),
+        (["--model", "m", "--not_an_option"], "unrecognized arguments: --not_an_option"),
+        (["--model", "m", "--vae_dtype", "fp16"], "argument --vae_dtype: invalid choice"),
+    ],
+    ids=["missing_model", "unknown_option", "invalid_choice"],
+)
+def test_a_runner_argument_error_stops_before_torchrun_starts(monkeypatch, capsys, args, message):
+    launched, exit_status = _launch(monkeypatch, args)
+
+    assert launched == []
+    assert exit_status.code == 2
+    assert message in capsys.readouterr().err

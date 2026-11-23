@@ -147,7 +147,7 @@ def test_auto_resolution_keeps_the_output_hop():
     assert resolved.output_enabled
 
 
-def _output_hop_args(gemm_quantization):
+def _output_hop_args(gemm_quantization, **kwargs):
     return xFuserArgs(
         model="test",
         ulysses_degree=8,
@@ -155,6 +155,7 @@ def _output_hop_args(gemm_quantization):
         attention_a2a="auto",
         attention_a2a_output="mori",
         gemm_quantization=gemm_quantization,
+        **kwargs,
     )
 
 
@@ -170,6 +171,11 @@ def test_output_hop_accepts_gemm_profiles_with_quantized_projections(gemm_quanti
 def test_output_hop_rejects_gemm_profiles_without_quantized_projections(gemm_quantization):
     with pytest.raises(ValueError, match="--attention_a2a_output mori requires --gemm_quantization"):
         _output_hop_args(gemm_quantization)
+
+
+def test_output_hop_rejects_sequential_cpu_offload():
+    with pytest.raises(ValueError, match="does not support --enable_sequential_cpu_offload"):
+        _output_hop_args("fp4", enable_sequential_cpu_offload=True)
 
 
 @pytest.mark.parametrize(

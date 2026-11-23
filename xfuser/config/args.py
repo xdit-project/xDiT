@@ -563,6 +563,11 @@ class xFuserArgs:
     def _validate_attention_a2a_output(self) -> None:
         if self.attention_a2a_output == "none":
             return
+        if self.enable_sequential_cpu_offload:
+            raise ValueError(
+                "--attention_a2a_output mori does not support --enable_sequential_cpu_offload: "
+                "the output projection consumes the transported activation outside its offload hook"
+            )
         if not self.gemm_quantization_spec.formats <= _ATTENTION_A2A_OUTPUT_GEMM_FORMATS:
             raise ValueError(
                 "--attention_a2a_output mori requires --gemm_quantization fp8, fp4, fp6, "

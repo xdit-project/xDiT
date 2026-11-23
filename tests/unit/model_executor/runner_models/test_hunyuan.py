@@ -1,4 +1,9 @@
+from types import SimpleNamespace
+from unittest import mock
+
 import pytest
+from diffusers.guiders import ClassifierFreeGuidance
+from PIL import Image
 
 
 COMMUNITY = "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers"
@@ -71,3 +76,83 @@ def test_hunyuanvideo15_distilled_keeps_its_own_checkpoint(build):
     name = f"{COMMUNITY}-720p_i2v_distilled"
 
     assert build(name, "i2v").settings.model_name == name
+
+
+def _hv15_args(model, **overrides):
+    # Keys the CLI always passes; unset flags are None.
+    args = {"prompt": "a cat", "dataset_path": None, "seed": 0, "num_frames": 5, "height": 64, "width": 64}
+    args |= {"negative_prompt": None, "guidance_scale": None, "num_inference_steps": 2}
+    return model.preprocess_args({**args, **overrides})
+
+
+def test_hunyuanvideo15_forwards_negative_prompt_and_guidance_for_one_call(build):
+    model = build(f"{COMMUNITY}-720p_t2v", "t2v")
+    guider = ClassifierFreeGuidance(guidance_scale=6.0)
+    scales = []
+
+    def run(**_):
+        scales.append(model.pipe.guider.guidance_scale)
+        return SimpleNamespace(frames=["video"])
+
+    model.pipe = mock.MagicMock(side_effect=run)
+    model.pipe.guider = guider
+    model.pipe._execution_device = "cpu"
+
+    model._run_pipe(_hv15_args(model, negative_prompt="blurry", guidance_scale=2.5))
+    model._run_pipe(_hv15_args(model))
+
+    assert [call.kwargs["negative_prompt"] for call in model.pipe.call_args_list] == ["blurry", None]
+    assert scales == [2.5, 6.0]
+    assert model.pipe.guider is guider
+
+
+def test_hunyuanvideo15_gives_every_prompt_a_negative_prompt(build):
+    model = build(f"{COMMUNITY}-720p_t2v", "t2v")
+    model.pipe = mock.MagicMock(return_value=SimpleNamespace(frames=["video"]), _execution_device="cpu")
+    model.pipe.guider = ClassifierFreeGuidance(guidance_scale=6.0)
+
+    model._run_pipe(_hv15_args(model, prompt=["a cat", "a dog"], negative_prompt="blurry"))
+    model._run_pipe(_hv15_args(model, negative_prompt=[]))
+
+    assert [call.kwargs["negative_prompt"] for call in model.pipe.call_args_list] == [["blurry", "blurry"], None]
+
+
+GUIDANCE_FREE = pytest.mark.parametrize(
+    ("name", "config"),
+    [("Hunyuanvideo-1.5-Distilled", {}), ("Hunyuanvideo-1.5-Sparse", {"attention_backend": "FLEX_BLOCK_ATTN"})],
+)
+
+
+@GUIDANCE_FREE
+def test_hunyuanvideo15_guidance_free_checkpoints_refuse_a_negative_prompt(build, name, config):
+    model = build(name, "i2v", **config)
+
+    with pytest.raises(ValueError, match="does not accept a negative prompt"):
+        _hv15_args(model, input_images=["image.png"], negative_prompt="blurry")
+
+
+@GUIDANCE_FREE
+def test_hunyuanvideo15_guidance_free_checkpoints_ignore_guidance_scale(build, name, config, tmp_path):
+    model = build(name, "i2v", **config)
+    Image.new("RGB", (64, 64)).save(tmp_path / "image.png")
+    scales = []
+
+    def run(**_):
+        scales.append(model.pipe.guider.guidance_scale)
+        return SimpleNamespace(frames=["video"])
+
+    model.pipe = mock.MagicMock(side_effect=run)
+    model.pipe.guider = ClassifierFreeGuidance(guidance_scale=1.0)
+    model.pipe._execution_device = "cpu"
+
+    model._run_pipe(_hv15_args(model, input_images=[str(tmp_path / "image.png")], guidance_scale=6.0))
+
+    assert scales == [1.0]
+
+
+def test_hunyuanvideo15_refuses_negative_prompt_when_guidance_scale_is_one(build):
+    model = build(f"{COMMUNITY}-720p_t2v", "t2v")
+
+    with pytest.raises(ValueError, match="--guidance_scale 1 turns guidance off"):
+        _hv15_args(model, negative_prompt="blurry", guidance_scale=1)
+    _hv15_args(model, guidance_scale=1)

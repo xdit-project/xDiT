@@ -12,6 +12,7 @@ import torch.distributed
 
 from xfuser.logger import init_logger
 from xfuser.core.distributed import init_distributed_environment
+from xfuser.core.distributed.attention_a2a_codecs import GEMM_FORMAT_OUTPUT_CODECS
 from xfuser.config.attention_a2a import (
     ATTENTION_A2A_HADAMARD_PLACEMENTS,
     ATTENTION_A2A_OUTPUT_HOPS,
@@ -42,9 +43,6 @@ from xfuser.config.config import (
 )
 
 logger = init_logger(__name__)
-
-# GEMM formats whose output projection can consume a quantized attention output.
-_ATTENTION_A2A_OUTPUT_GEMM_FORMATS = frozenset({"fp8", "fp4", "fp6", "a6w4"})
 
 
 class FlexibleArgumentParser(argparse.ArgumentParser):
@@ -568,10 +566,10 @@ class xFuserArgs:
                 "--attention_a2a_output mori does not support --enable_sequential_cpu_offload: "
                 "the output projection consumes the transported activation outside its offload hook"
             )
-        if not self.gemm_quantization_spec.formats <= _ATTENTION_A2A_OUTPUT_GEMM_FORMATS:
+        if not self.gemm_quantization_spec.formats <= GEMM_FORMAT_OUTPUT_CODECS.keys():
             raise ValueError(
-                "--attention_a2a_output mori requires --gemm_quantization fp8, fp4, fp6, "
-                f"a6w4, or a low=fp4 pair; got {self.gemm_quantization_spec}"
+                "--attention_a2a_output mori requires --gemm_quantization built from "
+                f"{', '.join(GEMM_FORMAT_OUTPUT_CODECS)}; got {self.gemm_quantization_spec}"
             )
 
     @property

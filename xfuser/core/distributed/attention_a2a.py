@@ -29,6 +29,12 @@ except (AttributeError, ImportError):
     has_side_effect = None
 
 from xfuser.config.attention_a2a import AttentionA2AConfig
+from xfuser.core.distributed.attention_a2a_codecs import (
+    E4M3_EXTERNAL_SCALE,
+    MXFP4,
+    OUTPUT_CODECS,
+    e4m3_external_scale_from_amax,
+)
 
 logger = init_logger(__name__)
 
@@ -52,7 +58,6 @@ _MORI_GROUP_KEY = None
 _MORI_CPU_GROUP = None
 _OP_CACHE = {}
 _OUTPUT_OP_CACHE = {}
-_OUTPUT_CODECS = ("e4m3_external_scale", "mxfp4", "mxfp6")
 _INPUT_SIDE_STREAMS = {}
 _INPUT_PENDING = {}
 _INPUT_COLLECTIVE_WAITS = {}
@@ -321,7 +326,7 @@ def _check_attention_output_a2a_contract():
 
     if getattr(PackedAttentionOutputResult, "_fields", ()) != ("payload", "scale"):
         raise RuntimeError("installed AITER has an incompatible attention-output A2A result")
-    missing = sorted(set(_OUTPUT_CODECS) - set(ATTENTION_OUTPUT_A2A_CODECS))
+    missing = sorted(set(OUTPUT_CODECS) - set(ATTENTION_OUTPUT_A2A_CODECS))
     if missing:
         raise RuntimeError("installed AITER lacks attention-output A2A codec(s) " + ", ".join(missing))
 
@@ -1204,8 +1209,6 @@ def _get_output_op(group, rank, shape, device, codec):
 
 def _e4m3_destination_scales(output, world_size, group):
     """Descales of every destination's full attention output, as its TorchAO projection computes them."""
-    from xfuser.model_executor.layers.quantized_attention_output import e4m3_external_scale_from_amax
-
     b, s, h_local, d = output.shape
     amax = output.view(b, world_size, s // world_size, h_local, d).abs().amax(dim=(0, 2, 3, 4))
     dist.all_reduce(amax, op=dist.ReduceOp.MAX, group=group)
@@ -1239,13 +1242,13 @@ def _fused_a2a_output(
     world_size: int,
     group_name: str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if codec not in _OUTPUT_CODECS:
+    if codec not in OUTPUT_CODECS:
         raise ValueError(f"unsupported Attention A2A output codec {codec!r}")
     group = dist.distributed_c10d._resolve_process_group(group_name)
     if dist.get_world_size(group) != world_size:
         raise ValueError("Attention A2A output world size changed after tracing")
     destination_scales = None
-    if codec == "e4m3_external_scale":
+    if codec == E4M3_EXTERNAL_SCALE:
         destination_scales = _e4m3_destination_scales(output, world_size, group)
     op = _get_output_op(group, rank, tuple(output.shape), output.device, codec)
     result = op(output, destination_scales=destination_scales)
@@ -1258,16 +1261,16 @@ def _fused_a2a_output(
 @_fused_a2a_output.register_fake
 def _fused_a2a_output_fake(output, codec, rank, world_size, group_name):
     del rank, group_name
-    if codec not in _OUTPUT_CODECS:
+    if codec not in OUTPUT_CODECS:
         raise ValueError(f"unsupported Attention A2A output codec {codec!r}")
     b, s, h_local, d = output.shape
     rows, features = b * s // world_size, h_local * world_size * d
-    if codec == "e4m3_external_scale":
+    if codec == E4M3_EXTERNAL_SCALE:
         return (
             output.new_empty((b, s // world_size, h_local * world_size, d), dtype=torch.uint8),
             output.new_empty((1, 1), dtype=torch.float32),
         )
-    if codec == "mxfp4":
+    if codec == MXFP4:
         # A4W4 scales use 256-row and 8-column tiles.
         return (
             output.new_empty((rows, features // 2), dtype=torch.uint8),

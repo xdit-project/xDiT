@@ -9,7 +9,7 @@ import torch
 
 from xfuser.config.attention_a2a import AttentionA2AConfig
 from xfuser.core.distributed import attention_a2a as fused_a2a_integration
-from xfuser.model_executor.layers.quantized_attention_output import e4m3_external_scale_from_amax
+from xfuser.core.distributed.attention_a2a_codecs import e4m3_external_scale_from_amax
 
 
 @pytest.fixture(autouse=True)

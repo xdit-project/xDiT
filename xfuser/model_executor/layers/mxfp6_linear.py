@@ -4,6 +4,8 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
+from xfuser.core.distributed.attention_a2a_codecs import MXFP6
+
 try:
     from aiter.ops.gemm_op_a6w6 import (
         gemm_a6w6,
@@ -95,7 +97,7 @@ def _(
 class xFuserMXFP6Linear(nn.Module):
     """Drop-in BF16 linear using AITER's MXFP6 A6W6 GEMM."""
 
-    prequantized_input_codec = "mxfp6"
+    prequantized_input_codec = MXFP6
 
     def __init__(
         self,

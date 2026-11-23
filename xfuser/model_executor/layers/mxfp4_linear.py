@@ -8,6 +8,7 @@ try:
 except ImportError:
     pass  # Error will be thrown in base_model.py, if mxfp4 gemms are enabled but AITER is not available.
 from typing import Optional
+from xfuser.core.distributed.attention_a2a_codecs import MXFP4
 from xfuser.core.distributed.runtime_state import get_runtime_state
 
 
@@ -60,7 +61,7 @@ class xFuserMXFP4Linear(nn.Module):
     Drop-in replacement for nn.Linear.
     """
 
-    prequantized_input_codec = "mxfp4"
+    prequantized_input_codec = MXFP4
 
     def __init__(self, in_features, out_features, bias=True, device=None, dtype=None):
         factory_kwargs = {"device": device, "dtype": dtype}

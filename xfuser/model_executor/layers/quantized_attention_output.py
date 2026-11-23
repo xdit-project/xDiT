@@ -6,7 +6,7 @@ from typing import NamedTuple
 import torch
 from torch import nn
 
-E4M3_EXTERNAL_SCALE = "e4m3_external_scale"
+from xfuser.core.distributed.attention_a2a_codecs import E4M3_EXTERNAL_SCALE
 
 
 class QuantizedAttentionOutput(NamedTuple):
@@ -35,18 +35,6 @@ def _is_torchao_tensorwise_fp8(linear: nn.Module) -> bool:
         return False
     weight = getattr(linear, "weight", None)
     return isinstance(weight, Float8Tensor) and weight.scale.numel() == 1
-
-
-def e4m3_external_scale_from_amax(amax: torch.Tensor) -> torch.Tensor:
-    """FP32 descales that TorchAO's dynamic per-tensor FP8 quantization derives from ``amax``.
-
-    ``amax`` must keep the activation dtype: TorchAO clamps and divides in that dtype
-    before converting the scale to FP32.
-    """
-    from xfuser.core.utils.runner_utils import FP8_ACTIVATION_SCALE_FLOOR
-
-    scale = torch.clamp(amax, min=FP8_ACTIVATION_SCALE_FLOOR) / torch.finfo(torch.float8_e4m3fn).max
-    return scale.to(torch.float32)
 
 
 def attention_output_codec(linear: nn.Module) -> str | None:

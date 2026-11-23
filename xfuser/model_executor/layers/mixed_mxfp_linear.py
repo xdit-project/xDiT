@@ -8,6 +8,8 @@ import os
 import torch
 from torch import nn
 
+from xfuser.core.distributed.attention_a2a_codecs import MXFP6
+
 try:
     from aiter.ops.gemm_op_a6w4 import (
         gemm_a6w4,
@@ -340,7 +342,7 @@ def _(
 class _xFuserMixedMXFPLinear(nn.Module):
     """Inference-only mixed-MXFP linear; subclasses choose operand formats."""
 
-    prequantized_input_codec = "mxfp6"
+    prequantized_input_codec = MXFP6
 
     kind: str
     weight_format: str

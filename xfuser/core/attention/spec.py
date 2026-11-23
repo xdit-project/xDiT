@@ -113,6 +113,13 @@ class Sparsity(Enum):
         a short text KV has too few blocks for that."""
         return self in _NEEDS_DENSE_CROSS_ATTENTION
 
+    @property
+    def prefers_local_token_order(self) -> bool:
+        """Whether a model should hand these families its tokens in a spatially
+        local order: they pool runs of consecutive tokens into blocks, and a
+        block of whole raster rows serves the frame border poorly."""
+        return self in _PREFERS_LOCAL_TOKEN_ORDER
+
 
 # Sol is its own capability: a model checked for Sparge is not thereby checked for Sol.
 _MODEL_CAPABILITY = {
@@ -121,6 +128,8 @@ _MODEL_CAPABILITY = {
     Sparsity.SOL: "supports_sol_attention_backends",
 }
 _NEEDS_DENSE_CROSS_ATTENTION = frozenset({Sparsity.SPARGE, Sparsity.VSA, Sparsity.SOL})
+# Sparge reorders its tokens itself.
+_PREFERS_LOCAL_TOKEN_ORDER = frozenset({Sparsity.SOL})
 
 
 @dataclass(frozen=True)
@@ -340,6 +349,11 @@ class Spec:
     def needs_dense_cross_attention(self) -> bool:
         """See Sparsity.needs_dense_cross_attention; False for a dense backend."""
         return self.sparsity is not None and self.sparsity.needs_dense_cross_attention
+
+    @property
+    def prefers_local_token_order(self) -> bool:
+        """See Sparsity.prefers_local_token_order; False for a dense backend."""
+        return self.sparsity is not None and self.sparsity.prefers_local_token_order
 
     def unavailable(self) -> Optional[str]:
         """Why this backend cannot run here, or None. Never says 'update X':

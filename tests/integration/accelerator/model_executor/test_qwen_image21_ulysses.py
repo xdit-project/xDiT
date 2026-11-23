@@ -72,6 +72,7 @@ def _ulysses_worker(rank, world_size, init_method):
     from xfuser.core.attention.spec import AttentionBackendType
     from xfuser.core.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
     from xfuser.model_executor.layers import usp
+    from xfuser.model_executor.layers.transposed_linear import transpose_plain_linears
     from xfuser.model_executor.models.transformers import transformer_qwenimage21 as xfuser_qwenimage21
 
     torch.cuda.set_device(rank)
@@ -96,14 +97,17 @@ def _ulysses_worker(rank, world_size, init_method):
                 stock = _tiny_model(device)
                 reference = _prefill_then_decode(stock, device, mask)
 
-                for fused in (False, True):
+                for variant in ("", "fused", "fused transposed"):
                     wrapper = xfuser_qwenimage21.xFuserQwenImage21TransformerWrapper.from_config(stock.config)
                     wrapper = wrapper.to(device).eval()
                     wrapper.load_state_dict(stock.state_dict())
                     for block in wrapper.transformer_blocks:
                         block.attn.set_processor(processor_cls())
-                    if fused:
+                    if "fused" in variant:
                         wrapper.fuse_projections_for_inference()
+                    if "transposed" in variant:
+                        # As the runner does on gfx942 once the weights are placed and fused.
+                        assert transpose_plain_linears(wrapper) > 0
                     actual = _prefill_then_decode(wrapper, device, mask)
 
                     for ref, out in zip(reference, actual):
@@ -113,7 +117,7 @@ def _ulysses_worker(rank, world_size, init_method):
                             rtol=1e-4,
                             atol=1e-4,
                             msg=lambda m: (
-                                f"{processor_cls.__name__}, padded prompt={mask is not None}, fused={fused}: {m}"
+                                f"{processor_cls.__name__}, padded prompt={mask is not None}, {variant or 'plain'}: {m}"
                             ),
                         )
     finally:

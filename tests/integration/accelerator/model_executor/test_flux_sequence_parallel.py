@@ -6,6 +6,7 @@ import torch
 from diffusers import FluxTransformer2DModel
 
 from xfuser.config.args import xFuserArgs
+from xfuser.model_executor.layers.transposed_linear import transpose_plain_linears
 from xfuser.core.distributed import (
     get_runtime_state,
     init_distributed_environment,
@@ -91,6 +92,8 @@ def _flux_worker(
             parallel.fuse_projections_for_inference()
         if "sharded" in variant:
             assert parallel.shard_modulation() == 3
+        if "transposed" in variant:
+            assert transpose_plain_linears(parallel) > 0
         inputs = _inputs(image_tokens, text_tokens, device)
         with torch.no_grad():
             expected = reference(**inputs)[0]
@@ -125,6 +128,11 @@ def _flux_worker(
         pytest.param(2, 2, 59, 8, "sharded", id="sharded-modulation-ulysses-ring-padded-image"),
         # Both, as FLUX.1-dev and FLUX.1-Kontext run.
         pytest.param(3, 1, 16, 8, "fused sharded", id="fused-qkv-sharded-modulation-padded-image-replicated-text"),
+        # With the weights stored transposed too, as FLUX.1-dev runs on gfx942.
+        pytest.param(
+            3, 1, 16, 8, "fused sharded transposed", id="fused-sharded-transposed-padded-image-replicated-text"
+        ),
+        pytest.param(2, 2, 59, 8, "fused transposed", id="fused-transposed-ulysses-ring-padded-image"),
     ],
 )
 def test_flux_sequence_parallel_matches_single_device(

@@ -25,6 +25,7 @@ from xfuser.core.attention import registry as attention_registry
 from xfuser.core.attention.spec import EXACT_KV_TOKENS_KEY, AttentionBackendType, Sparsity
 from xfuser.core.attention.backends.vsa_h3.attention import build_h3_vsa_metadata
 from xfuser.core.sparge_attention.sparge import get_gilbert_perm
+from xfuser.logger import init_logger, warn_once
 from xfuser.model_executor.layers.fused_qk_rope_flydsl import (
     _HAS_FLYDSL,
     flydsl_fused_qk_norm_rope,
@@ -44,6 +45,8 @@ VSA_H3_BACKENDS = attention_registry.types_where(sparsity=Sparsity.H3)
 SOL_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SOL)
 # The token refiner's backend under a Sol run; the runner selects it before compiling.
 REFINER_DENSE_BACKEND = AttentionBackendType.AITER
+
+logger = init_logger(__name__)
 
 
 MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT = 64
@@ -411,9 +414,10 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
             )
 
         self.register_forward_pre_hook(lambda module, args: get_runtime_state().increment_step_counter())
-        # The runner sets this when a Sol backend is selected, which routes KV blocks.
+        # The runner sets this when a selected backend prefers a local token order.
         self.curve_order_video = False
         self._curve_order = None
+        self._forward_signature = inspect.signature(type(self).forward)
         self.register_forward_pre_hook(self._order_video_along_curve, with_kwargs=True)
 
     _pad_rows = staticmethod(pad_packed_rows)
@@ -428,17 +432,19 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
         """
         if not self.curve_order_video or self.use_vsa_h3:
             return None
-        bound = inspect.signature(type(self).forward).bind(self, *args, **kwargs)
+        bound = self._forward_signature.bind(self, *args, **kwargs)
         arguments = bound.arguments
         position_ids, video_indices = arguments["position_ids"], arguments["video_indices"]
-        # As for VSA-H3, sizes alone do not tell two geometries apart (768x1344 and 1344x768),
-        # so the key carries the first and last video rows and their coordinates.
-        ends = video_indices[[0, -1]]
-        corners = torch.cat((ends.to(position_ids.dtype), position_ids.index_select(0, ends).flatten()))
-        key = (position_ids.shape[0], video_indices.numel(), position_ids.device, *corners.tolist())
-        if self._curve_order is None or self._curve_order[0] != key:
-            self._curve_order = (key, curve_ordered_video_rows(position_ids, video_indices))
-        order = self._curve_order[1]
+        # The pipeline builds its layout once per request and passes the same tensors at every
+        # step, so they are the cache key: no device read per forward. The cache holds them, so
+        # their identities cannot be reused by other tensors.
+        cached = self._curve_order
+        if cached is None or cached[0] is not position_ids or cached[1] is not video_indices:
+            order = curve_ordered_video_rows(position_ids, video_indices)
+            if order is None:
+                warn_once(logger, "MiniMax-H3 video rows do not fill a (t, h, w) grid; they keep the packed order.")
+            self._curve_order = cached = (position_ids, video_indices, order)
+        order = cached[2]
         if order is None:
             return None
         row_order, arguments["video_indices"] = order

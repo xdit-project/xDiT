@@ -370,6 +370,38 @@ def test_curve_ordered_video_changes_only_what_attention_sees(monkeypatch):
     assert torch.all(seen[1][video_rows].diff(dim=0).abs().sum(dim=-1) == 1), "the curve does not"
 
 
+def test_the_curve_order_is_built_once_per_layout(monkeypatch):
+    """The pipeline passes the same layout tensors at every step; the order is read from their
+    values, a device sync, only when a new layout arrives."""
+    from xfuser.core.attention.spec import AttentionBackendType
+    from xfuser.model_executor.models.transformers import transformer_minimax_h3
+    from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
+        xFuserMiniMaxH3Transformer3DWrapper,
+    )
+
+    monkeypatch.setattr(transformer_minimax_h3, "get_ulysses_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(transformer_minimax_h3, "get_ulysses_parallel_rank", lambda: 0)
+    _patch_minimax_runtime_state(monkeypatch)
+    built = []
+    build = transformer_minimax_h3.curve_ordered_video_rows
+    monkeypatch.setattr(
+        transformer_minimax_h3, "curve_ordered_video_rows", lambda *args: built.append(True) or build(*args)
+    )
+    wrapper = xFuserMiniMaxH3Transformer3DWrapper(
+        **_tiny_config(),
+        attention_backend=AttentionBackendType.SDPA,
+    ).eval()
+    wrapper.curve_order_video = True
+    inputs = _with_video_grid(_tiny_inputs(torch.device("cpu")), (2, 4, 6))
+
+    with torch.no_grad():
+        wrapper(**inputs)
+        wrapper(**inputs)
+        assert len(built) == 1, "a repeated layout reuses its order"
+        wrapper(**{**inputs, "position_ids": inputs["position_ids"].clone()})
+    assert len(built) == 2, "a new layout gets its own"
+
+
 @pytest.mark.parametrize(
     "backend,schedule,prepared",
     [

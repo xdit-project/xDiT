@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import torch
 import torch.distributed as dist
 import os
 import gc
 import logging
-from typing import Tuple
+from typing import TYPE_CHECKING, Tuple
 
 
 def setup_logging():
@@ -21,13 +23,31 @@ if not os.environ.get("RANK"):
 
 
 # ruff: noqa: E402
-from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY, xFuserModel, DiffusionOutput
-from xfuser.config import FlexibleArgumentParser
-from xfuser.core.distributed import (
-    get_runtime_state,
-)
-from xfuser.core.utils.runner_utils import log, is_last_process
-from xfuser import xFuserArgs
+# Load only the argument parser at module level. Then main() parses the
+# arguments, for example --help, before it loads the models and the runtime.
+from xfuser.config.args import FlexibleArgumentParser, xFuserArgs
+
+if TYPE_CHECKING:
+    from xfuser.model_executor.models.runner_models.base_model import DiffusionOutput, xFuserModel
+
+
+def _model_registry() -> dict:
+    """Load the runner models and return their registry.
+
+    The import loads the runtime: xfuser.envs (aiter, diffusers) and the
+    import-time patches in xfuser.core.utils.runner_utils.
+    """
+    from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY
+
+    return MODEL_REGISTRY
+
+
+def _log(message: str) -> None:
+    # runner_utils loads the runtime. Import it when the runner logs, not
+    # when this module loads.
+    from xfuser.core.utils.runner_utils import log
+
+    log(message)
 
 
 def _has_output_payload(output: DiffusionOutput | None) -> bool:
@@ -63,6 +83,12 @@ class xFuserModelRunner:
     """
 
     def __init__(self, config: dict) -> None:
+        # Keep the startup order from before the lazy imports: load the runtime
+        # (the xfuser.envs checks and the import-time patches, for example the
+        # torchao Float8 FSDP2 patches in xfuser.core.utils.runner_utils) before
+        # create_config() initializes the distributed environment.
+        _model_registry()
+
         xfuser_config = xFuserArgs.from_runner_args(config)
         # Runs the config through argument parsing and validation - not the cleanest solution but has to be done inside the runner
         engine_config, input_config = xfuser_config.create_config()
@@ -73,7 +99,7 @@ class xFuserModelRunner:
 
     def _select_model(self, model_name: str, config: xFuserArgs) -> xFuserModel:
         """Select and instantiate model from registry"""
-        model = MODEL_REGISTRY.get(model_name, None)
+        model = _model_registry().get(model_name, None)
         if not model:
             raise ValueError(f"Model {model_name} not found in registry.")
         return model(config)
@@ -84,14 +110,14 @@ class xFuserModelRunner:
         Repeated calls are ignored once initialization has completed.
         """
         if self.is_initialized:
-            log("Model already initialized, skipping...")
+            _log("Model already initialized, skipping...")
             return
 
-        log(f"Initializing model: {self.config.model}")
+        _log(f"Initializing model: {self.config.model}")
         self.model.initialize(input_args)
 
         self.is_initialized = True
-        log("Model initialization complete.")
+        _log("Model initialization complete.")
 
     def run(self, input_args: dict) -> Tuple[DiffusionOutput, list]:
         """Generate outputs after initialization and return outputs and timings.
@@ -102,7 +128,7 @@ class xFuserModelRunner:
         if not self.is_initialized:
             raise RuntimeError("ModelRunner not initialized. Call initialize() before run().")
 
-        log("Running model...")
+        _log("Running model...")
         output, timings = self.model.run(input_args)
         return output, timings
 
@@ -121,19 +147,21 @@ class xFuserModelRunner:
 
     def print_args(self, args: dict) -> None:
         """Print the arguments from the Namespace"""
-        log("Model Runner Arguments:")
+        _log("Model Runner Arguments:")
         for arg, value in args.items():
-            log(f"  {arg}: {value}")
+            _log(f"  {arg}: {value}")
 
     def cleanup(self) -> None:
         """Release the initialized pipeline, device caches, and distributed state."""
+        from xfuser.core.distributed import get_runtime_state
+
         torch.compiler.reset()
         torch.cuda.synchronize()
         del self.model.pipe
         gc.collect()
         torch.cuda.empty_cache()
         get_runtime_state().destroy_distributed_env()
-        log("Cleaned up resources.")
+        _log("Cleaned up resources.")
 
     def save(
         self,
@@ -148,6 +176,8 @@ class xFuserModelRunner:
         Files use the configured output directory; profile traces are compressed
         Chrome trace JSON files. Omitted payloads are not saved.
         """
+        from xfuser.core.utils.runner_utils import is_last_process
+
         if profile:
             self.model.save_profile(profile)
 

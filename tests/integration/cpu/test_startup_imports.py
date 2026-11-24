@@ -60,3 +60,27 @@ def test_runner_parser_builds_without_the_runtime():
     )
 
     assert report["runtime_modules"] == []
+
+
+@pytest.mark.parametrize(
+    ("argv", "exit_code", "message"),
+    [
+        (["--help"], 0, "usage:"),
+        ([], 2, "the following arguments are required: --model"),
+    ],
+    ids=["help", "missing_model"],
+)
+def test_runner_exits_on_arguments_before_it_loads_the_runtime(argv, exit_code, message):
+    result, report = _run(
+        f"""
+        import runpy
+        sys.argv = ["xfuser.runner", *{argv!r}]
+        try:
+            runpy.run_module("xfuser.runner", run_name="__main__", alter_sys=True)
+        except SystemExit as exit:
+            report(exit.code)
+        """
+    )
+
+    assert report == {"exit_code": exit_code, "runtime_modules": []}
+    assert message in result.stdout + result.stderr

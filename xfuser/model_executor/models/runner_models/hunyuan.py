@@ -1,7 +1,6 @@
 import torch
 import copy
 import dataclasses
-from typing import Optional
 import json
 import numpy as np
 from safetensors.torch import load_file
@@ -17,7 +16,6 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
     ModelSettings,
 )
-from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.core.utils.runner_utils import (
     resize_and_crop_image,
     fix_llama_tokenizer_pretokenizer,
@@ -32,6 +30,7 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     LoadRoute,
     STANDARD_LOAD_ROUTES,
+    UnsupportedLoadContract,
 )
 
 
@@ -149,10 +148,6 @@ class xFuserHunyuanvideoModel(xFuserModel):
         )
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
-    def _get_compile_warmup_steps(self, input_args: dict) -> Optional[int]:
-        # A per-step attention schedule needs a full warmup to trigger every backend path.
-        return None if get_runtime_state().has_attention_schedule() else 2
-
     def _compile_model(self, input_args: dict) -> None:
         """Compile the model using torch.compile"""
         # Install Inductor post-grad pass that defeats a scheduler bug in the
@@ -168,7 +163,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
         self.pipe.transformer.compile()
 
         compile_args = copy.deepcopy(input_args)
-        warmup_steps = self._get_compile_warmup_steps(input_args)
+        warmup_steps = self._compile_warmup_steps(input_args)
         if warmup_steps is not None:
             compile_args["num_inference_steps"] = warmup_steps
         self._run_timed_pipe(compile_args)
@@ -186,12 +181,11 @@ class xFuserHunyuanvideo15Model(xFuserModel):
 
     min_diffusers_version = "0.36.0"
 
-    # The 1.5 wrapper's config-only construction and checkpoint layout are unverified.
     load_support = LoadSupport(
-        meta_transformers=(),
+        meta_transformers=("transformer",),
         meta_text_encoders=(),
-        replicated_meta=False,
-        routes=LoadRoute.NONE,
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
     )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
@@ -245,6 +239,11 @@ class xFuserHunyuanvideo15Model(xFuserModel):
             self.default_input_values = dataclasses.replace(self.default_input_values, height=480, width=848)
 
     def _load_model(self) -> DiffusionPipeline:
+        if self.config.use_fp8_gemms and self.loader.replicated_broadcast_load():
+            raise UnsupportedLoadContract(
+                "HunyuanVideo-1.5 --memory_efficient_replicated_load requires unquantized GEMMs; "
+                "the FP8 loading route is unverified."
+            )
         from diffusers import HunyuanVideo15Pipeline, HunyuanVideo15ImageToVideoPipeline
         from xfuser.model_executor.models.transformers.transformer_hunyuan_video15 import (
             xFuserHunyuanVideo15Transformer3DWrapper,
@@ -252,11 +251,16 @@ class xFuserHunyuanvideo15Model(xFuserModel):
 
         task = self.config.task
         pipeline = HunyuanVideo15Pipeline if task == "t2v" else HunyuanVideo15ImageToVideoPipeline
-        transformer = xFuserHunyuanVideo15Transformer3DWrapper.from_pretrained(
-            self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            **self.loader.checkpoint_request("transformer").from_pretrained_kwargs(),
-        )
+        if self.loader.replicated_broadcast_load():
+            transformer = self.loader.load_transformer(
+                xFuserHunyuanVideo15Transformer3DWrapper, subfolder="transformer"
+            )
+        else:
+            transformer = xFuserHunyuanVideo15Transformer3DWrapper.from_pretrained(
+                self.settings.model_name,
+                torch_dtype=torch.bfloat16,
+                **self.loader.checkpoint_request("transformer").from_pretrained_kwargs(),
+            )
         pipe = pipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             transformer=transformer,

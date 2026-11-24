@@ -38,6 +38,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     LoadRoute,
+    STANDARD_LOAD_ROUTES,
 )
 
 
@@ -69,6 +70,7 @@ _FASTH3_ATTN_BACKENDS = VSA_H3_BACKENDS
 # routing is for. Its alignment pad is declared through valid_kv_len and valid_q_len, and the
 # text and audio rows are forced exact; see the transformer wrapper.
 _SOL_ATTN_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SOL)
+_LOCAL_TOKEN_ORDER_BACKENDS = attention_registry.types_where(prefers_local_token_order=True)
 _H3_ATTN_BACKENDS = _SUPPORTED_ATTN_BACKENDS | _SOL_ATTN_BACKENDS
 # VDN-H3's window varlen executor only implements these three; it does not use
 # the CUDNN / NVTE_FP8 / MHA-v4 paths the base H3 advertises.
@@ -243,20 +245,92 @@ def _minimax_h3_parallel_decode_clip(self, z: torch.Tensor) -> torch.Tensor:
     return self._stitch_tiles(rows, y_overlaps, x_overlaps)
 
 
+def _minimax_h3_parallel_encode_clip(self, x: torch.Tensor) -> torch.Tensor:
+    vae_group = get_vae_parallel_group()
+    if vae_group.world_size == 1 or not self.use_tiling:
+        return self._xfuser_original_encode_clip(x)
+
+    y_indices, y_lengths, y_overlaps = self._split_tiles(
+        x.shape[-2],
+        self.tile_sample_min_height,
+        self.tile_sample_min_overlap_height,
+    )
+    x_indices, x_lengths, x_overlaps = self._split_tiles(
+        x.shape[-1],
+        self.tile_sample_min_width,
+        self.tile_sample_min_overlap_width,
+    )
+    tile_specs = [
+        (y, tile_height, x_start, tile_width)
+        for y, tile_height in zip(y_indices, y_lengths)
+        for x_start, tile_width in zip(x_indices, x_lengths)
+    ]
+    # A rank without a tile of its own would not know the encoded tile shape.
+    if len(tile_specs) < vae_group.world_size:
+        return self._xfuser_original_encode_clip(x)
+
+    world_size, rank = vae_group.world_size, vae_group.rank_in_group
+    local_tiles = {
+        index: self.quant_conv(self.encoder(x[..., y : y + height, x_start : x_start + width])).contiguous()
+        for index, (y, height, x_start, width) in enumerate(tile_specs)
+        if index % world_size == rank
+    }
+    # _split_tiles gives every tile along an axis the same length, so every
+    # encoded tile has the shape of this rank's own.
+    template = next(iter(local_tiles.values()))
+    encoded = [
+        vae_group.broadcast(
+            local_tiles[index] if index % world_size == rank else torch.empty_like(template), src=index % world_size
+        )
+        for index in range(len(tile_specs))
+    ]
+    columns = len(x_lengths)
+    rows = [encoded[start : start + columns] for start in range(0, len(encoded), columns)]
+
+    ratio = self.spatial_compression_ratio
+    return self._stitch_tiles(
+        rows,
+        [overlap // ratio for overlap in y_overlaps],
+        [overlap // ratio for overlap in x_overlaps],
+    )
+
+
+def _record_cudagraph_on_first_call(compiled_forward):
+    """Replay a once-per-request compiled forward as a CUDA graph from its first call on."""
+    recorded = False
+
+    def forward(hidden_states: torch.Tensor) -> torch.Tensor:
+        nonlocal recorded
+        if not recorded:
+            # A graph records on its second call. Make both happen in the first
+            # call, which is the compile warmup, rather than in a timed run.
+            torch.compiler.cudagraph_mark_step_begin()
+            compiled_forward(hidden_states)
+            recorded = True
+        torch.compiler.cudagraph_mark_step_begin()
+        # The result outlives the call, and the next replay reuses its buffer.
+        return compiled_forward(hidden_states).clone()
+
+    return forward
+
+
 def install_minimax_h3_vae_tile_parallel(vae) -> None:
     """Distribute MiniMax-H3 spatial VAE tiles across the existing VAE ranks.
 
-    DistVAE does not reimplement MiniMax-H3's clip/tile/stitch decode loop, so
-    this keeps that native loop and only shards complete spatial tiles.
+    DistVAE does not reimplement MiniMax-H3's clip/tile/stitch loops, so this
+    keeps those native loops and only shards complete spatial tiles, for both
+    encoding and decoding.
     """
     if getattr(vae, "_xfuser_tile_parallel", False):
         return
 
     vae._xfuser_original_decode_clip = vae._decode_clip
     vae._decode_clip = MethodType(_minimax_h3_parallel_decode_clip, vae)
+    vae._xfuser_original_encode_clip = vae._encode_clip
+    vae._encode_clip = MethodType(_minimax_h3_parallel_encode_clip, vae)
     vae._xfuser_tile_parallel = True
     log(
-        "MiniMax-H3 parallel VAE enabled: distributing spatial decode tiles "
+        "MiniMax-H3 parallel VAE enabled: distributing spatial encode and decode tiles "
         f"across {get_vae_parallel_group().world_size} ranks."
     )
 
@@ -490,6 +564,7 @@ def _count_steps_as_forwards(scheduler) -> None:
     def set_timesteps(num_inference_steps, device=None):
         # MiniMaxH3Scheduler runs one step fewer than requested, so ask for one extra.
         set_grid_points(num_inference_steps + 1, device=device)
+        scheduler.set_begin_index(0)
 
     scheduler.set_timesteps = set_timesteps
 
@@ -630,12 +705,10 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
         valid_tasks=["t2va", "i2va", "l2va", "fl2va"],
     )
 
-    # Modular loading and QKV fusion leave no collective-safe checkpoint mapping.
     load_support = LoadSupport(
-        meta_transformers=(),
-        meta_text_encoders=(),
-        replicated_meta=False,
-        routes=LoadRoute.NONE,
+        meta_transformers=("transformer",),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
     )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
@@ -664,6 +737,8 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
+        if self.loader.replicated_broadcast_load():
+            self.pipe.transformer.fuse_qkv_projections()
         # Under a Sol backend the token refiner runs on dense AITER (see the transformer wrapper).
         # Select it here, outside the compiled forward, which cannot import its kernel.
         runtime = get_runtime_state()
@@ -671,8 +746,13 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
             from xfuser.model_executor.models.transformers.transformer_minimax_h3 import REFINER_DENSE_BACKEND
 
             runtime._check_if_backend_compatible_with_current_configuration(REFINER_DENSE_BACKEND)
+        # A backend that pools runs of consecutive tokens gets the video in curve order.
+        if set(runtime.selected_attention_backends()) & _LOCAL_TOKEN_ORDER_BACKENDS:
+            getattr(self.pipe, self._transformer_component_name).curve_order_video = True
 
     def _validate_config(self, config) -> None:
+        if getattr(config, "memory_efficient_sharding", False) and config.fully_shard_degree > 1:
+            raise ValueError("MiniMax-H3 does not support memory-efficient FSDP loading.")
         if config.task is None:
             if self.settings.valid_tasks == ["ref2va"]:
                 config.task = "ref2va"
@@ -739,6 +819,11 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
         return args
 
     def _load_model(self):
+        if (self.config.use_fp8_gemms or self.config.use_fp4_gemms) and self.loader.replicated_broadcast_load():
+            raise ValueError(
+                "MiniMax-H3 --memory_efficient_replicated_load does not support FP8/FP4 GEMMs: "
+                "checkpoint materialization must finish before QKV fusion."
+            )
         from diffusers import ModularPipeline
         from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
             xFuserMiniMaxH3Transformer3DWrapper,
@@ -752,16 +837,25 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
             self.settings.model_name,
             workflow=workflow,
         )
-        transformer = xFuserMiniMaxH3Transformer3DWrapper.from_pretrained(
-            self.settings.model_name,
-            dtype=torch.bfloat16,
-            **self.loader.checkpoint_request("transformer").from_pretrained_kwargs(),
-            enable_fasth3_vsa=self._enable_fasth3_vsa,
-            attention_backend=_parse_attention_backend(
+        init_kwargs = {
+            "enable_fasth3_vsa": self._enable_fasth3_vsa,
+            "attention_backend": _parse_attention_backend(
                 getattr(self.config, "attention_backend", None),
                 "attention backend",
             ),
-        )
+        }
+        if self.loader.replicated_broadcast_load():
+            transformer = self.loader.load_transformer(
+                xFuserMiniMaxH3Transformer3DWrapper,
+                init_kwargs=init_kwargs,
+            )
+        else:
+            transformer = xFuserMiniMaxH3Transformer3DWrapper.from_pretrained(
+                self.settings.model_name,
+                dtype=torch.bfloat16,
+                **self.loader.checkpoint_request("transformer").from_pretrained_kwargs(),
+                **init_kwargs,
+            )
         pipe.update_components(transformer=transformer)
         _load_minimax_h3_components(pipe)
         if self.config.lora_path:
@@ -770,7 +864,10 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
                 _resolve_lora_file(self.config.lora_path, self.config.lora_weight_name),
                 scale=self.config.lora_scale,
             )
-        pipe.transformer.fuse_qkv_projections()
+        # Keep checkpoint projections unfused until replicated weights are materialized.
+        # _post_load_and_state_initialization performs fusion on that path.
+        if not self.loader.replicated_broadcast_load():
+            pipe.transformer.fuse_qkv_projections()
         pipe.text_encoder.lm_head = None
         self._parallelize_text_encoder(pipe.text_encoder)
         _count_steps_as_forwards(pipe.scheduler)
@@ -836,12 +933,39 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
         if input_args.get("negative_prompt") is not None:
             raise ValueError("MiniMax-H3 is guidance-distilled and does not accept a negative prompt.")
 
+    def _get_vae_compile_mode(self) -> str:
+        if PACKAGES_CHECKER._on_rdna4():
+            return "default"
+        return "reduce-overhead"
+
+    def _compile_vae_decoder_blocks(self, vae) -> None:
+        mode = self._get_vae_compile_mode()
+        vae.compile_repeated_blocks(mode=mode, fullgraph=False)
+        if mode in self.CUDAGRAPH_COMPILE_MODES:
+            self._mark_cudagraph_steps(vae.decoder)
+        log("MiniMax-H3 torch.compile enabled for repeated video VAE decoder blocks.")
+
+    def _compile_audio_vae_decoder(self, audio_vae) -> None:
+        mode = self._get_vae_compile_mode()
+        decoder = audio_vae.decoder
+        for module in decoder.modules():
+            if hasattr(module, "weight_g"):
+                torch.nn.utils.remove_weight_norm(module)
+        compiled_forward = torch.compile(decoder.forward, mode=mode, fullgraph=False)
+        if mode in self.CUDAGRAPH_COMPILE_MODES:
+            decoder.forward = _record_cudagraph_on_first_call(compiled_forward)
+        else:
+            decoder.forward = compiled_forward
+        log("MiniMax-H3 torch.compile enabled for the audio VAE decoder.")
+
     def _compile_model(self, input_args: dict) -> None:
         mode = self._get_compile_mode()
         vae = getattr(self.pipe, "vae", None)
         if vae is not None:
-            vae.compile_repeated_blocks(mode=mode, fullgraph=False)
-            log("MiniMax-H3 torch.compile enabled for repeated video VAE decoder blocks.")
+            self._compile_vae_decoder_blocks(vae)
+        audio_vae = getattr(self.pipe, "audio_vae", None)
+        if audio_vae is not None:
+            self._compile_audio_vae_decoder(audio_vae)
 
         if self.config.fully_shard_degree > 1:
             super()._compile_model(input_args)
@@ -865,7 +989,7 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
         self._run_timed_pipe(compile_args)
 
     def _transformer_compile_mode(self, mode: str, use_hybrid: bool) -> str:
-        """CUDA graphs for the transformer alone: the video VAE decoder reads graph outputs across calls."""
+        """CUDA graphs for the transformer; the video VAE decoder's mode comes from _get_vae_compile_mode."""
         if not self.transformer_cudagraphs or use_hybrid or PACKAGES_CHECKER._on_rdna4():
             return mode
         return usp_sdma.compile_mode("reduce-overhead")
@@ -952,6 +1076,8 @@ class xFuserFastH3Model(xFuserMiniMaxH3Model):
     kernel; ``FLEX_VSA_H3`` runs the same selection through FlexAttention;
     other MiniMax-H3 backends stay dense when selected explicitly.
     """
+
+    load_support = LoadSupport()
 
     transformer_cudagraphs = False
 
@@ -1056,6 +1182,8 @@ class xFuserMiniMaxH3TurboModel(xFuserMiniMaxH3Model):
     are refused; any other adapter needs ``--num_inference_steps`` and ``--flow_shift``.
     """
 
+    load_support = LoadSupport()
+
     transformer_cudagraphs = False
 
     default_input_values = DefaultInputValues(
@@ -1129,6 +1257,8 @@ class xFuserVDNMiniMaxH3Model(xFuserMiniMaxH3Model):
     transformer block (fullgraph=True); the packed-layout geometry is primed from
     position_ids in an eager forward pre-hook outside the compiled blocks.
     """
+
+    load_support = LoadSupport()
 
     # Compiles its blocks in _compile_model below, outside _transformer_compile_mode.
     transformer_cudagraphs = False

@@ -14,8 +14,8 @@ import torch.nn.functional as F
 pytest.importorskip("diffusers.models.transformers.transformer_flux")
 
 from xfuser.core.attention.spec import AttentionBackendType  # noqa: E402
-from xfuser.model_executor.layers import usp_sdma  # noqa: E402
-from xfuser.model_executor.models.runner_models import flux as flux_runner  # noqa: E402
+from xfuser.model_executor.layers import plain_linear as plain_linear_module  # noqa: E402
+from xfuser.model_executor.models.runner_models import base_model, flux as flux_runner  # noqa: E402
 from xfuser.model_executor.models.runner_models.flux import (  # noqa: E402
     xFuserFlux2Model,
     xFuserFluxKontextModel,
@@ -106,7 +106,7 @@ def _attention_layers(model):
 def test_fusing_keeps_the_transformer_output(transformer):
     expected = _forward(transformer)
 
-    _runner(xFuserFluxModel, transformer)._fuse_qkv_projections()
+    _runner(xFuserFluxModel, transformer)._fuse_projections()
 
     layers = _attention_layers(transformer)
     assert [layer.fused_projections for layer in layers] == [True] * 4
@@ -127,7 +127,7 @@ def test_a_single_block_whose_mlp_projection_is_not_a_plain_linear_keeps_its_for
     quantized.load_state_dict(first.proj_mlp.state_dict())
     first.proj_mlp = quantized
 
-    _runner(xFuserFluxModel, transformer)._fuse_qkv_projections()
+    _runner(xFuserFluxModel, transformer)._fuse_projections()
 
     assert not hasattr(first, "to_qkv_mlp") and "forward" not in vars(first)
     assert first.attn.fused_projections
@@ -151,9 +151,20 @@ def _weight_bytes(model):
 def test_fusing_costs_no_memory(transformer):
     before = _weight_bytes(transformer)
 
-    _runner(xFuserFluxModel, transformer)._fuse_qkv_projections()
+    _runner(xFuserFluxModel, transformer)._fuse_projections()
 
     assert _weight_bytes(transformer) == before
+
+
+def test_fusing_logs_what_each_pass_fused(monkeypatch, transformer):
+    logged = []
+    monkeypatch.setattr(base_model, "log", logged.append)
+    first = transformer.single_transformer_blocks[0]
+    first.proj_mlp.__class__ = type("QuantizedLinear", (torch.nn.Linear,), {})
+
+    _runner(xFuserFluxModel, transformer)._fuse_projections()
+
+    assert logged == ["Fused projections: 4 qkv, 1 single_mlp"]
 
 
 def test_the_separate_projections_compute_the_same_from_the_fused_weights(transformer):
@@ -163,7 +174,7 @@ def test_the_separate_projections_compute_the_same_from_the_fused_weights(transf
     with torch.no_grad():
         expected = [getattr(layer, name)(sample) for name in names]
 
-    _runner(xFuserFluxModel, transformer)._fuse_qkv_projections()
+    _runner(xFuserFluxModel, transformer)._fuse_projections()
 
     with torch.no_grad():
         for name, output in zip(names, expected):
@@ -177,7 +188,7 @@ def test_a_layer_whose_projections_are_not_plain_linears_stays_separate(transfor
     first = transformer.transformer_blocks[0].attn
     first.add_k_proj = QuantizedLinear(first.add_k_proj.in_features, first.add_k_proj.out_features)
 
-    _runner(xFuserFluxModel, transformer)._fuse_qkv_projections()
+    _runner(xFuserFluxModel, transformer)._fuse_projections()
 
     assert [layer.fused_projections for layer in _attention_layers(transformer)] == [False, True, True, True]
 
@@ -193,10 +204,12 @@ def test_linears_whose_weights_are_not_plain_tensors_are_left_alone(monkeypatch,
             linear.weight.placements = ("shard",)
     else:
         monkeypatch.setattr(
-            usp_sdma, "_weight_is_torchao_quantized", lambda module: any(module is linear for linear in special)
+            plain_linear_module,
+            "_weight_is_torchao_quantized",
+            lambda module: any(module is linear for linear in special),
         )
 
-    _runner(xFuserFluxModel, transformer)._fuse_qkv_projections()
+    _runner(xFuserFluxModel, transformer)._fuse_projections()
 
     assert [layer.fused_projections for layer in _attention_layers(transformer)] == [False, True, True, True]
     assert not hasattr(single, "to_qkv_mlp") and "forward" not in vars(single)
@@ -214,7 +227,7 @@ def test_linears_whose_weights_are_not_plain_tensors_are_left_alone(monkeypatch,
     ],
 )
 def test_sharded_or_offloaded_weights_are_not_fused(transformer, config):
-    _runner(xFuserFluxModel, transformer, **config)._fuse_qkv_projections()
+    _runner(xFuserFluxModel, transformer, **config)._fuse_projections()
 
     assert not any(layer.fused_projections for layer in _attention_layers(transformer))
 
@@ -234,12 +247,13 @@ def test_sharded_or_offloaded_weights_are_not_fused(transformer, config):
 def test_which_runs_fuse(monkeypatch, model_cls, config, rdna4, expected):
     monkeypatch.setattr(flux_runner.PACKAGES_CHECKER, "_on_rdna4", lambda: rdna4)
 
-    assert _runner(model_cls, **config)._fuses_qkv_projections() is expected
+    assert _runner(model_cls, **config)._fuses_projections() is expected
 
 
 @pytest.mark.parametrize(("model_cls", "fused"), [(xFuserFluxModel, True), (xFuserFlux2Model, False)])
 def test_the_post_load_step_fuses_once_the_weights_are_placed(monkeypatch, transformer, model_cls, fused):
     monkeypatch.setattr(flux_runner.PACKAGES_CHECKER, "_on_rdna4", lambda: False)
+    monkeypatch.setattr(base_model, "get_sequence_parallel_world_size", lambda: 1)
     runner = _runner(
         model_cls,
         transformer,

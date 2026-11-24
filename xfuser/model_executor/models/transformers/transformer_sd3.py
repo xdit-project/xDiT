@@ -23,6 +23,7 @@ from xfuser.core.distributed import (
 )
 from .register import xFuserTransformerWrappersRegister
 from .base_transformer import xFuserTransformerBaseWrapper
+from xfuser.model_executor.layers.base_layer import xFuserLayerBaseWrapper
 
 logger = init_logger(__name__)
 
@@ -38,7 +39,7 @@ def sd3_attn_modules(transformer) -> list[nn.Module]:
     return modules
 
 
-class _PipeFusionTextInputBlock(nn.Module):
+class _PipeFusionTextInputBlock(xFuserLayerBaseWrapper):
     """Give one SD3 block patch 0's text input during PipeFusion patch steps.
 
     Patch 0 records the text stream entering the block; later patches of the
@@ -48,8 +49,7 @@ class _PipeFusionTextInputBlock(nn.Module):
     """
 
     def __init__(self, block: nn.Module):
-        super().__init__()
-        self.block = block
+        super().__init__(block)
         # Kept on the module rather than in an indexed list: torch.compile
         # specializes on Python ints, so an index would compile every block.
         self.text_input = None
@@ -61,7 +61,7 @@ class _PipeFusionTextInputBlock(nn.Module):
                 self.text_input = encoder_hidden_states
             else:
                 encoder_hidden_states = self.text_input
-        return self.block(hidden_states, encoder_hidden_states, *args, **kwargs)
+        return self.module(hidden_states, encoder_hidden_states, *args, **kwargs)
 
 
 @xFuserTransformerWrappersRegister.register(SD3Transformer2DModel)

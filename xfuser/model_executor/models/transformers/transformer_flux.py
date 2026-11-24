@@ -56,10 +56,11 @@ from xfuser.model_executor.layers.attention_processor import (
     xFuserAttentionProcessorRegister,
 )
 from xfuser.model_executor.layers.usp import USP
+from xfuser.model_executor.layers.sharded_modulation import shard_modulation
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
 from xfuser.model_executor.layers.usp_sdma import plain_linear
 from xfuser.model_executor.models.transformers.transformers_utils import (
-    fuse_plain_qkv_projections,
+    fuse_projections,
     local_sp_pad_rows,
     share_fused_weights,
     zero_sp_pad_rows_hook,
@@ -439,6 +440,16 @@ def flux_attn_modules(transformer) -> list[torch.nn.Module]:
     ]
 
 
+def flux_modulation_linears(transformer) -> list[torch.nn.Module]:
+    """The linears that project the conditioning embedding to each FLUX.1 block's modulation."""
+    double, single = transformer.transformer_blocks, transformer.single_transformer_blocks
+    return [
+        *(block.norm1.linear for block in double),
+        *(block.norm1_context.linear for block in double),
+        *(block.norm.linear for block in single),
+    ]
+
+
 class xFuserFlux1Transformer2DWrapper(FluxTransformer2DModel):
     def __init__(
         self,
@@ -475,16 +486,23 @@ class xFuserFlux1Transformer2DWrapper(FluxTransformer2DModel):
             block.register_forward_hook(zero_sp_pad_rows_hook(self._sp_pad, index=1))
         register_fp8_comms_eligible_modules(self, flux_attn_modules(self))
 
-    def fuse_qkv_projections(self) -> None:
+    def shard_modulation(self) -> int:
+        """Share the blocks' timestep modulation out over the sequence-parallel ranks.
+
+        Every rank holds the same conditioning embedding, so each projects a share of the
+        blocks' modulation and the ranks gather it (`ShardedModulation`), in place of every
+        rank projecting all of it. Returns the number of linears shared out.
+        """
+        return shard_modulation(self, flux_modulation_linears(self), self.time_text_embed)
+
+    def fuse_projections_for_inference(self) -> dict[str, int]:
         """Compute each layer's projections of one input with one GEMM, where they are plain linears.
 
         Fuses Q, K and V of every attention layer and folds the single blocks' MLP projection into
         theirs. The separate projections become views of the fused weights, so this costs no memory.
+        Returns the number fused by each pass.
         """
-        fuse_plain_qkv_projections(self)
-        # Before folding allocates: the freed Q/K/V copies would otherwise sit cached under it.
-        torch.cuda.empty_cache()
-        fold_mlp_into_qkv_projections(self)
+        return fuse_projections(self, single_mlp=fold_mlp_into_qkv_projections)
 
     def _pad_to_sp_divisible(self, tensor: torch.Tensor, padding_length: int, dim: int) -> torch.Tensor:
         padding = torch.zeros(

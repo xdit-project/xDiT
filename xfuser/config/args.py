@@ -5,13 +5,12 @@ import os
 import sys
 import warnings
 from dataclasses import dataclass
-from typing import Optional, List, Tuple, Union
+from typing import TYPE_CHECKING, Optional, List, Tuple, Union
 
 import torch
 import torch.distributed
 
 from xfuser.logger import init_logger
-from xfuser.core.distributed import init_distributed_environment
 from xfuser.config.attention_a2a_codecs import GEMM_FORMAT_OUTPUT_CODECS
 from xfuser.config.attention_a2a import (
     ATTENTION_A2A_HADAMARD_PLACEMENTS,
@@ -19,28 +18,18 @@ from xfuser.config.attention_a2a import (
     ATTENTION_A2A_PROFILES,
     AttentionA2AConfig,
 )
+from xfuser.config.defaults import DEFAULT_FP8_COMMS_SAFETY_FACTOR
 from xfuser.config.ulysses_a2a import UlyssesA2AConfig
-from xfuser.core.distributed.attention_schedule import SolAttnBetaSchedule
 from xfuser.config.gemm import (
     GemmQuantizationSpec,
     load_gemm_config,
     parse_gemm_quantization,
 )
-from xfuser.config.config import (
-    DEFAULT_FP8_COMMS_SAFETY_FACTOR,
-    EngineConfig,
-    FastAttnConfig,
-    ParallelConfig,
-    TensorParallelConfig,
-    PipeFusionParallelConfig,
-    SequenceParallelConfig,
-    DataParallelConfig,
-    FullyShardConfig,
-    VaeParallelConfig,
-    ModelConfig,
-    InputConfig,
-    RuntimeConfig,
-)
+
+# Do not import the runtime (xfuser.config.config, xfuser.core) at module level.
+# The argument parser must load without it, for example to show --help.
+if TYPE_CHECKING:
+    from xfuser.config.config import EngineConfig, InputConfig
 
 logger = init_logger(__name__)
 
@@ -96,6 +85,10 @@ def block_size(val: str) -> Tuple[int, int]:
     if q_tile <= 0 or kv_tile <= 0:
         raise argparse.ArgumentTypeError(f"block size tiles must be positive; got {val!r}")
     return q_tile, kv_tile
+
+
+# --vae_dtype choices.
+VAE_DTYPES = {"bf16": torch.bfloat16, "fp32": torch.float32}
 
 
 _DETERMINISM_CHECK_HELP = (
@@ -310,7 +303,7 @@ class xFuserArgs:
     shard_t5_encoder: bool = False
     attention_backend: Optional[str] = None
     cross_attention_backend: Optional[str] = None
-    mha_v4_kv_splits: Union[str, int] = 1
+    mha_v4_kv_splits: Union[str, int, None] = None
     gemm_quantization: Union[GemmQuantizationSpec, str, None] = None
     gemm_config: Optional[str] = None
     use_int8_gemms: bool = False
@@ -362,6 +355,7 @@ class xFuserArgs:
     memory_efficient_sharding: bool = False
     memory_efficient_replicated_load: bool = False
     use_vae_channels_last_format: bool = False
+    vae_dtype: Optional[torch.dtype] = None
     # Hybrid attention schedule
     use_hybrid_attn_schedule: bool = False
     hybrid_attn_low_precision_backend: Optional[str] = None
@@ -417,6 +411,10 @@ class xFuserArgs:
     def __post_init__(self):
         if isinstance(self.sparseattn_block_size, str):
             self.sparseattn_block_size = block_size(self.sparseattn_block_size)
+        if isinstance(self.vae_dtype, str):
+            if self.vae_dtype not in VAE_DTYPES:
+                raise ValueError(f"--vae_dtype must be one of {', '.join(VAE_DTYPES)}; got {self.vae_dtype!r}")
+            self.vae_dtype = VAE_DTYPES[self.vae_dtype]
         if not math.isfinite(self.lora_scale):
             raise ValueError("lora_scale must be finite")
         if not self.lora_path and (self.lora_weight_name or self.lora_scale != 1.0):
@@ -432,7 +430,8 @@ class xFuserArgs:
             )
             self.use_sparseattn_head_balance = True
         self._resolve_attention_a2a()
-        self.mha_v4_kv_splits = _normalize_mha_v4_kv_splits(self.mha_v4_kv_splits)
+        if self.mha_v4_kv_splits is not None:
+            self.mha_v4_kv_splits = _normalize_mha_v4_kv_splits(self.mha_v4_kv_splits)
         self._validate_ulysses_a2a()
         if self.warmup_steps < 0:
             raise ValueError("--warmup_steps must be greater than or equal to 0")
@@ -1115,9 +1114,10 @@ class xFuserArgs:
         parser.add_argument(
             "--mha_v4_kv_splits",
             type=str,
-            default="1",
+            default=None,
             help=(
                 "Dense AITER MHA v4 KV split count: 1 disables splitting; 'auto' delegates to AITER. "
+                "Unset means the model's default, else 1. "
                 "A larger count requires a compatible AITER kernel and shape. Tune with measured latency; "
                 "splitting adds host overhead and does not apply to every attention format."
             ),
@@ -1550,6 +1550,13 @@ class xFuserArgs:
             help="Use channels last memory format for the VAE.",
         )
         parser.add_argument(
+            "--vae_dtype",
+            choices=list(VAE_DTYPES),
+            default=None,
+            help="Load the VAE in this dtype instead of the model's default. Faster in bf16, "
+            "at some image fidelity. Only for models that list it.",
+        )
+        parser.add_argument(
             "--use_ssta_sparse_text_to_image",
             action="store_true",
             default=False,
@@ -1862,7 +1869,24 @@ class xFuserArgs:
 
     def create_config(
         self,
-    ) -> Tuple[EngineConfig, InputConfig]:
+    ) -> Tuple["EngineConfig", "InputConfig"]:
+        from xfuser.config.config import (
+            EngineConfig,
+            FastAttnConfig,
+            ParallelConfig,
+            TensorParallelConfig,
+            PipeFusionParallelConfig,
+            SequenceParallelConfig,
+            DataParallelConfig,
+            FullyShardConfig,
+            VaeParallelConfig,
+            ModelConfig,
+            InputConfig,
+            RuntimeConfig,
+        )
+        from xfuser.core.distributed import init_distributed_environment
+        from xfuser.core.distributed.attention_schedule import SolAttnBetaSchedule
+
         self._validate_gemm_quantization_flags()
         if self.vae_parallel_size != 0:
             raise ValueError(
@@ -1926,7 +1950,7 @@ class xFuserArgs:
             use_fp8_t5_encoder=self.use_fp8_t5_encoder,
             attention_backend=self.attention_backend,
             cross_attention_backend=self.cross_attention_backend,
-            mha_v4_kv_splits=self.mha_v4_kv_splits,
+            mha_v4_kv_splits=1 if self.mha_v4_kv_splits is None else self.mha_v4_kv_splits,
             spargeattn_reorder_sequence=self.spargeattn_reorder_sequence,
             use_spargeattn_static_block_mask=self.use_spargeattn_static_block_mask,
             spargeattn_simthreshold=self.spargeattn_simthreshold,

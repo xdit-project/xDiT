@@ -15,6 +15,7 @@ from diffusers.utils import (
     unscale_lora_layers,
 )
 from xfuser.model_executor.layers.usp import USP, masked_attention_backend
+from xfuser.model_executor.layers.sharded_modulation import shard_modulation
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
 from xfuser.core.distributed import (
     get_runtime_state,
@@ -403,6 +404,15 @@ class xFuserQwenImageTransformerWrapper(QwenImageTransformer2DModel):
             self._key_packing = (key, packing)
         return self._key_packing[1]
 
+    def shard_modulation(self) -> int:
+        """Share the blocks' timestep modulation out over the sequence-parallel ranks.
+
+        Every rank holds the same timestep embedding, so each projects a share of the blocks'
+        modulation and the ranks gather it (`ShardedModulation`), in place of every rank
+        projecting all of it. Returns the number of linears shared out.
+        """
+        return shard_modulation(self, qwen_modulation_linears(self), self.time_text_embed)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -594,6 +604,16 @@ class xFuserQwenImageTransformerWrapper(QwenImageTransformer2DModel):
             return (output,)
 
         return Transformer2DModelOutput(sample=output)
+
+
+def qwen_modulation_linears(transformer) -> list[torch.nn.Module]:
+    """The linears that project the timestep embedding to each Qwen-Image block's modulation.
+
+    Each sits behind a SiLU in the block's `img_mod` / `txt_mod`. With `zero_cond_t` the
+    prompt stream's are handed only the first half of the embedding's samples.
+    """
+    blocks = transformer.transformer_blocks
+    return [*(block.img_mod[1] for block in blocks), *(block.txt_mod[1] for block in blocks)]
 
 
 def qwen_attn_modules(transformer) -> list[torch.nn.Module]:

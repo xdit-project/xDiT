@@ -73,6 +73,49 @@ def test_cfg_parallel_without_guidance_is_refused(build_flux3):
         model._validate_args(_args(guidance_scale=1.0))
 
 
+@pytest.mark.parametrize(
+    ("name", "config", "guidance_scale", "calls_per_step"),
+    [
+        ("FLUX.3-image-klein", {}, None, 1),
+        ("FLUX.3-image-klein-base", {}, 3.5, 2),
+        ("FLUX.3-image-klein-base", {"use_cfg_parallel": True}, 3.5, 1),
+        ("FLUX.3-image-klein-base", {}, 1.0, 1),
+        # The guider keeps both branches at any scale other than 1.
+        ("FLUX.3-image-klein-base", {}, 0.5, 2),
+    ],
+)
+def test_hybrid_schedules_count_every_transformer_call(build_flux3, name, config, guidance_scale, calls_per_step):
+    model = build_flux3(name, **config)
+
+    assert model._calculate_hybrid_attention_step_multiplier(_args(guidance_scale=guidance_scale)) == calls_per_step
+
+
+@pytest.mark.parametrize(
+    ("attention_schedule", "gemm_schedule", "warmup_steps"),
+    [(False, False, 2), (False, True, None), (True, False, None)],
+)
+def test_compile_warmup_runs_a_whole_schedule(
+    build_flux3, monkeypatch, attention_schedule, gemm_schedule, warmup_steps
+):
+    model = build_flux3()
+    state = SimpleNamespace(
+        has_attention_schedule=lambda: attention_schedule,
+        has_gemm_schedule=lambda: gemm_schedule,
+    )
+    base_model = "xfuser.model_executor.models.runner_models.base_model"
+    monkeypatch.setattr(f"{base_model}.runtime_state_is_initialized", lambda: True)
+    monkeypatch.setattr(f"{base_model}.get_runtime_state", lambda: state)
+
+    assert model._compile_warmup_steps(_args()) == warmup_steps
+
+
+def test_the_compiled_text_encoder_keeps_leaf_level_offload(build_flux3):
+    model = build_flux3()
+
+    assert "text_encoder" in model._get_compiled_pipe_components()
+    assert model._block_level_offload_components() == ["transformer"]
+
+
 def test_negative_prompt_is_refused(build_flux3):
     model = build_flux3()
 
@@ -118,10 +161,19 @@ def test_resizing_references_needs_a_target_size(build_flux3, monkeypatch):
         model._preprocess_args_images(_args(input_images=["ref.png"], resize_input_images=True))
 
 
+class _RecordingTransformer:
+    def __init__(self):
+        self.releases = 0
+
+    def release_step_constants(self):
+        self.releases += 1
+
+
 class _RecordingPipe:
     def __init__(self, size):
         self.size = size
         self.calls = []
+        self.transformer = _RecordingTransformer()
 
     def __call__(self, **kwargs):
         self.calls.append(kwargs)
@@ -155,6 +207,15 @@ def test_a_seed_draws_the_same_noise_as_a_cpu_generator(build_flux3):
     generator = model.pipe.calls[0]["generator"]
     assert generator.device.type == "cpu"
     assert torch.equal(torch.randn(4, generator=generator), torch.randn(4, generator=torch.Generator().manual_seed(7)))
+
+
+def test_a_call_releases_the_transformers_step_constants(build_flux3):
+    model = build_flux3()
+    model.pipe = _RecordingPipe((1024, 1024))
+
+    model._run_pipe(_args(prompt=["a bison", "a heron"]))
+
+    assert model.pipe.transformer.releases == 1
 
 
 def test_the_base_model_runs_the_requested_guidance_and_negative_prompt(build_flux3):

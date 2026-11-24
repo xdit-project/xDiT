@@ -64,8 +64,8 @@ run every configuration.
 with an extended precision (fp32 by default). It is not a `diffusers` implementation.
 
 **HL50.** One test answers one question: "Does this component, in this regime, with these inputs, work
-correctly?" A failed check belongs to one test, so only that test fails (wider failures due to
-crashes or hangs are an accepted limitation of version 1).
+correctly?" A failed check belongs to one test, so only that test fails.
+A misattribution of failure due to a crash or a hang is an accepted limitation of version 1.
 
 **HL60.** A test fails for a deviation beyond its tolerance, a crash, a hang, nondeterminism, or any other
 detectable issue. "Flaky" includes a crash and a hang.
@@ -103,7 +103,7 @@ reference data (B).
 
 **HLS15.** Statuses describe nodes of an exactly one directed acyclic graph of evolution of the knowledge about certain properties that matter for the testing of:
 1. a component call on a rank (ABOUT_TO_START, DUMPED, UNSUPPORTED, FIDELITY_SKIPPED, PRE_FIDELITY, PRE_REPLAY, FIDELITY_FAILED, FIDELITY_PASSED, REPLAYED; also additionally CRASHED or HANGED if such an event happens during the call processing), or
-2. a whole component/case on a rank(NOT_REACHED, FAILED_TO_START) or all ranks (UNRESOLVABLE_PATH, UNSUPPORTED), or
+2. a whole component/case on a rank(NOT_REACHED, FAILED_TO_START) or all ranks (UNRESOLVABLE_PATH, UNSUPPORTED, CASE_CALLS_MISMATCH), or
 3. a whole configuration on all ranks (UNSUPPORTED; also additionally CRASHED or HANGED if such an event happens outside of some call processing); Configuration statuses per se do not exist: these are shortcuts for an algorithm of assigning certain statuses for all ranks of some or all cases of the configuration:
    1. UNSUPPORTED configuration means "set all configuration component/case statuses to UNSUPPORTED on all ranks"
    2. CRASHED or HANGED configuration (when the crash or hang happen outside of processing of some component call) means "record the status, for all cases of the configuration that don't have at least ABOUT_TO_START call status recorded, record FAILED_TO_START status."
@@ -193,9 +193,10 @@ an attribute, and an empty name for a bare tensor. Nested containers flatten to 
 
 **TM70.** Each metrics file record has these fields:
 1. a UTC timestamp field with value in ISO 8601 `YYYY-MM-DDThh:mm:ssZ` format.
-2. the xDiT commit, and whether the working tree had uncommitted changes;
+2. the xDiT commit, and whether the working tree had uncommitted changes; For reruns, the user is responsible to ensure the commit corresponds to the version that created data on which the rerun worked.
 3. the GPU architecture;
-4. list of calls made, where each element has:
+4. run mode (fresh, or rerun)
+5. list of calls made, where each element has:
    1. a call identifier
    2. list of outputs, where each element has:
       1. output name
@@ -204,15 +205,12 @@ an attribute, and an empty name for a bare tensor. Nested containers flatten to 
 
 ### Components, paths and calls
 
-**CP10.** The harness tests only components mentioned in an explicit list of component path strings. Each path string defines a component to test and is the path from the runner model object to the callable component or a method. Only the listed components are captured. A listed component must run at least once during pipeline run.
+**CP10.** The harness tests only components mentioned in an explicit list of component path strings. Each path string defines a component to test and is the path from the runner model object to the callable component or a method. Only the listed components are captured. A listed component must run at least once during pipeline run. This document also calls a pytorch object with `forward()` method as callable too (since that is what's happening in a model).
 
 **CP20.** The list is known before the run. The harness makes the test cases from the list only (without a
 model) and list's items (component paths) serve as test case identifiers, so there is an exact 1-to-1 relationship between a component path and a test case.
 
-**CP30.** Component path syntax: dots separate the path
-elements, and `[i]` indexes a container, for example
-`pipe.transformer.blocks[0].attn1` and `pipe.transformer.blocks[-1]`. A path has no leading dot. `[key]`
-selects an item of an `nn.ModuleDict`.
+**CP30.** Component path syntax: dots separate the path elements, and `[i]` indexes a container, for example `pipe.transformer.blocks[0].attn1` and `pipe.transformer.blocks[-1]`. A path has no leading dot. `[key]` selects an item of an `nn.ModuleDict`.
 
 **CP40.** The first element names an attribute of the runner model object, for example `pipe`, `second_pipe` or
 `refiner_pipe`. The harness does not check that the attribute holds a pipeline. An attribute that holds `None`
@@ -253,10 +251,7 @@ writes the inputs of each selected call, random-number states and the outputs af
 to data files (it doesn't store them in memory). These data files are read later for call replays and
 checks. Only the corresponding test case function can delete these data files.
 
-**CP100.** An address contains the call numbers of all callable elements of a path that the
-harness tracks. The first path element, such as `pipe`, `second_pipe` or `refiner_pipe` is
-usually callable, but version 1 does not track it due to complications, and assumes it to
-be a non-callable instead.
+**CP100.** A call identifier `<call_id>` is a component path in which each tracked callable element carries its counter value at the time of the call, for example `pipe.transformer:3.blocks[0]:1`. The first path element, such as `pipe`, `second_pipe` or `refiner_pipe` is usually callable, but version 1 does not track it due to complications, and assumes it to be a non-callable instead. This identifier is unique within a run, reads with the CP30 rules, and is the same in A and B when their call order is the same.
 
 **CP110.** The harness does not care who calls a component. It uses only the inputs and the outputs of each
 call. Calls from another pipeline, from the runner, or from any other code are tested like all other calls.
@@ -376,9 +371,11 @@ In version 1 no cross-rank synchronization about which cases to replay is perfor
 
 *Rationale for the absence of replay synchronization:* Synchronization adds considerable complexity to the code. Instead we assume that each component runs on every rank the same number of calls, and each of the calls is handled by the rank successfully, so ordered "replay lists" are identical across all ranks, therefore letting each rank to use its private "replay list" is harmless. The user is responsible to ensure the component they select meets the assumptions.
 
+However, to alleviate debugging, all ranks compare their "replay lists" with one `all_gather_object()` call. Cases whose lists differ get `status=CASE_CALLS_MISMATCH case=<case_id>` on all ranks, and are dropped on all ranks. B runs the same check on its list of A's calls.
+
 **RL90.** **phase=replay** Two kind of replays are needed:
 - both instance A and B should replay each call for fidelity check IA40-IA60;
-- instance B also replays all calls that got status=DUMPED on A and then either passed B's fidelity check or the check was disabled for a call by instance-specific override flag, using A's data casted to reference dtype to obtain reference outputs of the component.
+- instance B also replays all calls that got status=DUMPED on A (B can read logs of A for this) and then either passed B's fidelity check or the check was disabled for a call by instance-specific override flag, using A's data casted to reference dtype to obtain reference outputs of the component.
 
 Instance B runs both replays: first it runs fidelity check replays on its own inputs and outputs, then it runs replays on A's inputs.
 

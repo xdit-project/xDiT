@@ -1,10 +1,6 @@
 # Requirements and use cases of the component test harness
 
-This document lists the use cases and the requirements of the xDiT component test harness.
-
-Each item has an identifier. Use cases use `UC` and a sequence number. A requirement uses letters for the title of
-its section and its position in the section multiplied by 10, for example `HL10` for the first requirement of
-"High-level requirements". The steps of 10 leave space for new requirements.
+This document describes the use cases and the requirements for the xDiT component testing harness.
 
 ## Use cases
 
@@ -107,15 +103,22 @@ reference data (B).
 
 #### Statuses
 
-**HLS10.** When a rank executes a model or does something else mandated by this document, it gets a status label that identifies a certain event, situation, state or a condition, that the rank seen. Statues are written in CAPITAL_LETTERS. Status only describe what the rank observed last and might apply to a component (i.e. its test case as a set of calls the component made during model execution), or to an individual case call.
+**HLS10.** A component path in the list of components to test for a configuration (TD10) identifies a single component, for which a test case is created, and the component must be executed (called by the model) at least once during a model/pipeline execution. Statues are written in CAPITAL_LETTERS and carry information necessary for proper conversion of behavior observed during an attempt to run instances into pytest outcomes, while giving a user enough information for debugging.
 
-**HS11.** Users do not need to see status identifiers: the harness raises verbose exceptions with explanations that a person can read.
+**HLS15.** Statuses describe nodes of an exactly one directed acyclic graph of evolution of the knowledge about certain properties that matter for the testing of:
+1. a component call on a rank (ABOUT_TO_START, DUMPED, UNSUPPORTED, FIDELITY_SKIPPED, PRE_FIDELITY, PRE_REPLAY, FIDELITY_FAILED, FIDELITY_PASSED, REPLAYED; also additionally CRASHED or HANGED if such an event happens during the call processing), or
+2. a whole component/case on a rank(NOT_REACHED, FAILED_TO_START) or all ranks (UNRESOLVABLE_PATH, UNSUPPORTED), or
+3. a whole configuration on all ranks (UNSUPPORTED; also additionally CRASHED or HANGED if such an event happens outside of some call processing); Configuration statuses per se do not exist: these are shortcuts for an algorithm of assigning certain statuses for all ranks of some or all cases of the configuration:
+   1. UNSUPPORTED configuration means "set all configuration component/case statuses to UNSUPPORTED on all ranks"
+   2. CRASHED or HANGED configuration (when the crash or hang happen outside of processing of some component call) means "record the status, for all cases of the configuration that don't have at least ABOUT_TO_START call status recorded, record FAILED_TO_START status."
 
-**HLS15.** A case call status progression as the document describes it must follow directed acyclic graph rules.
+**TODO for an agent:** ALWAYS verify consistency of HLS15 with the other parts of the document!
+
+**HLS19.** Users do not need to see status identifiers: the harness raises verbose exceptions with explanations that a person can read.
 
 **HLS20.** This document follows a convention: if a certain status X has _A or _B suffix, that only means that status X applies to a rank of instance A or B correspondingly. There are no distinct statuses X_A or X_B, there's only a status X and a rank of instance A or B on which it appears. It's always known to which instance a rank belongs, so instance specific statuses aren't generally needed.
 
-**HLS30.** Status is written to the rank's log file immediately when it happens as `status=X` record (the record should have other fields providing additional information). In the rank's log, when `status=` field is recorded with `case=` entry (setting a current test case identifier), the status applies to the test case. It's an error to have a `case=` field without `status=` field. When `status=` is recorded together with `case=` and `call=` identifiers, the status applies to the given call of the given case.
+**HLS30.** Status is written to the rank's log file immediately when it happens as `status=X` record (the record should have other fields providing additional information). In the rank's log, when `status=` field is recorded with `case=` entry (setting a current test case identifier), the status applies to the test case. When `status=` is recorded together with `case=` and `call=` identifiers, the status applies to the given call of the given case. It's an error to have a `case=` field without `status=` or `pass=` fields (PI30), or `case=` and `call=` fields without `status=`.
 
 **HLS40.** When the harness processes data obtained from instances A and B, it loads individual case data
 from each of the instances and by aggregating statuses from all ranks decides how it's going
@@ -347,7 +350,7 @@ so a fidelity check on own inputs is needed.
 
 ### Rank lifecycle
 
-**RL10.** **Logging.** In its lifetime a rank comes through a sequence of phases (in which all ranks must participate), described in the order below. To preserve events happened/observed during rank's lifetime, each rank creates in the configuration's directory (TD75) a structured log file that, during the instance execution, only the rank can write to. On a rank startup, rank gets from the launcher a path to data directory to store the dumps and the status file. The status file name is `<instance_id>_rank_<rank_number>.jsonl`, where `<instance_id>` is `A` for instance A, or `B` otherwise, and `<rank_number>` is just torchrun's LOCAL_RANK value. It's an error if the file existed when the rank started. Each rank appends (and flushes immediately) to their own log file progress records (TD110, TD120), status changes and all other information that requirements of this document mandate to save and pass to pytest/user.
+**RL10.** **Logging.** In its lifetime a rank comes through a sequence of phases (in which all ranks must participate), described in the order below. To preserve events happened/observed during rank's lifetime, each rank creates in the configuration's directory (TD75) a structured log file that, during the instance execution, only the rank can write to. On a rank startup, rank gets from the launcher a path to data directory to store the dumps and the log file. The log file name is `<instance_id>_rank_<rank_number>.jsonl`, where `<instance_id>` is `A` for instance A, or `B` otherwise, and `<rank_number>` is just torchrun's LOCAL_RANK value. It's an error if the file existed when the rank started. Each rank appends (and flushes immediately) to their own log file progress records (TD110, TD120), status changes and all other information that requirements of this document mandate to save and pass to pytest/user.
 
 Each log record must have at least one common field: a UTC timestamp in ISO 8601 `YYYY-MM-DDThh:mm:ssZ` format. Records related to a case must have another common field `case=<case_id>` - the case identifier, so one can use it to find entries related to the case. A case call related records must also have `call=<call_id>` field set. The file hence serves as a structured timestamped log of all important events the rank observed. Neither rank, nor launcher never deletes anything from the file, only appends to it.
 
@@ -355,10 +358,10 @@ After the instance ends, the ownership of the log files of all ranks is passed t
 
 **RL20.** Getting to the next phase is recorded in the rank's log with a corresponding field `phase=`. These records are used by the launcher to enforce deadlines (TD110).
 
-**RL30.** When a rank just starts, it gets a status STARTED.
+**RL30.** When a rank just starts, it writes `started=true` log record.
 
 **RL40.** **phase=initialization** This is where the rank parses its xDiT setting (TD50) and determines if it can run the configuration. If the configuration gets `status=UNSUPPORTED` record with an appropriate value of `reason=` field describing what exactly isn't supported, and then rank exits with an error. This automatically forces torchrun to kill all other ranks. By reading the log files the launcher is able to correctly identify the cause and set all cases statuses to UNSUPPORTED too (IA70.2).
-*Rationale for not setting case statuses:* In case of a hang or a crash, the launcher have to identify cases that didn't run to assign them appropriate statuses. We simply reuse this machinery for setting case statuses for unsupported configuration too.
+*Rationale for not setting case statuses in rank code:* In case of a hang or a crash, the launcher have to identify cases that didn't run to assign them appropriate statuses. We simply reuse this machinery for setting case statuses for unsupported configuration too.
 
 **RL50.** **phase=loading** Doesn't have specific statuses.
 

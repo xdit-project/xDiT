@@ -1083,6 +1083,17 @@ class xFuserModel(abc.ABC):
     def _get_compiled_pipe_components(self) -> List[str]:
         return ["transformer"]
 
+    def _weights_whole_and_resident(self) -> bool:
+        """Whether each rank holds whole weights on its device: not sharded (FSDP, memory-efficient sharding) or offloaded."""
+        config = self.config
+        return not (
+            config.fully_shard_degree > 1
+            or config.memory_efficient_sharding
+            or config.enable_group_cpu_offload
+            or config.enable_sequential_cpu_offload
+            or config.enable_model_cpu_offload
+        )
+
     def _shard_modulation(self) -> None:
         """Share the transformer's timestep modulation out over the sequence-parallel ranks.
 
@@ -1097,11 +1108,7 @@ class xFuserModel(abc.ABC):
         if (
             size <= 1
             or config.pipefusion_parallel_degree > 1
-            or config.fully_shard_degree > 1
-            or config.memory_efficient_sharding
-            or config.enable_group_cpu_offload
-            or config.enable_sequential_cpu_offload
-            or config.enable_model_cpu_offload
+            or not self._weights_whole_and_resident()
             or config.cache_method
             or PACKAGES_CHECKER._on_rdna4()
         ):
@@ -1125,15 +1132,7 @@ class xFuserModel(abc.ABC):
         the weights are sharded or offloaded, and with a LoRA, which expects [out, in].
         """
         config = self.config
-        if (
-            not prefers_untransposed_weights()
-            or config.fully_shard_degree > 1
-            or config.memory_efficient_sharding
-            or config.enable_group_cpu_offload
-            or config.enable_sequential_cpu_offload
-            or config.enable_model_cpu_offload
-            or config.lora_path
-        ):
+        if not prefers_untransposed_weights() or not self._weights_whole_and_resident() or config.lora_path:
             return
         count = transpose_plain_linears(self.pipe.transformer)
         if count:
@@ -1155,14 +1154,7 @@ class xFuserModel(abc.ABC):
 
     def _fuse_projections(self) -> None:
         """Fuse the same-input projections of the compiled components, unless their weights are sharded or offloaded."""
-        config = self.config
-        if (
-            config.fully_shard_degree > 1
-            or config.memory_efficient_sharding
-            or config.enable_group_cpu_offload
-            or config.enable_sequential_cpu_offload
-            or config.enable_model_cpu_offload
-        ):
+        if not self._weights_whole_and_resident():
             return
         fused: dict[str, int] = {}
         for name in self._get_compiled_pipe_components():

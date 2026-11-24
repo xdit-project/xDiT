@@ -1,10 +1,13 @@
-# Requests AMD hardware validation manually or through a /ci-rocm PR comment.
+# Requests AMD benchmarks and accelerator tests manually, by PR comment, or nightly.
+# Scheduled runs require their GitHub actor in the downstream XDIT_CI_ALLOWED_ACTORS.
 name: ROCm Hardware CI
 run-name: "ROCm HW CI [origin:${{ inputs.original_run_id || github.run_id }}]"
 
 on:
   issue_comment:
     types: [created]
+  schedule:
+    - cron: '0 2 * * *'
   workflow_dispatch:
     inputs:
       benchmarks:
@@ -49,6 +52,7 @@ jobs:
   wait:
     if: >-
       github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
       (github.event.issue.pull_request &&
        (github.event.comment.body == '/ci-rocm' ||
         startsWith(github.event.comment.body, '/ci-rocm ')))
@@ -60,12 +64,31 @@ jobs:
       SELF_WORKFLOW: rocm-hardware-ci.yml
       ORIGINAL_RUN_ID: ${{ inputs.original_run_id || github.run_id }}
       CONTINUATION_COUNT: ${{ inputs.original_run_id && inputs.continuation_count || '0' }}
-      BENCHMARKS: ${{ inputs.benchmarks }}
-      ARCHITECTURES: ${{ inputs.architectures }}
-      AMD_REF: ${{ inputs.amd_ref }}
+      BENCHMARKS: ${{ github.event_name == 'schedule' && '--tag nightly' || inputs.benchmarks }}
+      ARCHITECTURES: ${{ github.event_name == 'schedule' && 'gfx942,gfx950' || inputs.architectures }}
+      AMD_REF: ${{ github.event_name == 'schedule' && 'main' || inputs.amd_ref }}
       DOWNSTREAM_CONFIGS: ${{ inputs.downstream_configs && 'true' || 'false' }}
       PR_NUMBER: ${{ github.event.issue.number || inputs.pr_number }}
     steps:
+      - name: Checkout nightly configuration
+        if: github.event_name == 'schedule'
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Select nightly configuration source
+        if: github.event_name == 'schedule'
+        run: |
+          shopt -s nullglob
+          configs=(.ci/configs/*.yaml)
+          if [ "${#configs[@]}" -eq 0 ]; then
+            echo "DOWNSTREAM_CONFIGS=true" >> "$GITHUB_ENV"
+            echo "No xDiT benchmark configs found; using downstream nightly configs."
+          else
+            echo "DOWNSTREAM_CONFIGS=false" >> "$GITHUB_ENV"
+            echo "Using xDiT benchmark configs."
+          fi
+
       - name: Checkout trusted comment parser
         if: github.event_name == 'issue_comment'
         uses: actions/checkout@v4
@@ -144,7 +167,7 @@ jobs:
             -f content=eyes
 
       - name: Publish request metadata
-        if: github.event_name == 'issue_comment' || inputs.original_run_id == ''
+        if: github.event_name == 'schedule' || github.event_name == 'issue_comment' || inputs.original_run_id == ''
         run: |
           mkdir -p request
           jq -n \
@@ -156,7 +179,7 @@ jobs:
             '{benchmarks: $benchmarks, architectures: $architectures, amd_ref: $amd_ref, xdit_sha: $xdit_sha, use_xdit_configs: ($downstream_configs | not)}' > request/request.json
 
       - name: Upload request metadata
-        if: github.event_name == 'issue_comment' || inputs.original_run_id == ''
+        if: github.event_name == 'schedule' || github.event_name == 'issue_comment' || inputs.original_run_id == ''
         uses: actions/upload-artifact@v4
         with:
           name: rocm-hardware-request

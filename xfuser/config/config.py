@@ -1,11 +1,12 @@
 from dataclasses import dataclass, field, fields
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 import torch
 from packaging import version
 
 from xfuser.compat import declared_floor, version_at_least
 from xfuser.config.attention_a2a import AttentionA2AConfig
+from xfuser.config.defaults import DEFAULT_FP8_COMMS_SAFETY_FACTOR
 from xfuser.config.ulysses_a2a import UlyssesA2AConfig
 from xfuser.envs import CUDA_VERSION, PACKAGES_CHECKER, TORCH_VERSION
 from xfuser.logger import init_logger
@@ -15,7 +16,6 @@ logger = init_logger(__name__)
 env_info = PACKAGES_CHECKER.get_packages_info()
 HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
 
-DEFAULT_FP8_COMMS_SAFETY_FACTOR = 0.85
 HAS_FLASH_ATTN = env_info["has_flash_attn"]
 
 
@@ -70,9 +70,16 @@ class RuntimeConfig:
     use_spargeattn_static_block_mask: bool = True
     spargeattn_simthreshold: float = 0.3
     spargeattn_cdfthreshold: float = 0.92
-    use_spargeattn_head_balance: bool = False
-    # Sol-Attn. kv_splits "auto" is 4 on SM90 CuTe for sequences of at least
-    # 65536 tokens, and 1 otherwise. sink_start None keeps a sink on the suffix.
+    use_sparseattn_head_balance: bool = False
+    # Block-sparse tile as (q_tile, kv_tile). None takes each recipe's default.
+    sparseattn_block_size: Optional[Tuple[int, int]] = None
+    # AITER MHA v4 Sol-Attn (the AITER_*_SOL backends).
+    solattn_beta: float = 0.5
+    solattn_beta_schedule: Optional[str] = None
+    solattn_tilt_rank: int = 0
+    # NVIDIA Sol-Attn (the SOL_ATTN backend). kv_splits "auto" is 4 on SM90
+    # CuTe for sequences of at least 65536 tokens, and 1 otherwise. sink_start
+    # None keeps a sink on the suffix.
     sol_attn_tau: float = 0.2
     sol_attn_thresh_type: str = "exact"
     sol_attn_kv_splits: str = "auto"

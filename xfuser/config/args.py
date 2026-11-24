@@ -5,39 +5,29 @@ import os
 import sys
 import warnings
 from dataclasses import dataclass
-from typing import Optional, List, Tuple, Union
+from typing import TYPE_CHECKING, Optional, List, Tuple, Union
 
 import torch
 import torch.distributed
 
 from xfuser.logger import init_logger
-from xfuser.core.distributed import init_distributed_environment
 from xfuser.config.attention_a2a import (
     ATTENTION_A2A_HADAMARD_PLACEMENTS,
     ATTENTION_A2A_PROFILES,
     AttentionA2AConfig,
 )
+from xfuser.config.defaults import DEFAULT_FP8_COMMS_SAFETY_FACTOR
 from xfuser.config.ulysses_a2a import UlyssesA2AConfig
 from xfuser.config.gemm import (
     GemmQuantizationSpec,
     load_gemm_config,
     parse_gemm_quantization,
 )
-from xfuser.config.config import (
-    DEFAULT_FP8_COMMS_SAFETY_FACTOR,
-    EngineConfig,
-    FastAttnConfig,
-    ParallelConfig,
-    TensorParallelConfig,
-    PipeFusionParallelConfig,
-    SequenceParallelConfig,
-    DataParallelConfig,
-    FullyShardConfig,
-    VaeParallelConfig,
-    ModelConfig,
-    InputConfig,
-    RuntimeConfig,
-)
+
+# Do not import the runtime (xfuser.config.config, xfuser.core) at module level.
+# The argument parser must load without it, for example to show --help.
+if TYPE_CHECKING:
+    from xfuser.config.config import EngineConfig, InputConfig
 
 logger = init_logger(__name__)
 
@@ -81,6 +71,22 @@ def nullable_str(val: str):
     if not val or val == "None":
         return None
     return val
+
+
+def block_size(val: str) -> Tuple[int, int]:
+    """Parse a block-sparse tile written as ``QxKV``, e.g. ``64x64``."""
+    parts = val.lower().split("x")
+    try:
+        q_tile, kv_tile = (int(part) for part in parts)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"block size must be QxKV, e.g. 64x64; got {val!r}") from None
+    if q_tile <= 0 or kv_tile <= 0:
+        raise argparse.ArgumentTypeError(f"block size tiles must be positive; got {val!r}")
+    return q_tile, kv_tile
+
+
+# --vae_dtype choices.
+VAE_DTYPES = {"bf16": torch.bfloat16, "fp32": torch.float32}
 
 
 _DETERMINISM_CHECK_HELP = (
@@ -333,6 +339,7 @@ class xFuserArgs:
     memory_efficient_sharding: bool = False
     memory_efficient_replicated_load: bool = False
     use_vae_channels_last_format: bool = False
+    vae_dtype: Optional[torch.dtype] = None
     # Hybrid attention schedule
     use_hybrid_attn_schedule: bool = False
     hybrid_attn_low_precision_backend: Optional[str] = None
@@ -350,8 +357,17 @@ class xFuserArgs:
     use_spargeattn_static_block_mask: bool = True
     spargeattn_simthreshold: float = 0.3
     spargeattn_cdfthreshold: float = 0.92
+    # Deprecated alias of use_sparseattn_head_balance.
     use_spargeattn_head_balance: bool = False
-    # Sol-Attn
+    # Block-sparse Ulysses head balancing, for any backend that publishes a per-head cost.
+    use_sparseattn_head_balance: bool = False
+    # Block-sparse tile as (q_tile, kv_tile). None takes each recipe's default.
+    sparseattn_block_size: Optional[Tuple[int, int]] = None
+    # AITER MHA v4 Sol-Attn (the AITER_*_SOL backends)
+    solattn_beta: float = 0.5
+    solattn_beta_schedule: Optional[str] = None
+    solattn_tilt_rank: int = 0
+    # NVIDIA Sol-Attn (the SOL_ATTN backend)
     sol_attn_tau: float = 0.2
     sol_attn_thresh_type: str = "exact"
     sol_attn_kv_splits: str = "auto"
@@ -377,6 +393,12 @@ class xFuserArgs:
     audio_prompt: Optional[str] = None
 
     def __post_init__(self):
+        if isinstance(self.sparseattn_block_size, str):
+            self.sparseattn_block_size = block_size(self.sparseattn_block_size)
+        if isinstance(self.vae_dtype, str):
+            if self.vae_dtype not in VAE_DTYPES:
+                raise ValueError(f"--vae_dtype must be one of {', '.join(VAE_DTYPES)}; got {self.vae_dtype!r}")
+            self.vae_dtype = VAE_DTYPES[self.vae_dtype]
         if not math.isfinite(self.lora_scale):
             raise ValueError("lora_scale must be finite")
         if not self.lora_path and (self.lora_weight_name or self.lora_scale != 1.0):
@@ -384,6 +406,13 @@ class xFuserArgs:
         self.determinism_check_report_ranks = _normalize_determinism_check_report_ranks(
             self.determinism_check_report_ranks
         )
+        if self.use_spargeattn_head_balance:
+            warnings.warn(
+                "--use_spargeattn_head_balance is deprecated, use --use_sparseattn_head_balance",
+                FutureWarning,
+                stacklevel=2,
+            )
+            self.use_sparseattn_head_balance = True
         self._resolve_attention_a2a()
         self.mha_v4_kv_splits = _normalize_mha_v4_kv_splits(self.mha_v4_kv_splits)
         self._validate_ulysses_a2a()
@@ -505,8 +534,8 @@ class xFuserArgs:
             raise ValueError("--attention_a2a currently requires batch size 1")
         if self.ring_degree != 1:
             raise ValueError("--attention_a2a does not support ring parallelism")
-        if self.use_spargeattn_head_balance:
-            raise ValueError("--attention_a2a does not support Sparge head balancing")
+        if self.use_sparseattn_head_balance:
+            raise ValueError("--attention_a2a does not support sparse-attention head balancing")
 
     @property
     def gemm_quantization_spec(self) -> GemmQuantizationSpec:
@@ -1486,6 +1515,13 @@ class xFuserArgs:
             help="Use channels last memory format for the VAE.",
         )
         parser.add_argument(
+            "--vae_dtype",
+            choices=list(VAE_DTYPES),
+            default=None,
+            help="Load the VAE in this dtype instead of the model's default. Faster in bf16, "
+            "at some image fidelity. Only for models that list it.",
+        )
+        parser.add_argument(
             "--use_ssta_sparse_text_to_image",
             action="store_true",
             default=False,
@@ -1519,24 +1555,74 @@ class xFuserArgs:
             "--spargeattn_reorder_sequence is set. Use --no-use_spargeattn_static_block_mask to disable.",
         )
         parser.add_argument(
-            "--use_spargeattn_head_balance",
+            "--use_sparseattn_head_balance",
             action="store_true",
             help="Balance per-rank attention work across Ulysses ranks by "
             "permuting heads (block-sparse load balancing). Only has an "
-            "effect with ulysses_degree>1 and a Sparge attention backend.",
+            "effect with ulysses_degree>1, equal query and KV head counts, "
+            "and a block-sparse attention backend that publishes a per-head "
+            "cost (the Sparge backends or the AITER Sol backends).",
+        )
+        parser.add_argument(
+            "--use_spargeattn_head_balance",
+            action="store_true",
+            help="Deprecated, use --use_sparseattn_head_balance.",
+        )
+        parser.add_argument(
+            "--sparseattn_block_size",
+            type=block_size,
+            default=None,
+            metavar="QxKV",
+            help="Block-sparse tile as QxKV, e.g. 64x64: the query rows and keys one mask "
+            "entry covers. Omit to use each recipe's default tile. Honoured by the AITER MHA v4 "
+            "Sparge and AITER Sol backends; the run is refused at startup if this GPU has no "
+            "kernel at that tile for the selected recipe.",
+        )
+        parser.add_argument(
+            "--solattn_beta",
+            type=float,
+            default=0.5,
+            help="Routing threshold for the AITER Sol backends. A KV block is "
+            "computed exactly when its pooled proxy score exceeds "
+            "mean + beta*std over the blocks of that query tile, so larger "
+            "beta keeps fewer blocks.",
+        )
+        parser.add_argument(
+            "--solattn_beta_schedule",
+            type=nullable_str,
+            default=None,
+            metavar="SCHEDULE",
+            help="Vary --solattn_beta across denoising steps, since steps are not equally "
+            "approximable. Either 'first:last' for a linear ramp over the run, e.g. "
+            "'1.0:-0.25' to start aggressive and end exact, or one beta per step as "
+            "'0.5,0.5,0.25,...' -- per DENOISING STEP, so a 40-step run takes 40 whether or "
+            "not guidance is on: a guided step's conditional and unconditional forward share "
+            "the step's beta. Overrides --solattn_beta when set. A spec starting with a "
+            "negative beta needs the --solattn_beta_schedule=-0.5:0.0 form, or argparse "
+            "reads the leading minus as another option.",
+        )
+        parser.add_argument(
+            "--solattn_tilt_rank",
+            type=int,
+            default=0,
+            metavar="RANK",
+            help="Correct each pooled block of the AITER Sol backends with its leading RANK "
+            "terms of Cov(v, k) q, on top of a second-order term on its logit, so a skipped "
+            "block stands in for its keys more closely. 0 (default) keeps the block means. "
+            "Not served by aiter_mxfp6_sol.",
         )
         parser.add_argument(
             "--sol_attn_tau",
             type=float,
             default=0.2,
-            help="Sol-Attn routing temperature. Higher values keep fewer KV blocks exact.",
+            help="NVIDIA Sol-Attn (SOL_ATTN backend) routing temperature. Higher values keep fewer KV blocks exact.",
         )
         parser.add_argument(
             "--sol_attn_thresh_type",
             type=str,
             default="exact",
             choices=["diag", "exact"],
-            help="Sol-Attn routing threshold. 'diag' uses the diagonal covariance; 'exact' uses the full covariance.",
+            help="NVIDIA Sol-Attn routing threshold. 'diag' uses the diagonal covariance; 'exact' uses the full covariance.",
         )
         parser.add_argument(
             "--sol_attn_kv_splits",
@@ -1549,13 +1635,13 @@ class xFuserArgs:
             "--sol_attn_sink_tokens",
             type=int,
             default=0,
-            help="Number of tokens whose KV blocks stay exact for every query. 0 disables the sink.",
+            help="NVIDIA Sol-Attn: number of tokens whose KV blocks stay exact for every query. 0 disables the sink.",
         )
         parser.add_argument(
             "--sol_attn_sink_start",
             type=int,
             default=None,
-            help="First token of the exact KV sink. Omit to place the sink on the token suffix.",
+            help="NVIDIA Sol-Attn: first token of the exact KV sink. Omit to place the sink on the token suffix.",
         )
         parser.add_argument(
             "--vsa_block_size",
@@ -1748,7 +1834,24 @@ class xFuserArgs:
 
     def create_config(
         self,
-    ) -> Tuple[EngineConfig, InputConfig]:
+    ) -> Tuple["EngineConfig", "InputConfig"]:
+        from xfuser.config.config import (
+            EngineConfig,
+            FastAttnConfig,
+            ParallelConfig,
+            TensorParallelConfig,
+            PipeFusionParallelConfig,
+            SequenceParallelConfig,
+            DataParallelConfig,
+            FullyShardConfig,
+            VaeParallelConfig,
+            ModelConfig,
+            InputConfig,
+            RuntimeConfig,
+        )
+        from xfuser.core.distributed import init_distributed_environment
+        from xfuser.core.distributed.attention_schedule import SolAttnBetaSchedule
+
         self._validate_gemm_quantization_flags()
         if self.vae_parallel_size != 0:
             raise ValueError(
@@ -1783,6 +1886,13 @@ class xFuserArgs:
                     "hybrid_attn_high_precision_backend must be set."
                 )
 
+        if self.solattn_beta_schedule is not None:
+            # The step count is only known at model setup; check the syntax before loading.
+            SolAttnBetaSchedule.from_spec(
+                self.solattn_beta_schedule,
+                len(self.solattn_beta_schedule.split(",")) if ":" not in self.solattn_beta_schedule else 2,
+            )
+
         if self.group_offload_low_cpu_mem and not self.enable_group_cpu_offload:
             raise ValueError(
                 "--group_offload_low_cpu_mem only affects group CPU offload; pass --enable_group_cpu_offload too."
@@ -1810,7 +1920,11 @@ class xFuserArgs:
             use_spargeattn_static_block_mask=self.use_spargeattn_static_block_mask,
             spargeattn_simthreshold=self.spargeattn_simthreshold,
             spargeattn_cdfthreshold=self.spargeattn_cdfthreshold,
-            use_spargeattn_head_balance=self.use_spargeattn_head_balance,
+            sparseattn_block_size=self.sparseattn_block_size,
+            solattn_beta=self.solattn_beta,
+            solattn_beta_schedule=self.solattn_beta_schedule,
+            solattn_tilt_rank=self.solattn_tilt_rank,
+            use_sparseattn_head_balance=self.use_sparseattn_head_balance,
             sol_attn_tau=self.sol_attn_tau,
             sol_attn_thresh_type=self.sol_attn_thresh_type,
             sol_attn_kv_splits=self.sol_attn_kv_splits,

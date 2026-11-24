@@ -10,6 +10,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
     register_model,
     ModelCapabilities,
+    ModelFeatures,
     DefaultInputValues,
     DiffusionOutput,
     ModelSettings,
@@ -55,6 +56,7 @@ class xFuserFluxModel(xFuserModel):
         supports_lora=True,
         profile_capture_phase=True,
     )
+    features = ModelFeatures(shards_modulation=True)
     default_input_values = DefaultInputValues(
         height=1024,
         width=1024,
@@ -96,6 +98,10 @@ class xFuserFluxModel(xFuserModel):
         if PACKAGES_CHECKER._on_rdna4() or self.config.cache_method:
             return "default"
         return "reduce-overhead"
+
+    def _fuses_projections(self) -> bool:
+        # A PipeFusion stage holds only its own blocks; RDNA4 is not measured.
+        return self.config.pipefusion_parallel_degree <= 1 and not PACKAGES_CHECKER._on_rdna4()
 
     def _load_model(self) -> DiffusionPipeline:
         if self.config.pipefusion_parallel_degree > 1:
@@ -193,6 +199,7 @@ class xFuserFluxKontextModel(xFuserModel):
         use_fp8_comms=True,
         supports_step_caching=True,
     )
+    features = ModelFeatures(shards_modulation=True)
     default_input_values = DefaultInputValues(
         height=1024,
         width=1024,
@@ -229,6 +236,16 @@ class xFuserFluxKontextModel(xFuserModel):
             )
         },
     )
+
+    def _get_compile_mode(self) -> str:
+        # One transformer pass per step, so CUDA graphs replay safely; as for FLUX.1.
+        if PACKAGES_CHECKER._on_rdna4() or self.config.cache_method:
+            return "default"
+        return "reduce-overhead"
+
+    def _fuses_projections(self) -> bool:
+        # RDNA4 is not measured.
+        return not PACKAGES_CHECKER._on_rdna4()
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import FluxKontextPipeline
@@ -519,6 +536,21 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         },
         step_cache_config={"fbcache": None},
     )
+
+    def _compiles_vae_decoder(self) -> bool:
+        """Compile the VAE decoder alongside the transformer and the text encoder."""
+        return True
+
+    def _get_compiled_pipe_components(self) -> list[str]:
+        return ["transformer", "text_encoder"]
+
+    def _block_level_offload_components(self) -> list[str]:
+        """Leave the text encoder on leaf-level offload.
+
+        Its blocks sit at ``model.layers``, one level below the component, where
+        block-level grouping does not reach them.
+        """
+        return ["transformer"]
 
     def _get_compile_mode(self) -> str:
         # CUDA graphs incompatible with cross-step caching, and

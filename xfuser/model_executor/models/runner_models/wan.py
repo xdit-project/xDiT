@@ -73,6 +73,7 @@ def _build_attention_kwargs(config: "xFuserArgs") -> dict:
         "spargeattn_cdfthreshold": config.spargeattn_cdfthreshold,
         "spargeattn_reorder_sequence": config.spargeattn_reorder_sequence,
         "use_spargeattn_static_block_mask": config.use_spargeattn_static_block_mask,
+        "solattn_beta": config.solattn_beta,
         "vsa_block_size": config.vsa_block_size,
         "vsa_top_k": config.vsa_top_k,
         "vsa_top_k_ratio": config.vsa_top_k_ratio,
@@ -190,6 +191,7 @@ class xFuserWan21I2VModel(xFuserWanModel):
         use_parallel_vae_encoder=True,
         cross_attention_backend=True,
         supports_sparge_attention_backends=True,
+        supports_sol_attention_backends=True,
         enable_tiling=True,
         enable_slicing=True,
         supports_step_caching=True,
@@ -311,13 +313,6 @@ class xFuserWan21I2VModel(xFuserWanModel):
         images = input_args.get("input_images", [])
         if len(images) != 1:
             raise ValueError("Exactly one input image is required for Wan I2V model.")
-
-    def _get_compile_warmup_steps(self, input_args: dict) -> Optional[int]:
-        # Full warmup when a per-step attention or GEMM schedule is active,
-        # to trigger all backend paths; reduce to 2 steps otherwise.
-        if not get_runtime_state().has_attention_schedule() and not get_runtime_state().has_gemm_schedule():
-            return 2
-        return None
 
 
 @register_model("Wan-AI/Wan2.2-I2V-A14B-Diffusers")
@@ -464,6 +459,7 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
         use_parallel_vae_encoder=True,
         cross_attention_backend=True,
         supports_sparge_attention_backends=True,
+        supports_sol_attention_backends=True,
         enable_tiling=True,
         enable_slicing=True,
         supports_distilled_weights=True,
@@ -623,6 +619,7 @@ class xFuserWan21T2VModel(xFuserWanModel):
         use_parallel_vae=True,
         cross_attention_backend=True,
         supports_sparge_attention_backends=True,
+        supports_sol_attention_backends=True,
         enable_tiling=True,
         enable_slicing=True,
     )
@@ -649,6 +646,7 @@ class xFuserWan21T2VModel(xFuserWanModel):
         use_parallel_vae=True,
         cross_attention_backend=True,
         supports_sparge_attention_backends=True,
+        supports_sol_attention_backends=True,
         enable_tiling=True,
         enable_slicing=True,
         supports_step_caching=True,
@@ -734,11 +732,6 @@ class xFuserWan21T2VModel(xFuserWanModel):
         )
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
-    def _get_compile_warmup_steps(self, input_args: dict) -> Optional[int]:
-        if not get_runtime_state().has_attention_schedule() and not get_runtime_state().has_gemm_schedule():
-            return 2
-        return None
-
 
 @register_model("Wan-AI/Wan2.1-T2V-1.3B-Diffusers")
 @register_model("Wan2.1-T2V-1.3B")
@@ -785,6 +778,7 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
     # See xFuserWan22I2VModel: "fbcache" == DBCache first-block (Fn_compute_blocks=1).
     capabilities = replace(
         xFuserWan21T2VModel.capabilities,
+        use_aiter_int8_gemms=True,
         use_fp8_comms=True,
         supports_attention_a2a=True,
     )
@@ -798,6 +792,7 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
             "dtype": torch.bfloat16,
         }
         self.settings.fp8_gemm_module_list = ["transformer.blocks", "transformer_2.blocks"]
+        self.settings.int8_gemm_module_list = ["transformer.blocks", "transformer_2.blocks"]
         self.settings.fp8_text_encoder_module_list = ["text_encoder.encoder.block"]
         self.settings.fp8_precision_overrides = None
         self.settings.transformer_attr_names = ["transformer", "transformer_2"]
@@ -908,6 +903,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         use_parallel_vae_encoder=True,
         cross_attention_backend=True,
         supports_sparge_attention_backends=True,
+        supports_sol_attention_backends=True,
         enable_tiling=True,
         enable_slicing=True,
         supports_step_caching=True,

@@ -10,7 +10,6 @@ from xfuser.core.distributed import (
 )
 from diffusers import DiffusionPipeline
 from diffusers.models.transformers.transformer_2d import Transformer2DModel
-from xfuser.model_executor.layers.attention_processor import xFuserAttentionBaseWrapper
 from collections import Counter
 import os
 import json
@@ -52,7 +51,9 @@ def save_config_file(step_methods, file_path):
 def load_config_file(file_path):
     with open(file_path, "r") as file:
         format_data = json.load(file)
-    steps_methods = [[FastAttnMethod[method] for method in format_method.values()] for format_method in format_data.values()]
+    steps_methods = [
+        [FastAttnMethod[method] for method in format_method.values()] for format_method in format_data.values()
+    ]
     return steps_methods
 
 
@@ -75,6 +76,10 @@ def compression_loss(a, b):
 
 
 def transformer_forward_pre_hook(m: Transformer2DModel, args, kwargs):
+    # Import at call time: xfuser.model_executor.layers imports
+    # xfuser.model_executor.base_wrapper, which imports this package.
+    from xfuser.model_executor.layers.attention_processor import xFuserAttentionBaseWrapper
+
     attn_name = get_fast_attn_layer_name()
     now_stepi = getattr(m.transformer_blocks[0], attn_name).stepi
     # batch_size = get_fast_attn_calib()
@@ -205,10 +210,12 @@ def set_methods(
 def statistics(pipe: DiffusionPipeline):
     attn_name = get_fast_attn_layer_name()
     blocks = pipe.transformer.transformer_blocks
-    counts = Counter([method for block in blocks for method in getattr(block, attn_name).processor.fast_attn.steps_method])
+    counts = Counter(
+        [method for block in blocks for method in getattr(block, attn_name).processor.fast_attn.steps_method]
+    )
     total = sum(counts.values())
     for k, v in counts.items():
-        logger.info(f"{attn_name} {k} {v/total}")
+        logger.info(f"{attn_name} {k} {v / total}")
 
 
 def fast_attention_compression(pipe: DiffusionPipeline):

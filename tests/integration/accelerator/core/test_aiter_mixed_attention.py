@@ -189,9 +189,6 @@ def _require_mha_v4_recipe(backend_name):
 # Dense MXFP4 V returned garbage at any sequence length that is not a multiple of 128: cosine
 # against SDPA measured 0.040 at S=257 and -0.012 at S=129. AITER main serves F6F4 and MXFP4
 # correctly there; F4F4 stays marked until a build with its gfx950 kernel shows the same.
-_MXFP4_V_BACKENDS = ("AITER_F4F4", "AITER_F6F4", "AITER_MXFP4")
-
-
 def _mixed_attention_case(backend_name, sequence_length):
     if backend_name == "AITER_F4F4" and sequence_length % 128:
         return pytest.param(
@@ -344,11 +341,8 @@ def test_aiter_mixed_attention_unequal_sequence_lengths(backend_name):
     _require_mha_v4_aiter(backend_name)
     _require_mha_v4_recipe(backend_name)
 
-    # The MXFP4-V rows require a full V tile. Keep Q and K unequal while
-    # respecting that kernel constraint; the other rows exercise a ragged K.
-    key_length = 256 if backend_name in _MXFP4_V_BACKENDS else 257
     query = torch.randn((2, 5, 128, 128), device="cuda", dtype=torch.bfloat16)
-    key = torch.randn((2, 5, key_length, 128), device="cuda", dtype=torch.bfloat16)
+    key = torch.randn((2, 5, 257, 128), device="cuda", dtype=torch.bfloat16)
     value = torch.randn_like(key)
     output, _ = _run(backend_name, query, key, value, dropout_p=0.0, is_causal=False)
 
@@ -720,6 +714,40 @@ def test_mha_v4_serves_several_packed_sequences_on_the_bf16_rows():
         reference = F.scaled_dot_product_attention(query[b : b + 1], key[b : b + 1, :, :n], value[b : b + 1, :, :n])
         cosine = F.cosine_similarity(output[b : b + 1].float().flatten(), reference.float().flatten(), dim=0)
         assert cosine > 0.99, f"sequence {b} of {valid}: {cosine}"
+
+
+def test_mha_v4_regroups_several_packed_sequences_in_one_graph():
+    """The regrouping must trace under torch.compile. An op whose output shape
+    depends on the lengths' values splits the graph at this call, in every
+    block of a model that batches ragged prompts (Qwen-Image-Edit's true CFG).
+
+    An empty sequence in the middle keeps the row search honest: its boundary
+    repeats, and the rows after it must still land in the last sequence."""
+    kernel = _mha_v4_kernel()
+    if not kernel.HAS_SEQLENS_K:
+        pytest.skip("this AITER cannot express per-batch key lengths")
+    fmt = next(fmt for fmt in kernel.FORMATS if fmt.name == "BF16")
+
+    torch.manual_seed(7)
+    heads, head_dim = 4, 128
+    padded, valid = 384, (300, 0, 137)
+    key = torch.randn((len(valid), padded, heads, head_dim), device="cuda", dtype=torch.bfloat16)
+    value = torch.randn_like(key)
+    call = AttnCall(varlen=VarlenPacking(**_packed_kwargs(valid, padded)))
+
+    # explain rather than fullgraph=True, which lets this break through.
+    explanation = torch._dynamo.explain(kernel._shorten_keys)(key, value, call, fmt)
+    assert explanation.graph_break_count == 0, [str(reason.reason) for reason in explanation.break_reasons]
+
+    with torch.no_grad():
+        short_key, short_value, lengths = kernel._shorten_keys(key, value, call, fmt)
+
+    assert lengths.tolist() == list(valid)
+    assert short_key.shape == (len(valid), max(valid), heads, head_dim)
+    for b, n in enumerate(valid):
+        assert torch.equal(short_key[b, :n], key[b, :n])
+        assert torch.equal(short_value[b, :n], value[b, :n])
+        assert not short_key[b, n:].any() and not short_value[b, n:].any()
 
 
 @pytest.mark.parametrize("head_dim", [64, 256])

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import math
 from typing import Any
 
@@ -21,8 +22,10 @@ from xfuser.core.distributed import (
     get_ulysses_parallel_world_size,
 )
 from xfuser.core.attention import registry as attention_registry
-from xfuser.core.attention.spec import Sparsity
+from xfuser.core.attention.spec import EXACT_KV_TOKENS_KEY, AttentionBackendType, Sparsity
 from xfuser.core.attention.backends.vsa_h3.attention import build_h3_vsa_metadata
+from xfuser.core.sparge_attention.sparge import get_gilbert_perm
+from xfuser.logger import init_logger, warn_once
 from xfuser.model_executor.layers.fused_qk_rope_flydsl import (
     _HAS_FLYDSL,
     flydsl_fused_qk_norm_rope,
@@ -39,9 +42,101 @@ from xfuser.model_executor.layers.usp import (
 # Both VSA-H3 backends declare the same sparsity strategy, so the set follows
 # from the specs rather than being listed here.
 VSA_H3_BACKENDS = attention_registry.types_where(sparsity=Sparsity.H3)
+SOL_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SOL)
+# The token refiner's backend under a Sol run; the runner selects it before compiling.
+REFINER_DENSE_BACKEND = AttentionBackendType.AITER
+
+logger = init_logger(__name__)
 
 
 MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT = 64
+
+
+def pad_packed_rows(
+    hidden_states: torch.Tensor,
+    timestep_indices: torch.Tensor,
+    token_tags: torch.Tensor,
+    position_ids: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    """Append rows to a packed MiniMax-H3 sequence up to the next multiple of 64.
+
+    The pad rows are tagged -1, so callers can tell them apart from real rows.
+    """
+    sequence_length = position_ids.shape[0]
+    padded_length = (
+        (sequence_length + MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT - 1)
+        // MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT
+        * MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT
+    )
+    pad_amount = padded_length - sequence_length
+    if pad_amount == 0:
+        return hidden_states, timestep_indices, token_tags, position_ids, 0
+
+    hidden_states = torch.cat(
+        (
+            hidden_states,
+            hidden_states.new_zeros(
+                hidden_states.shape[0],
+                pad_amount,
+                hidden_states.shape[-1],
+            ),
+        ),
+        dim=1,
+    )
+    timestep_indices = torch.cat(
+        (
+            timestep_indices,
+            timestep_indices.new_zeros(pad_amount),
+        )
+    )
+    token_tags = torch.cat(
+        (
+            token_tags,
+            token_tags.new_full((pad_amount,), -1),
+        )
+    )
+    position_ids = torch.cat(
+        (
+            position_ids,
+            position_ids.new_zeros(pad_amount, position_ids.shape[-1]),
+        ),
+        dim=0,
+    )
+    return hidden_states, timestep_indices, token_tags, position_ids, pad_amount
+
+
+def curve_ordered_video_rows(
+    position_ids: torch.Tensor,
+    video_indices: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """Place a packed sequence's video tokens along a Gilbert curve over their (t, h, w) grid.
+
+    Returns ``(row_order, video_indices)``: the rows the per-row inputs are gathered from, and
+    where each video token now sits. Text, audio and every other non-video row keep their
+    places, and the video tokens take the same set of rows. Returns None when the video rows
+    do not fill a whole grid.
+
+    Every op in a block but attention is per token, so the order changes only which tokens share
+    an attention block. In raster order a block holds a few whole frame rows; along the curve it
+    holds a compact patch, which a backend that pools and selects KV blocks needs.
+    """
+    video_positions = position_ids.index_select(0, video_indices)
+    grid, coordinates = [], []
+    for axis in range(video_positions.shape[-1]):
+        values, coordinate = torch.unique(video_positions[:, axis], return_inverse=True)
+        grid.append(values.numel())
+        coordinates.append(coordinate)
+    frames, height, width = grid
+    cells = (coordinates[0] * height + coordinates[1]) * width + coordinates[2]
+    if math.prod(grid) != video_indices.numel() or torch.unique(cells).numel() != cells.numel():
+        return None
+    # get_gilbert_perm returns (cell of each curve step, curve step of each cell).
+    _, curve_step = get_gilbert_perm((frames, height, width), position_ids.device)
+    video_rows = video_indices.sort().values
+    curve_video_indices = video_rows.index_select(0, curve_step.index_select(0, cells))
+    row_order = torch.arange(position_ids.shape[0], device=position_ids.device)
+    row_order[curve_video_indices] = video_indices
+    return row_order, curve_video_indices
 
 
 class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
@@ -51,12 +146,17 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
         attention_kwargs: dict[str, Any] | None = None,
         backend=None,
         use_fasth3_vsa: bool = False,
+        dense_for_sol: bool = False,
     ) -> None:
         super().__init__()
         self.use_ulysses_parallel_attention = use_ulysses_parallel_attention
         self.attention_kwargs = attention_kwargs
         self.backend = backend
         self.use_vsa_h3 = use_fasth3_vsa and backend in VSA_H3_BACKENDS
+        # For the token refiner, which attends a few hundred text tokens: too few KV blocks for
+        # Sol-Attn's routing threshold to mean anything. Resolved per call, since None defers to
+        # the runtime's backend, which a hybrid schedule changes between steps.
+        self.dense_for_sol = dense_for_sol
 
     def __call__(
         self,
@@ -96,6 +196,10 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
             # the Ulysses exchange before the VSA-H3 backend consumes it.
             self.attention_kwargs[ULYSSES_EXTRA_INPUTS_KEY] = ("vsa_h3_gate",)
 
+        backend = self.backend
+        if self.dense_for_sol and (backend or get_runtime_state().attention_backend) in SOL_BACKENDS:
+            backend = REFINER_DENSE_BACKEND
+
         use_ulysses = self.use_ulysses_parallel_attention and get_ulysses_parallel_world_size() > 1
         attention_function = USP if use_ulysses else attention
         attention_args = {
@@ -103,7 +207,7 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
             "is_causal": False,
             "attention_kwargs": self.attention_kwargs,
             "head_balance_layer": attn,
-            "backend": self.backend,
+            "backend": backend,
         }
         if use_ulysses:
             attention_args["combine_qkv_a2a"] = True
@@ -254,6 +358,10 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
             # The pad rows are a trailing block, so backends without a
             # key-padding mask can slice K/V here instead of packing.
             "valid_kv_len": None,
+            # The same count on the query side, for Sol-Attn: it routes one
+            # selection per query tile, and pad rows would vote on it.
+            "valid_q_len": None,
+            EXACT_KV_TOKENS_KEY: None,
             "vsa_h3_metadata": None,
             "vsa_h3_gate": None,
             ULYSSES_EXTRA_INPUTS_KEY: None,
@@ -291,6 +399,7 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
                 xFuserMiniMaxH3AttnProcessor(
                     use_ulysses_parallel_attention=False,
                     backend=self.attention_backend,
+                    dense_for_sol=True,
                 )
             )
 
@@ -305,55 +414,43 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
             )
 
         self.register_forward_pre_hook(lambda module, args: get_runtime_state().increment_step_counter())
+        # The runner sets this when a selected backend prefers a local token order.
+        self.curve_order_video = False
+        self._curve_order = None
+        self._forward_signature = inspect.signature(type(self).forward)
+        self.register_forward_pre_hook(self._order_video_along_curve, with_kwargs=True)
 
-    @staticmethod
-    def _pad_rows(
-        hidden_states: torch.Tensor,
-        timestep_indices: torch.Tensor,
-        token_tags: torch.Tensor,
-        position_ids: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
-        sequence_length = position_ids.shape[0]
-        padded_length = (
-            (sequence_length + MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT - 1)
-            // MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT
-            * MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT
-        )
-        pad_amount = padded_length - sequence_length
-        if pad_amount == 0:
-            return hidden_states, timestep_indices, token_tags, position_ids, 0
+    _pad_rows = staticmethod(pad_packed_rows)
 
-        hidden_states = torch.cat(
-            (
-                hidden_states,
-                hidden_states.new_zeros(
-                    hidden_states.shape[0],
-                    pad_amount,
-                    hidden_states.shape[-1],
-                ),
-            ),
-            dim=1,
-        )
-        timestep_indices = torch.cat(
-            (
-                timestep_indices,
-                timestep_indices.new_zeros(pad_amount),
-            )
-        )
-        token_tags = torch.cat(
-            (
-                token_tags,
-                token_tags.new_full((pad_amount,), -1),
-            )
-        )
-        position_ids = torch.cat(
-            (
-                position_ids,
-                position_ids.new_zeros(pad_amount, position_ids.shape[-1]),
-            ),
-            dim=0,
-        )
-        return hidden_states, timestep_indices, token_tags, position_ids, pad_amount
+    def _order_video_along_curve(self, module, args, kwargs):
+        """Hand the forward its video rows in curve order (see curve_ordered_video_rows).
+
+        A pre-hook, so it runs before the runner's compiled forward: the grid is read from
+        position_ids values, which cannot be traced. Only the per-row inputs and video_indices
+        change, and the outputs still come back in the caller's order through video_indices.
+        VSA-H3 builds its tiles from the packed order, so it keeps that order.
+        """
+        if not self.curve_order_video or self.use_vsa_h3:
+            return None
+        bound = self._forward_signature.bind(self, *args, **kwargs)
+        arguments = bound.arguments
+        position_ids, video_indices = arguments["position_ids"], arguments["video_indices"]
+        # The pipeline builds its layout once per request and passes the same tensors at every
+        # step, so they are the cache key: no device read per forward. The cache holds them, so
+        # their identities cannot be reused by other tensors.
+        cached = self._curve_order
+        if cached is None or cached[0] is not position_ids or cached[1] is not video_indices:
+            order = curve_ordered_video_rows(position_ids, video_indices)
+            if order is None:
+                warn_once(logger, "MiniMax-H3 video rows do not fill a (t, h, w) grid; they keep the packed order.")
+            self._curve_order = cached = (position_ids, video_indices, order)
+        order = cached[2]
+        if order is None:
+            return None
+        row_order, arguments["video_indices"] = order
+        for name in ("position_ids", "timestep_indices", "token_tags"):
+            arguments[name] = arguments[name].index_select(0, row_order)
+        return bound.args[1:], bound.kwargs
 
     def prepare_vsa_h3_metadata(
         self,
@@ -555,6 +652,15 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
             cu_seqlens_k = None
             max_seqlen_k = None
 
+        # Text and audio are a few percent and a fraction of a percent of this
+        # sequence. Sol-Attn thresholds every KV block against statistics the
+        # video blocks set, so their queries would lose the text and audio
+        # blocks they need most. Forcing those blocks exact costs one exact
+        # block per block they occupy. Every other backend ignores the mask.
+        exact_tokens = torch.zeros(padded_length, dtype=torch.bool, device=packed_hidden_states.device)
+        exact_tokens[text_indices] = True
+        exact_tokens[audio_indices] = True
+
         self._usp_attention_kwargs.update(
             {
                 "indices_k": indices_k,
@@ -563,6 +669,8 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
                 # _pad_rows appends its rows, so the valid keys are the leading
                 # sequence_length rows and nothing beyond them is real.
                 "valid_kv_len": max_seqlen_k,
+                "valid_q_len": max_seqlen_k,
+                EXACT_KV_TOKENS_KEY: exact_tokens,
             }
         )
 

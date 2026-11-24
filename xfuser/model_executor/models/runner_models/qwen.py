@@ -12,17 +12,66 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     xFuserModel,
     ModelCapabilities,
+    ModelFeatures,
     DefaultInputValues,
     DiffusionOutput,
     ModelSettings,
 )
 from xfuser import xFuserArgs
+from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.core.distributed import get_runtime_state
 from xfuser.core.utils.runner_utils import log
+from xfuser.envs import PACKAGES_CHECKER
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     STANDARD_LOAD_ROUTES,
 )
+
+_QWEN_IMAGE_NUM_LAYERS = 60
+
+
+def _configure_qwen_pipefusion_stages(config: xFuserArgs) -> None:
+    """Choose a balanced default while accepting any valid 60-block split."""
+    pp_degree = config.pipefusion_parallel_degree
+    if pp_degree <= 1:
+        return
+    if getattr(config, "ulysses_degree", 1) > 1 or getattr(config, "ring_degree", 1) > 1:
+        raise ValueError(
+            "Qwen Image PipeFusion does not yet compose with sequence parallelism; use pure PP or CFG-parallel x PP."
+        )
+    if pp_degree > _QWEN_IMAGE_NUM_LAYERS:
+        raise ValueError(
+            f"Qwen Image PipeFusion cannot split {_QWEN_IMAGE_NUM_LAYERS} transformer blocks across {pp_degree} stages."
+        )
+
+    if config.attn_layer_num_for_pp is None:
+        blocks_per_stage, remainder = divmod(_QWEN_IMAGE_NUM_LAYERS, pp_degree)
+        config.attn_layer_num_for_pp = [blocks_per_stage + (stage < remainder) for stage in range(pp_degree)]
+    elif sum(config.attn_layer_num_for_pp) != _QWEN_IMAGE_NUM_LAYERS:
+        raise ValueError(
+            f"Qwen Image --attn_layer_num_for_pp must assign all {_QWEN_IMAGE_NUM_LAYERS} transformer blocks."
+        )
+
+
+def _load_qwen_pipefusion_pipeline(model, pipeline_cls):
+    from diffusers.models.transformers.transformer_qwenimage import (
+        QwenImageTransformer2DModel,
+    )
+
+    model.engine_config.runtime_config.dtype = torch.bfloat16
+    transformer, pipeline_kwargs = model.loader.plan_pipefusion_components(
+        QwenImageTransformer2DModel,
+        torch_dtype=torch.bfloat16,
+    )
+    pipe = pipeline_cls.from_pretrained(
+        pretrained_model_name_or_path=model.settings.model_name,
+        torch_dtype=torch.bfloat16,
+        engine_config=model.engine_config,
+        **pipeline_kwargs,
+    )
+    if transformer is not None:
+        model.loader.mark_pipeline_stage_blockwise(pipe.transformer, transformer)
+    return pipe
 
 
 @register_model("Qwen/Qwen-Image-Edit-2511")
@@ -46,6 +95,7 @@ class xFuserQwenImageEditModel(xFuserModel):
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
+        pipefusion_parallel_degree=True,
         use_cfg_parallel=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
@@ -100,12 +150,30 @@ class xFuserQwenImageEditModel(xFuserModel):
             self.settings.model_name = "Qwen/Qwen-Image-Edit-2509"
             self.settings.output_name = "qwen_image_edit_2509"
             self._is_edit_plus = True
+        if config.pipefusion_parallel_degree > 1:
+            if self._is_edit_plus:
+                raise ValueError("Qwen Image Edit Plus 2509/2511 does not support PipeFusion.")
+            _configure_qwen_pipefusion_stages(config)
+
+    def _get_compile_mode(self) -> str:
+        # CUDA graphs are incompatible with cross-step caching and re-capture pathologically on RDNA4.
+        if self.config.cache_method or PACKAGES_CHECKER._on_rdna4():
+            return "default"
+        return "reduce-overhead"
 
     def _load_model(self) -> DiffusionPipeline:
         from xfuser.model_executor.pipelines.pipeline_qwen_image_edit import (
             xFuserQwenImageEditPipeline,
             xFuserQwenImageEditPlusPipeline,
         )
+
+        if self.config.pipefusion_parallel_degree > 1:
+            from xfuser.model_executor.pipelines.pipeline_qwen_image_edit import (
+                xFuserQwenImageEditPipeFusionPipeline,
+            )
+
+            return _load_qwen_pipefusion_pipeline(self, xFuserQwenImageEditPipeFusionPipeline)
+
         from xfuser.model_executor.models.transformers.transformer_qwen import (
             xFuserQwenImageTransformerWrapper,
         )
@@ -124,6 +192,39 @@ class xFuserQwenImageEditModel(xFuserModel):
         )
         return pipe
 
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        self.pipe.batched_true_cfg = self._batches_true_cfg()
+        if self.pipe.batched_true_cfg:
+            log("Qwen-Image-Edit: true CFG runs its two branches as one batch.")
+
+    def _batches_true_cfg(self) -> bool:
+        """Whether both true-CFG branches can run as one batch with each row exact.
+
+        The batch pads the shorter prompt and keeps every row off its padding with per-row key
+        packing, which the AITER FAv3 kernel and BF16 MHA v4 serve. MHA v4 does not split
+        calls carrying per-row key lengths, so an explicit split count keeps the two calls.
+        """
+        config = self.config
+        state = get_runtime_state()
+        if (
+            config.cache_method
+            or (config.ring_degree or 1) > 1
+            or config.pipefusion_parallel_degree > 1
+            or config.use_fp8_comms
+            or state.has_attention_schedule()
+        ):
+            return False
+        backend = state.attention_backend
+        if backend == AttentionBackendType.AITER:
+            return True
+        if backend == AttentionBackendType.AITER_BF16:
+            from xfuser.core.attention.backends.aiter_mha_v4.kernel import HAS_SEQLENS_K
+
+            splits = state.runtime_config.mha_v4_kv_splits
+            return HAS_SEQLENS_K and (splits == "auto" or splits == 1)
+        return False
+
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         images = input_args["input_images"]
         kwargs = {
@@ -140,7 +241,7 @@ class xFuserQwenImageEditModel(xFuserModel):
             kwargs["width"] = input_args["width"]
 
         output = self.pipe(**kwargs)
-        return DiffusionOutput(images=output.images, pipe_args=input_args)
+        return DiffusionOutput(images=output.images if output else [], pipe_args=input_args)
 
     def _validate_args(self, input_args: dict) -> None:
         """Validate input arguments"""
@@ -172,6 +273,7 @@ class xFuserQwenImageModel(xFuserModel):
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
+        pipefusion_parallel_degree=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
         supports_step_caching=True,
@@ -181,6 +283,7 @@ class xFuserQwenImageModel(xFuserModel):
         enable_tiling=True,
         enable_slicing=True,
     )
+    features = ModelFeatures(shards_modulation=True)
     default_input_values = DefaultInputValues(
         height=928,
         width=1664,
@@ -217,8 +320,22 @@ class xFuserQwenImageModel(xFuserModel):
         if "2512" in config.model:
             self.settings.model_name = "Qwen/Qwen-Image-2512"
             self.settings.output_name = "qwen_image_2512"
+        _configure_qwen_pipefusion_stages(config)
+
+    def _get_compile_mode(self) -> str:
+        # CUDA graphs are incompatible with cross-step caching and re-capture pathologically on RDNA4.
+        if self.config.cache_method or PACKAGES_CHECKER._on_rdna4():
+            return "default"
+        return "reduce-overhead"
 
     def _load_model(self) -> DiffusionPipeline:
+        if self.config.pipefusion_parallel_degree > 1:
+            from xfuser.model_executor.pipelines.pipeline_qwen_image import (
+                xFuserQwenImagePipeFusionPipeline,
+            )
+
+            return _load_qwen_pipefusion_pipeline(self, xFuserQwenImagePipeFusionPipeline)
+
         from diffusers import QwenImagePipeline
         from xfuser.model_executor.models.transformers.transformer_qwen import (
             xFuserQwenImageTransformerWrapper,
@@ -247,7 +364,7 @@ class xFuserQwenImageModel(xFuserModel):
         }
 
         output = self.pipe(**kwargs)
-        return DiffusionOutput(images=output.images, pipe_args=input_args)
+        return DiffusionOutput(images=output.images if output else [], pipe_args=input_args)
 
 
 @register_model("Qwen/Qwen-Image-2.1")
@@ -302,6 +419,10 @@ class xFuserQwenImage21Model(xFuserModel):
             },
         },
     )
+
+    def _fuses_projections(self) -> bool:
+        # RDNA4 is not measured.
+        return not PACKAGES_CHECKER._on_rdna4()
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import QwenImage21Pipeline

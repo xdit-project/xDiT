@@ -48,8 +48,9 @@ at the end either way.
 Inputs may be non-contiguous: real models build q/k as chunks of a fused QKV
 projection, so the row stride is passed to the kernel at runtime and rows are
 read in place rather than copied.  Only the ``(H, D)`` block within a token has
-to be packed.  Outputs are always freshly allocated and contiguous: ``[B, S, H, D]``,
-or, with ``send_world = P > 1`` (batch 1), the Ulysses all-to-all send buffer
+to be packed.  Outputs are freshly allocated and contiguous, except that the
+key can be written into a caller's buffer (``key_out``): ``[B, S, H, D]``, or,
+with ``send_world = P > 1`` (batch 1), the Ulysses all-to-all send buffer
 ``[P, S, H/P, D]`` so the caller needs no transpose before the exchange.
 
 Envelope: bf16 activations, 4-D ``[B, S, H, D]`` (sequence_dim == 1), even ``D``
@@ -554,10 +555,10 @@ if _HAS_FLYDSL:
         }
         return launch_fused_qk_norm_rope
 
-    @torch.library.custom_op("xfuser::flydsl_qk_norm_rope", mutates_args=())
-    def _flydsl_qk_norm_rope_launch(
+    def _launch(
         q: torch.Tensor,  # [B, S, H, D] bf16, (H, D) packed, any row stride
         k: torch.Tensor,  # [B, S, H, D] bf16, (H, D) packed, any row stride
+        k_out: Optional[torch.Tensor],  # [B, S, H, D] destination for k, or None for a new buffer
         wq: Optional[torch.Tensor],  # [D] bf16 or None (weightless RMSNorm)
         wk: Optional[torch.Tensor],
         cos: torch.Tensor,  # [cos_rows, D]
@@ -576,7 +577,9 @@ if _HAS_FLYDSL:
         half_rot: int,
         send_world: int = 1,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Opaque launch boundary for torch.compile.
+        """Body of the launch custom ops below.
+
+        Opaque launch boundary for torch.compile.
 
         Everything that touches a real data pointer (``_build_kernel`` ->
         ``flyc.compile`` and the ``_run_compiled`` grid launches) lives inside
@@ -618,7 +621,9 @@ if _HAS_FLYDSL:
         # use reduce-overhead, so separate buffers win where it counts.
         out_shape = (send_world, t_tok, h // send_world, d) if send_world > 1 else (t_tok, h, d)
         oq = q.new_empty(out_shape)
-        ok = k.new_empty(out_shape)
+        # The kernel writes packed rows, so a strided destination goes through a scratch buffer.
+        k_out_packed = k_out is not None and k_out.is_contiguous()
+        ok = k_out.view(t_tok, h, d) if k_out_packed else k.new_empty(out_shape)
 
         # Row strides come off the tensors we actually marshal, so they can
         # never disagree with the data pointer DLPack hands the kernel.
@@ -693,7 +698,123 @@ if _HAS_FLYDSL:
 
         if send_world > 1:
             return oq, ok
+        if k_out is not None and not k_out_packed:
+            k_out.copy_(ok.view(b, s, h, d))
         return oq.view(b, s, h, d), ok.view(b, s, h, d)
+
+    @torch.library.custom_op("xfuser::flydsl_qk_norm_rope", mutates_args=())
+    def _flydsl_qk_norm_rope_launch(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        wq: Optional[torch.Tensor],
+        wk: Optional[torch.Tensor],
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        cos_rows: int,
+        eps: float,
+        vec: int,
+        block_threads: int,
+        lanes_per_head: int,
+        pairs_per_block: int,
+        norm_q: bool,
+        norm_k: bool,
+        round_after_norm: bool,
+        round_after_affine: bool,
+        neox: bool,
+        half_rot: int,
+        send_world: int = 1,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return _launch(
+            q,
+            k,
+            None,
+            wq,
+            wk,
+            cos,
+            sin,
+            cos_rows,
+            eps,
+            vec,
+            block_threads,
+            lanes_per_head,
+            pairs_per_block,
+            norm_q,
+            norm_k,
+            round_after_norm,
+            round_after_affine,
+            neox,
+            half_rot,
+            send_world,
+        )
+
+    @torch.library.custom_op("xfuser::flydsl_qk_norm_rope_into", mutates_args=("k_out",))
+    def _flydsl_qk_norm_rope_into_launch(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        k_out: torch.Tensor,
+        wq: Optional[torch.Tensor],
+        wk: Optional[torch.Tensor],
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        cos_rows: int,
+        eps: float,
+        vec: int,
+        block_threads: int,
+        lanes_per_head: int,
+        pairs_per_block: int,
+        norm_q: bool,
+        norm_k: bool,
+        round_after_norm: bool,
+        round_after_affine: bool,
+        neox: bool,
+        half_rot: int,
+    ) -> torch.Tensor:
+        """``_flydsl_qk_norm_rope_launch`` with k written into ``k_out``; returns q."""
+        return _launch(
+            q,
+            k,
+            k_out,
+            wq,
+            wk,
+            cos,
+            sin,
+            cos_rows,
+            eps,
+            vec,
+            block_threads,
+            lanes_per_head,
+            pairs_per_block,
+            norm_q,
+            norm_k,
+            round_after_norm,
+            round_after_affine,
+            neox,
+            half_rot,
+        )[0]
+
+    @_flydsl_qk_norm_rope_into_launch.register_fake
+    def _flydsl_qk_norm_rope_into_launch_fake(
+        q,
+        k,
+        k_out,
+        wq,
+        wk,
+        cos,
+        sin,
+        cos_rows,
+        eps,
+        vec,
+        block_threads,
+        lanes_per_head,
+        pairs_per_block,
+        norm_q,
+        norm_k,
+        round_after_norm,
+        round_after_affine,
+        neox,
+        half_rot,
+    ):
+        return q.new_empty(q.shape)
 
     @_flydsl_qk_norm_rope_launch.register_fake
     def _flydsl_qk_norm_rope_launch_fake(
@@ -860,6 +981,7 @@ def flydsl_fused_qk_norm_rope(
     rope_style: str = "gptj",
     rotary_dim: Optional[int] = None,
     neox_tables: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    key_out: Optional[torch.Tensor] = None,
     send_world: int = 1,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """FlyDSL RMSNorm(q)/RMSNorm(k) + RoPE, fused.
@@ -890,23 +1012,31 @@ def flydsl_fused_qk_norm_rope(
     the note in the kernel body -- fast_fp_math makes replaying the reference's
     rounding schedule impossible without disabling FMA contraction.
 
+    With ``key_out`` (``key``'s shape, e.g. a slice of a KV cache) the key result
+    is written there and ``key_out`` is returned in its place.
+
     ``send_world > 1`` (batch 1 only) returns q and k as Ulysses all-to-all send
     buffers ``[P, S, H/P, D]`` instead of ``[1, S, H, D]``, written directly by
-    the kernel's store.
+    the kernel's store.  It cannot be combined with ``key_out``.
     """
     neox = rope_style == "neox"
     if send_world != 1 and (send_world < 1 or query.dim() != 4 or query.shape[0] != 1 or query.shape[2] % send_world):
         raise ValueError("send_world > 1 needs [1, S, H, D] inputs with H divisible by send_world")
+    if send_world != 1 and key_out is not None:
+        raise ValueError("key_out cannot be combined with send_world > 1")
 
     def _ref():
         if neox:
-            out = _reference_neox(query, key, norm_q, norm_k, rotary_emb)
+            q, k = _reference_neox(query, key, norm_q, norm_k, rotary_emb)
         else:
-            out = _reference(query, key, norm_q, norm_k, rotary_emb)
-        if send_world == 1:
-            return out
-        _, s, h, d = query.shape
-        return tuple(x.reshape(s, send_world, h // send_world, d).transpose(0, 1).contiguous() for x in out)
+            q, k = _reference(query, key, norm_q, norm_k, rotary_emb)
+        if send_world > 1:
+            _, s, h, d = query.shape
+            return tuple(x.reshape(s, send_world, h // send_world, d).transpose(0, 1).contiguous() for x in (q, k))
+        if key_out is None:
+            return q, k
+        key_out.copy_(k)
+        return q, key_out
 
     if rope_style not in ("gptj", "neox"):
         return _ref()
@@ -1013,10 +1143,8 @@ def flydsl_fused_qk_norm_rope(
         break
 
     # The build + grid launches run inside an opaque custom op so this whole
-    # path is safe under torch.compile (see _flydsl_qk_norm_rope_launch).
-    oq, ok = _flydsl_qk_norm_rope_launch(
-        query,
-        key,
+    # path is safe under torch.compile (see _launch).
+    args = (
         wq if has_wq else None,
         wk if has_wk else None,
         cos2,
@@ -1033,7 +1161,7 @@ def flydsl_fused_qk_norm_rope(
         round_after_affine,
         neox,
         half if half is not None else 0,
-        send_world,
     )
-
-    return oq, ok
+    if key_out is None:
+        return _flydsl_qk_norm_rope_launch(query, key, *args, send_world)
+    return _flydsl_qk_norm_rope_into_launch(query, key, key_out, *args), key_out

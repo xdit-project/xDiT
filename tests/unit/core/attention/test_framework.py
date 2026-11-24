@@ -29,6 +29,7 @@ from xfuser.core.attention.constraints import (
     HEAD_DIM,
     MASKED_VARLEN,
     MHA_ONLY,
+    MIN_KEY_LENGTH,
     NON_CAUSAL,
     NO_VARLEN,
 )
@@ -216,6 +217,28 @@ def test_head_dim_is_readable_for_shape_selection():
     assert HEAD_DIM(128).head_dims() == (128,)
     assert (HEAD_DIM(128) & NON_CAUSAL).head_dims() == (128,)
     assert ANY_CALL.head_dims() is None
+
+
+def test_min_key_length_counts_the_keys_a_call_attends_over():
+    q, k, v = _qkv(q_len=128, kv_len=128)
+    assert MIN_KEY_LENGTH(65).unmet(q, k, v, AttnCall()) is None
+    assert MIN_KEY_LENGTH(129).unmet(q, k, v, AttnCall()) == "needs at least 129 keys, got 128"
+
+    # A packed call attends over its valid keys, not the padded length.
+    packed = AttnCall(
+        varlen=VarlenPacking(indices_k=torch.arange(60), cu_seqlens_k=torch.tensor([0, 60]), max_seqlen_k=60)
+    )
+    assert MIN_KEY_LENGTH(65).unmet(q, k, v, packed) == "needs at least 65 keys, got 60"
+
+
+def test_aiter_bf16_refuses_the_short_key_lengths_its_kernel_gets_wrong():
+    spec = registry.get(AttentionBackendType.AITER_BF16)
+    for kv_len, refused in ((53, True), (64, True), (65, False), (4096, False)):
+        q, k, v = _qkv(q_len=4096, kv_len=kv_len)
+        assert (spec.accepts.unmet(q, k, v, AttnCall()) is not None) is refused, kv_len
+    # The other rows run another kernel, which has no such floor.
+    q, k, v = _qkv(kv_len=16)
+    assert registry.get(AttentionBackendType.AITER_BF16FP8).accepts.unmet(q, k, v, AttnCall()) is None
 
 
 def test_non_causal_constraint():
@@ -469,6 +492,22 @@ def test_a_fallback_cannot_sit_beside_a_fact_it_would_route_around(field, value)
     primary, fallback, _ = _pair(**{field: value})
     with pytest.raises(ValueError, match=field):
         registry.build_registry([_module("pkg.a", primary, fallback)])
+
+
+def test_an_option_no_selected_backend_reads_is_refused():
+    """A backend's option set on a run that selects none of its readers would do nothing."""
+    from xfuser.config import xFuserArgs
+
+    specs = [_spec(AttentionBackendType.SDPA), _spec(AttentionBackendType.AITER_FP8_SOL, options=("solattn_beta",))]
+    sdpa, sol = AttentionBackendType.SDPA, AttentionBackendType.AITER_FP8_SOL
+
+    with registry.using(specs):
+        with pytest.raises(ValueError, match="--solattn_beta applies only to the AITER_FP8_SOL"):
+            registry.refuse_unread_options(xFuserArgs(model="m", solattn_beta=0.25), [sdpa])
+        registry.refuse_unread_options(xFuserArgs(model="m", solattn_beta=0.25), [sdpa, sol])
+        # Unset, or set to its default, the option asks for nothing.
+        registry.refuse_unread_options(xFuserArgs(model="m"), [sdpa])
+        registry.refuse_unread_options(xFuserArgs(model="m", solattn_beta=0.5), [sdpa])
 
 
 def test_get_unregistered_names_the_backend():
@@ -940,12 +979,13 @@ def test_only_varlen_capable_backends_accept_packed_keys():
     from xfuser.core.attention import registry
     from xfuser.core.attention.spec import VarlenPacking
 
-    q = torch.zeros(1, 4, 8, 128)
+    # 80 valid keys of 160: a count every kernel serves, so packing support alone decides.
+    q = torch.zeros(1, 4, 160, 128)
     packed = AttnCall(
         varlen=VarlenPacking(
-            indices_k=torch.tensor([0]),
-            cu_seqlens_k=torch.tensor([0, 1]),
-            max_seqlen_k=1,
+            indices_k=torch.arange(80),
+            cu_seqlens_k=torch.tensor([0, 80]),
+            max_seqlen_k=80,
         )
     )
     accepting = {backend.name for backend, spec in registry.REGISTRY.items() if spec.rejects(q, q, q, packed) is None}
@@ -994,8 +1034,8 @@ def test_a_masked_pack_reaches_the_varlen_and_mask_applying_backends_only():
 
     # xDiT's CUDNN spec accepts only half-precision calls; use a supported
     # dtype so this test isolates masked-varlen support from the dtype gate.
-    q = torch.zeros(1, 4, 8, 128, dtype=torch.bfloat16)
-    call = _masked_pack()
+    q = torch.zeros(1, 4, 160, 128, dtype=torch.bfloat16)
+    call = _masked_pack(kv_len=160)
     accepting = {backend.name for backend, spec in registry.REGISTRY.items() if spec.rejects(q, q, q, call) is None}
     expected = VARLEN_CAPABLE | MASK_APPLYING
     assert accepting == expected, f"unexpected: {sorted(accepting - expected)}, missing: {sorted(expected - accepting)}"
@@ -1126,16 +1166,56 @@ def test_packed_keys_requires_the_longest_segment_to_be_the_valid_count():
     assert reason is not None and "max_seqlen_k" in reason
 
 
+def test_trailing_pad_keys_takes_a_dense_call_and_one_declared_pad():
+    from xfuser.core.attention.constraints import TRAILING_PAD_KEYS
+
+    t = torch.empty((1, 2, 8, 128))
+    assert TRAILING_PAD_KEYS.unmet(t, t, t, AttnCall()) is None
+    assert TRAILING_PAD_KEYS.unmet(t, t, t, _packed(4, valid_kv_len=4)) is None
+
+
+def test_trailing_pad_keys_refuses_what_only_a_gather_could_serve():
+    """Unlike PACKED_KEYS, there is no gather to fall back on: an undeclared
+    pack and a batch that one valid_kv_len cannot describe are both refused,
+    and a declared length is still checked."""
+    from xfuser.core.attention.constraints import TRAILING_PAD_KEYS
+
+    t = torch.empty((1, 2, 8, 128))
+    assert "valid_kv_len" in TRAILING_PAD_KEYS.unmet(t, t, t, _packed(4))
+    batch = torch.empty((2, 2, 8, 128))
+    assert "one sequence" in TRAILING_PAD_KEYS.unmet(batch, batch, batch, _packed(4, valid_kv_len=4))
+    assert "max_seqlen_k" in TRAILING_PAD_KEYS.unmet(t, t, t, _packed(6, valid_kv_len=4))
+
+
 def test_dense_mha_v4_serves_packed_keys_but_sparge_does_not():
     """Sparge needs the key length padded to its KV tile, which is exactly the
     alignment both a trailing-pad slice and a gather remove."""
     from xfuser.core.attention import registry
 
-    t = torch.empty((1, 2, 8, 128))
-    call = _packed(4, valid_kv_len=4)
+    t = torch.empty((1, 2, 96, 128))
+    call = _packed(80, valid_kv_len=80)
 
     dense = registry.get(AttentionBackendType.AITER_BF16)
     assert dense.rejects(t, t, t, call) is None
 
     sparge = registry.get(AttentionBackendType.AITER_FP8_SPARGE)
     assert sparge.rejects(t, t, t, call) is not None
+
+
+@pytest.mark.parametrize("with_mask", [False, True])
+def test_a_backend_can_apply_dense_masks_and_accept_unmasked_packing(with_mask):
+    from xfuser.core.attention.backends.sdpa.kernel import sdpa
+
+    query = torch.zeros(1, 1, 1, 8)
+    key = torch.zeros(1, 1, 2, 8)
+    value = torch.stack([torch.ones(8), torch.full((8,), 100.0)]).view(1, 1, 2, 8)
+    packing = VarlenPacking(torch.tensor([0, 1]), torch.tensor([0, 2], dtype=torch.int32), 2)
+    kwargs = {"indices_k": packing.indices_k, "cu_seqlens_k": packing.cu_seqlens_k, "max_seqlen_k": 2}
+    call = (
+        AttnCall(attention_kwargs={"attn_mask": torch.tensor([[[[True, False]]]])})
+        if with_mask
+        else AttnCall(varlen=packing, attention_kwargs=kwargs)
+    )
+    spec = _spec(AttentionBackendType.AITER_BF16, impl=sdpa, accepts=ANY_CALL, applies_attn_mask=True)
+    output, _ = spec.run(query, key, value, call)
+    torch.testing.assert_close(output, torch.full_like(query, 1.0 if with_mask else 50.5))

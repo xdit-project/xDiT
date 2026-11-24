@@ -8,6 +8,7 @@ These tables describe this source checkout; installed releases can differ.
 depends on the checkpoint, inputs, hardware, kernels, and flag combinations.
 Follow the linked guides for restrictions; a row does not promise every feature
 can be enabled together. CUDA, ROCm, and Ascend availability varies by backend.
+INT8 names the platform instead, because its backends differ: torchao on CUDA, AITER on ROCm gfx950.
 
 - [Parallelism](#parallelism)
 - [Memory and precision](#memory-and-precision)
@@ -57,14 +58,15 @@ Text-encoder TP is separate; see the **Text TP** column.
 | [LTX-Video-0.9.7-dev](#model-ltx-video-0-9-7-dev) | ✓ | ✓ | ✓ | — | ✓ | — | ✓ | — | — |
 | [Lumina2](#model-lumina2) | ✓ | — | ✓ | — | ✓ | — | — | — | — |
 | [MiniMax-H3](#model-minimax-h3) | ✓ | — | — | — | — | — | ✓ | ✓ | D |
+| [MiniMax-H3-Image](#model-minimax-h3-image) | ✓ | — | — | — | — | — | ✓ | ✓ | D |
 | [MiniMax-H3-Ref2VA](#model-minimax-h3-ref2va) | ✓ | — | — | — | — | — | ✓ | ✓ | D |
 | [MiniMax-H3-Turbo](#model-minimax-h3-turbo) | ✓ | — | — | — | — | — | ✓ | ✓ | D |
 | [MOSS-Image](#model-moss-image) | ✓ | ✓ | ✓ | — | ✓ | — | — | — | — |
 | [Prism](#model-prism) | ✓ | — | — | — | — | — | — | — | — |
-| [Qwen-Image](#model-qwen-image) | ✓ | ✓ | — | — | ✓ | — | ✓ | — | D |
+| [Qwen-Image](#model-qwen-image) | ✓ | ✓ | — | ✓ | ✓ | — | ✓ | — | D |
 | [Qwen-Image-2.1](#model-qwen-image-2-1) | ✓ | — | — | — | ✓ | — | ✓ | — | — |
 | [Qwen-Image-2.1-Turbo](#model-qwen-image-2-1-turbo) | ✓ | — | — | — | ✓ | — | ✓ | — | — |
-| [Qwen-Image-Edit](#model-qwen-image-edit) | ✓ | ✓ | ✓ | — | ✓ | — | ✓ | — | D+E |
+| [Qwen-Image-Edit](#model-qwen-image-edit) | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | — | D+E |
 | [SD3.5](#model-sd3-5) | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | — | D |
 | [SkyReels-V2-I2V-14B](#model-skyreels-v2-i2v-14b) | ✓ | ✓ | — | — | ✓ | — | ✓ | — | — |
 | [SkyReels-V2-T2V-14B](#model-skyreels-v2-t2v-14b) | ✓ | ✓ | — | — | ✓ | — | ✓ | — | — |
@@ -118,6 +120,7 @@ not the entire model. Text FP8 is a separate opt-in for supported encoders.
 | [LTX-Video-0.9.7-dev](#model-ltx-video-0-9-7-dev) | — | — | — | — | — | — | ✓ | ✓ |
 | [Lumina2](#model-lumina2) | — | — | — | — | — | — | ✓ | ✓ |
 | [MiniMax-H3](#model-minimax-h3) | ✓ | ✓ | — | — | — | — | — | — |
+| [MiniMax-H3-Image](#model-minimax-h3-image) | ✓ | — | — | — | — | — | — | — |
 | [MiniMax-H3-Ref2VA](#model-minimax-h3-ref2va) | ✓ | ✓ | — | — | — | — | — | — |
 | [MiniMax-H3-Turbo](#model-minimax-h3-turbo) | ✓ | ✓ | — | — | — | — | — | — |
 | [MOSS-Image](#model-moss-image) | — | — | — | — | — | — | ✓ | ✓ |
@@ -136,10 +139,10 @@ not the entire model. Text FP8 is a separate opt-in for supported encoders.
 | [Wan2.1-VACE-14B](#model-wan2-1-vace-14b) | ✓ | — | — | — | — | ✓ | ✓ | ✓ |
 | [Wan2.2-Distilled-I2V](#model-wan2-2-distilled-i2v) | ✓ | ✓ | ✓ | — | — | ✓ | ✓ | ✓ |
 | [Wan2.2-I2V](#model-wan2-2-i2v) | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ |
-| [Wan2.2-T2V](#model-wan2-2-t2v) | ✓ | ✓ | ✓ | ✓ | — | — | ✓ | ✓ |
+| [Wan2.2-T2V](#model-wan2-2-t2v) | ✓ | ✓ | ✓ | ✓ | ROCm gfx950 | — | ✓ | ✓ |
 | [Wan2.2-TI2V](#model-wan2-2-ti2v) | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ |
-| [Z-Image](#model-z-image) | ✓ | — | — | — | ✓ | ✓ | ✓ | ✓ |
-| [Z-Image-Turbo](#model-z-image-turbo) | ✓ | — | — | — | ✓ | ✓ | ✓ | ✓ |
+| [Z-Image](#model-z-image) | ✓ | — | — | — | CUDA | ✓ | ✓ | ✓ |
+| [Z-Image-Turbo](#model-z-image-turbo) | ✓ | — | — | — | CUDA | ✓ | ✓ | ✓ |
 
 ## Communication, caching, and adapters
 
@@ -156,11 +159,11 @@ requires a compatible DBCache layout and is described in the PipeFusion guide.
 | [Chroma1-HD](#model-chroma1-hd) | — | — | — | — | — |
 | [Cosmos3-Nano](#model-cosmos3-nano) | — | — | — | — | — |
 | [Cosmos3-Super](#model-cosmos3-super) | — | — | — | — | — |
-| [FastH3](#model-fasth3) | — | — | — | — | — |
-| [FastH3-Dense](#model-fasth3-dense) | — | — | — | — | — |
-| [FastVideo/FastVideo-FastH3-8-Step-V2](#model-fastvideo-fastvideo-fasth3-8-step-v2) | — | — | — | — | — |
-| [flux-3-image-klein](#model-flux-3-image-klein) | ✓ | — | — | — | — |
-| [flux-3-image-klein-base](#model-flux-3-image-klein-base) | ✓ | — | — | — | — |
+| [FastH3](#model-fasth3) | — | — | ✓ | — | — |
+| [FastH3-Dense](#model-fasth3-dense) | — | — | ✓ | — | — |
+| [FastVideo/FastVideo-FastH3-8-Step-V2](#model-fastvideo-fastvideo-fasth3-8-step-v2) | — | — | ✓ | — | — |
+| [flux-3-image-klein](#model-flux-3-image-klein) | ✓ | — | ✓ | — | — |
+| [flux-3-image-klein-base](#model-flux-3-image-klein-base) | ✓ | — | ✓ | — | — |
 | [FLUX.1-dev](#model-flux-1-dev) | ✓ | — | — | `dbcache`, `teacache` | ✓ |
 | [FLUX.1-Kontext-dev](#model-flux-1-kontext-dev) | ✓ | — | — | `dbcache` | — |
 | [FLUX.2-dev](#model-flux-2-dev) | ✓ | — | — | `dbcache`, `fbcache` | — |
@@ -181,9 +184,10 @@ requires a compatible DBCache layout and is described in the PipeFusion guide.
 | [LTX-2.5-full](#model-ltx-2-5-full) | — | — | — | — | — |
 | [LTX-Video-0.9.7-dev](#model-ltx-video-0-9-7-dev) | — | — | — | — | — |
 | [Lumina2](#model-lumina2) | — | — | — | — | — |
-| [MiniMax-H3](#model-minimax-h3) | — | — | — | — | — |
-| [MiniMax-H3-Ref2VA](#model-minimax-h3-ref2va) | — | — | — | — | — |
-| [MiniMax-H3-Turbo](#model-minimax-h3-turbo) | — | — | — | — | ✓ |
+| [MiniMax-H3](#model-minimax-h3) | — | — | ✓ | — | — |
+| [MiniMax-H3-Image](#model-minimax-h3-image) | — | — | — | — | — |
+| [MiniMax-H3-Ref2VA](#model-minimax-h3-ref2va) | — | — | ✓ | — | — |
+| [MiniMax-H3-Turbo](#model-minimax-h3-turbo) | — | — | ✓ | — | ✓ |
 | [MOSS-Image](#model-moss-image) | — | — | — | — | — |
 | [Prism](#model-prism) | — | — | ✓ | — | — |
 | [Qwen-Image](#model-qwen-image) | ✓ | — | — | `dbcache` | — |
@@ -248,6 +252,7 @@ Optional and task-specific inputs are labeled; check the source for image counts
 | <a id="model-ltx-video-0-9-7-dev"></a>[LTX-Video-0.9.7-dev](https://github.com/xdit-project/xDiT/blob/main/xfuser/model_executor/models/runner_models/ltx_video.py) | `LTX-Video-0.9.7-dev`, `Lightricks/LTX-Video-0.9.7-dev` | t2v: text; i2v: text + one image | video | `0.34.0` |
 | <a id="model-lumina2"></a>[Lumina2](https://github.com/xdit-project/xDiT/blob/main/xfuser/model_executor/models/runner_models/lumina2.py) | `Lumina2`, `Lumina-Image-2.0`, `Alpha-VLLM/Lumina-Image-2.0` | Text | image | Not declared |
 | <a id="model-minimax-h3"></a>[MiniMax-H3](https://github.com/xdit-project/xDiT/blob/main/xfuser/model_executor/models/runner_models/minimax_h3.py) | `MiniMax-H3`, `MiniMaxAI/MiniMax-H3` | Text; t2va: no images; i2va: first frame; l2va: last frame; fl2va: both | video + audio | `0.40.0` |
+| <a id="model-minimax-h3-image"></a>[MiniMax-H3-Image](https://github.com/xdit-project/xDiT/blob/main/xfuser/model_executor/models/runner_models/minimax_h3_image.py) | `MiniMax-H3-Image`, `MiniMaxAI/MiniMax-H3-Image` | Text; optional reference images (editing) | image | `source` |
 | <a id="model-minimax-h3-ref2va"></a>[MiniMax-H3-Ref2VA](https://github.com/xdit-project/xDiT/blob/main/xfuser/model_executor/models/runner_models/minimax_h3.py) | `MiniMax-H3-Ref2VA` | Text + one or more reference images | video + audio | `0.40.0` |
 | <a id="model-minimax-h3-turbo"></a>[MiniMax-H3-Turbo](https://github.com/xdit-project/xDiT/blob/main/xfuser/model_executor/models/runner_models/minimax_h3.py) | `MiniMax-H3-Turbo` | Text; t2va: no images; i2va: first frame; l2va: last frame; fl2va: both | video + audio | `0.40.0` |
 | <a id="model-moss-image"></a>[MOSS-Image](https://github.com/xdit-project/xDiT/blob/main/xfuser/model_executor/models/runner_models/moss_image.py) | `MOSS-Image`, `MOSS-Image-Base`, `OpenMOSS-Team/MOSS-Image-Base` | Text | image | `0.38.0` |

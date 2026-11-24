@@ -54,6 +54,16 @@ class AttentionBackendType(Enum):
     AITER_F6F4_SPARGE = "AITER F6F4 Sparge"
     AITER_MXFP4_SPARGE = "AITER MXFP4 Sparge"
     AITER_F4F4_SPARGE = "AITER F4F4 Sparge"
+    AITER_BF16_SOL = "AITER BF16 Sol"
+    AITER_BF16FP8_SOL = "AITER BF16/FP8 Sol"
+    AITER_I8FP8_SOL = "AITER I8FP8 Sol"
+    AITER_FP8_SOL = "AITER FP8 Sol"
+    AITER_MXFP8_SOL = "AITER MXFP8 Sol"
+    AITER_F8F6_SOL = "AITER F8F6 Sol"
+    AITER_MXFP6_SOL = "AITER MXFP6 Sol"
+    AITER_F6F6_SOL = "AITER F6F6 Sol"
+    AITER_F6F4_SOL = "AITER F6F4 Sol"
+    AITER_MXFP4_SOL = "AITER MXFP4 Sol"
     AITER_SAGE = "AITER Sage"
     AITER_SPARSE_SAGE = "AITER Sparse Sage"
     AITER_SAGE_V2 = "AITER Sage V2"
@@ -83,7 +93,43 @@ class Sparsity(Enum):
     SPARGE = "sparge"
     VSA = "vsa"
     H3 = "h3"
+    # Sol-Attn on AITER MHA v4: routes its own block selection and corrects the
+    # skipped blocks from pooled K/V. Not SPARGE, because a model checked for
+    # one is not thereby checked for the other.
+    SOL = "sol"
     BSA = "bsa"
+
+    @property
+    def model_capability(self) -> Optional[str]:
+        """The ModelCapabilities flag a model sets to accept backends of this
+        family, or None where the family is gated some other way (SSTA and BSA
+        by base_model, H3 by the MiniMax-H3 runners' backend lists)."""
+        return _MODEL_CAPABILITY.get(self)
+
+    @property
+    def needs_dense_cross_attention(self) -> bool:
+        """Whether a model with cross-attention must serve it on a separate,
+        dense backend: these families select blocks from block statistics, and
+        a short text KV has too few blocks for that."""
+        return self in _NEEDS_DENSE_CROSS_ATTENTION
+
+    @property
+    def prefers_local_token_order(self) -> bool:
+        """Whether a model should hand these families its tokens in a spatially
+        local order: they pool runs of consecutive tokens into blocks, and a
+        block of whole raster rows serves the frame border poorly."""
+        return self in _PREFERS_LOCAL_TOKEN_ORDER
+
+
+# Sol is its own capability: a model checked for Sparge is not thereby checked for Sol.
+_MODEL_CAPABILITY = {
+    Sparsity.SPARGE: "supports_sparge_attention_backends",
+    Sparsity.VSA: "supports_sparge_attention_backends",
+    Sparsity.SOL: "supports_sol_attention_backends",
+}
+_NEEDS_DENSE_CROSS_ATTENTION = frozenset({Sparsity.SPARGE, Sparsity.VSA, Sparsity.SOL})
+# Sparge reorders its tokens itself.
+_PREFERS_LOCAL_TOKEN_ORDER = frozenset({Sparsity.SOL})
 
 
 @dataclass(frozen=True)
@@ -111,6 +157,15 @@ class VarlenPacking:
         )
 
 
+# attention_kwargs key a model sets for keys that must not be approximated: a (seqlen_k,) bool
+# mask, or longer by a trailing pad. A backend that selects KV blocks computes every block holding
+# a flagged key exactly, for every query; a dense backend has nothing to do with it.
+EXACT_KV_TOKENS_KEY = "exact_kv_tokens"
+# The query-side counterpart, a (seqlen_q,) bool mask: a backend that selects KV blocks computes
+# every block exactly for the query rows it flags.
+EXACT_Q_TOKENS_KEY = "exact_q_tokens"
+
+
 @dataclass
 class AttnCall:
     """Everything a backend needs about one call that is not q/k/v."""
@@ -124,6 +179,10 @@ class AttnCall:
     # exercised without an initialised process group.
     ulysses_world_size: int = 1
     ring_world_size: int = 1
+
+    # The transformer forward's index in the run, as a 0-d tensor, for a
+    # backend that varies per step. None when nothing tracks steps.
+    step: Optional[torch.Tensor] = None
 
     attention_kwargs: dict = field(default_factory=dict)
 
@@ -204,6 +263,9 @@ class Spec:
     accepts_prequantized: bool = False
     prequant_rotate: Optional[Callable] = None
 
+    # Applies attention_kwargs["attn_mask"] directly, independent of key packing.
+    applies_attn_mask: bool = False
+
     # Which calls the kernel can serve -- head dim, causality, varlen packing,
     # dropout, self- vs cross-attention. Enforced by run() before dispatch, so
     # an unsupported call raises with a reason instead of computing something
@@ -236,6 +298,22 @@ class Spec:
     # one place to forget.
     initializers: Tuple[Callable[[], None], ...] = ()
 
+    # Checked when the backend is selected, against the run's RuntimeConfig,
+    # after the kernel has resolved. Raises if this backend cannot serve that
+    # configuration on this device.
+    validates: Optional[Impl | Callable] = None
+
+    # The run-configuration fields this backend reads and no other part of
+    # xDiT does. A run that sets one while no selected backend lists it is
+    # refused before loading, rather than having the option do nothing.
+    options: Tuple[str, ...] = ()
+
+    # Run once the run's step plan is known -- denoising steps and transformer
+    # forwards per step -- outside any compiled region, for per-step state the
+    # backend owns. Called as (runtime_config, denoising_steps,
+    # forwards_per_step), for every backend the run selected.
+    configures: Optional[Impl | Callable] = None
+
     # Filled in by the registry from the module the spec came from, so Impl
     # targets can be written relative to the backend package.
     package: str = ""
@@ -262,6 +340,21 @@ class Spec:
     def is_sparse(self) -> bool:
         return self.sparsity is not None
 
+    @property
+    def model_capability(self) -> Optional[str]:
+        """See Sparsity.model_capability; None for a dense backend."""
+        return None if self.sparsity is None else self.sparsity.model_capability
+
+    @property
+    def needs_dense_cross_attention(self) -> bool:
+        """See Sparsity.needs_dense_cross_attention; False for a dense backend."""
+        return self.sparsity is not None and self.sparsity.needs_dense_cross_attention
+
+    @property
+    def prefers_local_token_order(self) -> bool:
+        """See Sparsity.prefers_local_token_order; False for a dense backend."""
+        return self.sparsity is not None and self.sparsity.prefers_local_token_order
+
     def unavailable(self) -> Optional[str]:
         """Why this backend cannot run here, or None. Never says 'update X':
         the same missing symbol means too-old or too-new, and we cannot tell."""
@@ -269,7 +362,25 @@ class Spec:
 
     def rejects(self, query, key, value, call: AttnCall) -> Optional[str]:
         """Why this backend cannot serve this particular call, or None."""
+        if call.varlen is None and call.attention_kwargs.get("attn_mask") is not None and not self.applies_attn_mask:
+            return "does not apply attn_mask without packed keys"
         return self.accepts.unmet(query, key, value, call)
+
+    def validate(self, runtime_config) -> None:
+        """Raise if this backend cannot serve the run's configuration."""
+        check = self.validates
+        if isinstance(check, Impl):
+            check = check.resolve(self.package)
+        if check is not None:
+            check(runtime_config)
+
+    def configure(self, runtime_config, denoising_steps: Optional[int], forwards_per_step: int) -> None:
+        """Hand the run's step plan to the backend, if it keeps per-step state."""
+        setup = self.configures
+        if isinstance(setup, Impl):
+            setup = setup.resolve(self.package)
+        if setup is not None:
+            setup(runtime_config, denoising_steps, forwards_per_step)
 
     def resolved(self) -> AttnFn:
         """The callable, importing the kernel module if it has not been yet.

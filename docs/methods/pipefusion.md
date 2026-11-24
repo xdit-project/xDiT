@@ -35,6 +35,28 @@ Patch and stage counts can differ. The output dimensions must permit the model's
 patch layout. `--warmup_steps` counts denoising steps within a generation.
 `--warmup_calls` counts complete, untimed generations before a benchmark.
 
+## Qwen Image and Image Edit
+
+Qwen Image and Qwen Image 2512 support PipeFusion. The original Qwen Image Edit
+checkpoint also supports it, with exactly one input image. Qwen Image Edit Plus
+2509/2511 and Qwen Image 2.1 do not support PipeFusion.
+
+```bash
+xdit --model Qwen-Image-2512 \
+    --prompt "An isometric botanical library" \
+    --pipefusion_parallel_degree 2
+```
+
+The stage split balances the 60 transformer blocks by default. An explicit
+`--attn_layer_num_for_pp` must assign all 60 blocks, with one positive count per
+stage. Qwen uses token-row patches; Image Edit appends fixed reference-image
+tokens, while scheduler feedback updates only generated tokens.
+
+Use pipeline parallelism alone for Qwen Image. The original Image Edit also
+supports CFG parallelism with PipeFusion. For example, `--use_cfg_parallel
+--pipefusion_parallel_degree 2` launches four ranks. Qwen PipeFusion rejects
+Ulysses and Ring composition, and step-end callbacks.
+
 <a id="composition-and-validation-boundaries"></a>
 
 ## Combine with other options
@@ -44,7 +66,7 @@ patch layout. `--warmup_steps` counts denoising steps within a generation.
 | Ulysses, Ring, or CFG parallelism | Require model support and multiply the rank count. See [hybrid parallelism](hybrid.md). |
 | Parallel VAE | Uses a separate VAE decode schedule over the existing ranks. See [Parallel VAE](parallel_vae.md). |
 | Step caching | Use `--cache_method pipefusion` on a model with a supported DBCache layout. Other cache methods are rejected; data parallelism must remain `1`. Caching adds another approximation to check for output quality. |
-| `--memory_efficient_replicated_load` | On supported FLUX runners, load only each stage's transformer blocks. Availability depends on the model; SD3.5 rejects this option with PipeFusion. |
+| `--memory_efficient_replicated_load` | On supported FLUX and Qwen Image runners, load only each stage's transformer blocks. Replicated pipeline components remain eager. Availability depends on the model; SD3.5 rejects this option with PipeFusion. |
 | FSDP | Select replicated components explicitly with `--fully_shard_components`. The stage-local transformer cannot be FSDP-wrapped. |
 | `--use_torch_compile` | Supported stage wrappers capture and compile their local calls during runner warmup. Allow for compilation startup before measuring inference. |
 | LoRA | Startup LoRA fusion currently rejects PipeFusion. |

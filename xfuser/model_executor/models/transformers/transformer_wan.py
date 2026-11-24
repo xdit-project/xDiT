@@ -195,8 +195,8 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
             raise RuntimeError("Attention A2A requires the Wan FlyDSL preprocessing path")
         if get_ulysses_parallel_world_size() <= 1 or get_ring_parallel_world_size() != 1:
             raise RuntimeError("Attention A2A requires Ulysses-only sequence parallelism")
-        if get_runtime_state().runtime_config.use_spargeattn_head_balance:
-            raise RuntimeError("Attention A2A does not support Sparge head balancing")
+        if get_runtime_state().runtime_config.use_sparseattn_head_balance:
+            raise RuntimeError("Attention A2A does not support sparse-attention head balancing")
 
         activation_dtype = hidden_states.dtype
         hadamard_placement = get_fused_a2a_hadamard_placement()
@@ -412,12 +412,13 @@ class xFuserWanSdmaAttnProcessor(xFuserWanAttnProcessor):
         if hidden_states.device.type != "cuda" or hidden_states.dtype != torch.bfloat16 or hidden_states.shape[0] != 1:
             return False
         linears = (attn.to_q, attn.to_k, attn.to_v)
+        if any(type(module) is not torch.nn.Linear for module in linears):
+            return False
         if len({m.weight.shape for m in linears}) != 1 or attn.to_q.weight.shape[0] % attn.heads:
             return False
         for module in linears:
             if (
-                type(module) is not torch.nn.Linear
-                or hasattr(module.weight, "placements")
+                hasattr(module.weight, "placements")
                 or module.weight.device != hidden_states.device
                 or module.weight.dtype != hidden_states.dtype
                 or module._forward_hooks
@@ -632,7 +633,7 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
             get_fused_a2a_mode() > 0
             and get_ulysses_parallel_world_size() > 1
             and get_ring_parallel_world_size() == 1
-            and not get_runtime_state().runtime_config.use_spargeattn_head_balance
+            and not get_runtime_state().runtime_config.use_sparseattn_head_balance
         )
         pad_multiple = fused_a2a_pad_multiple(sp_world_size) if attention_a2a_padding else sp_world_size
         pad_amount = (pad_multiple - (hidden_states.shape[1] % pad_multiple)) % pad_multiple

@@ -1,7 +1,9 @@
 import json
 import logging
+from dataclasses import replace
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
@@ -199,6 +201,58 @@ def test_the_head_dim_refusal_names_fallback_or_a_hard_stop():
         base_model._validate_attention_head_dims(model, _HeadDimConfig("AITER_FP8_SPARGE"))
 
 
+def _block_size_config(**kwargs):
+    return xFuserArgs(model="m", sparseattn_block_size=(64, 64), **kwargs)
+
+
+def _refuse_unread_options(config):
+    from xfuser.core.attention import registry
+
+    registry.refuse_unread_options(config, base_model._selected_attention_backends(config))
+
+
+@pytest.mark.parametrize("scheduled", ["AITER_BF16,AITER_FP8_SPARGE", "AITER_BF16,AITER_F6F4_SOL"])
+def test_a_block_size_is_accepted_when_a_scheduled_backend_reads_it(scheduled):
+    config = _block_size_config(use_hybrid_attn_schedule=True, hybrid_attn_schedule=scheduled)
+
+    _refuse_unread_options(config)
+
+
+@pytest.mark.parametrize("backend", ["AITER_BF16", "FLEX_BLOCK_SPARGE"])
+def test_a_block_size_without_a_backend_that_reads_it_is_refused(backend):
+    with pytest.raises(
+        ValueError, match="--sparseattn_block_size applies only to the sol and sparge attention backends"
+    ):
+        _refuse_unread_options(_block_size_config(attention_backend=backend))
+
+
+def test_a_beta_schedule_is_accepted_when_a_scheduled_backend_is_sol():
+    config = xFuserArgs(
+        model="m",
+        solattn_beta_schedule="1.0:0.0",
+        use_hybrid_attn_schedule=True,
+        hybrid_attn_schedule="AITER_BF16,AITER_F6F4_SOL",
+    )
+
+    _refuse_unread_options(config)
+
+
+@pytest.mark.parametrize("backend", ["AITER_BF16", "AITER_FP8_SPARGE"])
+def test_a_beta_schedule_without_a_sol_backend_is_refused(backend):
+    """No Sol backend would read it, so the run would quietly route nothing by it."""
+    config = xFuserArgs(model="m", solattn_beta_schedule="1.0:0.0", attention_backend=backend)
+
+    with pytest.raises(ValueError, match="--solattn_beta_schedule applies only to the sol attention backends"):
+        _refuse_unread_options(config)
+
+
+def test_a_tilt_rank_without_a_sol_backend_is_refused():
+    config = xFuserArgs(model="m", solattn_tilt_rank=2, attention_backend="AITER_FP8")
+
+    with pytest.raises(ValueError, match="--solattn_tilt_rank applies only to the "):
+        _refuse_unread_options(config)
+
+
 def _gather_dp_outputs(monkeypatch, *, dp_degree, legacy_pipe, rank=0, sp_rank=0):
     """Run ``_gather_dp_outputs`` on a non-saving rank and return what it sent, or "not gathered"."""
     sent = []
@@ -299,3 +353,18 @@ def test_eval_pass_is_silent_when_everything_is_already_in_eval_mode(runner_warn
     model._set_eval_mode()
 
     assert runner_warnings() == []
+
+
+def test_save_output_encodes_each_video_with_encode_video(monkeypatch, tmp_path):
+    encoded = []
+    monkeypatch.setattr(base_model, "encode_video", lambda video, **kwargs: encoded.append((video, kwargs)))
+    model = _StubModel(xFuserArgs(model="test/model", output_directory=str(tmp_path)))
+    model.settings = replace(model.settings, fps=16, output_name="clip")
+    videos = np.zeros((2, 3, 8, 8, 3), dtype=np.float32)
+
+    model.save_output(base_model.DiffusionOutput(videos=videos, pipe_args={"height": 8, "width": 8}))
+
+    assert [kwargs for _, kwargs in encoded] == [
+        {"fps": 16, "output_path": f"{tmp_path}/clip_u1r1_tc_False_8x8_{index}.mp4"} for index in range(2)
+    ]
+    assert all(video.shape == (3, 8, 8, 3) for video, _ in encoded)

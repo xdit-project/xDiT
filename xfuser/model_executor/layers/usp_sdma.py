@@ -48,6 +48,7 @@ from xfuser.core.distributed import (
 )
 from xfuser.core.distributed.sdma import ulysses
 from xfuser.core.utils.runner_utils import log
+from xfuser.model_executor.layers.plain_linear import plain_linear
 from xfuser.logger import init_logger, warn_once
 
 logger = init_logger(__name__)
@@ -547,11 +548,6 @@ def prepare(pipe, components, *, cpu_offload: bool) -> None:
 _GROUPED = "_xfuser_sdma_qkv"
 
 
-def plain_linear(module) -> bool:
-    # Quantized GEMMs replace the module; sharded (FSDP) weights are DTensors with placements.
-    return type(module) is torch.nn.Linear and not hasattr(module.weight, "placements")
-
-
 def _qkv_parts(attn):
     """(weight, bias) of Q, K and V, or None unless they are plain nn.Linear layers of one shape."""
     if getattr(attn, "fused_projections", False) and hasattr(attn, "to_qkv"):
@@ -601,7 +597,7 @@ def qk_first_attention(
         joint_strategy=None,
         fp8_comms=runtime.fp8_comms,
         has_kv_cache=False,
-        head_balanced=runtime.runtime_config.use_spargeattn_head_balance,
+        head_balanced=runtime.runtime_config.use_sparseattn_head_balance,
         attention_kwargs=attention_kwargs,
     )
     if reason is not None:
@@ -685,7 +681,7 @@ def grouped_qkv_attention(attn, hidden_states, norm_rope, *, backend, attention_
         joint_strategy=None,
         fp8_comms=runtime.fp8_comms,
         has_kv_cache=False,
-        head_balanced=runtime.runtime_config.use_spargeattn_head_balance,
+        head_balanced=runtime.runtime_config.use_sparseattn_head_balance,
         attention_kwargs=attention_kwargs,
     )
     if reason is not None:

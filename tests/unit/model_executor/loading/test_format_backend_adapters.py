@@ -50,6 +50,7 @@ def _contract(modules, format_name, backend_name, mode_name="EAGER"):
         (True, False, (10, 0), False, "FP4", "TORCHAO", "TorchaoNvfp4BackendAdapter"),
         (False, True, None, True, "FP4", "AITER", "AiterMxfp4BackendAdapter"),
         (True, False, (8, 9), False, "INT8", "TORCHAO", "TorchaoInt8BackendAdapter"),
+        (False, True, None, True, "INT8", "AITER", "AiterInt8BackendAdapter"),
     ],
 )
 def test_hardware_routing_matrix_is_injectable(
@@ -68,6 +69,7 @@ def test_hardware_routing_matrix_is_injectable(
         hip_probe=lambda: hip,
         cuda_capability_probe=lambda: capability,
         aiter_probe=lambda: aiter,
+        require_aiter_int8=(format_name == "INT8" and hip),
         nvfp4_probe=lambda: (True, None),
         int8_probe=lambda: (True, None),
         diffusers_probe=lambda config_kind: (True, None),
@@ -150,9 +152,9 @@ def test_rocm_aiter_mxfp4_hybrid_adapters_remain_supported(modules):
         nvfp4_probe=lambda: pytest.fail("must not probe NVFP4 on ROCm"),
         int8_probe=lambda: pytest.fail("must not probe INT8 on ROCm"),
         diffusers_probe=lambda config_kind: pytest.fail("must not probe Diffusers for MXFP4"),
-        fsdp_probe=lambda config_kind: (True, None)
-        if config_kind == "mxfp4"
-        else pytest.fail(f"must not probe {config_kind} FSDP on ROCm"),
+        fsdp_probe=lambda config_kind: (
+            (True, None) if config_kind == "mxfp4" else pytest.fail(f"must not probe {config_kind} FSDP on ROCm")
+        ),
     )
 
     adapter = b.select_format_backend(
@@ -288,10 +290,12 @@ def test_aiter_mxfp4_capability_preserves_symbol_probe_reason(modules):
         cuda_probe=lambda: False,
         hip_probe=lambda: True,
         cuda_capability_probe=lambda: None,
-        mxfp4_probe=lambda: calls.append("mxfp4")
-        or (
-            False,
-            "missing required AITER MXFP4 API: aiter.gemm_a4w4",
+        mxfp4_probe=lambda: (
+            calls.append("mxfp4")
+            or (
+                False,
+                "missing required AITER MXFP4 API: aiter.gemm_a4w4",
+            )
         ),
         nvfp4_probe=lambda: pytest.fail("must not probe NVFP4"),
         int8_probe=lambda: pytest.fail("must not probe INT8"),
@@ -629,18 +633,26 @@ def test_fsdp_tensor_subclass_validation_is_format_specific(modules, format_name
 
 
 @pytest.mark.parametrize("fsdp_supported", [False, True])
-def test_mxfp4_fsdp_placement_follows_the_packed_parameter_capability(modules, fsdp_supported):
+@pytest.mark.parametrize(
+    ("format_name", "adapter_name", "label"),
+    [("FP4", "AiterMxfp4BackendAdapter", "mxfp4"), ("INT8", "AiterInt8BackendAdapter", "int8")],
+)
+def test_aiter_fsdp_placement_follows_the_packed_parameter_capability(
+    modules, format_name, adapter_name, label, fsdp_supported
+):
     b = modules.backends
     capabilities = b.FormatBackendCapabilities(
-        aiter_mxfp4=True,
-        aiter_mxfp4_fsdp=fsdp_supported,
-        aiter_mxfp4_fsdp_reason=None if fsdp_supported else "torch is too old",
+        **{
+            f"aiter_{label}": True,
+            f"aiter_{label}_fsdp": fsdp_supported,
+            f"aiter_{label}_fsdp_reason": None if fsdp_supported else "torch is too old",
+        }
     )
-    adapter = b.AiterMxfp4BackendAdapter(
+    adapter = getattr(b, adapter_name)(
         backend=modules.contracts.QuantizationBackend.AITER,
-        format_=modules.contracts.QuantizationFormat.FP4,
+        format_=getattr(modules.contracts.QuantizationFormat, format_name),
     )
-    contract = _contract(modules, "FP4", "AITER", "FSDP_META")
+    contract = _contract(modules, format_name, "AITER", "FSDP_META")
 
     if fsdp_supported:
         b.validate_format_fsdp_placement(contract, adapter, capabilities=capabilities, required=True)
@@ -648,7 +660,7 @@ def test_mxfp4_fsdp_placement_follows_the_packed_parameter_capability(modules, f
 
     with pytest.raises(
         modules.contracts.UnsupportedLoadContract,
-        match=r"AITER MXFP4 packed weight cannot be placed under FSDP2: torch is too old",
+        match=rf"AITER {label.upper()} packed weight cannot be placed under FSDP2: torch is too old",
     ):
         b.validate_format_fsdp_placement(contract, adapter, capabilities=capabilities, required=True)
 

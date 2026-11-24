@@ -9,10 +9,8 @@ transformers = pytest.importorskip("transformers")
 if not hasattr(transformers, "Qwen3VLForConditionalGeneration"):
     pytest.skip("installed transformers has no Qwen3-VL", allow_module_level=True)
 
-from xfuser.model_executor.models.runner_models.flux3 import (  # noqa: E402
-    _deepest_text_encoder_layer,
-    trim_text_encoder,
-)
+from xfuser.model_executor.models.runner_models.flux3 import _deepest_text_encoder_layer  # noqa: E402
+from xfuser.model_executor.models.runner_models.text_encoder_utils import trim_text_encoder  # noqa: E402
 
 LAYERS = 6
 READ = (2, 4)

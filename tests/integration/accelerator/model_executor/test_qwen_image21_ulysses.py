@@ -96,21 +96,26 @@ def _ulysses_worker(rank, world_size, init_method):
                 stock = _tiny_model(device)
                 reference = _prefill_then_decode(stock, device, mask)
 
-                wrapper = xfuser_qwenimage21.xFuserQwenImage21TransformerWrapper.from_config(stock.config)
-                wrapper = wrapper.to(device).eval()
-                wrapper.load_state_dict(stock.state_dict())
-                for block in wrapper.transformer_blocks:
-                    block.attn.set_processor(processor_cls())
-                actual = _prefill_then_decode(wrapper, device, mask)
+                for fused in (False, True):
+                    wrapper = xfuser_qwenimage21.xFuserQwenImage21TransformerWrapper.from_config(stock.config)
+                    wrapper = wrapper.to(device).eval()
+                    wrapper.load_state_dict(stock.state_dict())
+                    for block in wrapper.transformer_blocks:
+                        block.attn.set_processor(processor_cls())
+                    if fused:
+                        wrapper.fuse_projections_for_inference()
+                    actual = _prefill_then_decode(wrapper, device, mask)
 
-                for ref, out in zip(reference, actual):
-                    torch.testing.assert_close(
-                        out,
-                        ref,
-                        rtol=1e-4,
-                        atol=1e-4,
-                        msg=lambda m: f"{processor_cls.__name__}, padded prompt={mask is not None}: {m}",
-                    )
+                    for ref, out in zip(reference, actual):
+                        torch.testing.assert_close(
+                            out,
+                            ref,
+                            rtol=1e-4,
+                            atol=1e-4,
+                            msg=lambda m: (
+                                f"{processor_cls.__name__}, padded prompt={mask is not None}, fused={fused}: {m}"
+                            ),
+                        )
     finally:
         destroy_model_parallel()
         destroy_distributed_environment()

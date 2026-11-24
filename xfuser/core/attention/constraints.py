@@ -77,6 +77,26 @@ class HEAD_DIM(CallConstraint):
 
 
 @dataclass(frozen=True)
+class MIN_KEY_LENGTH(CallConstraint):
+    """Refuse calls that attend over fewer than ``minimum`` keys.
+
+    A packed call counts its valid keys (the longest segment), which is what a
+    kernel that shortens K/V to them is launched with; otherwise the key length.
+    A batch of several packed rows is judged by its longest row, since the
+    shortest one is only known on the device; a kernel that reads per-row
+    lengths (seqlens_k) can still see a shorter row.
+    """
+
+    minimum: int
+
+    def unmet(self, query, key, value, call) -> Optional[str]:
+        length = key.shape[2] if call.varlen is None else call.varlen.max_seqlen_k
+        if length >= self.minimum:
+            return None
+        return f"needs at least {self.minimum} keys, got {length}"
+
+
+@dataclass(frozen=True)
 class _NonCausal(CallConstraint):
     def unmet(self, query, key, value, call) -> Optional[str]:
         return "does not support causal masking" if call.is_causal else None
@@ -146,6 +166,25 @@ class _PackedKeys(CallConstraint):
         return None
 
 
+class _TrailingPadKeys(CallConstraint):
+    """Packed keys only as one sequence's declared trailing pad.
+
+    For a kernel that can drop a pad by length but cannot gather: keys packed
+    any other way -- several segments, a pad that is not a trailing block, or a
+    batch one ``valid_kv_len`` cannot describe -- would be attended across
+    their boundaries.
+    """
+
+    def unmet(self, query, key, value, call) -> Optional[str]:
+        if call.varlen is None:
+            return None
+        if call.attention_kwargs.get("valid_kv_len") is None:
+            return "serves packed keys only as a trailing pad declared through valid_kv_len"
+        if key.shape[0] != 1:
+            return f"serves a trailing key pad on one sequence only, got batch size {key.shape[0]}"
+        return PACKED_KEYS.unmet(query, key, value, call)
+
+
 @dataclass(frozen=True)
 class _NoDropout(CallConstraint):
     def unmet(self, query, key, value, call) -> Optional[str]:
@@ -188,6 +227,7 @@ SELF_ATTENTION = _SelfAttention()
 NO_VARLEN = _NoVarlen()
 MASKED_VARLEN = _MaskedVarlen()
 PACKED_KEYS = _PackedKeys()
+TRAILING_PAD_KEYS = _TrailingPadKeys()
 NO_DROPOUT = _NoDropout()
 BF16 = _BFloat16()
 SAME_QKV = _SameQKV()

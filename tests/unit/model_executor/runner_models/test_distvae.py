@@ -35,14 +35,6 @@ def _distributed_log_environment(monkeypatch):
     monkeypatch.setenv("WORLD_SIZE", "1")
 
 
-@pytest.fixture(scope="module", autouse=True)
-def _torch_group_norm_for_distvae_tests():
-    original = torch.nn.GroupNorm
-    envs.restore_torch_group_norm_for_distvae()
-    yield
-    torch.nn.GroupNorm = original
-
-
 def _runner(**config):
     runner = object.__new__(_TestRunner)
     defaults = {
@@ -212,24 +204,6 @@ def test_zero_overlap_is_valid_for_an_inactive_strip_axis():
     )
 
     vae_manager.validate_vae_config(config, runner.capabilities, runner.settings)
-
-
-def test_vae_validator_restores_aiter_groupnorm_for_parallel_decode():
-    runner = _runner()
-    config = xFuserArgs(model="test-model", use_parallel_vae=True)
-
-    with mock.patch.object(
-        vae_manager,
-        "restore_torch_group_norm_for_distvae",
-        return_value=True,
-    ) as restore:
-        vae_manager.validate_vae_config(
-            config,
-            runner.capabilities,
-            runner.settings,
-        )
-
-    restore.assert_called_once_with()
 
 
 def test_enable_tiling_without_dimensions_keeps_native_window():
@@ -650,20 +624,112 @@ def _two_d_vae():
     )
 
 
-def test_non_aiter_group_norm_restoration_is_a_no_op():
-    original = envs._TORCH_GROUPNORM
-    with mock.patch.object(nn, "GroupNorm", original):
-        assert envs.restore_torch_group_norm_for_distvae() is False
-        assert nn.GroupNorm is original
-
-
-def test_aiter_replacement_blocks_recognition_until_xdit_restores_torch_norm():
-    original = envs._TORCH_GROUPNORM
+def test_aiter_group_norm_hides_the_layers_distvae_shards():
+    """Why a sharded run builds its VAE with the torch class."""
     vae = _two_d_vae()
     assert parallel.decoder_adapter_name(vae) == "DecoderAdapter"
 
     with mock.patch.object(nn, "GroupNorm", AiterGroupNorm):
         assert parallel.decoder_adapter_name(vae) is None
-        assert envs.restore_torch_group_norm_for_distvae() is True
-        assert nn.GroupNorm is original
-        assert parallel.decoder_adapter_name(vae) == "DecoderAdapter"
+
+
+def test_binding_torch_group_norm_governs_what_is_built_next():
+    with mock.patch.object(nn, "GroupNorm", AiterGroupNorm):
+        envs.bind_group_norm(use_aiter=False)
+
+        assert nn.GroupNorm is envs._TORCH_GROUPNORM
+
+
+def test_asking_for_aiter_without_aiter_keeps_the_torch_class():
+    with mock.patch.object(envs.PACKAGES_CHECKER, "packages_info", {"has_aiter": False}):
+        envs.bind_group_norm(use_aiter=True)
+
+        assert nn.GroupNorm is envs._TORCH_GROUPNORM
+
+
+class _DecoderTree(nn.Module):
+    """A nested module tree, standing in for a VAE decoder."""
+
+    def __init__(self):
+        super().__init__()
+        self.block = nn.Sequential(nn.Conv2d(8, 8, 1), nn.GroupNorm(4, 8))
+
+
+def test_decoder_compilation_covers_every_decoding_vae():
+    runner = _runner()
+    first, second = _DecoderTree(), _DecoderTree()
+    runner.pipe = SimpleNamespace(vae=SimpleNamespace(decoder=first))
+    runner.second_pipe = SimpleNamespace(vae=SimpleNamespace(decoder=second))
+
+    with mock.patch.object(torch, "compile", side_effect=lambda m, mode=None: ("compiled", m, mode)) as compiled:
+        runner._compile_vae_decoder()
+
+    assert compiled.call_count == 2
+    assert runner.pipe.vae.decoder == ("compiled", first, "default")
+    assert runner.second_pipe.vae.decoder == ("compiled", second, "default")
+
+
+def test_decoder_compilation_defers_to_parallel_vae():
+    runner = _runner(use_parallel_vae=True)
+    tree = _DecoderTree()
+    runner.pipe = SimpleNamespace(vae=SimpleNamespace(decoder=tree))
+
+    with mock.patch.object(torch, "compile") as compiled:
+        runner._compile_vae_decoder()
+
+    compiled.assert_not_called()
+    # DistVAE owns this decoder's execution, so the compile policy stays out of it.
+    assert runner.pipe.vae.decoder is tree
+
+
+@pytest.mark.parametrize(
+    "use_parallel_vae, use_torch_compile, compiles_decoder, uses_aiter",
+    [
+        (False, False, False, True),
+        (False, False, True, True),
+        (False, True, False, True),
+        # The two the torch class is for: DistVAE shards by that type, and
+        # Inductor cannot fuse across AITER's custom op.
+        (True, False, False, False),
+        (False, True, True, False),
+    ],
+)
+def test_which_group_norm_the_run_builds_its_model_with(
+    use_parallel_vae, use_torch_compile, compiles_decoder, uses_aiter
+):
+    runner = _runner(use_parallel_vae=use_parallel_vae, use_torch_compile=use_torch_compile)
+    runner._compiles_vae_decoder = lambda: compiles_decoder
+
+    assert runner._uses_aiter_group_norm() is uses_aiter
+
+
+def test_only_the_runners_that_measured_it_compile_their_decoder():
+    from xfuser.model_executor.models.runner_models.flux import xFuserFlux2Klein9BModel
+    from xfuser.model_executor.models.runner_models.z_image import xFuserZImageModel
+
+    assert base_model.xFuserModel._compiles_vae_decoder(object()) is False
+    assert xFuserZImageModel._compiles_vae_decoder(object()) is True
+    assert xFuserFlux2Klein9BModel._compiles_vae_decoder(object()) is True
+
+
+class _AlreadyCompiled(nn.Module):
+    """Stands in for ``torch._dynamo.OptimizedModule``, which is patched to it.
+
+    Building a real one couples the test to Dynamo's constructor, which is not
+    what is under test here -- the guard only asks whether the decoder is one.
+    """
+
+
+def test_decoder_compilation_skips_an_already_compiled_decoder():
+    runner = _runner()
+    already = _AlreadyCompiled()
+    runner.pipe = SimpleNamespace(vae=SimpleNamespace(decoder=already))
+
+    with (
+        mock.patch.object(torch._dynamo, "OptimizedModule", _AlreadyCompiled),
+        mock.patch.object(torch, "compile") as compiled,
+    ):
+        runner._compile_vae_decoder()
+
+    compiled.assert_not_called()
+    assert runner.pipe.vae.decoder is already

@@ -121,15 +121,20 @@ def _attend_in_bf16(backend):
     from xfuser.core.attention import registry
     from xfuser.core.attention.spec import AttentionBackendType
 
-    spec = registry.get(AttentionBackendType[backend])
-    kernel = spec.resolved()
+    specs = [registry.get(AttentionBackendType[backend])]
+    # Calls the backend refuses go to its fallback, which takes bf16 as well: AITER_BF16
+    # hands the text cross-attention's 16 keys to AITER.
+    if specs[0].fallback is not None:
+        specs.append(registry.get(specs[0].fallback))
+    for spec in specs:
+        kernel = spec.resolved()
 
-    def kernel_in_bf16(query, key, value, call):
-        output, lse = kernel(query.bfloat16(), key.bfloat16(), value.bfloat16(), call)
-        return output.to(query.dtype), lse
+        def kernel_in_bf16(query, key, value, call, kernel=kernel):
+            output, lse = kernel(query.bfloat16(), key.bfloat16(), value.bfloat16(), call)
+            return output.to(query.dtype), lse
 
-    # Spec is frozen; run() dispatches to whatever it holds as resolved.
-    object.__setattr__(spec, "_resolved", kernel_in_bf16)
+        # Spec is frozen; run() dispatches to whatever it holds as resolved.
+        object.__setattr__(spec, "_resolved", kernel_in_bf16)
 
 
 def _attend_as_fp8_comms(backend):

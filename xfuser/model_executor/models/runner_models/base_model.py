@@ -8,9 +8,10 @@ from PIL.Image import Image
 from typing import Callable, List, Optional, Tuple, Generator
 from dataclasses import dataclass, field, replace
 from torch.profiler import profile, record_function, ProfilerActivity
+from torch.utils._pytree import tree_map_only
 import diffusers
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from diffusers.utils import load_image, export_to_video
+from diffusers.utils import load_image
 import numpy as np
 from xfuser.compat import is_diffusers_import_error
 from xfuser.config import xFuserArgs
@@ -18,8 +19,10 @@ from xfuser.envs import (
     PACKAGES_CHECKER,
     _is_hip,
     _is_cuda,
+    bind_group_norm,
 )
 from xfuser.core.utils.outputs_equal import outputs_equal
+from xfuser.core.utils.video_utils import encode_video
 from xfuser.logger import warn_once
 from xfuser.core.utils.runner_utils import (
     log,
@@ -48,6 +51,7 @@ from xfuser.core.distributed import (
     get_data_parallel_rank,
     get_data_parallel_world_size,
     get_sequence_parallel_rank,
+    get_sequence_parallel_world_size,
     get_classifier_free_guidance_rank,
     get_pipeline_parallel_world_size,
     get_pp_group,
@@ -100,12 +104,9 @@ def register_model(name: str) -> Callable:
 
 
 # Derived from the backend specs rather than listed here: each backend declares
-# its sparsity strategy, so adding one cannot miss these sets. SPARGE and VSA
-# are grouped because both need a separate, dense cross-attention backend.
+# its sparsity strategy, so adding one cannot miss these sets.
 _SPARSE_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SSTA)
-_SPARGE_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SPARGE) | attention_registry.types_where(
-    sparsity=Sparsity.VSA
-)
+_NEEDS_DENSE_CROSS_ATTENTION = attention_registry.types_where(needs_dense_cross_attention=True)
 # Prism's block-sparse attention needs a token grid that only models declaring the
 # capability publish; anywhere else it would quietly run dense.
 _BSA_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.BSA)
@@ -120,36 +121,34 @@ def _parse_attention_backend(name: Optional[str], kind: str) -> Optional[Attenti
         raise ValueError(f"Invalid {kind}: {name}")
 
 
-def _validate_cross_attention_for_sparge(config: xFuserArgs) -> None:
-    """Cross-attention must be set and must not itself be a Sparge backend
-    whenever Sparge Attention is in play (either as the explicit backend or
-    via the hybrid schedule)."""
-    if config.cross_attention_backend is None:
+def _refuse_block_selecting_cross_attention(config: xFuserArgs) -> None:
+    """--cross_attention_backend must not select blocks itself: a short text KV has too few."""
+    cross = _parse_attention_backend(config.cross_attention_backend, "cross attention backend")
+    if cross in _NEEDS_DENSE_CROSS_ATTENTION:
         raise ValueError(
-            "When Sparge Attention is used, --cross_attention_backend must be set to a non-Sparge backend."
-        )
-    cross = _parse_attention_backend(
-        config.cross_attention_backend,
-        "cross attention backend",
-    )
-    if cross in _SPARGE_ATTENTION_BACKENDS:
-        raise ValueError(
-            f"--cross_attention_backend cannot be {cross.name} when Sparge "
-            f"Attention is used. Pick a non-Sparge cross attention backend."
+            f"--cross_attention_backend cannot be {cross.name}, a {attention_registry.get(cross).sparsity.value} "
+            f"backend: a short text KV has too few blocks to select from. Pick a dense cross attention backend."
         )
 
 
-def _selected_attention_backends(config: xFuserArgs) -> list[AttentionBackendType]:
+def _selected_attention_backends(config: xFuserArgs, include_cross: bool = True) -> list[AttentionBackendType]:
     """Every backend the run would actually dispatch to, named as the user named them."""
-    if config.use_hybrid_attn_schedule:
+    scheduled: list[AttentionBackendType] = []
+    if config.use_hybrid_attn_schedule and config.hybrid_attn_schedule:
+        scheduled = AttentionSchedule.from_comma_delimited_string(config.hybrid_attn_schedule).backends
+        specs = []
+    elif config.use_hybrid_attn_schedule:
         specs = [
             (config.hybrid_attn_high_precision_backend, "hybrid attention high precision backend"),
             (config.hybrid_attn_low_precision_backend, "hybrid attention low precision backend"),
         ]
     else:
         specs = [(config.attention_backend, "attention backend")]
-    specs.append((config.cross_attention_backend, "cross attention backend"))
-    return [backend for value, kind in specs if (backend := _parse_attention_backend(value, kind)) is not None]
+    if include_cross:
+        specs.append((config.cross_attention_backend, "cross attention backend"))
+    return scheduled + [
+        backend for value, kind in specs if (backend := _parse_attention_backend(value, kind)) is not None
+    ]
 
 
 def _validate_attention_head_dims(model: "xFuserModel", config: xFuserArgs) -> None:
@@ -227,8 +226,10 @@ class ModelCapabilities:
     enable_slicing: bool = False
     enable_tiling: bool = False
     use_vae_channels_last_format: bool = True
+    vae_dtype: bool = False
     # Other features
     use_int8_gemms: bool = False
+    use_aiter_int8_gemms: bool = False
     use_fp8_gemms: bool = False
     use_fp8_text_encoder: bool = False
     use_fp4_gemms: bool = False
@@ -245,9 +246,18 @@ class ModelCapabilities:
     cross_attention_backend: bool = False
     supports_sparse_attention_backends: bool = False
     supports_sparge_attention_backends: bool = False
+    supports_sol_attention_backends: bool = False
     supports_bsa_attention_backends: bool = False
     supports_distilled_weights: bool = False
     profile_capture_phase: bool = False
+
+
+@dataclass(frozen=True)
+class ModelFeatures:
+    """What a model always runs with where it applies, unlike a capability, which a user asks for."""
+
+    # The transformer wrapper has `shard_modulation()` and gains from it (see `_shard_modulation`).
+    shards_modulation: bool = False
 
 
 @dataclass(frozen=True)
@@ -389,6 +399,7 @@ class xFuserModel(abc.ABC):
     unsupported_attn_backend_reason: str = ""
 
     capabilities: ModelCapabilities = ModelCapabilities()
+    features: ModelFeatures = ModelFeatures()
     default_input_values: DefaultInputValues = DefaultInputValues()
     settings: ModelSettings = ModelSettings()
     checkpoint_request_defaults: dict = {}
@@ -499,6 +510,7 @@ class xFuserModel(abc.ABC):
         self.engine_config.runtime_config.runner_managed_torch_compile = (
             getattr(self.config, "pipefusion_parallel_degree", 1) > 1
         )
+        bind_group_norm(use_aiter=self._uses_aiter_group_norm())
         log("Loading model pipeline...")
         self.pipe = self._load_model_checked()
         enable_fast_pil_postprocess([self.pipe, getattr(self, "second_pipe", None)])
@@ -615,8 +627,8 @@ class xFuserModel(abc.ABC):
 
     def _enable_options(self) -> None:
         """Enable model options based on config"""
-        if getattr(self.config, "use_spargeattn_head_balance", False):
-            log("Enabling Sparge block-sparse head balancing...")
+        if getattr(self.config, "use_sparseattn_head_balance", False):
+            log("Enabling block-sparse head balancing...")
 
         self._vae_manager.enable_options(self._decoding_vaes())
         self._enable_cpu_offload()
@@ -649,15 +661,15 @@ class xFuserModel(abc.ABC):
     def _enable_cpu_offload(self) -> None:
         """Apply the CPU offload mode the config selects, if any."""
         if self.config.enable_group_cpu_offload:
-            # block_level groups only top-level ModuleLists: fits compiled transformers
-            # (blocks are top-level) and avoids the per-block-compile recompile storm that
-            # leaf-level hooks trigger. Eager components nest their layers (e.g. Mistral-3 at
-            # model.language_model.layers) where block_level cannot reach, leaving the whole
-            # component in one unmatched group and OOMing; they use leaf_level, which recurses.
+            # block_level groups only top-level ModuleLists, which also avoids the
+            # per-block-compile recompile storm that leaf-level hooks trigger. Components
+            # that nest their layers (e.g. Mistral-3 at model.language_model.layers) are out
+            # of its reach and would offload as one group, so they use leaf_level, which
+            # recurses. _block_level_offload_components names the ones it fits.
             from diffusers.hooks import apply_group_offloading
 
-            log("Enabling group CPU offload (transformer block-level, others leaf-level, streamed)...")
-            block_level_names = set(self._get_compiled_pipe_components())
+            log("Enabling group CPU offload (declared components block-level, others leaf-level, streamed)...")
+            block_level_names = set(self._block_level_offload_components())
             for name, component in self.pipe.components.items():
                 if not isinstance(component, torch.nn.Module):
                     continue
@@ -763,6 +775,27 @@ class xFuserModel(abc.ABC):
         config.attention_backend = default
         log(f"--attention_backend not set, using {self.settings.model_name} default: {default}")
 
+    def _validate_sparse_attention_families(self, config: xFuserArgs) -> None:
+        """Refuse a sparse backend the model has not opted into, wherever the run selects it --
+        including an explicit hybrid schedule -- and require a dense cross-attention backend
+        beside one that selects blocks, on a model that has cross-attention. Which capability a
+        family needs, and whether it needs a dense cross-attention backend, the specs say."""
+        _refuse_block_selecting_cross_attention(config)
+        needs_dense_cross = None
+        for backend in _selected_attention_backends(config, include_cross=False):
+            spec = attention_registry.find(backend)
+            capability = spec.model_capability if spec is not None else None
+            if capability is not None and not getattr(self.capabilities, capability):
+                raise ValueError(
+                    f"Model {config.model} does not support {backend.name}: it has not opted into "
+                    f"{spec.sparsity.value} attention backends."
+                )
+            if needs_dense_cross is None and spec is not None and spec.needs_dense_cross_attention:
+                needs_dense_cross = backend
+        if needs_dense_cross is not None and self.capabilities.cross_attention_backend:
+            if config.cross_attention_backend is None:
+                raise ValueError(f"{needs_dense_cross.name} needs --cross_attention_backend set to a dense backend.")
+
     def _validate_supported_attn_backends(self, config: xFuserArgs) -> None:
         """Refuse backends this model is not known to be correct with.
 
@@ -823,11 +856,15 @@ class xFuserModel(abc.ABC):
             config_value = getattr(
                 config, key, None
             )  # Some config options might not be set in the CLI, such as support for specific attention backends.
+            supported = getattr(self.capabilities, key)
+            if key == "use_int8_gemms":
+                # Each INT8 backend has its own flag; the load contract refuses the one a model lacks.
+                supported = supported or self.capabilities.use_aiter_int8_gemms
             if isinstance(config_value, int) and not isinstance(config_value, bool):
-                if not getattr(self.capabilities, key) and config_value > 1:
+                if not supported and config_value > 1:
                     raise ValueError(f"Model {self.settings.model_name} does not support {key}.")
             else:
-                if config_value and not getattr(self.capabilities, key):
+                if config_value and not supported:
                     raise ValueError(f"Model {self.settings.model_name} does not support {key}.")
 
         if config.cache_method:
@@ -849,6 +886,8 @@ class xFuserModel(abc.ABC):
                 )
 
         self._validate_supported_attn_backends(config)
+        attention_registry.refuse_unread_options(config, _selected_attention_backends(config))
+        self._validate_sparse_attention_families(config)
 
         if not self.capabilities.supports_bsa_attention_backends:
             for value, label in (
@@ -866,7 +905,6 @@ class xFuserModel(abc.ABC):
 
         backend = _parse_attention_backend(config.attention_backend, "attention backend")
         supports_sparse = self.capabilities.supports_sparse_attention_backends
-        supports_sparge = self.capabilities.supports_sparge_attention_backends
 
         if backend is None:
             if supports_sparse:
@@ -877,17 +915,6 @@ class xFuserModel(abc.ABC):
                     f"capabilities. If you want to use a dense attention backend, "
                     f"use the dense model equivalent."
                 )
-            if config.use_hybrid_attn_schedule:
-                low = _parse_attention_backend(
-                    config.hybrid_attn_low_precision_backend,
-                    "hybrid low-precision attention backend",
-                )
-                high = _parse_attention_backend(
-                    config.hybrid_attn_high_precision_backend,
-                    "hybrid high-precision attention backend",
-                )
-                if low in _SPARGE_ATTENTION_BACKENDS or high in _SPARGE_ATTENTION_BACKENDS:
-                    _validate_cross_attention_for_sparge(config)
         else:
             if backend in _SPARSE_ATTENTION_BACKENDS and not supports_sparse:
                 raise ValueError(f"Model {config.model} does not support sparse attention backends.")
@@ -900,11 +927,6 @@ class xFuserModel(abc.ABC):
                     f"If you want to use a dense attention backend, use the dense "
                     f"model equivalent."
                 )
-            if backend in _SPARGE_ATTENTION_BACKENDS:
-                if not supports_sparge:
-                    raise ValueError(f"Model {config.model} does not support Sparge attention backend.")
-                if self.capabilities.cross_attention_backend:
-                    _validate_cross_attention_for_sparge(config)
 
         possible_task = getattr(config, "task", None)
         if possible_task and self.settings.valid_tasks:
@@ -929,9 +951,6 @@ class xFuserModel(abc.ABC):
 
         if self.settings.model_output_type == "video" and not self.settings.fps:
             raise ValueError(f"Model {self.settings.model_name} produces video output but fps is not set.")
-
-        if config.use_int8_gemms and _is_hip():
-            raise ValueError("Int8 GEMMs on ROCm are not supported.")
 
         if config.use_fp6_gemms and _is_cuda():
             raise ValueError(
@@ -996,11 +1015,136 @@ class xFuserModel(abc.ABC):
         component.register_forward_pre_hook(_mark, with_kwargs=True, prepend=True)
         component._xfuser_marks_cudagraph_steps = True
 
+    def _compiles_vae_decoder(self) -> bool:
+        """Whether ``--use_torch_compile`` covers this model's VAE decoder too.
+
+        Off by default.  A decoder is compiled where a runner has measured it,
+        because this also builds the VAE with torch GroupNorm instead of AITER's,
+        which is the faster of the two for a decoder that stays eager.
+        """
+        return False
+
+    def _uses_aiter_group_norm(self) -> bool:
+        """Whether this run builds its model with AITER's GroupNorm.
+
+        AITER's kernel is the faster of the two run eagerly, so a run takes it
+        unless something needs the torch class: DistVAE identifies the layers to
+        shard by that type, and Inductor cannot fuse across AITER's custom op.
+        """
+        if self.config.use_parallel_vae:
+            return False
+        return not (self.config.use_torch_compile and self._compiles_vae_decoder())
+
+    def _compile_vae_decoder(self, mode: str = "default") -> None:
+        """Forward decoder compilation to the VAE manager, which owns the policy."""
+        self._vae_manager.compile_decoders(self._decoding_vaes(), mode=mode)
+
+    def _compile_whole(self, module: torch.nn.Module, kwargs: dict) -> torch.nn.Module:
+        """Compile a whole component; under CUDA graphs, copy its outputs out of the graph's pool.
+
+        The next replay overwrites the pool, and sequential true CFG reads one call's output after the next call.
+        """
+        compiled = torch.compile(module, **kwargs)
+        if kwargs["mode"] in self.CUDAGRAPH_COMPILE_MODES:
+            compiled.register_forward_hook(
+                lambda _module, _args, output: tree_map_only(torch.Tensor, torch.clone, output)
+            )
+        return compiled
+
     def _get_compiled_pipe_components(self) -> List[str]:
         return ["transformer"]
 
+    def _shard_modulation(self) -> None:
+        """Share the transformer's timestep modulation out over the sequence-parallel ranks.
+
+        For runners that set `shards_modulation` in their features, once the weights are placed. Each rank
+        then projects one share of the modulation instead of all of it, and its device holds
+        that share of the modulation weights instead of all of them. Stays off where a rank does
+        not run the whole transformer on whole weights (PipeFusion, sharded or offloaded
+        weights), and with step caching and on RDNA4, where it is not tested.
+        """
+        config = self.config
+        size = get_sequence_parallel_world_size()
+        if (
+            size <= 1
+            or config.pipefusion_parallel_degree > 1
+            or config.fully_shard_degree > 1
+            or config.memory_efficient_sharding
+            or config.enable_group_cpu_offload
+            or config.enable_sequential_cpu_offload
+            or config.enable_model_cpu_offload
+            or config.cache_method
+            or PACKAGES_CHECKER._on_rdna4()
+        ):
+            return
+        count = self.pipe.transformer.shard_modulation()
+        if count:
+            # Hand the device memory of the released weights back.
+            torch.cuda.empty_cache()
+            share = self.pipe.transformer.sharded_modulation.weight.nbytes / 2**30
+            log(
+                f"Shared the timestep modulation of {count} projections out over {size} sequence-parallel ranks: "
+                f"each holds {share:.2f} GiB of its weights."
+            )
+
+    def _fuses_projections(self) -> bool:
+        """Whether the compiled components compute the projections of one input with one fused GEMM.
+
+        One wide GEMM replaces several, which is faster where a rank holds few tokens and GEMMs
+        that small run far below the GPU's throughput. A runner opts in once its attention
+        processors read the fused Q/K/V and its components' `fuse_projections_for_inference()`
+        fuses only plain linears and shares their weights (`fuse_projections`), so that fusing
+        costs no memory.
+        """
+        return False
+
+    def _fuse_projections(self) -> None:
+        """Fuse the same-input projections of the compiled components, unless their weights are sharded or offloaded."""
+        config = self.config
+        if (
+            config.fully_shard_degree > 1
+            or config.memory_efficient_sharding
+            or config.enable_group_cpu_offload
+            or config.enable_sequential_cpu_offload
+            or config.enable_model_cpu_offload
+        ):
+            return
+        fused: dict[str, int] = {}
+        for name in self._get_compiled_pipe_components():
+            for kind, count in getattr(self.pipe, name).fuse_projections_for_inference().items():
+                fused[kind] = fused.get(kind, 0) + count
+        if any(fused.values()):
+            # Hand the separate projections' own copies back to the device.
+            torch.cuda.empty_cache()
+            # Zero counts stay: a pass that fused nothing (FP8, LoRA) otherwise shows only as a smaller speedup.
+            log("Fused projections: " + ", ".join(f"{count} {kind}" for kind, count in fused.items()))
+
+    def _block_level_offload_components(self) -> List[str]:
+        """Components that group CPU offload splits block by block.
+
+        ``block_level`` groups the ModuleLists that are direct children of a
+        component, which suits a transformer that holds its blocks there. A
+        component that nests its blocks deeper matches nothing, and group
+        offload then holds all of it on the device at once, so such a component
+        belongs on ``leaf_level``, which recurses.
+        """
+        return self._get_compiled_pipe_components()
+
     def _get_compile_warmup_steps(self, input_args: dict) -> Optional[int]:
         return 2  # None = skip step reduction, run full warmup cycle
+
+    def _compile_warmup_steps(self, input_args: dict) -> Optional[int]:
+        """``_get_compile_warmup_steps``, or None (the full cycle) under a per-step schedule.
+
+        An attention or GEMM schedule advances once per transformer call and restarts only
+        after its last step, so a shortened warmup would leave every later call starting
+        partway through the schedule, and some of its backend paths uncompiled.
+        """
+        if runtime_state_is_initialized():
+            runtime_state = get_runtime_state()
+            if runtime_state.has_attention_schedule() or runtime_state.has_gemm_schedule():
+                return None
+        return self._get_compile_warmup_steps(input_args)
 
     def _enable_compute_comm_overlap(self) -> None:
         """Enables compute-communication overlap for the model while caring for
@@ -1075,7 +1219,12 @@ class xFuserModel(abc.ABC):
         when ``run`` or ``profile`` executes. The final warmup runs
         ``_get_compile_warmup_steps`` steps, or the caller's count when that
         returns ``None``.
+
+        A runner that opts in through ``_compiles_vae_decoder`` also has its VAE
+        decoder compiled here, in the mode the VAE manager selects for it.
         """
+        if self._compiles_vae_decoder():
+            self._compile_vae_decoder()
         self._enable_compute_comm_overlap()
         compile_kwargs = {"mode": self._get_compile_mode()}
         pp_degree = getattr(self.config, "pipefusion_parallel_degree", 1)
@@ -1085,7 +1234,7 @@ class xFuserModel(abc.ABC):
         cache_targets = set(self.settings.transformer_attr_names if self.config.cache_method else ())
         requested_shards = getattr(self.config, "fully_shard_components", None)
         compile_args = copy.deepcopy(input_args)
-        warmup_steps = self._get_compile_warmup_steps(input_args)
+        warmup_steps = self._compile_warmup_steps(input_args)
         if warmup_steps is not None:
             compile_args["num_inference_steps"] = warmup_steps
 
@@ -1132,7 +1281,7 @@ class xFuserModel(abc.ABC):
                 kwargs = {**compile_kwargs, "mode": usp_sdma.compile_mode(compile_kwargs["mode"])}
             blockwise = name in stages or name in sharded or name in cache_targets or self._prefer_blockwise_compile()
             if not blockwise:
-                setattr(self.pipe, name, torch.compile(module, **kwargs))
+                setattr(self.pipe, name, self._compile_whole(module, kwargs))
                 continue
             block_lists = self._declared_blocks(name, module)
             for block_list in block_lists:
@@ -1151,7 +1300,7 @@ class xFuserModel(abc.ABC):
                         f"{self.settings.fsdp_strategy.get(name, {}).get('wrap_attrs', [])} exist. Name them in "
                         f"fsdp_strategy[{name!r}]['wrap_attrs'] of {type(self).__name__}."
                     )
-                setattr(self.pipe, name, torch.compile(module, **kwargs))
+                setattr(self.pipe, name, self._compile_whole(module, kwargs))
                 continue
             if kwargs["mode"] in self.CUDAGRAPH_COMPILE_MODES:
                 self._mark_cudagraph_steps(module)
@@ -1328,6 +1477,10 @@ class xFuserModel(abc.ABC):
 
         return DiffusionOutput.from_outputs(all_outputs, self.settings.model_output_type), timings
 
+    def _records_cudagraphs(self) -> bool:
+        """Whether a compiled component records CUDA graphs; override when one component's mode differs."""
+        return self._get_compile_mode() in self.CUDAGRAPH_COMPILE_MODES
+
     def _warmup_cudagraph_capture(self, input_args: dict) -> bool:
         """Record CUDA graphs once, before timings, and report whether that happened.
 
@@ -1341,7 +1494,7 @@ class xFuserModel(abc.ABC):
             return False
         if self.config.warmup_calls:
             return False
-        if self._get_compile_mode() not in self.CUDAGRAPH_COMPILE_MODES:
+        if not self._records_cudagraphs():
             return False
 
         capture_args = copy.deepcopy(input_args)
@@ -1444,7 +1597,7 @@ class xFuserModel(abc.ABC):
             for video_index, (video, pipe_args) in enumerate(output.get_outputs()):
                 output_name = self.get_output_name(pipe_args)
                 output_path = f"{self.config.output_directory}/{output_name}_{video_index}.mp4"
-                export_to_video(video, output_path, fps=self.settings.fps)
+                encode_video(video, fps=self.settings.fps, output_path=output_path)
                 log(f"Output video saved to {output_path}")
         else:
             raise NotImplementedError("No output to save.")
@@ -1463,6 +1616,9 @@ class xFuserModel(abc.ABC):
     def prepare_run(self, input_args: dict) -> None:
         """Prepare model state before a pipeline invocation."""
         self._vae_manager.prepare_run(self._decoding_vaes(), input_args)
+        # Warmups advance the step counter too, so each invocation starts the schedules at step 0.
+        if runtime_state_is_initialized():
+            get_runtime_state().reset_step_counter()
 
     def _run_timed_pipe(self, input_args: dict) -> Tuple[DiffusionOutput, float]:
         """Run the pipeline and time its latency from the synchronized across all ranks beginning
@@ -1535,6 +1691,8 @@ class xFuserModel(abc.ABC):
         """Hook for any post model-load and state initialization"""
 
         self.loader.materialize_pipeline()
+        if self._fuses_projections():
+            self._fuse_projections()
 
         if self.config.use_hybrid_attn_schedule:
             self._setup_hybrid_attn_schedule(input_args)
@@ -1542,8 +1700,16 @@ class xFuserModel(abc.ABC):
         if self.config.use_hybrid_gemm_schedule:
             self._setup_hybrid_gemm_schedule(input_args)
 
+        if runtime_state_is_initialized():
+            get_runtime_state().configure_attention_backends(
+                input_args.get("num_inference_steps"), self._calculate_hybrid_attention_step_multiplier(input_args)
+            )
+
         if self.config.use_vae_channels_last_format:
             self._convert_vae_to_channels_last()
+
+        if self.features.shards_modulation:
+            self._shard_modulation()
 
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
         return 1

@@ -23,19 +23,22 @@ from xfuser.core.distributed import (
 )
 from xfuser.core.utils.runner_utils import log
 from xfuser.core.utils.video_utils import encode_video_with_audio
-from xfuser.envs import get_device_name
+from xfuser.envs import PACKAGES_CHECKER, get_device_name
+from xfuser.model_executor.layers import usp_sdma
 from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
     ModelCapabilities,
     ModelSettings,
     _parse_attention_backend,
+    _selected_attention_backends,
     register_model,
     xFuserModel,
 )
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     LoadRoute,
+    STANDARD_LOAD_ROUTES,
 )
 
 
@@ -63,6 +66,12 @@ _SUPPORTED_ATTN_BACKENDS = frozenset(
     }
 ) | (AITER_MHA_V4_ONLY_BACKEND_SET - _UNSERVED_MHA_V4_BACKENDS)
 _FASTH3_ATTN_BACKENDS = VSA_H3_BACKENDS
+# MiniMax-H3 attends text, video and audio as one long packed sequence, the shape Sol-Attn's
+# routing is for. Its alignment pad is declared through valid_kv_len and valid_q_len, and the
+# text and audio rows are forced exact; see the transformer wrapper.
+_SOL_ATTN_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SOL)
+_LOCAL_TOKEN_ORDER_BACKENDS = attention_registry.types_where(prefers_local_token_order=True)
+_H3_ATTN_BACKENDS = _SUPPORTED_ATTN_BACKENDS | _SOL_ATTN_BACKENDS
 # VDN-H3's window varlen executor only implements these three; it does not use
 # the CUDNN / NVTE_FP8 / MHA-v4 paths the base H3 advertises.
 _VDN_SUPPORTED_ATTN_BACKENDS = frozenset(
@@ -129,7 +138,7 @@ TURBO_ADAPTERS = {
 }
 
 
-def _load_minimax_h3_components(pipe) -> None:
+def _load_minimax_h3_components(pipe, model_name: str = "MiniMax-H3") -> None:
     """Load H3 components without requiring online metadata or a processor model config."""
     from huggingface_hub.constants import HF_HUB_OFFLINE
 
@@ -154,7 +163,7 @@ def _load_minimax_h3_components(pipe) -> None:
         # ModularPipeline logs component errors and continues with None. Stop
         # here rather than failing later in prompt encoding or VAE decoding.
         raise RuntimeError(
-            f"MiniMax-H3 failed to load required components: {', '.join(missing)}. "
+            f"{model_name} failed to load required components: {', '.join(missing)}. "
             "See the component loading errors above."
         )
 
@@ -254,8 +263,14 @@ def install_minimax_h3_vae_tile_parallel(vae) -> None:
     )
 
 
-def _patch_minimax_h3_text_encoder_broadcast() -> None:
-    from diffusers.modular_pipelines.minimax_h3 import encoders
+def _patch_minimax_h3_text_encoder_broadcast(encoders=None) -> None:
+    """Encode prompts on the first rank only and broadcast the embeddings.
+
+    ``encoders`` is the modular pipeline's encoders module, whose
+    ``get_qwen3vl_prompt_embeds`` gets patched; MiniMax-H3's by default.
+    """
+    if encoders is None:
+        from diffusers.modular_pipelines.minimax_h3 import encoders
 
     if getattr(encoders, "_xfuser_broadcast_patched", False):
         return
@@ -494,11 +509,93 @@ class MiniMaxH3DiffusionOutput(DiffusionOutput):
         self.audio_sample_rate = audio_sample_rate
 
 
+class MiniMaxH3TextEncoderMixin:
+    """Qwen3-VL text encoder handling shared by the MiniMax-H3 family of runners:
+    TP sharding over every rank, and streaming it from host memory under
+    --enable_model_cpu_offload."""
+
+    def _offload_resident_components(self) -> tuple[str, ...]:
+        # Model offload moves only the text encoder: the transformer runs every step and is
+        # quantized on the device, and the VAEs are small.
+        names = (self._transformer_component_name, "vae", "audio_vae")
+        return tuple(name for name in names if getattr(self.pipe, name, None) is not None)
+
+    def _enable_cpu_offload(self) -> None:
+        """Stream the text encoder from host memory under --enable_model_cpu_offload.
+
+        ModularPipeline has no enable_model_cpu_offload, and the 63 GB Qwen3-VL encoder is the one
+        component that runs once per request, so it is the one worth leaving on the host. Leaf-level
+        group offload keeps its weights pinned there and streams them in layer by layer, so nothing
+        is copied back after encoding. _validate_config refuses the other offload modes.
+        """
+        if not self.config.enable_model_cpu_offload:
+            return
+        from diffusers.hooks import apply_group_offloading
+
+        log(
+            f"Enabling {self.settings.model_name} CPU offload: text encoder streamed from host, "
+            "transformer and VAEs on device."
+        )
+        apply_group_offloading(module=self.pipe.text_encoder, **self._group_offload_kwargs("leaf_level"))
+
+    @staticmethod
+    def _build_text_encoder_tp_plan(num_layers: int):
+        from torch.distributed.tensor.parallel import (
+            ColwiseParallel,
+            RowwiseParallel,
+        )
+
+        plan = {}
+        for layer_index in range(num_layers):
+            prefix = f"layers.{layer_index}"
+            plan.update(
+                {
+                    f"{prefix}.self_attn.q_proj": ColwiseParallel(),
+                    f"{prefix}.self_attn.k_proj": ColwiseParallel(),
+                    f"{prefix}.self_attn.v_proj": ColwiseParallel(),
+                    f"{prefix}.self_attn.o_proj": RowwiseParallel(),
+                    f"{prefix}.mlp.gate_proj": ColwiseParallel(),
+                    f"{prefix}.mlp.up_proj": ColwiseParallel(),
+                    f"{prefix}.mlp.down_proj": RowwiseParallel(),
+                }
+            )
+        return plan
+
+    def _parallelize_text_encoder(self, text_encoder) -> None:
+        degree = self.config.text_encoder_tp_degree or 1
+        if degree <= 1:
+            return
+
+        from torch.distributed.device_mesh import DeviceMesh
+        from torch.distributed.tensor.parallel import parallelize_module
+
+        world_group = get_world_group()
+        if degree != world_group.world_size:
+            raise ValueError(
+                f"{self.settings.model_name} text encoder TP degree {degree} must match world size {world_group.world_size}."
+            )
+
+        device = torch.device(f"cuda:{world_group.local_rank}")
+        language_model = text_encoder.model.language_model
+        text_encoder.to(device)
+        mesh = DeviceMesh.from_group(world_group.device_group, "cuda")
+        parallelize_module(
+            language_model,
+            device_mesh=mesh,
+            parallelize_plan=self._build_text_encoder_tp_plan(len(language_model.layers)),
+            src_data_rank=None,
+        )
+        text_encoder._xfuser_tp_mesh = mesh
+        log(f"Sharded {self.settings.model_name} Qwen3-VL text encoder with TP{degree}.")
+
+
 @register_model("MiniMaxAI/MiniMax-H3")
 @register_model("MiniMax-H3")
-class xFuserMiniMaxH3Model(xFuserModel):
+class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
     # From the registered checkpoint's transformer config.
     attention_heads = 56
+    # Measured on the base checkpoint only; the variants keep the runner's compile mode.
+    transformer_cudagraphs = True
 
     # diffusers 0.40.0 is the first release with native MiniMax-H3.
     min_diffusers_version = "0.40.0"
@@ -535,12 +632,10 @@ class xFuserMiniMaxH3Model(xFuserModel):
         valid_tasks=["t2va", "i2va", "l2va", "fl2va"],
     )
 
-    # Modular loading and QKV fusion leave no collective-safe checkpoint mapping.
     load_support = LoadSupport(
-        meta_transformers=(),
-        meta_text_encoders=(),
-        replicated_meta=False,
-        routes=LoadRoute.NONE,
+        meta_transformers=("transformer",),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
     )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
@@ -553,20 +648,38 @@ class xFuserMiniMaxH3Model(xFuserModel):
         use_fp8_gemms=True,
         use_fp4_gemms=True,
         use_hybrid_attn_schedule=True,
+        supports_sol_attention_backends=True,
         enable_slicing=False,
         enable_tiling=False,
     )
     _transformer_component_name = "transformer"
     _warmup_num_inference_steps = 3
     _enable_fasth3_vsa = False
-    supported_attn_backends = _SUPPORTED_ATTN_BACKENDS
+    supported_attn_backends = _H3_ATTN_BACKENDS
 
     def _get_runtime_state_pipeline(self):
         if self._transformer_component_name == "transformer":
             return self.pipe
         return SimpleNamespace(transformer=getattr(self.pipe, self._transformer_component_name))
 
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        if self.loader.replicated_broadcast_load():
+            self.pipe.transformer.fuse_qkv_projections()
+        # Under a Sol backend the token refiner runs on dense AITER (see the transformer wrapper).
+        # Select it here, outside the compiled forward, which cannot import its kernel.
+        runtime = get_runtime_state()
+        if set(runtime.selected_attention_backends()) & _SOL_ATTN_BACKENDS:
+            from xfuser.model_executor.models.transformers.transformer_minimax_h3 import REFINER_DENSE_BACKEND
+
+            runtime._check_if_backend_compatible_with_current_configuration(REFINER_DENSE_BACKEND)
+        # A backend that pools runs of consecutive tokens gets the video in curve order.
+        if set(runtime.selected_attention_backends()) & _LOCAL_TOKEN_ORDER_BACKENDS:
+            getattr(self.pipe, self._transformer_component_name).curve_order_video = True
+
     def _validate_config(self, config) -> None:
+        if getattr(config, "memory_efficient_sharding", False) and config.fully_shard_degree > 1:
+            raise ValueError("MiniMax-H3 does not support memory-efficient FSDP loading.")
         if config.task is None:
             if self.settings.valid_tasks == ["ref2va"]:
                 config.task = "ref2va"
@@ -583,24 +696,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
                 "existing model ranks and does not support dedicated VAE-only "
                 "ranks; leave --vae_parallel_size at 0."
             )
-        if config.use_hybrid_attn_schedule:
-            backend_specs = [
-                (
-                    config.hybrid_attn_high_precision_backend,
-                    "hybrid attention high precision backend",
-                ),
-                (
-                    config.hybrid_attn_low_precision_backend,
-                    "hybrid attention low precision backend",
-                ),
-            ]
-        else:
-            backend_specs = [(config.attention_backend, "attention backend")]
-
-        backends = [
-            backend for value, label in backend_specs if (backend := _parse_attention_backend(value, label)) is not None
-        ]
-        for backend in backends:
+        for backend in _selected_attention_backends(config):
             if backend == AttentionBackendType.AITER_FP8:
                 try:
                     from aiter import flash_attn_varlen_fp8_pertensor_func  # noqa: F401
@@ -649,28 +745,12 @@ class xFuserMiniMaxH3Model(xFuserModel):
             args["prompt"] = args["prompt"][0]
         return args
 
-    def _offload_resident_components(self) -> tuple[str, ...]:
-        # Model offload moves only the text encoder: the transformer runs every step and is
-        # quantized on the device, and the VAEs are small.
-        names = (self._transformer_component_name, "vae", "audio_vae")
-        return tuple(name for name in names if getattr(self.pipe, name, None) is not None)
-
-    def _enable_cpu_offload(self) -> None:
-        """Stream the text encoder from host memory under --enable_model_cpu_offload.
-
-        ModularPipeline has no enable_model_cpu_offload, and the 63 GB Qwen3-VL encoder is the one
-        component that runs once per request, so it is the one worth leaving on the host. Leaf-level
-        group offload keeps its weights pinned there and streams them in layer by layer, so nothing
-        is copied back after encoding. _validate_config refuses the other offload modes.
-        """
-        if not self.config.enable_model_cpu_offload:
-            return
-        from diffusers.hooks import apply_group_offloading
-
-        log("Enabling MiniMax-H3 CPU offload: text encoder streamed from host, transformer and VAEs on device.")
-        apply_group_offloading(module=self.pipe.text_encoder, **self._group_offload_kwargs("leaf_level"))
-
     def _load_model(self):
+        if (self.config.use_fp8_gemms or self.config.use_fp4_gemms) and self.loader.replicated_broadcast_load():
+            raise ValueError(
+                "MiniMax-H3 --memory_efficient_replicated_load does not support FP8/FP4 GEMMs: "
+                "checkpoint materialization must finish before QKV fusion."
+            )
         from diffusers import ModularPipeline
         from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
             xFuserMiniMaxH3Transformer3DWrapper,
@@ -684,16 +764,25 @@ class xFuserMiniMaxH3Model(xFuserModel):
             self.settings.model_name,
             workflow=workflow,
         )
-        transformer = xFuserMiniMaxH3Transformer3DWrapper.from_pretrained(
-            self.settings.model_name,
-            dtype=torch.bfloat16,
-            **self.loader.checkpoint_request("transformer").from_pretrained_kwargs(),
-            enable_fasth3_vsa=self._enable_fasth3_vsa,
-            attention_backend=_parse_attention_backend(
+        init_kwargs = {
+            "enable_fasth3_vsa": self._enable_fasth3_vsa,
+            "attention_backend": _parse_attention_backend(
                 getattr(self.config, "attention_backend", None),
                 "attention backend",
             ),
-        )
+        }
+        if self.loader.replicated_broadcast_load():
+            transformer = self.loader.load_transformer(
+                xFuserMiniMaxH3Transformer3DWrapper,
+                init_kwargs=init_kwargs,
+            )
+        else:
+            transformer = xFuserMiniMaxH3Transformer3DWrapper.from_pretrained(
+                self.settings.model_name,
+                dtype=torch.bfloat16,
+                **self.loader.checkpoint_request("transformer").from_pretrained_kwargs(),
+                **init_kwargs,
+            )
         pipe.update_components(transformer=transformer)
         _load_minimax_h3_components(pipe)
         if self.config.lora_path:
@@ -702,62 +791,15 @@ class xFuserMiniMaxH3Model(xFuserModel):
                 _resolve_lora_file(self.config.lora_path, self.config.lora_weight_name),
                 scale=self.config.lora_scale,
             )
-        pipe.transformer.fuse_qkv_projections()
+        # Keep checkpoint projections unfused until replicated weights are materialized.
+        # _post_load_and_state_initialization performs fusion on that path.
+        if not self.loader.replicated_broadcast_load():
+            pipe.transformer.fuse_qkv_projections()
         pipe.text_encoder.lm_head = None
         self._parallelize_text_encoder(pipe.text_encoder)
         _count_steps_as_forwards(pipe.scheduler)
         _count_steps_as_forwards(pipe.audio_scheduler)
         return pipe
-
-    @staticmethod
-    def _build_text_encoder_tp_plan(num_layers: int):
-        from torch.distributed.tensor.parallel import (
-            ColwiseParallel,
-            RowwiseParallel,
-        )
-
-        plan = {}
-        for layer_index in range(num_layers):
-            prefix = f"layers.{layer_index}"
-            plan.update(
-                {
-                    f"{prefix}.self_attn.q_proj": ColwiseParallel(),
-                    f"{prefix}.self_attn.k_proj": ColwiseParallel(),
-                    f"{prefix}.self_attn.v_proj": ColwiseParallel(),
-                    f"{prefix}.self_attn.o_proj": RowwiseParallel(),
-                    f"{prefix}.mlp.gate_proj": ColwiseParallel(),
-                    f"{prefix}.mlp.up_proj": ColwiseParallel(),
-                    f"{prefix}.mlp.down_proj": RowwiseParallel(),
-                }
-            )
-        return plan
-
-    def _parallelize_text_encoder(self, text_encoder) -> None:
-        degree = self.config.text_encoder_tp_degree or 1
-        if degree <= 1:
-            return
-
-        from torch.distributed.device_mesh import DeviceMesh
-        from torch.distributed.tensor.parallel import parallelize_module
-
-        world_group = get_world_group()
-        if degree != world_group.world_size:
-            raise ValueError(
-                f"MiniMax-H3 text encoder TP degree {degree} must match world size {world_group.world_size}."
-            )
-
-        device = torch.device(f"cuda:{world_group.local_rank}")
-        language_model = text_encoder.model.language_model
-        text_encoder.to(device)
-        mesh = DeviceMesh.from_group(world_group.device_group, "cuda")
-        parallelize_module(
-            language_model,
-            device_mesh=mesh,
-            parallelize_plan=self._build_text_encoder_tp_plan(len(language_model.layers)),
-            src_data_rank=None,
-        )
-        text_encoder._xfuser_tp_mesh = mesh
-        log(f"Sharded MiniMax-H3 Qwen3-VL text encoder with TP{degree}.")
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         prompt = input_args["prompt"]
@@ -834,7 +876,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
         original_forward = transformer.forward
         compiled_forward = torch.compile(
             original_forward,
-            mode=mode,
+            mode=self._transformer_compile_mode(mode, use_hybrid),
             fullgraph=not use_hybrid,
         )
 
@@ -845,6 +887,18 @@ class xFuserMiniMaxH3Model(xFuserModel):
         if not get_runtime_state().has_attention_schedule():
             compile_args["num_inference_steps"] = self._warmup_num_inference_steps
         self._run_timed_pipe(compile_args)
+
+    def _transformer_compile_mode(self, mode: str, use_hybrid: bool) -> str:
+        """CUDA graphs for the transformer alone: the video VAE decoder reads graph outputs across calls."""
+        if not self.transformer_cudagraphs or use_hybrid or PACKAGES_CHECKER._on_rdna4():
+            return mode
+        return usp_sdma.compile_mode("reduce-overhead")
+
+    def _records_cudagraphs(self) -> bool:
+        if self.config.fully_shard_degree > 1:
+            return super()._records_cudagraphs()
+        mode = self._transformer_compile_mode(self._get_compile_mode(), get_runtime_state().has_attention_schedule())
+        return mode in self.CUDAGRAPH_COMPILE_MODES
 
     def _run_warmup_calls(self, input_args: dict) -> None:
         if not self.config.warmup_calls:
@@ -923,6 +977,10 @@ class xFuserFastH3Model(xFuserMiniMaxH3Model):
     other MiniMax-H3 backends stay dense when selected explicitly.
     """
 
+    load_support = LoadSupport()
+
+    transformer_cudagraphs = False
+
     default_input_values = DefaultInputValues(
         height=768,
         width=1344,
@@ -938,7 +996,7 @@ class xFuserFastH3Model(xFuserMiniMaxH3Model):
 
     _warmup_num_inference_steps = 4
     _enable_fasth3_vsa = True
-    supported_attn_backends = _SUPPORTED_ATTN_BACKENDS | _FASTH3_ATTN_BACKENDS
+    supported_attn_backends = _H3_ATTN_BACKENDS | _FASTH3_ATTN_BACKENDS
 
     def _customize_settings(self, config) -> None:
         super()._customize_settings(config)
@@ -981,7 +1039,7 @@ class xFuserFastH3DenseModel(xFuserFastH3Model):
     settings.default_attention_backend = None
 
     _enable_fasth3_vsa = False
-    supported_attn_backends = _SUPPORTED_ATTN_BACKENDS
+    supported_attn_backends = _H3_ATTN_BACKENDS
 
     def _validate_config(self, config) -> None:
         # Skip V1's VSA/hybrid-schedule check: no VSA backend is supported here,
@@ -1023,6 +1081,10 @@ class xFuserMiniMaxH3TurboModel(xFuserMiniMaxH3Model):
     count and video shift default to their published values and other step counts
     are refused; any other adapter needs ``--num_inference_steps`` and ``--flow_shift``.
     """
+
+    load_support = LoadSupport()
+
+    transformer_cudagraphs = False
 
     default_input_values = DefaultInputValues(
         height=768,
@@ -1096,6 +1158,11 @@ class xFuserVDNMiniMaxH3Model(xFuserMiniMaxH3Model):
     position_ids in an eager forward pre-hook outside the compiled blocks.
     """
 
+    load_support = LoadSupport()
+
+    # Compiles its blocks in _compile_model below, outside _transformer_compile_mode.
+    transformer_cudagraphs = False
+
     default_input_values = DefaultInputValues(
         height=768,
         width=1344,
@@ -1135,6 +1202,8 @@ class xFuserVDNMiniMaxH3Model(xFuserMiniMaxH3Model):
         use_fp8_gemms=True,
         use_fp4_gemms=False,
         use_hybrid_attn_schedule=False,
+        # The window executor serves none of the Sol rows; see _VDN_SUPPORTED_ATTN_BACKENDS.
+        supports_sol_attention_backends=False,
     )
 
     supported_attn_backends = _VDN_SUPPORTED_ATTN_BACKENDS
@@ -1248,6 +1317,7 @@ class xFuserVDNMiniMaxH3Model(xFuserMiniMaxH3Model):
 
 @register_model("MiniMax-H3-Ref2VA")
 class xFuserMiniMaxH3Ref2VAModel(xFuserMiniMaxH3Model):
+    transformer_cudagraphs = False
     # The reference workflow shares the modular loading and QKV-fusion limitation.
     load_support = LoadSupport(
         meta_transformers=(),

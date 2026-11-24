@@ -22,6 +22,7 @@ _RUNTIME_FIELDS = (
     "cross_attention_backend",
     "use_high_precision_gemm",
     "step_counter",
+    "forward_step",
 )
 _ATTENTION_BYPASS_FIELD = "_xdit_compile_capture_bypass_attention"
 

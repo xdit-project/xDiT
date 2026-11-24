@@ -159,7 +159,9 @@ eck in the configuration fixture stops a configuration that starts a second time
 3. each replayed call (measured between the call's starting replay status (PRE_FIDELITY or PRE_REPLAY) and ending status (FIDELITY_FAILED or FIDELITY_PASSED or REPLAYED), see RL100): 2 minutes in A and 5 minutes in B.
 4. 5 (for A) or 10 (for B) minutes since the last record in the log file in all other cases
 
-**TD110.** **Deadlines enforcement.** The configuration fixture (TD40) launches each instance sequentially using a supplementary launcher process that takes care of deadlines, child processes cleanup, actually launching an instance with torchrun and statuses of instance's case in some cases. Each rank of the instance writes its deadline -related progress and timestamps to a certain rank-specific log file known to the launcher. The launcher then periodically reads these files and uses progress records and timestamps to enforce deadlines. A missed deadline leads to a warning message and killing the instance and all its descendant processes.
+**TD110.** **Deadlines enforcement.** The configuration fixture (TD40) launches each instance sequentially (TD115) using a supplementary launcher process that takes care of deadlines, child processes cleanup, actually launching an instance with torchrun and statuses of instance's case in some cases. Each rank of the instance writes its deadline -related progress and timestamps to a certain rank-specific log file known to the launcher. The launcher then periodically reads these files and uses progress records and timestamps to enforce deadlines. A missed deadline leads to a warning message and killing the instance and all its descendant processes.
+
+**TD115.** The launcher first runs instance A. If at least one call on any rank of A reached `status=DUMPED`, the launcher also runs instance B for the same test cases that A used.
 
 **TD120.** Since the launcher is the only entity that knows of missed deadlines, and also only it can detect crashes or other premature exits, upon the instance finishing execution (whatever the reasons for instance process ending were) the launcher is responsible for reading rank log files and appending correct statuses to rank log files for the cases that were executed last (these might need `status=CRASHED` or `status=HANGED` if that happened) or don't have records at all (these might need UNSUPPORTED if whole configuration is unsupported, or FAILED_TO_START if the rank crashed or hanged and just didn't have an opportunity to try to run the case).
 
@@ -169,7 +171,7 @@ eck in the configuration fixture stops a configuration that starts a second time
 
 **TD140.** The launcher exits with 0 when it worked; the detailed statuses and other run information go through rank log files. A nonzero launcher exit means that the launcher failed and that no data exists, so every case of the configuration fails triggering a pytest error.
 
-**TD200.** Configurations with step caching or hybrid schedules aren't supported.
+**TD200.** Configurations with step caching or hybrid schedules aren't supported. The configuration fixture detects that before running the launcher for instance A, and errors out.
 
 ### Tolerances and metrics
 
@@ -307,10 +309,6 @@ The harness arranges the following behavior: if set, A's instance flag value is 
 
 **IA60.** If the case policy requires fidelity check and the check fails on any rank of A or B, this necessary fails the pytest tests function outcome even if output tolerances are within bounds.
 
-**IA70.** UNSUPPORTED marks a known limit of the harness:
-1. If the harness cannot handle an argument (fp8 or MX tensors, types that it cannot serialize), only the affected case call gets UNSUPPORTED. The message names the argument.
-2. If the harness cannot handle a feature of a configuration, every case of the configuration gets UNSUPPORTED. The message names the feature and the run argument with its value. The harness finds this at collection, from the xDiT settings (TD20), or when A or B loads the configuration (RL40). After that, no instance of the configuration starts or continues.
-
 **IA80.** A crash or a hang ends the instance. Version 1 does not recover. An exception that ends the instance counts as a crash.
 
 ### Instance B
@@ -328,10 +326,7 @@ the same world size and parallel layout as A, with these changes:
 5. no compile, no step cache, no FP8 communication, no hybrid schedules.
 6. B gets the same list of component paths (cases) to work on as A. B knows where A stores its dump files, and for the case calls for which it can run replays, it can try to read dump files that A produced to replay them with higher precision. Calls that exist in A (have at least status DUMPED) but never replayed in B (this means replay on A's data, since other replay is fidelity check and it's irrelevant in the context, i.e. calls in B with status REPLAYED), or calls that have at least status DUMPED in B, but never had that status in A, necessary fail its pytest test function even if other calls of the case might pass tolerance checks.
 
-**IB20.** B always loads in bf16 and casts to the reference dtype if the data dtype offers less
-precision (less mantissa bits) than the reference dtype (so if the reference dtype is bf16
-and there's fp32 data, that higher precision data stays unmodified). It does not load a
-checkpoint in the reference dtype. B converts all components at once.
+**IB20.** B loads the model in bf16 or in more precise data type that A uses, and casts to the reference dtype if the data dtype offers less precision (less mantissa bits) than the reference dtype (so if the reference dtype is bf16 and there's fp32 data, that higher precision data stays unmodified). It does not load a checkpoint in the reference dtype. B converts all components at once.
 
 **IB30.** After B loads a model, a `TorchDispatchMode` audit checks all dtypes used to run the model (including replays). It warns about dtypes with less precision than the reference dtype, and about custom calls. The check does not fail, only prints a warning informing about an imprecise dtype use, or a custom call. (it's a known limitation of version 1 needs to be addressed in future versions that these warnings aren't recorded and are produced only during instance B runs)
 
@@ -346,7 +341,7 @@ so a fidelity check on own inputs is needed.
 
 **IB70.** B has three run-related parameters for the user: the reference dtype, the self-attention backend and the cross-attention backend, and also own per-path determinism override setting, and deadlines.
 
-**IB80.** An attention backend that declares a fallback, or that needs a blocked vendor package, makes the configuration UNSUPPORTED (IA70.2). A cross-attention parameter for a model without a separate cross-attention backend is an error. The default attention backend is `sdpa_efficient`.
+**IB80.** An attention backend that declares a fallback, or that needs a blocked vendor package, makes the configuration UNSUPPORTED. A cross-attention parameter for a model without a separate cross-attention backend is an error. The default attention backend is `sdpa_efficient`.
 
 ### Rank lifecycle
 
@@ -360,7 +355,7 @@ After the instance ends, the ownership of the log files of all ranks is passed t
 
 **RL30.** When a rank just starts, it writes `started=true` log record.
 
-**RL40.** **phase=initialization** This is where the rank parses its xDiT setting (TD50) and determines if it can run the configuration. If the configuration gets `status=UNSUPPORTED` record with an appropriate value of `reason=` field describing what exactly isn't supported, and then rank exits with an error. This automatically forces torchrun to kill all other ranks. By reading the log files the launcher is able to correctly identify the cause and set all cases statuses to UNSUPPORTED too (IA70.2).
+**RL40.** **phase=initialization** This is where the rank parses its xDiT setting (TD50) and determines if it can run the configuration. If the configuration gets `status=UNSUPPORTED` record with an appropriate value of `reason=` field describing what exactly isn't supported, and then rank exits with an error. This automatically forces torchrun to kill all other ranks. By reading the log files the launcher is able to correctly identify the cause and set all cases statuses to UNSUPPORTED too.
 *Rationale for not setting case statuses in rank code:* In case of a hang or a crash, the launcher have to identify cases that didn't run to assign them appropriate statuses. We simply reuse this machinery for setting case statuses for unsupported configuration too.
 
 **RL50.** **phase=loading** Doesn't have specific statuses.
@@ -416,7 +411,7 @@ Instance B runs both replays: first it runs fidelity check replays on its own in
     1. `--xdit_data_dir` (default: `./_data` ) to set the data directory to contain directories of individual configuration dirs (TD75) with configuration's data files and rank logs;
     2. `--xdit_metrics_dir` (default: `./_metrics`) to set the directory to contain `<configuration_name>_<case_id>.jsonl` case specific structured metrics file (TD75).
 
-**PI30.** If `--xdit_cache_passed` CLI flag (PI20) is NOT set, for each test passed in a fresh runs or a rerun, the harness appends to each rank log file a record `case=<case_id> pass=true` and deletes their data files. Subsequent reruns detect these records in the log files and "skip" corresponding tests with a message "Passed in previous run" (all ranks of the case must have this `pass=true`; otherwise the case error out with a message "inconsistent pass record for the case: ranks <..> have `pass=true` while ranks <..> doesn't have it").
+**PI30.** If `--xdit_cache_passed` CLI flag (PI20) is NOT set, for each test passed in a fresh runs or a rerun, the harness appends to each rank log file a record `case=<case_id> pass=true` and deletes their data files. Subsequent reruns detect these records in the log files and "skip" corresponding tests with a message "Passed in previous run" (all ranks of the case must have this `pass=true`; otherwise the case fails with a message "inconsistent pass record for the case: ranks <..> have `pass=true` while ranks <..> doesn't have it").
 If `--xdit_cache_passed` is set, a passed test doesn't add any record to the rank log files, and does not delete data files, so a subsequent rerun doesn't observe `case=<case_id> pass=true` in rank log files, expects to find data files and executes test case function in full.
 
 **PI40.** If `--xdit_force_fresh_run` CLI flag (PI20) is set, the harness ALWAYS clean up existing data and rank log files, and do a fresh run.
@@ -445,9 +440,9 @@ If `--xdit_cache_passed` is set, a passed test doesn't add any record to the ran
 2. In a rerun mode a test case is "skipped" by the case fixture when all ranks of the case have `case=<case_id> pass=true` record. If only some ranks have the record, but others don't, the test function runs on the available data, but eventually necessary fails later.
 
 **PM40.** **Passed.** Only a successfully ran test case function sets "passed" outcome. A test case is "passed" if and only if these conditions holds simultaneously:
-   1. all ranks of A and B reached successful final state for the case (RL100), i.e.
-      - for A, which only does a fidelity check: it's FIDELITY_SKIPPED when fidelity check override flag is set, or FIDELITY_PASSED otherwise
-      - for B, which does a fidelity check and replay of A inputs: it's REPLAYED.
+   1. every call on all ranks of A and B reached the following last status:
+      - instance A, which only does a fidelity check: the last call status is FIDELITY_SKIPPED when fidelity check override flag is set, or FIDELITY_PASSED otherwise;
+      - instance B, which does a fidelity check and replay of A inputs: the last call status is REPLAYED.
    2. for all calls observed for the case/component, all outputs obtained on all ranks of A are within specified tolerances from outputs obtained from corresponding ranks of B.
 
 **PM50.** **Failed.** Every other status combination for a test case, whenever possible still runs tolerances checks, but even if the checks passes, necessary leads to a "failed" test outcome. Failure message MUST list all independent reasons that led to the failure.
@@ -455,6 +450,8 @@ If `--xdit_cache_passed` is set, a passed test doesn't add any record to the ran
 **PM60.** A test reached test function (i.e. configuration and test fixture didn't generate errors or skips) independently checks captured outputs of each rank of A versus corresponding outputs of a replay with the inputs A that B rank did, against the same tolerance. The test runs as many checks as possible before it fails, like the `EXPECT_` macros of GoogleTest. It uses the installed `pytest-check` package. After/during doing checks, before generating failure, it writes a record to the case metric file with per-output tolerances, per-output per-rank values of tested metrics and the test per-output per-rank test outcome. If metric values can't be computed (for example, dumps weren't generated, or absent), a per-rank test outcome with a short but descriptive and unique explanation is written, mentioning actual status.
 
 **PM70.** The error or failure message lists every rank with its status and, if known, the call identifier, the reason and other applicable information the requirements of this file require to present to a user.
+
+**PM80.** Whatever the pytest outcome is, a test case fixture must issue a warning for each call that have `status=FIDELITY_SKIPPED` on at least one rank. Message is "WARNING: instances A and B didn't run fidelity check for the call <call_id> due to fidelity override flag set. You are responsible to ensure the component is properly isolated and its determinism state is known."
 
 #### Files and directories
 

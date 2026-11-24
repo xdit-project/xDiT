@@ -109,3 +109,31 @@ def test_transposing_twice_changes_nothing():
 
     for name, output in _outputs(model).items():
         assert torch.equal(output, expected[name]), name
+
+
+def test_the_state_dict_keeps_the_standard_layout():
+    expected = _model().state_dict()
+    model = _model()
+
+    transpose_plain_linears(model)
+
+    state = model.state_dict()
+    assert state.keys() == expected.keys()
+    for name, tensor in expected.items():
+        assert torch.equal(state[name], tensor), name
+
+
+def test_a_standard_state_dict_loads_into_transposed_weights():
+    source = _model()
+    with torch.no_grad():
+        for parameter in source.parameters():
+            parameter.add_(1)
+    model = _model()
+    transpose_plain_linears(model)
+
+    model.load_state_dict(source.state_dict())
+
+    expected = _outputs(source)
+    assert model.to_qk.weight.shape == (6, 8)
+    for name, output in _outputs(model).items():
+        torch.testing.assert_close(output, expected[name], rtol=1e-6, atol=1e-6, msg=name)

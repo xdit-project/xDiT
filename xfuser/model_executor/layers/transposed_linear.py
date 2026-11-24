@@ -16,10 +16,22 @@ def prefers_untransposed_weights() -> bool:
 
 
 class TransposedLinear(torch.nn.Linear):
-    """A linear whose `weight` is stored as [in_features, out_features]; it computes what it did before."""
+    """A linear whose `weight` is stored as [in_features, out_features]; it computes what it did before.
+
+    Its state dict keeps the standard [out_features, in_features] layout, as a view on save.
+    """
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return F.linear(input, self.weight.t(), self.bias)
+
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        super()._save_to_state_dict(destination, prefix, keep_vars)
+        destination[prefix + "weight"] = destination[prefix + "weight"].t()
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        if prefix + "weight" in state_dict:
+            state_dict[prefix + "weight"] = state_dict[prefix + "weight"].t()
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
 
 def _owns_its_weight(linear: torch.nn.Linear) -> bool:

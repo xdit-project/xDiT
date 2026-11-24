@@ -19,6 +19,9 @@ def build(monkeypatch):
         monkeypatch.setattr(requirements, "device_arch", lambda: arch)
         monkeypatch.setattr(base_model.attention_registry, "available", lambda backend: None if mha_v4 else "absent")
         monkeypatch.setattr(base_model, "_MHA_V4_KV_SPLITS", requirements.ALWAYS if mha_v4 else requirements.NEVER)
+        if "H3" in name:
+            # MiniMax-H3 runners infer the task from input images, which these runs have none of.
+            cli.setdefault("task", "t2va")
         config = xFuserArgs(model=name, **cli)
         MODEL_REGISTRY[name](config)
         return config
@@ -33,6 +36,8 @@ def build(monkeypatch):
         ("Qwen/Qwen-Image-2512", "auto"),
         ("black-forest-labs/FLUX.1-Kontext-dev", "auto"),
         ("black-forest-labs/FLUX.2-dev", "auto"),
+        ("MiniMax-H3", "auto"),
+        ("black-forest-labs/FLUX.1-dev", "auto"),
         ("Tongyi-MAI/Z-Image", "auto"),
     ],
 )
@@ -69,6 +74,8 @@ def test_without_split_kv_the_global_default_stays(build):
         "Qwen/Qwen-Image-2512",
         "black-forest-labs/FLUX.1-Kontext-dev",
         "black-forest-labs/FLUX.2-dev",
+        "MiniMax-H3",
+        "black-forest-labs/FLUX.1-dev",
         "Tongyi-MAI/Z-Image",
     ],
 )
@@ -80,5 +87,18 @@ def test_gfx942_keeps_the_global_default(build, name):
 
 def test_flux2_pipefusion_keeps_the_global_default(build):
     config = build("black-forest-labs/FLUX.2-dev", mha_v4=True, pipefusion_parallel_degree=2)
+    assert config.attention_backend is None
+    assert config.mha_v4_kv_splits is None
+
+
+@pytest.mark.parametrize(("name", "cli"), [("MiniMax-H3", {"use_hybrid_attn_schedule": True}), ("FastH3-Dense", {})])
+def test_minimax_h3_default_is_only_for_the_base_runner(build, name, cli):
+    config = build(name, mha_v4=True, **cli)
+    assert config.attention_backend != AttentionBackendType.AITER_BF16.name
+    assert config.mha_v4_kv_splits is None
+
+
+def test_flux1_pipefusion_keeps_the_global_default(build):
+    config = build("black-forest-labs/FLUX.1-dev", mha_v4=True, pipefusion_parallel_degree=2)
     assert config.attention_backend is None
     assert config.mha_v4_kv_splits is None

@@ -3,7 +3,16 @@
 import torch
 import torch.nn.functional as F
 
+from xfuser.core.attention.requirements import device_arch
 from xfuser.model_executor.layers.plain_linear import plain_linear
+
+# Measured on gfx942 and gfx950; gfx950 is faster with the standard layout.
+_ARCHS_PREFERRING_UNTRANSPOSED_WEIGHTS = ("gfx942",)
+
+
+def prefers_untransposed_weights() -> bool:
+    """Whether this device's GEMM is faster when a linear's weight is stored as [in, out]."""
+    return device_arch().split(":")[0] in _ARCHS_PREFERRING_UNTRANSPOSED_WEIGHTS
 
 
 class TransposedLinear(torch.nn.Linear):

@@ -55,14 +55,14 @@ def _transposed(runner):
     return [type(linear) is TransposedLinear for linear in runner.pipe.transformer]
 
 
-@pytest.mark.parametrize(("arch", "expected"), [("gfx942", True), ("gfx950", False), ("", False)])
-def test_only_gfx942_stores_the_weights_transposed(monkeypatch, arch, expected):
-    monkeypatch.setattr(base_model, "device_arch", lambda: arch)
+@pytest.mark.parametrize("prefers", [True, False])
+def test_only_where_the_gemm_prefers_it_are_the_weights_transposed(monkeypatch, prefers):
+    monkeypatch.setattr(base_model, "prefers_untransposed_weights", lambda: prefers)
     runner = _runner()
 
     runner._transpose_linears()
 
-    assert _transposed(runner) == [expected] * 2
+    assert _transposed(runner) == [prefers] * 2
 
 
 @pytest.mark.parametrize(
@@ -77,7 +77,7 @@ def test_only_gfx942_stores_the_weights_transposed(monkeypatch, arch, expected):
     ],
 )
 def test_sharded_or_offloaded_weights_and_loras_keep_their_layout(monkeypatch, config):
-    monkeypatch.setattr(base_model, "device_arch", lambda: "gfx942")
+    monkeypatch.setattr(base_model, "prefers_untransposed_weights", lambda: True)
     runner = _runner(**config)
 
     runner._transpose_linears()
@@ -106,7 +106,7 @@ def test_which_runners_transpose(model_cls, expected):
 
 
 def test_the_post_load_step_transposes_once_the_weights_are_placed(monkeypatch):
-    monkeypatch.setattr(base_model, "device_arch", lambda: "gfx942")
+    monkeypatch.setattr(base_model, "prefers_untransposed_weights", lambda: True)
     runner = _runner(
         use_hybrid_attn_schedule=False,
         use_hybrid_gemm_schedule=False,

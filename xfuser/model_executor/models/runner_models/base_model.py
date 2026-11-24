@@ -33,7 +33,7 @@ from xfuser.core.utils.runner_utils import (
 )
 from xfuser.model_executor.models.runner_models.image_postprocess import enable_fast_pil_postprocess
 from xfuser.model_executor.layers import usp_sdma
-from xfuser.model_executor.layers.transposed_linear import transpose_plain_linears
+from xfuser.model_executor.layers.transposed_linear import prefers_untransposed_weights, transpose_plain_linears
 from xfuser.model_executor.pipelines.base_pipeline import xFuserPipelineBaseWrapper
 from xfuser.model_executor.models.runner_models.vae_manager import (
     VAEManager,
@@ -262,7 +262,7 @@ class ModelFeatures:
 
     # The transformer wrapper has `shard_modulation()` and gains from it (see `_shard_modulation`).
     shards_modulation: bool = False
-    # The transformer gains from linear weights stored transposed on gfx942 (see `_transpose_linears`).
+    # The transformer gains from linear weights stored transposed where the GEMM prefers it (see `_transpose_linears`).
     transposes_linears: bool = False
 
 
@@ -1117,16 +1117,16 @@ class xFuserModel(abc.ABC):
             )
 
     def _transpose_linears(self) -> None:
-        """Store the transformer's plain linear weights transposed, on gfx942.
+        """Store the transformer's plain linear weights transposed, where the GEMM prefers it.
 
         For runners that set `transposes_linears` in their features, once the weights are placed
-        and fused. On gfx942 the GEMM behind a linear is slower when its weight is a transposed
-        operand, which is what `F.linear` hands it; on gfx950 it is the other way round. Stays
-        off where the weights are sharded or offloaded, and with a LoRA, which expects [out, in].
+        and fused. On some GPUs (`prefers_untransposed_weights`) the GEMM behind a linear is slower
+        when its weight is a transposed operand, which is what `F.linear` hands it. Stays off where
+        the weights are sharded or offloaded, and with a LoRA, which expects [out, in].
         """
         config = self.config
         if (
-            "gfx942" not in device_arch()
+            not prefers_untransposed_weights()
             or config.fully_shard_degree > 1
             or config.memory_efficient_sharding
             or config.enable_group_cpu_offload
@@ -1139,7 +1139,8 @@ class xFuserModel(abc.ABC):
         if count:
             # Hand the weights' old copies back to the device.
             torch.cuda.empty_cache()
-            log(f"Stored the weights of {count} linears transposed.")
+            arch = device_arch().split(":")[0]
+            log(f"{type(self).__name__}: stored the weights of {count} linears transposed for {arch}.")
 
     def _fuses_projections(self) -> bool:
         """Whether the compiled components compute the projections of one input with one fused GEMM.

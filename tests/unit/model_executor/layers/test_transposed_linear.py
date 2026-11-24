@@ -1,5 +1,7 @@
+import pytest
 import torch
 
+from xfuser.model_executor.layers import transposed_linear
 from xfuser.model_executor.layers.transposed_linear import TransposedLinear, transpose_plain_linears
 from xfuser.model_executor.models.transformers.transformers_utils import share_fused_weights
 
@@ -39,6 +41,16 @@ def _weight_bytes(model):
         parameter.untyped_storage().data_ptr(): parameter.untyped_storage().nbytes() for parameter in model.parameters()
     }
     return sum(storages.values())
+
+
+@pytest.mark.parametrize(
+    ("arch", "expected"),
+    [("gfx942:sramecc+:xnack-", True), ("gfx942", True), ("gfx950:sramecc+:xnack-", False), ("", False)],
+)
+def test_only_gfx942_prefers_untransposed_weights(monkeypatch, arch, expected):
+    monkeypatch.setattr(transposed_linear, "device_arch", lambda: arch)
+
+    assert transposed_linear.prefers_untransposed_weights() is expected
 
 
 def test_plain_linears_store_their_weight_transposed_and_compute_the_same():

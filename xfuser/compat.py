@@ -19,6 +19,7 @@ from xfuser.logger import init_logger
 
 logger = init_logger(__name__)
 
+
 @lru_cache(maxsize=None)
 def declared_floor(name: str) -> Optional[str]:
     """The minimum version of ``name`` that project metadata declares xfuser needs.
@@ -70,9 +71,7 @@ def version_at_least(installed: str, floor: str) -> bool:
         return Version(installed).release >= Version(floor).release
     except InvalidVersion:
         # Let custom/vendor builds through; we have no basis for blocking them.
-        logger.debug(
-            f"Unparseable version {installed!r}; assuming it satisfies {floor}"
-        )
+        logger.debug(f"Unparseable version {installed!r}; assuming it satisfies {floor}")
         return True
 
 

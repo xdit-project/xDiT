@@ -29,7 +29,7 @@ except (AttributeError, ImportError):
     has_side_effect = None
 
 from xfuser.config.attention_a2a import AttentionA2AConfig
-from xfuser.core.distributed.attention_a2a_codecs import (
+from xfuser.config.attention_a2a_codecs import (
     E4M3_EXTERNAL_SCALE,
     MXFP4,
     OUTPUT_CODECS,

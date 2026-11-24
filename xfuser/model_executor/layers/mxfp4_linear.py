@@ -8,7 +8,7 @@ try:
 except ImportError:
     pass  # Error will be thrown in base_model.py, if mxfp4 gemms are enabled but AITER is not available.
 from typing import Optional
-from xfuser.core.distributed.attention_a2a_codecs import MXFP4
+from xfuser.config.attention_a2a_codecs import MXFP4
 from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.model_executor.layers.quantized_attention_output import prequantized_consumer
 

@@ -8,7 +8,7 @@ import os
 import torch
 from torch import nn
 
-from xfuser.core.distributed.attention_a2a_codecs import MXFP6
+from xfuser.config.attention_a2a_codecs import MXFP6
 
 try:
     from aiter.ops.gemm_op_a6w4 import (

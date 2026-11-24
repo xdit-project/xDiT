@@ -13,7 +13,7 @@ from typing import NamedTuple, Protocol
 import torch
 from torch import nn
 
-from xfuser.core.distributed.attention_a2a_codecs import E4M3_EXTERNAL_SCALE
+from xfuser.config.attention_a2a_codecs import E4M3_EXTERNAL_SCALE
 
 
 class QuantizedAttentionOutput(NamedTuple):

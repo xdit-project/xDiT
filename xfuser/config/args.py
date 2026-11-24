@@ -12,7 +12,7 @@ import torch.distributed
 
 from xfuser.logger import init_logger
 from xfuser.core.distributed import init_distributed_environment
-from xfuser.core.distributed.attention_a2a_codecs import GEMM_FORMAT_OUTPUT_CODECS
+from xfuser.config.attention_a2a_codecs import GEMM_FORMAT_OUTPUT_CODECS
 from xfuser.config.attention_a2a import (
     ATTENTION_A2A_HADAMARD_PLACEMENTS,
     ATTENTION_A2A_OUTPUT_HOPS,

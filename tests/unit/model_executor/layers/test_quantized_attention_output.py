@@ -7,7 +7,7 @@ import torch
 from torch import nn
 
 from xfuser.model_executor.layers import mixed_mxfp_linear, mxfp4_linear, mxfp6_linear, quantized_attention_output
-from xfuser.core.distributed.attention_a2a_codecs import E4M3_EXTERNAL_SCALE, e4m3_external_scale_from_amax
+from xfuser.config.attention_a2a_codecs import E4M3_EXTERNAL_SCALE, e4m3_external_scale_from_amax
 from xfuser.model_executor.layers.quantized_attention_output import (
     QuantizedAttentionOutput,
     attention_output_codec,

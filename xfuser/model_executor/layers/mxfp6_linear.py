@@ -4,7 +4,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from xfuser.core.distributed.attention_a2a_codecs import MXFP6
+from xfuser.config.attention_a2a_codecs import MXFP6
 
 try:
     from aiter.ops.gemm_op_a6w6 import (

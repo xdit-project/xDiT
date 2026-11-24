@@ -113,6 +113,8 @@ def _setup(rank, world_size, init_method, ulysses_degree, ring_degree=1, cfg_deg
     ).create_config()
     initialize_runtime_state(engine_config=engine_config)
     get_runtime_state().set_attention_backend(BACKEND)
+    # Without a pipeline there is no denoising schedule to advance, but the wrapper's forward asks to.
+    get_runtime_state().increment_step_counter = lambda: None
     return torch.device(f"cuda:{rank}")
 
 

@@ -56,9 +56,13 @@ from xfuser.model_executor.layers.attention_processor import (
     xFuserAttentionProcessorRegister,
 )
 from xfuser.model_executor.layers.usp import USP
+from xfuser.model_executor.layers.sharded_modulation import shard_modulation
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
+from xfuser.model_executor.layers.usp_sdma import plain_linear
 from xfuser.model_executor.models.transformers.transformers_utils import (
+    fuse_projections,
     local_sp_pad_rows,
+    share_fused_weights,
     zero_sp_pad_rows_hook,
 )
 from xfuser.model_executor.layers.fused_qk_rope_flydsl import (
@@ -163,6 +167,7 @@ class xFuserFluxAttnProcessor(FluxAttnProcessor):
         image_rotary_emb: Optional[torch.Tensor] = None,
         sp_text_tokens: Optional[int] = None,
         sp_padding: int = 0,
+        qkv_projections: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Joint text-image attention under xDiT's parallelism.
 
@@ -171,14 +176,20 @@ class xFuserFluxAttnProcessor(FluxAttnProcessor):
         parallel ranks. `sp_padding` is the number of zero image tokens that
         xFuserFlux1Transformer2DWrapper appended so the image sequence divides
         the sequence parallel degree; they are excluded from the keys.
+        `qkv_projections` is Q, K and V of `hidden_states` side by side, from a
+        single block that computed them with its MLP projection.
         """
         if sp_padding and get_runtime_state().num_pipeline_patch > 1:
             raise NotImplementedError(
                 "FLUX.1 PipeFusion does not support image tokens padded for sequence parallelism."
             )
-        query, key, value, encoder_query, encoder_key, encoder_value = _get_qkv_projections(
-            attn, hidden_states, encoder_hidden_states
-        )
+        if qkv_projections is not None:
+            query, key, value = qkv_projections.chunk(3, dim=-1)
+            encoder_query = encoder_key = encoder_value = None
+        else:
+            query, key, value, encoder_query, encoder_key, encoder_value = _get_qkv_projections(
+                attn, hidden_states, encoder_hidden_states
+            )
         query = query.unflatten(-1, (attn.heads, -1))
         key = key.unflatten(-1, (attn.heads, -1))
         value = value.unflatten(-1, (attn.heads, -1))
@@ -344,6 +355,76 @@ class xFuserFluxAttnProcessor(FluxAttnProcessor):
             return hidden_states
 
 
+def _fused_single_block_forward(
+    self,
+    hidden_states: torch.Tensor,
+    encoder_hidden_states: torch.Tensor,
+    temb: torch.Tensor,
+    image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    joint_attention_kwargs: Optional[Dict[str, Any]] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """`FluxSingleTransformerBlock.forward` with Q/K/V and the MLP projection computed by one GEMM.
+
+    All four project the block's normed input, so `to_qkv_mlp` stacks them and the attention
+    processor is handed its share.
+    """
+    text_seq_len = encoder_hidden_states.shape[1]
+    hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
+
+    residual = hidden_states
+    norm_hidden_states, gate = self.norm(hidden_states, emb=temb)
+    qkv_projections, mlp_hidden_states = self.to_qkv_mlp(norm_hidden_states).split_with_sizes(
+        [self.to_qkv_mlp.out_features - self.mlp_hidden_dim, self.mlp_hidden_dim], dim=-1
+    )
+    mlp_hidden_states = self.act_mlp(mlp_hidden_states)
+    # A single block's attention has no prompt-stream projections, which `qkv_projections` skips.
+    attn_output = self.attn(
+        hidden_states=norm_hidden_states,
+        image_rotary_emb=image_rotary_emb,
+        qkv_projections=qkv_projections,
+        **(joint_attention_kwargs or {}),
+    )
+
+    hidden_states = torch.cat([attn_output, mlp_hidden_states], dim=2)
+    hidden_states = residual + gate.unsqueeze(1) * self.proj_out(hidden_states)
+    if hidden_states.dtype == torch.float16:
+        hidden_states = hidden_states.clip(-65504, 65504)
+
+    return hidden_states[:, :text_seq_len], hidden_states[:, text_seq_len:]
+
+
+def fold_mlp_into_qkv_projections(transformer) -> int:
+    """Fold the MLP projection of FLUX.1 single blocks into their fused Q/K/V projection.
+
+    The MLP branch of a single block reads the same normed input as its attention, so one
+    GEMM computes both. A block is left alone unless its Q/K/V are fused and its MLP
+    projection is a plain linear. The projections folded become views of the new weights,
+    so folding costs no memory. Returns the number of blocks folded.
+    """
+    folded = 0
+    for block in transformer.single_transformer_blocks:
+        attn = block.attn
+        if not getattr(attn, "fused_projections", False) or not plain_linear(block.proj_mlp):
+            continue
+        qkv, mlp = attn.to_qkv, block.proj_mlp
+        fused = torch.nn.Linear(
+            qkv.in_features,
+            qkv.out_features + mlp.out_features,
+            device=qkv.weight.device,
+            dtype=qkv.weight.dtype,
+        )
+        with torch.no_grad():
+            fused.weight.copy_(torch.cat([qkv.weight, mlp.weight]))
+            fused.bias.copy_(torch.cat([qkv.bias, mlp.bias]))
+        share_fused_weights(fused, (qkv, mlp))
+        share_fused_weights(qkv, (attn.to_q, attn.to_k, attn.to_v))
+        block.to_qkv_mlp = fused
+        # Bound per instance: Module.__call__ resolves `self.forward` per call, so hooks still run.
+        block.forward = _fused_single_block_forward.__get__(block, type(block))
+        folded += 1
+    return folded
+
+
 def flux_attn_modules(transformer) -> list[torch.nn.Module]:
     """Self-attention modules of a Flux1/Flux2 transformer, in block order.
 
@@ -356,6 +437,16 @@ def flux_attn_modules(transformer) -> list[torch.nn.Module]:
             *transformer.transformer_blocks,
             *transformer.single_transformer_blocks,
         )
+    ]
+
+
+def flux_modulation_linears(transformer) -> list[torch.nn.Module]:
+    """The linears that project the conditioning embedding to each FLUX.1 block's modulation."""
+    double, single = transformer.transformer_blocks, transformer.single_transformer_blocks
+    return [
+        *(block.norm1.linear for block in double),
+        *(block.norm1_context.linear for block in double),
+        *(block.norm.linear for block in single),
     ]
 
 
@@ -394,6 +485,24 @@ class xFuserFlux1Transformer2DWrapper(FluxTransformer2DModel):
             block.attn.processor = xFuserFluxAttnProcessor()
             block.register_forward_hook(zero_sp_pad_rows_hook(self._sp_pad, index=1))
         register_fp8_comms_eligible_modules(self, flux_attn_modules(self))
+
+    def shard_modulation(self) -> int:
+        """Share the blocks' timestep modulation out over the sequence-parallel ranks.
+
+        Every rank holds the same conditioning embedding, so each projects a share of the
+        blocks' modulation and the ranks gather it (`ShardedModulation`), in place of every
+        rank projecting all of it. Returns the number of linears shared out.
+        """
+        return shard_modulation(self, flux_modulation_linears(self), self.time_text_embed)
+
+    def fuse_projections_for_inference(self) -> dict[str, int]:
+        """Compute each layer's projections of one input with one GEMM, where they are plain linears.
+
+        Fuses Q, K and V of every attention layer and folds the single blocks' MLP projection into
+        theirs. The separate projections become views of the fused weights, so this costs no memory.
+        Returns the number fused by each pass.
+        """
+        return fuse_projections(self, single_mlp=fold_mlp_into_qkv_projections)
 
     def _pad_to_sp_divisible(self, tensor: torch.Tensor, padding_length: int, dim: int) -> torch.Tensor:
         padding = torch.zeros(

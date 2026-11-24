@@ -10,6 +10,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
     register_model,
     ModelCapabilities,
+    ModelFeatures,
     DefaultInputValues,
     DiffusionOutput,
     ModelSettings,
@@ -56,6 +57,7 @@ class xFuserFluxModel(xFuserModel):
         supports_lora=True,
         profile_capture_phase=True,
     )
+    features = ModelFeatures(shards_modulation=True)
     default_input_values = DefaultInputValues(
         height=1024,
         width=1024,
@@ -97,6 +99,10 @@ class xFuserFluxModel(xFuserModel):
         if PACKAGES_CHECKER._on_rdna4() or self.config.cache_method:
             return "default"
         return "reduce-overhead"
+
+    def _fuses_projections(self) -> bool:
+        # A PipeFusion stage holds only its own blocks; RDNA4 is not measured.
+        return self.config.pipefusion_parallel_degree <= 1 and not PACKAGES_CHECKER._on_rdna4()
 
     def _load_model(self) -> DiffusionPipeline:
         if self.config.pipefusion_parallel_degree > 1:
@@ -194,6 +200,7 @@ class xFuserFluxKontextModel(xFuserModel):
         use_fp8_comms=True,
         supports_step_caching=True,
     )
+    features = ModelFeatures(shards_modulation=True)
     default_input_values = DefaultInputValues(
         height=1024,
         width=1024,
@@ -240,6 +247,10 @@ class xFuserFluxKontextModel(xFuserModel):
         if PACKAGES_CHECKER._on_rdna4() or self.config.cache_method:
             return "default"
         return "reduce-overhead"
+
+    def _fuses_projections(self) -> bool:
+        # RDNA4 is not measured.
+        return not PACKAGES_CHECKER._on_rdna4()
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import FluxKontextPipeline

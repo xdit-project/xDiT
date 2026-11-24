@@ -42,3 +42,20 @@ def test_unknown_name_is_an_attribute_error():
 
     with pytest.raises(AttributeError):
         xfuser.not_an_export
+
+
+@pytest.mark.parametrize(("package", "name"), [("xfuser", "xFuserFluxPipeline"), ("xfuser.config", "EngineConfig")])
+def test_an_attribute_error_while_an_export_loads_stays_the_cause(monkeypatch, package, name):
+    error = AttributeError("module 'diffusers' has no attribute 'NotInThisVersion'")
+
+    def broken_import(*args, **kwargs):
+        raise error
+
+    module = importlib.import_module(package)
+    monkeypatch.delitem(vars(module), name, raising=False)
+    # The submodule that supplies the export fails while it loads.
+    monkeypatch.setattr(importlib, "import_module", broken_import)
+
+    with pytest.raises(ImportError, match="NotInThisVersion") as raised:
+        exec(f"from {package} import {name}", {})
+    assert raised.value.__cause__ is error

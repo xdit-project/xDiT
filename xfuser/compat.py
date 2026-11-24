@@ -110,6 +110,25 @@ def import_optional(name: str, package: Optional[str] = None) -> Optional[Module
     return _import_optional(importlib.util.resolve_name(name, package))
 
 
+def import_submodule(name: str, package: str) -> ModuleType:
+    """Import ``name`` for a module ``__getattr__`` that loads exports on first access.
+
+    In ``from package import export``, Python turns an AttributeError from the
+    module ``__getattr__`` into a "cannot import name" ImportError, and drops
+    the original error. Thus an AttributeError while ``name`` loads (for
+    example, a diffusers attribute that the installed version does not have)
+    becomes an ImportError chained to the original error. Then the traceback
+    still shows where the error occurred.
+
+    ``name`` may be relative to ``package``, as for importlib.
+    """
+    try:
+        return importlib.import_module(name, package)
+    except AttributeError as error:
+        absolute = importlib.util.resolve_name(name, package)
+        raise ImportError(f"Loading {absolute} failed: {error}") from error
+
+
 @lru_cache(maxsize=None)
 def _import_optional(name: str) -> Optional[ModuleType]:
     # Keyed on the absolute name and cached because Python does not cache failed

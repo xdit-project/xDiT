@@ -1129,10 +1129,10 @@ class xFuserModel(abc.ABC):
         For runners that set `transposes_linears` in their features, once the weights are placed
         and fused. On some GPUs (`prefers_untransposed_weights`) the GEMM behind a linear is slower
         when its weight is a transposed operand, which is what `F.linear` hands it. Stays off where
-        the weights are sharded or offloaded, and with a LoRA, which expects [out, in].
+        the weights are sharded or offloaded. A LoRA is fused into the weights at load, and a
+        module that still wraps one is not a plain linear, so it keeps its layout.
         """
-        config = self.config
-        if not prefers_untransposed_weights() or not self._weights_whole_and_resident() or config.lora_path:
+        if not prefers_untransposed_weights() or not self._weights_whole_and_resident():
             return
         count = transpose_plain_linears(self.pipe.transformer)
         if count:

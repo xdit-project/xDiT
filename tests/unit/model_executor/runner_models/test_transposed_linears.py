@@ -73,16 +73,24 @@ def test_only_where_the_gemm_prefers_it_are_the_weights_transposed(monkeypatch, 
         {"enable_group_cpu_offload": True},
         {"enable_sequential_cpu_offload": True},
         {"enable_model_cpu_offload": True},
-        {"lora_path": "lora.safetensors"},
     ],
 )
-def test_sharded_or_offloaded_weights_and_loras_keep_their_layout(monkeypatch, config):
+def test_sharded_or_offloaded_weights_keep_their_layout(monkeypatch, config):
     monkeypatch.setattr(base_model, "prefers_untransposed_weights", lambda: True)
     runner = _runner(**config)
 
     runner._transpose_linears()
 
     assert _transposed(runner) == [False] * 2
+
+
+def test_a_lora_fused_at_load_does_not_turn_it_off(monkeypatch):
+    monkeypatch.setattr(base_model, "prefers_untransposed_weights", lambda: True)
+    runner = _runner(lora_path="lora.safetensors")
+
+    runner._transpose_linears()
+
+    assert _transposed(runner) == [True] * 2
 
 
 @pytest.mark.parametrize(

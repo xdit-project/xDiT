@@ -25,6 +25,16 @@ on:
         type: boolean
         required: false
         default: false
+      run_benchmarks:
+        description: 'Run benchmarks'
+        type: boolean
+        required: false
+        default: true
+      run_tests:
+        description: 'Run tests'
+        type: boolean
+        required: false
+        default: false
       original_run_id:
         description: 'Automatic retry only; leave empty'
         required: false
@@ -68,6 +78,8 @@ jobs:
       ARCHITECTURES: ${{ github.event_name == 'schedule' && 'gfx942,gfx950' || inputs.architectures }}
       AMD_REF: ${{ github.event_name == 'schedule' && 'main' || inputs.amd_ref }}
       DOWNSTREAM_CONFIGS: ${{ inputs.downstream_configs && 'true' || 'false' }}
+      RUN_BENCHMARKS: ${{ (github.event_name != 'workflow_dispatch' || inputs.run_benchmarks) && 'true' || 'false' }}
+      RUN_TESTS: ${{ (github.event_name == 'schedule' || inputs.run_tests) && 'true' || 'false' }}
       PR_NUMBER: ${{ github.event.issue.number || inputs.pr_number }}
     steps:
       - name: Checkout nightly configuration
@@ -153,6 +165,18 @@ jobs:
             echo "::error::downstream_configs must be true or false."
             exit 1
           fi
+          if [[ "$RUN_BENCHMARKS" != true && "$RUN_BENCHMARKS" != false ]]; then
+            echo "::error::run_benchmarks must be true or false."
+            exit 1
+          fi
+          if [[ "$RUN_TESTS" != true && "$RUN_TESTS" != false ]]; then
+            echo "::error::run_tests must be true or false."
+            exit 1
+          fi
+          if [[ "$RUN_BENCHMARKS" == false && "$RUN_TESTS" == false ]]; then
+            echo "::error::Nothing to do: enable run_benchmarks, run_tests, or both."
+            exit 1
+          fi
 
           echo "WAIT_DEADLINE=$(( $(date +%s) + 21000 ))" >> "$GITHUB_ENV"
           echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
@@ -176,7 +200,9 @@ jobs:
             --arg amd_ref "$AMD_REF" \
             --arg xdit_sha "${XDIT_SHA:-$GITHUB_SHA}" \
             --argjson downstream_configs "$DOWNSTREAM_CONFIGS" \
-            '{benchmarks: $benchmarks, architectures: $architectures, amd_ref: $amd_ref, xdit_sha: $xdit_sha, use_xdit_configs: ($downstream_configs | not)}' > request/request.json
+            --argjson run_benchmarks "$RUN_BENCHMARKS" \
+            --argjson run_tests "$RUN_TESTS" \
+            '{benchmarks: $benchmarks, architectures: $architectures, amd_ref: $amd_ref, xdit_sha: $xdit_sha, use_xdit_configs: ($downstream_configs | not), run_benchmarks: $run_benchmarks, run_tests: $run_tests}' > request/request.json
 
       - name: Upload request metadata
         if: github.event_name == 'schedule' || github.event_name == 'issue_comment' || inputs.original_run_id == ''
@@ -247,6 +273,8 @@ jobs:
             -f 'inputs[architectures]='"$ARCHITECTURES" \
             -f 'inputs[amd_ref]='"$AMD_REF" \
             -F 'inputs[downstream_configs]='"$DOWNSTREAM_CONFIGS" \
+            -F 'inputs[run_benchmarks]='"$RUN_BENCHMARKS" \
+            -F 'inputs[run_tests]='"$RUN_TESTS" \
             -f 'inputs[original_run_id]='"$ORIGINAL_RUN_ID" \
             -f 'inputs[continuation_count]='"$next_continuation" \
             -f 'inputs[pr_number]='"$PR_NUMBER"

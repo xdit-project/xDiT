@@ -19,6 +19,7 @@ from xfuser.logger import init_logger
 
 logger = init_logger(__name__)
 
+
 @lru_cache(maxsize=None)
 def declared_floor(name: str) -> Optional[str]:
     """The minimum version of ``name`` that project metadata declares xfuser needs.
@@ -70,9 +71,7 @@ def version_at_least(installed: str, floor: str) -> bool:
         return Version(installed).release >= Version(floor).release
     except InvalidVersion:
         # Let custom/vendor builds through; we have no basis for blocking them.
-        logger.debug(
-            f"Unparseable version {installed!r}; assuming it satisfies {floor}"
-        )
+        logger.debug(f"Unparseable version {installed!r}; assuming it satisfies {floor}")
         return True
 
 
@@ -108,6 +107,25 @@ def import_optional(name: str, package: Optional[str] = None) -> Optional[Module
     ``name`` may be relative if ``package`` is given, as for importlib.
     """
     return _import_optional(importlib.util.resolve_name(name, package))
+
+
+def import_submodule(name: str, package: str) -> ModuleType:
+    """Import ``name`` for a module ``__getattr__`` that loads exports on first access.
+
+    In ``from package import export``, Python turns an AttributeError from the
+    module ``__getattr__`` into a "cannot import name" ImportError, and drops
+    the original error. Thus an AttributeError while ``name`` loads (for
+    example, a diffusers attribute that the installed version does not have)
+    becomes an ImportError chained to the original error. Then the traceback
+    still shows where the error occurred.
+
+    ``name`` may be relative to ``package``, as for importlib.
+    """
+    try:
+        return importlib.import_module(name, package)
+    except AttributeError as error:
+        absolute = importlib.util.resolve_name(name, package)
+        raise ImportError(f"Loading {absolute} failed: {error}") from error
 
 
 @lru_cache(maxsize=None)

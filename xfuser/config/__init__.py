@@ -5,8 +5,9 @@ classes in ``xfuser.config.config`` load on first access, because that module
 checks the installed packages and devices when it loads.
 """
 
-import importlib
 from typing import Any, List
+
+from xfuser.compat import import_submodule
 
 from .args import FlexibleArgumentParser, xFuserArgs
 from .attention_a2a import AttentionA2AConfig
@@ -36,7 +37,7 @@ __all__ = [
 def __getattr__(name: str) -> Any:
     if name not in _RUNTIME_EXPORTS:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    value = getattr(importlib.import_module(".config", __name__), name)
+    value = getattr(import_submodule(".config", __name__), name)
     globals()[name] = value
     return value
 

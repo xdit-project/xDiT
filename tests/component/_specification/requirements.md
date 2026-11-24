@@ -6,41 +6,37 @@ This document describes the use cases and the requirements for the xDiT componen
 
 **UC1. Check that a component works correctly.** A developer asks: "Does this component of this model
 configuration work correctly?" The harness runs the component as production runs it (instance A) and as an
-eager reference in potentially extended precision (instance B). It then compares the outputs against tolerances. Requirements:
-HL10–HL60, TD10–TD40, TM10–TM50, IA10–IA80, IB10–IB80.
+eager reference in potentially extended precision (instance B). It then compares the outputs against tolerances.
 *Rationale:* some operations of xDiT diffusion models can be flaky (produce wrong numerics, or cause hangs or
 crashes). Component-wise testing could help with QA of the implementation.
 
 **UC2. Find flaky kernels.** A test shows a deviation beyond the tolerance, nondeterminism, a crash or a hang. The report names the instance and the case. At least for a deviation or nondeterminism, it also names the calls.
-Requirements: HL60, IA40–IA60, IB50, FC10–FC160.
 
 **UC3. Test the configurations of the CI benchmark files.** Tests run on selected components
 of a model that is configured by an entry in a CI benchmark YAML file, or directly.
-Requirements: TD20–TD40.
 *Rationale:* the user specifies model configurations in the same way as the benchmark configurations.
 
-**UC4. Cover many configurations of one model in one test module.** Requirements: TD50–TD80.
+**UC4. Cover many configurations of one model in one test module.**
 *Rationale:* there are hundreds of configurations in total, and most of them are very similar.
 
 **UC5. Test sub-components and selected calls.** Examples are a transformer block, an attention module, the
-VAE decode method, and one specific call of a transformer. Requirements: CP10–CP150.
+VAE decode method, and one specific call of a transformer.
 
 **UC6. Tune tolerances over time.** A test reports its metrics in each run. A missing tolerance makes the test
 fail, so the user sets tolerances from the reported values. The metrics history shows how the deviations
-change while the implementation changes. Requirements: TM20–TM40, FR70, FR80.
+change while the implementation changes.
 
 **UC7. Run the tests again after failures.** A new run compares the stored data again, for example with new
-tolerances, and does not run A and B again. After all cases pass, the next run starts from the beginning
-automatically. Requirements: FR50, FR60.
+tolerances, and does not run A and B again. By default, after all cases pass, the next run starts from the beginning
+automatically. This behavior, however, can be modified if test functions executions on the same data without rerunning A and B is needed.
 
-**UC8. Select single cases.** The user selects cases with pytest, for example with `-k` or a node ID.
-Requirements: CP150.
+**UC8. Select single cases.** The user selects cases with pytest, for example with `-k` or a node ID. The user is responsible this doesn't conflict with UC7.
 
-**UC9. Keep the tests valid while xDiT changes.** Requirements: HL20, HL30, HL90.
+**UC9. Keep the tests valid while xDiT changes.**
 *Rationale:* xDiT changes fast, and its components get new augmentations all the time. Hard-coded tests become
 obsolete.
 
-**UC10. Accept nondeterminism that is valid.** An override of one test changes the result of nondeterminism in that test from a failure to a warning. The determinism checks of all other tests stay active. B should have its own override. Requirements: IA50, IA60.
+**UC10. Accept nondeterminism that is valid.** An override of one test changes the result of nondeterminism in that test from a failure to a warning. The determinism checks of all other tests stay active. B should have its own override.
 *Rationale:* some operations are validly nondeterministic. A model can have one nondeterministic component
 among many, and that component must be testable. Instance B generally uses different kernels that might have
 other determinism expectations.
@@ -144,8 +140,7 @@ Each entry (a component path) of the list of components defines a separate test 
 
 **TD60.** The configuration call has no explicit `name` parameter. The configuration name is the `name` field of the merged xDiT settings (TD30). Hence, if `yaml_path` and `entry` aren't used (i.e. have default `None` value), the `overrides` parameter must have a valid `name` value. The `name` value of the merged xDiT settings (TD30) becomes the configuration name. The name defines the data directory of the configuration (PI20.2.1), and scopes metric file names (TM60, PI20.2.2). By convention, a configuration name also let identify the xDiT model to which it applies.
 
-**TD70.** Configuration names are unique. The harness raises an error for two configurations with the same name. The check runs during collection, and it also covers the configurations that `-k` deselects. A separate ch
-eck in the configuration fixture stops a configuration that starts a second time in one session. Unique names across sessions are the responsibility of the user.
+**TD70.** Configuration names are unique. The harness raises an error for two configurations with the same name. The check runs during collection, and it also covers the configurations that `-k` deselects. A separate check in the configuration fixture stops a configuration that starts a second time in one session. Unique names across sessions are the responsibility of the user.
 
 **TD75.** During the test session, tests of the same configuration write files (data files with dumped data and rank log files) to the same directory specific to the configuration that uses configuration's name. This directory may persist between tests execution sessions (see PI10).
 
@@ -159,7 +154,7 @@ eck in the configuration fixture stops a configuration that starts a second time
 3. each replayed call (measured between the call's starting replay status (PRE_FIDELITY or PRE_REPLAY) and ending status (FIDELITY_FAILED or FIDELITY_PASSED or REPLAYED), see RL100): 2 minutes in A and 5 minutes in B.
 4. 5 (for A) or 10 (for B) minutes since the last record in the log file in all other cases
 
-**TD110.** **Deadlines enforcement.** The configuration fixture (TD40) launches each instance sequentially (TD115) using a supplementary launcher process that takes care of deadlines, child processes cleanup, actually launching an instance with torchrun and statuses of instance's case in some cases. Each rank of the instance writes its deadline -related progress and timestamps to a certain rank-specific log file known to the launcher. The launcher then periodically reads these files and uses progress records and timestamps to enforce deadlines. A missed deadline leads to a warning message and killing the instance and all its descendant processes.
+**TD110.** **Deadlines enforcement.** For all configuration paths / cases if pytest `-k` wasn't used, or only for cases selected by `-k` otherwise, the configuration fixture (TD40) launches each instance sequentially (TD115) using a supplementary launcher process that takes care of deadlines, child processes cleanup, actually launching an instance with torchrun and statuses of instance's case in some cases. Each rank of the instance writes its deadline -related progress and timestamps to a certain rank-specific log file known to the launcher. The launcher then periodically reads these files and uses progress records and timestamps to enforce deadlines. A missed deadline leads to a warning message and killing the instance and all its descendant processes.
 
 **TD115.** The launcher first runs instance A. If at least one call on any rank of A reached `status=DUMPED`, the launcher also runs instance B for the same test cases that A used.
 
@@ -403,16 +398,16 @@ Instance B runs both replays: first it runs fidelity check replays on its own in
 
 **PI10.** Due to a cost of running instance A and instance B, there are 2 modes of running the test suite:
 1. a "fresh run" runs everything in full (i.e. for each configuration in the test suite run instances A and B to perform dumping of inputs/outputs and then run test case functions to obtain results of testing), and
-2. a "rerun" reuses results of a previous fresh run (i.e. it never runs a single instance A or B for any configuration, instead it only uses previously dumped files to run test case functions).
+2. a "rerun" whenever possible reuses results of a previous fresh run (i.e. it never runs a single instance A or B for any configuration, instead it only uses previously created files to run test case functions).
 
 **PI20.** The harness defines these custom pytest CLI arguments:
-1. flags: `--xdit_cache_passed` and `--xdit_force_fresh_run`. Both aren't set by default.
+1. flags: `--xdit_no_cache_passed` and `--xdit_force_fresh_run`. Both aren't set by default.
 2. strings with absolute or relative paths (relative paths are resolved relative to `os.getcwd()`):
     1. `--xdit_data_dir` (default: `./_data` ) to set the data directory to contain directories of individual configuration dirs (TD75) with configuration's data files and rank logs;
     2. `--xdit_metrics_dir` (default: `./_metrics`) to set the directory to contain `<configuration_name>_<case_id>.jsonl` case specific structured metrics file (TD75).
 
-**PI30.** If `--xdit_cache_passed` CLI flag (PI20) is NOT set, for each test passed in a fresh runs or a rerun, the harness appends to each rank log file a record `case=<case_id> pass=true` and deletes their data files. Subsequent reruns detect these records in the log files and "skip" corresponding tests with a message "Passed in previous run" (all ranks of the case must have this `pass=true`; otherwise the case fails with a message "inconsistent pass record for the case: ranks <..> have `pass=true` while ranks <..> doesn't have it").
-If `--xdit_cache_passed` is set, a passed test doesn't add any record to the rank log files, and does not delete data files, so a subsequent rerun doesn't observe `case=<case_id> pass=true` in rank log files, expects to find data files and executes test case function in full.
+**PI30.** If `--xdit_no_cache_passed` CLI flag (PI20) is NOT set, for each test passed in a fresh runs or a rerun, the harness appends to each rank log file a record `case=<case_id> pass=true` and deletes their data files. Subsequent reruns detect these records in the log files and "skip" corresponding tests with a message "Passed in previous run" (all ranks of the case must have this `pass=true`; otherwise the case fails with a message "inconsistent pass record for the case: ranks <..> have `pass=true` while ranks <..> doesn't have it").
+If `--xdit_no_cache_passed` is set, a passed test doesn't add any record to the rank log files, and does not delete data files, so a subsequent rerun doesn't observe `case=<case_id> pass=true` in rank log files, expects to find data files and executes test case function in full.
 
 **PI40.** If `--xdit_force_fresh_run` CLI flag (PI20) is set, the harness ALWAYS clean up existing data and rank log files, and do a fresh run.
 
@@ -421,10 +416,10 @@ If `--xdit_cache_passed` is set, a passed test doesn't add any record to the ran
 **PI60.** **Pytest life cycle.** Here's how execution steps maps onto pytest:
 1. Each pytest module defines configurations (TD10) of a single xDiT model to test. A module level `pytest_generate_tests()` hook parses each configuration of the module and spawns an individual test case for each element of configuration's component list.
 2. A global session scoped fixture determines the run mode (PI10) and sets a global `run_mode` flag defining the mode, so other test code could use it:
-   1. if `--xdit_force_fresh_run` CLI flag (PI20) is set, it's always a fresh run;
-   2. otherwise, since the fixture has access to all test case name that are about to execute, and each test case name allow to reconstruct the configuration name exactly, the fixture can determine if a fresh run, or a rerun is needed by inspecting rank log files. If and only if for all generated cases (i.e. before pytest `-k` filtering is applied) all rank log files contain `case=<case_id> pass=true` record for the case, the fixture chooses a fresh run mode for the session; otherwise it choose rerun mode.
+   1. if `--xdit_force_fresh_run` CLI flag (PI20) is set, it's always a fresh run; The user is responsible to use it manually if any underlying code or configurations change.
+   2. otherwise, since the fixture has access to all test case name that are about to execute, and each test case name allow to reconstruct the configuration name exactly, the fixture can determine if a fresh run, or a rerun is needed by inspecting rank log files (if they exist; otherwise it's a fresh rerun). If and only if for all generated cases (i.e. before pytest `-k` filtering is applied) all rank log files contain `case=<case_id> pass=true` record for the case, the fixture chooses a fresh run mode for the session; otherwise it choose rerun mode.
 
-   Whenever a fresh run mode is chosen, the fixture then deletes all configuration directories (TD75) with all their content (data files with dumps and rank log files).
+   Whenever a fresh run mode is chosen, the fixture then deletes all configuration directories (TD75; every directory under `--xdit_data_dir`) with all their content (data files with dumps and rank log files). The user is responsible the fresh run doesn't wipe out more data than they wanted, if they use test case selection with `-k` argument.
 3. A configuration (TD10) level fixture depending on the value of the global `run_mode` flag either do a fresh run or rerun of the configuration (PI10). After a configuration level fixture runs the configuration's individual test case functions (that weren't skipped by pytest `-k` parameter, or by other valid reason that the fixture might detect). After that the loop repeats: another configuration level fixture runs, then its test cases.
 
 #### Mapping statuses to pytest outcomes

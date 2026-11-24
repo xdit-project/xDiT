@@ -9,7 +9,7 @@ from xfuser.core.attention.spec import AttentionBackendType
 def build(monkeypatch):
     from xfuser import xFuserArgs
     from xfuser.core.attention import requirements
-    from xfuser.model_executor.models.runner_models import qwen
+    from xfuser.model_executor.models.runner_models import base_model
     from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY
 
     monkeypatch.setenv("RANK", "0")
@@ -17,8 +17,8 @@ def build(monkeypatch):
 
     def _build(name, mha_v4, arch="gfx950:sramecc+:xnack-", **cli):
         monkeypatch.setattr(requirements, "device_arch", lambda: arch)
-        monkeypatch.setattr(qwen.attention_registry, "available", lambda backend: None if mha_v4 else "absent")
-        monkeypatch.setattr(qwen, "_MHA_V4_KV_SPLITS", requirements.ALWAYS if mha_v4 else requirements.NEVER)
+        monkeypatch.setattr(base_model.attention_registry, "available", lambda backend: None if mha_v4 else "absent")
+        monkeypatch.setattr(base_model, "_MHA_V4_KV_SPLITS", requirements.ALWAYS if mha_v4 else requirements.NEVER)
         config = xFuserArgs(model=name, **cli)
         MODEL_REGISTRY[name](config)
         return config

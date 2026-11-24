@@ -60,7 +60,7 @@ from xfuser.model_executor.layers.sharded_modulation import shard_modulation
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
 from xfuser.model_executor.layers.usp_sdma import plain_linear
 from xfuser.model_executor.models.transformers.transformers_utils import (
-    fuse_plain_qkv_projections,
+    fuse_projections,
     local_sp_pad_rows,
     share_fused_weights,
     zero_sp_pad_rows_hook,
@@ -495,16 +495,14 @@ class xFuserFlux1Transformer2DWrapper(FluxTransformer2DModel):
         """
         return shard_modulation(self, flux_modulation_linears(self), self.time_text_embed)
 
-    def fuse_qkv_projections(self) -> None:
+    def fuse_projections_for_inference(self) -> dict[str, int]:
         """Compute each layer's projections of one input with one GEMM, where they are plain linears.
 
         Fuses Q, K and V of every attention layer and folds the single blocks' MLP projection into
         theirs. The separate projections become views of the fused weights, so this costs no memory.
+        Returns the number fused by each pass.
         """
-        fuse_plain_qkv_projections(self)
-        # Before folding allocates: the freed Q/K/V copies would otherwise sit cached under it.
-        torch.cuda.empty_cache()
-        fold_mlp_into_qkv_projections(self)
+        return fuse_projections(self, single_mlp=fold_mlp_into_qkv_projections)
 
     def _pad_to_sp_divisible(self, tensor: torch.Tensor, padding_length: int, dim: int) -> torch.Tensor:
         padding = torch.zeros(

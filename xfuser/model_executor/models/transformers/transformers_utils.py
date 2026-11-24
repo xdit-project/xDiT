@@ -173,6 +173,20 @@ def fuse_plain_qkv_projections(model: torch.nn.Module) -> int:
     return fused
 
 
+def fuse_projections(model: torch.nn.Module, **extra_passes) -> dict[str, int]:
+    """Fuse Q, K and V of `model` (`fuse_plain_qkv_projections`), then run each model-specific pass.
+
+    Each pass fuses other projections of one input and returns how many it fused. Returns the count
+    of every pass by name, Q/K/V's as "qkv".
+    """
+    fused = {"qkv": fuse_plain_qkv_projections(model)}
+    # Before the passes allocate: the freed Q/K/V copies would otherwise sit cached under them.
+    torch.cuda.empty_cache()
+    for name, fuse in extra_passes.items():
+        fused[name] = fuse(model)
+    return fused
+
+
 def zero_sp_pad_rows(tensor: torch.Tensor, rows: int) -> None:
     """Clear a tensor's trailing `rows` SP pad rows in place; a no-op when `rows` is 0.
 

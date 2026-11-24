@@ -1087,19 +1087,19 @@ class xFuserModel(abc.ABC):
                 f"each holds {share:.2f} GiB of its weights."
             )
 
-    def _fuses_qkv_projections(self) -> bool:
-        """Whether the compiled components compute Q, K and V with one fused projection.
+    def _fuses_projections(self) -> bool:
+        """Whether the compiled components compute the projections of one input with one fused GEMM.
 
-        One GEMM three times as wide replaces three, which is faster where a rank holds few
-        tokens and GEMMs that small run far below the GPU's throughput. A runner opts in once
-        its attention processors read the fused projection and its components'
-        `fuse_qkv_projections()` fuses only plain linears and shares their weights
-        (`fuse_plain_qkv_projections`), so that fusing costs no memory.
+        One wide GEMM replaces several, which is faster where a rank holds few tokens and GEMMs
+        that small run far below the GPU's throughput. A runner opts in once its attention
+        processors read the fused Q/K/V and its components' `fuse_projections_for_inference()`
+        fuses only plain linears and shares their weights (`fuse_projections`), so that fusing
+        costs no memory.
         """
         return False
 
-    def _fuse_qkv_projections(self) -> None:
-        """Fuse the Q/K/V projections of the compiled components, unless their weights are sharded or offloaded."""
+    def _fuse_projections(self) -> None:
+        """Fuse the same-input projections of the compiled components, unless their weights are sharded or offloaded."""
         config = self.config
         if (
             config.fully_shard_degree > 1
@@ -1109,15 +1109,15 @@ class xFuserModel(abc.ABC):
             or config.enable_model_cpu_offload
         ):
             return
-        fused = 0
+        fused: dict[str, int] = {}
         for name in self._get_compiled_pipe_components():
-            component = getattr(self.pipe, name)
-            component.fuse_qkv_projections()
-            fused += sum(bool(getattr(module, "fused_projections", False)) for module in component.modules())
-        if fused:
+            for kind, count in getattr(self.pipe, name).fuse_projections_for_inference().items():
+                fused[kind] = fused.get(kind, 0) + count
+        if any(fused.values()):
             # Hand the separate projections' own copies back to the device.
             torch.cuda.empty_cache()
-            log(f"Fused the Q/K/V projections of {fused} attention layers.")
+            # Zero counts stay: a pass that fused nothing (FP8, LoRA) otherwise shows only as a smaller speedup.
+            log("Fused projections: " + ", ".join(f"{count} {kind}" for kind, count in fused.items()))
 
     def _block_level_offload_components(self) -> List[str]:
         """Components that group CPU offload splits block by block.
@@ -1691,8 +1691,8 @@ class xFuserModel(abc.ABC):
         """Hook for any post model-load and state initialization"""
 
         self.loader.materialize_pipeline()
-        if self._fuses_qkv_projections():
-            self._fuse_qkv_projections()
+        if self._fuses_projections():
+            self._fuse_projections()
 
         if self.config.use_hybrid_attn_schedule:
             self._setup_hybrid_attn_schedule(input_args)

@@ -5,40 +5,29 @@ import os
 import sys
 import warnings
 from dataclasses import dataclass
-from typing import Optional, List, Tuple, Union
+from typing import TYPE_CHECKING, Optional, List, Tuple, Union
 
 import torch
 import torch.distributed
 
 from xfuser.logger import init_logger
-from xfuser.core.distributed import init_distributed_environment
 from xfuser.config.attention_a2a import (
     ATTENTION_A2A_HADAMARD_PLACEMENTS,
     ATTENTION_A2A_PROFILES,
     AttentionA2AConfig,
 )
+from xfuser.config.defaults import DEFAULT_FP8_COMMS_SAFETY_FACTOR
 from xfuser.config.ulysses_a2a import UlyssesA2AConfig
-from xfuser.core.distributed.attention_schedule import SolAttnBetaSchedule
 from xfuser.config.gemm import (
     GemmQuantizationSpec,
     load_gemm_config,
     parse_gemm_quantization,
 )
-from xfuser.config.config import (
-    DEFAULT_FP8_COMMS_SAFETY_FACTOR,
-    EngineConfig,
-    FastAttnConfig,
-    ParallelConfig,
-    TensorParallelConfig,
-    PipeFusionParallelConfig,
-    SequenceParallelConfig,
-    DataParallelConfig,
-    FullyShardConfig,
-    VaeParallelConfig,
-    ModelConfig,
-    InputConfig,
-    RuntimeConfig,
-)
+
+# Do not import the runtime (xfuser.config.config, xfuser.core) at module level.
+# The argument parser must load without it, for example to show --help.
+if TYPE_CHECKING:
+    from xfuser.config.config import EngineConfig, InputConfig
 
 logger = init_logger(__name__)
 
@@ -1845,7 +1834,24 @@ class xFuserArgs:
 
     def create_config(
         self,
-    ) -> Tuple[EngineConfig, InputConfig]:
+    ) -> Tuple["EngineConfig", "InputConfig"]:
+        from xfuser.config.config import (
+            EngineConfig,
+            FastAttnConfig,
+            ParallelConfig,
+            TensorParallelConfig,
+            PipeFusionParallelConfig,
+            SequenceParallelConfig,
+            DataParallelConfig,
+            FullyShardConfig,
+            VaeParallelConfig,
+            ModelConfig,
+            InputConfig,
+            RuntimeConfig,
+        )
+        from xfuser.core.distributed import init_distributed_environment
+        from xfuser.core.distributed.attention_schedule import SolAttnBetaSchedule
+
         self._validate_gemm_quantization_flags()
         if self.vae_parallel_size != 0:
             raise ValueError(

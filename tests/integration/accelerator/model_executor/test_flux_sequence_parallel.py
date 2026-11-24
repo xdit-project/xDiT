@@ -88,7 +88,7 @@ def _flux_worker(
         parallel = xFuserFlux1Transformer2DWrapper(**_CONFIG).to(device).eval()
         parallel.load_state_dict(reference.state_dict())
         if "fused" in variant:
-            parallel.fuse_qkv_projections()
+            parallel.fuse_projections_for_inference()
         if "sharded" in variant:
             assert parallel.shard_modulation() == 3
         inputs = _inputs(image_tokens, text_tokens, device)

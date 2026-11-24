@@ -162,8 +162,8 @@ requires a compatible DBCache layout and is described in the PipeFusion guide.
 | [FastH3](#model-fasth3) | — | — | ✓ | — | — |
 | [FastH3-Dense](#model-fasth3-dense) | — | — | ✓ | — | — |
 | [FastVideo/FastVideo-FastH3-8-Step-V2](#model-fastvideo-fastvideo-fasth3-8-step-v2) | — | — | ✓ | — | — |
-| [flux-3-image-klein](#model-flux-3-image-klein) | ✓ | — | — | — | — |
-| [flux-3-image-klein-base](#model-flux-3-image-klein-base) | ✓ | — | — | — | — |
+| [flux-3-image-klein](#model-flux-3-image-klein) | ✓ | — | ✓ | — | — |
+| [flux-3-image-klein-base](#model-flux-3-image-klein-base) | ✓ | — | ✓ | — | — |
 | [FLUX.1-dev](#model-flux-1-dev) | ✓ | — | — | `dbcache`, `teacache` | ✓ |
 | [FLUX.1-Kontext-dev](#model-flux-1-kontext-dev) | ✓ | — | — | `dbcache` | — |
 | [FLUX.2-dev](#model-flux-2-dev) | ✓ | — | — | `dbcache`, `fbcache` | — |

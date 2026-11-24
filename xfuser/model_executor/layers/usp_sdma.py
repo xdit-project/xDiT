@@ -48,6 +48,7 @@ from xfuser.core.distributed import (
 )
 from xfuser.core.distributed.sdma import ulysses
 from xfuser.core.utils.runner_utils import log
+from xfuser.model_executor.layers.plain_linear import plain_linear
 from xfuser.logger import init_logger, warn_once
 
 logger = init_logger(__name__)
@@ -545,11 +546,6 @@ def prepare(pipe, components, *, cpu_offload: bool) -> None:
 # attention module by `prepare`, before compilation.
 
 _GROUPED = "_xfuser_sdma_qkv"
-
-
-def plain_linear(module) -> bool:
-    # Quantized GEMMs replace the module; sharded (FSDP) weights are DTensors with placements.
-    return type(module) is torch.nn.Linear and not hasattr(module.weight, "placements")
 
 
 def _qkv_parts(attn):

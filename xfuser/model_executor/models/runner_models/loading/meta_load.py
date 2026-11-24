@@ -1927,9 +1927,13 @@ class _BlockwiseDiskFiller:
                 raise RuntimeError(f"unexpected checkpoint tensors in {self.subfolder}: {preview}{suffix}")
         self._retie_weights(comp)
         if getattr(comp, "_xfuser_pipeline_stage_partial", False):
+            from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
+
             delattr(comp, "_xfuser_pipeline_stage_partial")
             for attr in self._block_prefixes:
                 for block in rgetattr(comp, attr[:-1]):
+                    while isinstance(block, xFuserBaseWrapper):
+                        block = block.module
                     if hasattr(block, "_xfuser_checkpoint_fqn"):
                         delattr(block, "_xfuser_checkpoint_fqn")
                     if hasattr(block, "_xfuser_checkpoint_block_index"):

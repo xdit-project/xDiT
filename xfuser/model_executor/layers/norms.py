@@ -38,13 +38,13 @@ class _AITERRMSNorm(torch.nn.Module):
             self.weight = weight
             self._use_ones = False
         else:
-            self.register_buffer("_ones_weight", torch.ones(dim))
+            self.register_buffer("_ones_weight", torch.ones(dim), persistent=False)
             self._use_ones = True
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         shape = x.shape
-        w = self._ones_weight if self._use_ones else self.weight
+        w = self._ones_weight.to(dtype=x.dtype) if self._use_ones else self.weight
         out = _aiter_rms_norm(x.view(-1, shape[-1]), w, self.eps)
         return out.view(shape)
 
@@ -69,11 +69,7 @@ def _replace_rms_norms_with_aiter(model: torch.nn.Module) -> None:
                 if child_module.weight is not None:
                     dim = child_module.weight.shape[0]
                 elif hasattr(child_module, "dim"):
-                    dim = (
-                        int(child_module.dim[0])
-                        if hasattr(child_module.dim, "__len__")
-                        else int(child_module.dim)
-                    )
+                    dim = int(child_module.dim[0]) if hasattr(child_module.dim, "__len__") else int(child_module.dim)
                 else:
                     continue
                 replacements.append(

@@ -31,7 +31,9 @@ class _Compiled(torch.nn.Module):
 
 
 def _runtime_state(has_attention_schedule):
-    return lambda: SimpleNamespace(has_attention_schedule=lambda: has_attention_schedule)
+    return lambda: SimpleNamespace(
+        has_attention_schedule=lambda: has_attention_schedule, has_gemm_schedule=lambda: False
+    )
 
 
 @pytest.fixture
@@ -51,7 +53,6 @@ def boundaries(monkeypatch):
     monkeypatch.setattr(torch, "compile", fake_compile)
     monkeypatch.setattr(base_model.xFuserModel, "_run_timed_pipe", lambda self, args: warmups.append(args))
     monkeypatch.setattr(base_model, "get_pipeline_parallel_world_size", lambda: 1)
-    monkeypatch.setattr(hunyuan, "get_runtime_state", _runtime_state(False))
     # The runner sets global Inductor options; restore them after each test.
     # pytest's monkeypatch records a torch config as absent because its value is
     # not in the module ``__dict__``, then deletes it on undo. Deletion hides the
@@ -116,7 +117,8 @@ def test_hunyuanvideo_15_without_a_step_cache_still_compiles_the_transformer(bou
 
 @pytest.mark.parametrize("cache_method", [None, "dbcache"])
 def test_hunyuanvideo_attention_schedule_warms_up_every_step(boundaries, monkeypatch, cache_method):
-    monkeypatch.setattr(hunyuan, "get_runtime_state", _runtime_state(True))
+    monkeypatch.setattr(base_model, "runtime_state_is_initialized", lambda: True)
+    monkeypatch.setattr(base_model, "get_runtime_state", _runtime_state(True))
     transformer = _transformer("transformer_blocks", "single_transformer_blocks")
     model = _runner(hunyuan.xFuserHunyuanvideoModel, None, transformer, cache_method=cache_method)
 

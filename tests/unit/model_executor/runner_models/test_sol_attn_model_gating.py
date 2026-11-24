@@ -102,3 +102,24 @@ def test_a_sol_cross_attention_backend_is_refused_beside_a_dense_one(model):
     or not the model accepts Sol for self-attention."""
     with pytest.raises(ValueError, match="cannot be AITER_FP8_SOL"):
         _build(model, attention_backend="aiter_bf16", cross_attention_backend="aiter_fp8_sol")
+
+
+FLUX3_MODELS = ["FLUX.3-image-klein", "FLUX.3-image-klein-base"]
+
+
+def _build_flux3(model_name, **config):
+    from xfuser import xFuserArgs
+    from xfuser.model_executor.models.runner_models import flux3  # noqa: F401  registers
+    from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY
+
+    return MODEL_REGISTRY[model_name](xFuserArgs(model=model_name, **config))
+
+
+@pytest.mark.parametrize("model", FLUX3_MODELS)
+def test_flux3_serves_sol_beside_a_dense_text_stage(model):
+    """FLUX.3's text-mode blocks attend the prompt alone, on --cross_attention_backend."""
+    _build_flux3(model, attention_backend="aiter_fp8_sol", cross_attention_backend="aiter", ulysses_degree=2)
+    with pytest.raises(ValueError, match="needs --cross_attention_backend set to a dense backend"):
+        _build_flux3(model, attention_backend="aiter_fp8_sol")
+    with pytest.raises(ValueError, match="cannot be AITER_FP8_SOL"):
+        _build_flux3(model, attention_backend="aiter_fp8_sol", cross_attention_backend="aiter_fp8_sol")

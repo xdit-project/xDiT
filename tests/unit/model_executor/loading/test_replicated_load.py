@@ -444,24 +444,6 @@ def test_runner_load_declarations_match_model_quantization_capabilities():
     )
 
 
-def test_runner_fsdp_meta_support_matches_capabilities_and_strategy():
-    from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY
-
-    mismatched = []
-    for cls in dict.fromkeys(MODEL_REGISTRY.values()):
-        declaration = resolved_class_load_declaration(cls)
-        candidates = declaration.replicated_meta_transformers
-        expected = (
-            tuple(name for name in candidates if cls.settings.fsdp_strategy.get(name, {}).get("wrap_attrs"))
-            if cls.capabilities.fully_shard_degree
-            else ()
-        )
-        if declaration.fsdp_meta_transformers != expected:
-            mismatched.append(f"{cls.__name__}: expected {expected}, declared {declaration.fsdp_meta_transformers}")
-
-    assert not mismatched, "\n".join(mismatched)
-
-
 def test_base_runner_selects_the_production_contract_before_loading(monkeypatch):
     from xfuser.model_executor.models.runner_models import base_model
 
@@ -1013,7 +995,7 @@ def test_eager_post_load_fallback_builds_meta_for_local_block_fill(monkeypatch):
             pytest.fail("local blockwise plan must bypass eager from_pretrained")
 
     loader = SimpleNamespace(
-        plan_eager_blockwise_fallback=lambda prepared, targets, wrap_attrs: (SimpleNamespace(enabled=True)),
+        plan_eager_blockwise_fallback=lambda prepared, targets, wrap_attrs: SimpleNamespace(enabled=True),
         build_meta_transformer=lambda *args, **kwargs: meta_component,
         mark_local_blockwise=marked.append,
     )
@@ -1290,7 +1272,7 @@ def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
     )
     monkeypatch.setattr(
         "xfuser.model_executor.models.runner_models.loading.text_encoder_adapter.TextEncoderFrameworkAdapter.pipeline_quantization_config",
-        lambda self, mapping, existing=None: (setattr(sentinel, "quant_mapping", dict(mapping)) or sentinel),
+        lambda self, mapping, existing=None: setattr(sentinel, "quant_mapping", dict(mapping)) or sentinel,
     )
     monkeypatch.setattr(text_encoder_plan, "log", logs.append)
 

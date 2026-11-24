@@ -68,7 +68,12 @@ def _worker(rank, world_size, init_method, ulysses, cfg, backend, compiled, outp
                 outputs["single"] = forward(hidden, timestep, text, return_dict=False)[0].clone()
                 torch.compiler.cudagraph_mark_step_begin()
                 outputs["pair"] = forward(
-                    hidden, timestep, text, pair_encoder_hidden_states=pair_text, pair_skip_layers=(1,), return_dict=False
+                    hidden,
+                    timestep,
+                    text,
+                    pair_encoder_hidden_states=pair_text,
+                    pair_skip_layers=(1,),
+                    return_dict=False,
                 )[0].clone()
         if rank == 0:
             torch.save({name: tensor.float().cpu() for name, tensor in outputs.items()}, output_path)

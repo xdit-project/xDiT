@@ -12,6 +12,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     xFuserModel,
     ModelCapabilities,
+    ModelFeatures,
     DefaultInputValues,
     DiffusionOutput,
     ModelSettings,
@@ -285,6 +286,7 @@ class xFuserQwenImageModel(xFuserModel):
         enable_tiling=True,
         enable_slicing=True,
     )
+    features = ModelFeatures(shards_modulation=True)
     default_input_values = DefaultInputValues(
         height=928,
         width=1664,
@@ -421,6 +423,10 @@ class xFuserQwenImage21Model(xFuserModel):
             },
         },
     )
+
+    def _fuses_projections(self) -> bool:
+        # RDNA4 is not measured.
+        return not PACKAGES_CHECKER._on_rdna4()
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import QwenImage21Pipeline

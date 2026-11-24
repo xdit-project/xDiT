@@ -4,12 +4,12 @@ from xfuser.config.args import FlexibleArgumentParser, xFuserArgs
 
 
 def test_dedicated_vae_ranks_fail_before_distributed_initialization(monkeypatch):
-    from xfuser.config import args as args_module
+    import xfuser.core.distributed as distributed
 
     def unexpected_initialization(*args, **kwargs):
         pytest.fail("Unsupported VAE topology must fail before distributed initialization")
 
-    monkeypatch.setattr(args_module, "init_distributed_environment", unexpected_initialization)
+    monkeypatch.setattr(distributed, "init_distributed_environment", unexpected_initialization)
 
     with pytest.raises(ValueError, match="Dedicated VAE ranks are no longer supported"):
         xFuserArgs(use_parallel_vae=True, vae_parallel_size=1).create_config()

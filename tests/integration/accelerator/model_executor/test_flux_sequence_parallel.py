@@ -62,6 +62,7 @@ def _flux_worker(
     ring,
     image_tokens,
     text_tokens,
+    variant,
 ):
     torch.cuda.set_device(rank)
     init_distributed_environment(
@@ -86,6 +87,10 @@ def _flux_worker(
         reference = FluxTransformer2DModel(**_CONFIG).to(device).eval()
         parallel = xFuserFlux1Transformer2DWrapper(**_CONFIG).to(device).eval()
         parallel.load_state_dict(reference.state_dict())
+        if "fused" in variant:
+            parallel.fuse_projections_for_inference()
+        if "sharded" in variant:
+            assert parallel.shard_modulation() == 3
         inputs = _inputs(image_tokens, text_tokens, device)
         with torch.no_grad():
             expected = reference(**inputs)[0]
@@ -98,23 +103,35 @@ def _flux_worker(
 
 @pytest.mark.multi_gpu
 @pytest.mark.parametrize(
-    "ulysses, ring, image_tokens, text_tokens",
+    "ulysses, ring, image_tokens, text_tokens, variant",
     [
-        pytest.param(2, 1, 16, 8, id="both-divisible"),
-        pytest.param(2, 1, 15, 8, id="padded-image"),
-        pytest.param(2, 1, 16, 7, id="replicated-text"),
-        pytest.param(3, 1, 16, 8, id="padded-image-replicated-text"),
-        pytest.param(1, 2, 34, 15, id="ring-replicated-text"),
-        pytest.param(2, 2, 40, 6, id="ulysses-ring-replicated-text"),
-        pytest.param(1, 2, 57, 6, id="ring-padded-image"),
-        pytest.param(1, 2, 33, 7, id="ring-padded-image-replicated-text"),
-        pytest.param(2, 2, 59, 8, id="ulysses-ring-padded-image"),
-        pytest.param(2, 2, 39, 6, id="ulysses-ring-padded-image-replicated-text"),
+        pytest.param(2, 1, 16, 8, "", id="both-divisible"),
+        pytest.param(2, 1, 15, 8, "", id="padded-image"),
+        pytest.param(2, 1, 16, 7, "", id="replicated-text"),
+        pytest.param(3, 1, 16, 8, "", id="padded-image-replicated-text"),
+        pytest.param(1, 2, 34, 15, "", id="ring-replicated-text"),
+        pytest.param(2, 2, 40, 6, "", id="ulysses-ring-replicated-text"),
+        pytest.param(1, 2, 57, 6, "", id="ring-padded-image"),
+        pytest.param(1, 2, 33, 7, "", id="ring-padded-image-replicated-text"),
+        pytest.param(2, 2, 59, 8, "", id="ulysses-ring-padded-image"),
+        pytest.param(2, 2, 39, 6, "", id="ulysses-ring-padded-image-replicated-text"),
+        # Fused Q/K/V projections, with the MLP projection folded in for single blocks, as the runner sets up.
+        pytest.param(2, 1, 16, 8, "fused", id="fused-qkv-both-divisible"),
+        pytest.param(3, 1, 16, 8, "fused", id="fused-qkv-padded-image-replicated-text"),
+        pytest.param(2, 2, 59, 8, "fused", id="fused-qkv-ulysses-ring-padded-image"),
+        # Each rank projects a share of the blocks' timestep modulation, as the runner sets up.
+        pytest.param(2, 1, 16, 8, "sharded", id="sharded-modulation-both-divisible"),
+        pytest.param(3, 1, 16, 8, "sharded", id="sharded-modulation-padded-image-replicated-text"),
+        pytest.param(2, 2, 59, 8, "sharded", id="sharded-modulation-ulysses-ring-padded-image"),
+        # Both, as FLUX.1-dev and FLUX.1-Kontext run.
+        pytest.param(3, 1, 16, 8, "fused sharded", id="fused-qkv-sharded-modulation-padded-image-replicated-text"),
     ],
 )
-def test_flux_sequence_parallel_matches_single_device(accelerator_ranks, ulysses, ring, image_tokens, text_tokens):
+def test_flux_sequence_parallel_matches_single_device(
+    accelerator_ranks, ulysses, ring, image_tokens, text_tokens, variant
+):
     accelerator_ranks(
         _flux_worker,
         world_size=ulysses * ring,
-        args=(ulysses, ring, image_tokens, text_tokens),
+        args=(ulysses, ring, image_tokens, text_tokens, variant),
     )

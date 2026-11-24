@@ -807,6 +807,18 @@ def _force_blocks_from_tokens(exact_tokens, seqlen_k, kv_tile):
     return exact_tokens.reshape(-1, kv_tile).any(dim=1)
 
 
+def _force_rows_from_tokens(exact_query_tokens, seqlen_q, q_tile):
+    """(num_q_tiles, 1) bool: the query tiles holding any row `exact_query_tokens` flags.
+
+    Routing selects per query tile, so a flagged row brings its whole tile along.
+    """
+    exact_query_tokens = exact_query_tokens[:seqlen_q]
+    pad = -seqlen_q % q_tile
+    if pad:
+        exact_query_tokens = torch.nn.functional.pad(exact_query_tokens, (0, pad))
+    return exact_query_tokens.reshape(-1, q_tile).any(dim=1, keepdim=True)
+
+
 def _pad_kv_to_tile(key, value, recipe, block_tile):
     """Right-pad BSHD K/V with zero tokens to a whole number of KV blocks, unless the row is ragged.
 
@@ -835,6 +847,7 @@ def sol_attn_bhsd(
     block_tile=None,
     query_seqlen=None,
     exact_tokens=None,
+    exact_query_tokens=None,
     tilt_rank=0,
     *,
     _jensen_only=False,
@@ -863,6 +876,11 @@ def sol_attn_bhsd(
     sequence whose minority -- a modality, say -- would otherwise be routed against a threshold
     the majority sets. It moves the call onto the packed API.
 
+    exact_query_tokens is the query-side counterpart, a (seqlen_q,) bool mask or longer: every
+    query tile holding a flagged row computes all of its KV blocks exactly. For rows another part
+    of the model reads back, such as a prompt that conditions the blocks after it. The whole tile
+    goes dense with its flagged rows, so flag a contiguous run: scattered rows each bring a tile.
+
     block_tile is the (q_tile, kv_tile) to route and dispatch at, from --sparseattn_block_size.
     None takes the recipe's default.
 
@@ -887,13 +905,17 @@ def sol_attn_bhsd(
     # Before the tile pad, so the caller's pad and the tile pad do not stack.
     if key_seqlen is not None and key_seqlen < key.shape[1]:
         key, value = key[:, :key_seqlen], value[:, :key_seqlen]
-    if exact_tokens is not None and not _SOL_PREPARE_FORCES_BLOCKS:
+    if (exact_tokens is not None or exact_query_tokens is not None) and not _SOL_PREPARE_FORCES_BLOCKS:
         raise SolAttnUnsupported(
-            "exact KV tokens need an aiter whose sol_prepare takes force_block_mask; please update AITER"
+            "exact KV or query tokens need an aiter whose sol_prepare takes force_block_mask; please update AITER"
         )
     force_blocks = (
         None if exact_tokens is None else _force_blocks_from_tokens(exact_tokens, key.shape[1], block_tile[1])
     )
+    if exact_query_tokens is not None:
+        rows = _force_rows_from_tokens(exact_query_tokens, query.shape[1], block_tile[0])
+        num_kv_blocks = -(-key.shape[1] // block_tile[1])
+        force_blocks = rows.expand(-1, num_kv_blocks) if force_blocks is None else rows | force_blocks
     key, value = _pad_kv_to_tile(key, value, recipe, block_tile)
     _warn_if_kv_too_short(key.shape[1], block_tile[1])
 

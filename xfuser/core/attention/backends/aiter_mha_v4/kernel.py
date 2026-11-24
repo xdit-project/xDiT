@@ -309,10 +309,14 @@ def _shorten_keys(key, value, call: AttnCall, fmt: MhaV4Format):
     device = k_packed.device
     cu_k = call.varlen.cu_seqlens_k.to(device=device, dtype=torch.int32)
     lengths = (cu_k[1:] - cu_k[:-1]).contiguous()
-    counts = lengths.to(torch.int64)
+    # Each packed row's sequence is found by searching the boundaries, whose
+    # output has the shape of `rows`. repeat_interleave over the lengths gives
+    # the same indices, but its output shape depends on their values, which
+    # torch.compile cannot trace: it would split the graph at every call.
+    bounds = cu_k.to(torch.int64)
     rows = torch.arange(k_packed.shape[0], device=device)
-    slot = rows - torch.repeat_interleave(cu_k[:-1].to(torch.int64), counts)
-    row = torch.repeat_interleave(torch.arange(batch, device=device), counts)
+    row = torch.searchsorted(bounds[1:], rows, right=True)
+    slot = rows - bounds[row]
     shape = (batch, int(call.varlen.max_seqlen_k), heads, head_dim)
     key, value = k_packed.new_zeros(shape), v_packed.new_zeros(shape)
     key[row, slot] = k_packed

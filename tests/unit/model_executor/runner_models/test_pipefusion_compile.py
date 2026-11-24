@@ -223,6 +223,8 @@ def test_pipefusion_captures_before_wrap_and_replays_before_validation(monkeypat
     runtime_config = SimpleNamespace(warmup_steps=4)
     state = SimpleNamespace(
         runtime_config=runtime_config,
+        has_attention_schedule=lambda: False,
+        has_gemm_schedule=lambda: False,
         patch_mode=False,
         pipeline_patch_idx=0,
         pp_patches_height=[1],
@@ -297,6 +299,8 @@ def test_pipefusion_captures_before_wrap_and_replays_before_validation(monkeypat
 def test_pipefusion_compile_replay_failure_is_raised_collectively(monkeypatch):
     events = []
     state = SimpleNamespace(
+        has_attention_schedule=lambda: False,
+        has_gemm_schedule=lambda: False,
         patch_mode=False,
         pipeline_patch_idx=0,
         pp_patches_height=[1],

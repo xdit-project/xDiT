@@ -126,13 +126,8 @@ is raised, it's message contain all important information to explain the reason 
 
 ### Tests definition
 
-**TD10.** The definition is in Python. One call defines one configuration: its xDiT settings,
-its list of components to test, the tolerances for each output of each component, special parameters
-of B instance, per component path determinism overrides, deadlines and other things the
-requirements mandate to be user-overridable.
-Each entry (a component path) of the list of components defines a separate test case,
-selectable with `-k` pytest parameter.
-Each configuration is a separate call.
+**TD10.** The definition is in Python. One call defines one configuration: its xDiT settings, its list of components to test, the tolerances for each output of each component, special parameters of B instance, per component path determinism overrides, deadlines and other things the requirements mandate to be user-overridable.
+Each entry (a component path) of the list of components defines a separate test case, selectable with `-k` pytest parameter. Each configuration is a separate call.
 
 **TD20.** The xDiT settings usually come from an entry of a CI benchmark YAML file. The `yaml_path` configuration (TD10) parameter defines path to the file (in the same format as the benchmark configurations), and the `entry` field defines name of the entry in the file. There's a helper that reads an entry from a file.  If both `yaml_path` and `entry` are `None` (default), helper returns an empty dictionary. If `yaml_path` can be read and it has an entry with `name` field equal to the `entry`, - the helper returns the read dictionary of xDiT settings. Otherwise the helper raise an exception.
 
@@ -144,18 +139,16 @@ Each configuration is a separate call.
 
 *Rationale:* the xDiT parser applies its defaults and conversions, for example to `gemm_quantization: low=fp4,high=fp6`, so it must not be skipped.
 
-**TD60.** The configuration call has no explicit `name` parameter. The configuration name is the `name` field of the merged xDiT settings (TD30). Hence, if `yaml_path` and `entry` aren't used (i.e. have default `None` value), the `overrides` parameter must have a valid `name` value. The `name` value of the merged xDiT settings (TD30) becomes the configuration name. The name selects the data directory and the metrics file of the configuration.
+**TD60.** The configuration call has no explicit `name` parameter. The configuration name is the `name` field of the merged xDiT settings (TD30). Hence, if `yaml_path` and `entry` aren't used (i.e. have default `None` value), the `overrides` parameter must have a valid `name` value. The `name` value of the merged xDiT settings (TD30) becomes the configuration name. The name defines the data directory of the configuration (PI20.2.1), and scopes metric file names (TM60, PI20.2.2). By convention, a configuration name also let identify the xDiT model to which it applies.
 
-**TD70.** Configuration names are unique. The harness raises an error for two configurations with the same
-name. The check runs during collection, and it also covers the configurations that `-k` deselects. A separate
-check in the configuration fixture stops a configuration that starts a second time in one session. Unique
-names across sessions are the responsibility of the user.
+**TD70.** Configuration names are unique. The harness raises an error for two configurations with the same name. The check runs during collection, and it also covers the configurations that `-k` deselects. A separate ch
+eck in the configuration fixture stops a configuration that starts a second time in one session. Unique names across sessions are the responsibility of the user.
 
-**TD80.** A name contains only letters, digits, `_`, `.` and `-`. The literal names `.` and `..` are not
-allowed. The `--ff` option of pytest, `pytest-xdist` and random-order pytest plugins are not supported.
+**TD75.** During the test session, tests of the same configuration write files (data files with dumped data and rank log files) to the same directory specific to the configuration that uses configuration's name. This directory may persist between tests execution sessions (see PI10).
 
-**TD90.** The harness forces these settings in A and B: no warmup calls, one execution ("iteration"
-in terms of xDiT runner), and `use_torch_compile` off.
+**TD80.** A name contains only letters, digits, `_`, `.` and `-`. The literal names `.` and `..` are not allowed. The `--ff` option of pytest, `pytest-xdist` and random-order pytest plugins are not supported.
+
+**TD90.** The harness forces these settings in A and B: no warmup calls, one execution ("iteration" in terms of xDiT runner), and `use_torch_compile` off.
 
 **TD100.** Deadlines have default values, and a configuration (TD10) can override them. The defaults are:
 1. A: 5 minutes for the `phase=initialization` (RL40), 10 minutes for the `phase=run` (RL60-RL70).
@@ -177,9 +170,7 @@ in terms of xDiT runner), and `use_torch_compile` off.
 
 ### Tolerances and metrics
 
-**TM10.** Each output of each component path for instance A is compared to that of instance B
-taken as a reference (see "Instance A" and "Instance B" below). Two comparison metrics are
-computed and asserted:
+**TM10.** Each output of each component path on a rank of instance A is compared to that of instance B taken as a reference (see "Instance A" and "Instance B" below; ranks are matched by their LOCAL_RANK value, reflect in rank log file names). Two comparison metrics are computed and asserted:
 1. maximum absolute deviation (requires absolute tolerance value, default is `1e-10`) and
 2. the relative L2 deviation (requires relative tolerance value, default is `1e-10`)
 
@@ -196,10 +187,20 @@ reports its metric values, also when it passes.
 **TM40.** Output names use the path notation relative to the return value: `[0]` for a tuple item, `.name` for
 an attribute, and an empty name for a bare tensor. Nested containers flatten to their tensor leaves.
 
-**TM50.** A proposed way to specify a list of component paths, outputs and tolerances, to a
-configuration call (TD10) is as a python dictionary where keys are components paths and values are
-dictionaries mapping component output names to a named tuple (abs, rel) of tolerance overrides
-to apply.
+**TM50.** The proposed way to specify a list of component paths, outputs and tolerances, to a configuration call (TD10) is as a python dictionary where keys are components paths and values are dictionaries mapping component output names to a named tuple (abs, rel) of tolerance overrides to apply.
+
+**TM60.** For all calls of each test case, all computed metrics, thresholds and comparison results are logged to a permanent structured log file called "a metrics file". The file is meant to preserve a history of values and comparisons obtained for the test case calls and the harness never deletes that file; only creates it if absent and appends a record to it. Each record stores all information from a single test function run that was able to compute at least one metric value. The metrics file isn't updated otherwise
+
+**TM70.** Each metrics file record has these fields:
+1. a UTC timestamp field with value in ISO 8601 `YYYY-MM-DDThh:mm:ssZ` format.
+2. the xDiT commit, and whether the working tree had uncommitted changes;
+3. the GPU architecture;
+4. list of calls made, where each element has:
+   1. a call identifier
+   2. list of outputs, where each element has:
+      1. output name
+      2. tolerance values
+      3. metrics dictionary mapping a metric name to a dictionary that maps rank id to a tuple of metric value and a flag if it is below the tolerance.
 
 ### Components, paths and calls
 
@@ -346,9 +347,9 @@ so a fidelity check on own inputs is needed.
 
 ### Rank lifecycle
 
-**RL10.** **Logging.** In its lifetime a rank comes through a sequence of phases (in which all ranks must participate), described in the order below. To preserve events happened/observed during rank's lifetime, each rank creates a structured log file that, during the instance execution, only the rank can write to. On a rank startup, rank gets from the launcher a path to data directory to store the dumps and the status file. The status file name is `rank_<rank_number>.jsonl`. It's an error if the file existed when the rank started. Each rank appends (and flushes immediately) to their own log file progress records (TD110, TD120), status changes and all other information that requirements of this document mandate to save and pass to pytest/user.
+**RL10.** **Logging.** In its lifetime a rank comes through a sequence of phases (in which all ranks must participate), described in the order below. To preserve events happened/observed during rank's lifetime, each rank creates in the configuration's directory (TD75) a structured log file that, during the instance execution, only the rank can write to. On a rank startup, rank gets from the launcher a path to data directory to store the dumps and the status file. The status file name is `<instance_id>_rank_<rank_number>.jsonl`, where `<instance_id>` is `A` for instance A, or `B` otherwise, and `<rank_number>` is just torchrun's LOCAL_RANK value. It's an error if the file existed when the rank started. Each rank appends (and flushes immediately) to their own log file progress records (TD110, TD120), status changes and all other information that requirements of this document mandate to save and pass to pytest/user.
 
-Each log record must have at least one common field: a timestamp. Records related to a case must have another common field `case=<case_id>` - the case identifier, so one can use it to find entries related to the case. A case call related records must also have `call=<call_id>` field set. The file hence serves as a structured timestamped log of all important events the rank observed. Neither rank, nor launcher never deletes anything from the file, only appends to it.
+Each log record must have at least one common field: a UTC timestamp in ISO 8601 `YYYY-MM-DDThh:mm:ssZ` format. Records related to a case must have another common field `case=<case_id>` - the case identifier, so one can use it to find entries related to the case. A case call related records must also have `call=<call_id>` field set. The file hence serves as a structured timestamped log of all important events the rank observed. Neither rank, nor launcher never deletes anything from the file, only appends to it.
 
 After the instance ends, the ownership of the log files of all ranks is passed to the launcher: it reads the records of all ranks (grepping for files with a known pattern and inferring ranks from it, instead of assuming a certain number of ranks) and appends final statuses for cases that must run, but didn't finish according to the file records. This enables crashes/hangs detection as per TD110, and sets FAILED_TO_START for cases that didn't run (TD120).
 
@@ -402,83 +403,60 @@ Instance B runs both replays: first it runs fidelity check replays on its own in
 
 ### pytest integration
 
-**PI10.** Due to a cost of running instance A and instance B, there are 2 modes of testing: a "fresh run" runs everything in full, and a rerun reuses pre-existing results from a previous fresh run. To save storage space, tests passed in fresh runs or reruns, are generally marked as passed internally and their data files are deleted, so subsequent reruns skip them.
+**PI10.** Due to a cost of running instance A and instance B, there are 2 modes of running the test suite:
+1. a "fresh run" runs everything in full (i.e. for each configuration in the test suite run instances A and B to perform dumping of inputs/outputs and then run test case functions to obtain results of testing), and
+2. a "rerun" reuses results of a previous fresh run (i.e. it never runs a single instance A or B for any configuration, instead it only uses previously dumped files to run test case functions).
 
-#### Fresh runs
+**PI20.** The harness defines these custom pytest CLI arguments:
+1. flags: `--xdit_cache_passed` and `--xdit_force_fresh_run`. Both aren't set by default.
+2. strings with absolute or relative paths (relative paths are resolved relative to `os.getcwd()`):
+    1. `--xdit_data_dir` (default: `./_data` ) to set the data directory to contain directories of individual configuration dirs (TD75) with configuration's data files and rank logs;
+    2. `--xdit_metrics_dir` (default: `./_metrics`) to set the directory to contain `<configuration_name>_<case_id>.jsonl` case specific structured metrics file (TD75).
 
-**PIF10.** **Mapping statuses to pytest outcomes for the fresh run**
-1. "error" means that not a single rank of the test case reached DUMPED status on the same ranks of A and B (configuration level fixture might also trigger it for all its cases).
-2. A test or a whole configuration can be "skipped" only if it's explicitly not supported on the current hardware (not the case for harness version 1).
-3. A test get "passed" if and only if these conditions holds simultaneously:
+**PI30.** If `--xdit_cache_passed` CLI flag (PI20) is NOT set, for each test passed in a fresh runs or a rerun, the harness appends to each rank log file a record `case=<case_id> pass=true` and deletes their data files. Subsequent reruns detect these records in the log files and "skip" corresponding tests with a message "Passed in previous run" (all ranks of the case must have this `pass=true`; otherwise the case error out with a message "inconsistent pass record for the case: ranks <..> have `pass=true` while ranks <..> doesn't have it").
+If `--xdit_cache_passed` is set, a passed test doesn't add any record to the rank log files, and does not delete data files, so a subsequent rerun doesn't observe `case=<case_id> pass=true` in rank log files, expects to find data files and executes test case function in full.
+
+**PI40.** If `--xdit_force_fresh_run` CLI flag (PI20) is set, the harness ALWAYS clean up existing data and rank log files, and do a fresh run.
+
+**PI50.** Test case names are generated automatically from a configuration call (TD10). A name of a test cases MUST allow to reconstruct exactly the configuration name (TD60-TD80) that spawned the case, and the component path to test in the configuration.
+
+**PI60.** **Pytest life cycle.** Here's how execution steps maps onto pytest:
+1. Each pytest module defines configurations (TD10) of a single xDiT model to test. A module level `pytest_generate_tests()` hook parses each configuration of the module and spawns an individual test case for each element of configuration's component list.
+2. A global session scoped fixture determines the run mode (PI10) and sets a global `run_mode` flag defining the mode, so other test code could use it:
+   1. if `--xdit_force_fresh_run` CLI flag (PI20) is set, it's always a fresh run;
+   2. otherwise, since the fixture has access to all test case name that are about to execute, and each test case name allow to reconstruct the configuration name exactly, the fixture can determine if a fresh run, or a rerun is needed by inspecting rank log files. If and only if for all generated cases (i.e. before pytest `-k` filtering is applied) all rank log files contain `case=<case_id> pass=true` record for the case, the fixture chooses a fresh run mode for the session; otherwise it choose rerun mode.
+
+   Whenever a fresh run mode is chosen, the fixture then deletes all configuration directories (TD75) with all their content (data files with dumps and rank log files).
+3. A configuration (TD10) level fixture depending on the value of the global `run_mode` flag either do a fresh run or rerun of the configuration (PI10). After a configuration level fixture runs the configuration's individual test case functions (that weren't skipped by pytest `-k` parameter, or by other valid reason that the fixture might detect). After that the loop repeats: another configuration level fixture runs, then its test cases.
+
+#### Mapping statuses to pytest outcomes
+
+**PM10.** A configuration level fixture, a test case-level fixture and a test case function implement different parts of the mapping from statuses to pytest outcomes:
+
+**PM20.** **Errors.** In pytest, only setup/teardown or fixture code could emit errors. We generally turn into an error any situation where a test case doesn't have dumped data to work with:
+1. a configuration level fixture inspects all rank log files and if not a single case of any single rank reached DUMPED status, it marks all test cases of the configuration as "error".
+2. a case level fixture inspects all rank log files and if it finds that no single pair of ranks of A and B reached DUMPED status for the case, it marks the case as "error". If some rank pairs reached DUMPED, but others don't, the test function runs on the obtained data, but eventually necessary fails later.
+
+**PM30.** **Skips.** Skips in pytest can be generated from both fixtures and test functions.
+1. In a fresh run mode, a whole configuration (all cases of the configuration) can be "skipped" only if the configuration is explicitly not supported on the current hardware (not the case for harness version 1).
+2. In a rerun mode a test case is "skipped" by the case fixture when all ranks of the case have `case=<case_id> pass=true` record. If only some ranks have the record, but others don't, the test function runs on the available data, but eventually necessary fails later.
+
+**PM40.** **Passed.** Only a successfully ran test case function sets "passed" outcome. A test case is "passed" if and only if these conditions holds simultaneously:
    1. all ranks of A and B reached successful final state for the case (RL100), i.e.
       - for A, which only does a fidelity check: it's FIDELITY_SKIPPED when fidelity check override flag is set, or FIDELITY_PASSED otherwise
       - for B, which does a fidelity check and replay of A inputs: it's REPLAYED.
    2. for all calls observed for the case/component, all outputs obtained on all ranks of A are within specified tolerances from outputs obtained from corresponding ranks of B.
-4. Every other combination whenever possible still runs tolerances checks, but even if the checks passes, necessary leads to a "failed" test outcome. Failure message MUST list all independent reasons that led to the failure.
 
-**PIF20.** A test reached test function (i.e. configuration and test fixture didn't generate errors) independently checks captured outputs of each rank of A versus corresponding outputs of a replay with the inputs A that B rank did, against the same tolerance. The test runs as many checks as possible before it fails, like the `EXPECT_` macros of GoogleTest. It uses the installed `pytest-check` package. After the checks, it writes the metrics lines with the values and the outcome.
+**PM50.** **Failed.** Every other status combination for a test case, whenever possible still runs tolerances checks, but even if the checks passes, necessary leads to a "failed" test outcome. Failure message MUST list all independent reasons that led to the failure.
 
-**PIF30.** The error or failure message lists every rank with its status and, if known, the call identifier, the reason and other applicable information the requirements of this file require to present to a user.
+**PM60.** A test reached test function (i.e. configuration and test fixture didn't generate errors or skips) independently checks captured outputs of each rank of A versus corresponding outputs of a replay with the inputs A that B rank did, against the same tolerance. The test runs as many checks as possible before it fails, like the `EXPECT_` macros of GoogleTest. It uses the installed `pytest-check` package. After/during doing checks, before generating failure, it writes a record to the case metric file with per-output tolerances, per-output per-rank values of tested metrics and the test per-output per-rank test outcome. If metric values can't be computed (for example, dumps weren't generated, or absent), a per-rank test outcome with a short but descriptive and unique explanation is written, mentioning actual status.
 
-**PIF40.** If and only if a test case passed, the harness appends to each rank log file a record `case=<case_id> pass=true` and deletes all data files (with dumped outputs) related to the case.
+**PM70.** The error or failure message lists every rank with its status and, if known, the call identifier, the reason and other applicable information the requirements of this file require to present to a user.
 
+#### Files and directories
 
+**FD10.** A session level fixture reads pytest CLI arguments (PI20.2) and resolves `--xdit_data_dir` and `--xdit_metrics_dir` to absolute paths and stores it somehow, so other fixtures or test functions work only with absolute paths for these directories. The user is responsible to never run two testing sessions in parallel using the same `--xdit_data_dir` or `--xdit_metrics_dir`. No code checks or prevents that.
 
+**FD20.** `--xdit_data_dir` contain subdirectories, where each subdirectory corresponds to a single configuration (TD10) and contain its data files and rank log files. `--xdit_metrics_dir` contain flat metric log files (TM60, PI20.2.2).
 
-### Files, re-runs and metrics
-
-**FR10.** Each configuration writes its data into its own directory. Only the listed components are saved. A
-test that passes marks its state as passed and deletes its data files; the state stays, so that re-runs can
-skip the case (FR50). The files of tests that did not pass stay.
-
-**FR20.** One entity, in the pytest process, defines the paths of the data files. The launcher,
-instances and test functions all get the paths from it. Test functions read the files, and
-might delete some of them during the work, following other requirements to save the storage space.
-
-**FR30.** Tensors go into safetensors files. Structure and plain values go into JSON. Other types give
-UNSUPPORTED for the affected case.
-
-**FR40.** The data goes into `_data/` and the metrics go into `_metrics/`. Both are in the directory of the
-running test module. The pytest process resolves the paths one time. The launchers and the workers get
-absolute paths.
-
-**FR50.** **Re-runs.** Each case has its own state: the status, the nondeterminism flag and supplemental
-information of each rank of A and B (for example, see IA50, IA80, or PI50; other requirements might
-add to the list), and the mark of a passed test (FR10). A fresh run gives every rank the status
-ABOUT_TO_START in each case.
-1. If every recorded case passed (a case that is UNSUPPORTED_A counts as passed), the harness cleans the
-   directory automatically and runs everything from the beginning.
-   *Rationale:* a new run of tests that all passed gives no new information.
-2. Otherwise, the harness prints a warning and does not run A and B. Each case gets its outcome from its stored
-   state by the same rules as in a fresh run (IA50, PI30), and the checks use the stored data. Two rules come
-   first in this order: a case that passed in a previous run is skipped with "passed in a previous run",
-   and a case without a state or data expected by the test function from the rank statuses
-   is an error ("not part of the run that produced the data" without a state, "the stored data is
-   missing" without data).
-3. The user cleans the directory after a change of the settings or configurations.
-   There is no fingerprint check.
-
-**FR60.** A marker file and a lock protect the data directory. Two pytest sessions must never use one
-configuration directory at the same time, also during the cleanup.
-
-**FR70.** **Metrics file.** It lives in its own directory, apart from the dumps. It only grows, and cleaning
-never deletes it. There is one file for each configuration name, in JSON Lines format, with UTC timestamps in
-ISO 8601. Each append takes an `fcntl.flock` lock on the file.
-*Rationale:* a metrics file that survives many runs shows how the deviations and the tolerances change while
-the implementation changes.
-
-**FR80.** Each metrics line has at least these fields:
-1. the timestamp and the run identifier;
-2. the identifier of the run that produced the compared data;
-3. the xDiT commit, and whether the working tree had uncommitted changes;
-4. the GPU architecture;
-5. the configuration name, the case path, the call address and the output name;
-6. the metric name, and its values as a list with one value for each rank;
-7. the tolerance in force;
-8. the outcome.
-
-A case without metrics writes one line with its outcome. A case that is skipped as "passed in a previous run"
-writes nothing.
-*Rationale:* a timestamp alone does not show which implementation gave a value; the commit does. The GPU
-architecture matters because values differ between MI355X and MI300X. One line for each rank would make the
-file too large to read.
+**FD30.** **Data files.** Tensors go into safetensors files. Structure and plain values go into JSON. Non-serializable types or data types that don't fit into the above give UNSUPPORTED for the affected case.

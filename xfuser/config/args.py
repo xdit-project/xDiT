@@ -11,8 +11,10 @@ import torch
 import torch.distributed
 
 from xfuser.logger import init_logger
+from xfuser.config.attention_a2a_codecs import GEMM_FORMAT_OUTPUT_CODECS
 from xfuser.config.attention_a2a import (
     ATTENTION_A2A_HADAMARD_PLACEMENTS,
+    ATTENTION_A2A_OUTPUT_HOPS,
     ATTENTION_A2A_PROFILES,
     AttentionA2AConfig,
 )
@@ -207,6 +209,19 @@ def _add_attention_a2a_args(parser) -> None:
             "default (none for INT8, preprocess for the MX/FP8 profiles)."
         ),
     )
+    parser.add_argument(
+        "--attention_a2a_output",
+        choices=ATTENTION_A2A_OUTPUT_HOPS,
+        default="none",
+        help=(
+            "Attention A2A output-hop transport. 'mori' quantizes the MHA output "
+            "to the activation format of the following output-projection GEMM "
+            "(TorchAO FP8, MXFP4, MXFP6, or A6W4) and performs the inverse "
+            "Ulysses all-to-all through MoRI. Requires an enabled "
+            "--attention_a2a profile and a --gemm_quantization profile built "
+            "from fp8, fp4, fp6, or a6w4."
+        ),
+    )
 
 
 @dataclass
@@ -305,6 +320,7 @@ class xFuserArgs:
     fp8_comms_safety_factor: float = DEFAULT_FP8_COMMS_SAFETY_FACTOR
     attention_a2a: str = "none"
     attention_a2a_hadamard: str = "auto"
+    attention_a2a_output: str = "none"
     # Ulysses all-to-all transport (xfuser/model_executor/layers/usp_sdma.py). The head-group
     # count is None when not given (2 with --ulysses_a2a sdma), so an explicit one is checked.
     ulysses_a2a: str = "default"
@@ -446,6 +462,7 @@ class xFuserArgs:
                 "--fully_shard_components."
             )
         self._resolve_gemm_quantization()
+        self._validate_attention_a2a_output()
         if self.cache_method is None:
             if self.use_fbcache:
                 warnings.warn(
@@ -483,11 +500,13 @@ class xFuserArgs:
         config = AttentionA2AConfig(
             profile=self.attention_a2a,
             hadamard=self.attention_a2a_hadamard,
+            output=self.attention_a2a_output,
         )
         # Keep programmatic construction aligned with CLI parsing: the config
         # object strips whitespace and normalizes case before validation.
         self.attention_a2a = config.profile
         self.attention_a2a_hadamard = config.hadamard
+        self.attention_a2a_output = config.output
         if not config.enabled:
             return
         if self.use_hybrid_attn_schedule:
@@ -537,6 +556,20 @@ class xFuserArgs:
             raise ValueError("--attention_a2a does not support ring parallelism")
         if self.use_sparseattn_head_balance:
             raise ValueError("--attention_a2a does not support sparse-attention head balancing")
+
+    def _validate_attention_a2a_output(self) -> None:
+        if self.attention_a2a_output == "none":
+            return
+        if self.enable_sequential_cpu_offload:
+            raise ValueError(
+                "--attention_a2a_output mori does not support --enable_sequential_cpu_offload: "
+                "the output projection consumes the transported activation outside its offload hook"
+            )
+        if not self.gemm_quantization_spec.formats <= GEMM_FORMAT_OUTPUT_CODECS.keys():
+            raise ValueError(
+                "--attention_a2a_output mori requires --gemm_quantization built from "
+                f"{', '.join(GEMM_FORMAT_OUTPUT_CODECS)}; got {self.gemm_quantization_spec}"
+            )
 
     @property
     def gemm_quantization_spec(self) -> GemmQuantizationSpec:
@@ -1947,6 +1980,7 @@ class xFuserArgs:
             attention_a2a=AttentionA2AConfig(
                 profile=self.attention_a2a,
                 hadamard=self.attention_a2a_hadamard,
+                output=self.attention_a2a_output,
             ),
             ulysses_a2a=UlyssesA2AConfig(
                 mode=self.ulysses_a2a,

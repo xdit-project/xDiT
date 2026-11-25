@@ -80,6 +80,57 @@ def test_blocks_receive_a_contiguous_residual_stream(single_rank):
     assert layouts == [True]
 
 
+def _run_self_attention(output_hop):
+    _, wrapper = _models()
+    attn = wrapper.blocks[0].attn1
+    calls = {}
+
+    def fake_usp(query, key, value, **kwargs):
+        calls["usp"] = kwargs
+        return torch.zeros_like(query)
+
+    def fake_projected(query, key, value, *, projection, **kwargs):
+        calls["projected"] = projection
+        b, h, s, d = query.shape
+        return torch.ones(b, s, h * d)
+
+    def split_heads(query, key, norm_q, norm_k, cos, sin, heads, **_):
+        return query.unflatten(2, (heads, -1)), key.unflatten(2, (heads, -1))
+
+    runtime_state = SimpleNamespace(runtime_config=SimpleNamespace(use_sparseattn_head_balance=False))
+    attn.processor.attention_function = fake_usp
+    with (
+        mock.patch.object(transformer_wan, "USP", fake_usp),
+        mock.patch.object(transformer_wan, "usp_attention_a2a_projected", fake_projected),
+        mock.patch.object(transformer_wan, "_HAS_FLYDSL", True),
+        mock.patch.object(transformer_wan, "fused_qk_norm_rope", side_effect=split_heads),
+        mock.patch.object(transformer_wan, "get_fused_a2a_mode", return_value=1),
+        mock.patch.object(transformer_wan, "get_fused_a2a_hadamard_placement", return_value="none"),
+        mock.patch.object(transformer_wan, "use_fused_a2a_interleave", return_value=False),
+        mock.patch.object(transformer_wan, "use_fused_a2a_output", return_value=output_hop),
+        mock.patch.object(transformer_wan, "get_ulysses_parallel_world_size", return_value=2),
+        mock.patch.object(transformer_wan, "get_ring_parallel_world_size", return_value=1),
+        mock.patch.object(transformer_wan, "get_runtime_state", return_value=runtime_state),
+        torch.no_grad(),
+    ):
+        output = attn.processor(attn, torch.randn(1, 6, 24), rotary_emb=(torch.empty(1), torch.empty(1)))
+    return attn, calls, output
+
+
+def test_self_attention_projects_the_attention_output_through_the_output_hop(single_rank):
+    attn, calls, output = _run_self_attention(True)
+
+    assert calls == {"projected": attn.to_out[0]}
+    torch.testing.assert_close(output, torch.ones(1, 6, 24))
+
+
+def test_self_attention_keeps_the_bf16_projection_without_the_output_hop(single_rank):
+    attn, calls, output = _run_self_attention(False)
+
+    assert "projected" not in calls and calls["usp"]["attention_a2a_enabled"]
+    torch.testing.assert_close(output, attn.to_out[0](torch.zeros(1, 6, 24)))
+
+
 def test_forward_matches_diffusers_on_one_rank(single_rank):
     stock, wrapper = _models()
 

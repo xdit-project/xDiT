@@ -22,9 +22,7 @@ of a model that is configured by an entry in a CI benchmark YAML file, or direct
 **UC5. Test sub-components and selected calls.** Examples are a transformer block, an attention module, the
 VAE decode method, and one specific call of a transformer.
 
-**UC6. Tune tolerances over time.** A test reports its metrics in each run. A missing tolerance makes the test
-fail, so the user sets tolerances from the reported values. The metrics history shows how the deviations
-change while the implementation changes.
+**UC6. Tune tolerances over time.** A test reports its metrics in each run. The metrics history shows how the deviations change while the implementation changes.
 
 **UC7. Run the tests again after failures.** By default, each run starts from the beginning and runs A and B again. On the user's request, a new run compares the stored data again, for example with new tolerances, and does not run A and B again. Also with such a request, after all cases pass, the next run starts from the beginning automatically. This behavior, however, can be modified if test functions executions on the same data without rerunning A and B is needed.
 
@@ -187,9 +185,9 @@ Each entry (a component path) of the list of components defines a separate test 
 **TD90.** The harness forces these settings in A and B: no warmup calls, one execution ("iteration" in terms of xDiT runner), and `use_torch_compile` off.
 
 **TD100.** Deadlines have default values, and a configuration (TD10) can override them. The defaults are:
-1. A: 5 minutes for the `phase=initialization` (RL40), 10 minutes for the `phase=run` (RL60-RL70).
-2. B: 10 minutes for the `phase=initialization` (RL40), 20 minutes for the `phase=run` (RL60-RL70).
-3. each replayed call (measured between the call's starting replay status (PRE_FIDELITY or PRE_REPLAY) and ending status (FIDELITY_FAILED or FIDELITY_PASSED or REPLAYED), see RL100): 2 minutes in A and 5 minutes in B.
+1. A: 5 minutes for the `phase=loading` (RL40), 10 minutes for the `phase=run` (RL60-RL70).
+2. B: 10 minutes for the `phase=loading` (RL40), 20 minutes for the `phase=run` (RL60-RL70).
+3. each individual call as measured between the call's starting status (ABOUT_TO_START for RL60; PRE_FIDELITY or PRE_REPLAY for RL100) and ending status (DUMPED for RL60; FIDELITY_FAILED or FIDELITY_PASSED or REPLAYED for RL100): 2 minutes in A and 4 minutes in B. It's a limitation of version 1 that these timeouts include file operations.
 4. 5 (for A) or 10 (for B) minutes since the last record in the log file in all other cases
 
 **TD110.** **Deadlines enforcement.** For all configuration paths / cases if pytest `-k` wasn't used, or only for cases selected by `-k` otherwise, the configuration fixture (TD40) launches each instance sequentially (TD115) using a supplementary launcher process that takes care of deadlines, child processes cleanup, actually launching an instance with torchrun and statuses of instance's case in some cases. Each rank of the instance writes its deadline -related progress and timestamps to a certain rank-specific log file known to the launcher. The launcher then periodically reads these files and uses progress records and timestamps to enforce deadlines. A missed deadline leads to a warning message and killing the instance and all its descendant processes.
@@ -216,7 +214,7 @@ Each entry (a component path) of the list of components defines a separate test 
 
 **TM10.** Each output of each component path on a rank of instance A is compared to that of instance B taken as a reference (see "Instance A" and "Instance B" below; ranks are matched by their LOCAL_RANK value, reflect in rank log file names). Two comparison metrics are computed and asserted:
 1. maximum absolute deviation (requires absolute tolerance value, default is `1e-10`) and
-2. the relative L2 deviation (requires relative tolerance value, default is `1e-10`)
+2. the relative L2 deviation (requires relative tolerance value, default is `1e-10`), relative to B. Zero in the denominator gives metric value of zero if the nominator is also zero, otherwise Inf.
 
 For tensors, the cosine similarity is also computed but reported without an assertion.
 
@@ -228,12 +226,14 @@ is a name that is not an output. The test function checks the names for each cal
 **TM30.** The metrics are computed on the CPU in float64, separately for each rank and call. The test always
 reports its metric values, also when it passes.
 
+**TM35.** Outputs structure must be the same on A and B. Different output structure, or NaNs or Infs in any of A or B trigger the test case failure.
+
 **TM40.** Output names use the path notation relative to the return value: `[0]` for a tuple item, `.name` for
-an attribute, and an empty name for a bare tensor. Nested containers flatten to their tensor leaves.
+an attribute, and an empty name for a bare tensor. Nested containers flatten to their leaves.
 
 **TM50.** The proposed way to specify a list of component paths, outputs and tolerances, to a configuration call (TD10) is as a python dictionary where keys are components paths and values are dictionaries mapping component output names to a named tuple (abs, rel) of tolerance overrides to apply.
 
-**TM60.** For all calls of each test case, all computed metrics, thresholds and comparison results are logged to a permanent structured log file called "a metrics file". The file is meant to preserve a history of values and comparisons obtained for the test case calls and the harness never deletes that file; only creates it if absent and appends a record to it. Each record stores all information from a single test function run that was able to compute at least one metric value. The metrics file isn't updated otherwise
+**TM60.** For all calls of each test case, all computed metrics, thresholds and comparison results are logged to a permanent structured log file called "a metrics file". The file is meant to preserve a history of values and comparisons obtained for the test case calls and the harness never deletes that file; only creates it if absent and appends a record to it. Each record stores all information from a single test function run that was able to compute at least one metric value. The metrics file isn't updated otherwise.
 
 **TM70.** Each metrics file record has these fields:
 1. a UTC timestamp field with value in ISO 8601 `YYYY-MM-DDThh:mm:ssZ` format.
@@ -242,10 +242,13 @@ an attribute, and an empty name for a bare tensor. Nested containers flatten to 
 4. run mode (fresh, or rerun)
 5. list of calls made, where each element has:
    1. a call identifier
-   2. list of outputs, where each element has:
+   2. flag is fidelity check passed
+   3. list of outputs, where each element has:
       1. output name
-      2. tolerance values
-      3. metrics dictionary mapping a metric name to a dictionary that maps rank id to a tuple of metric value and a flag if it is below the tolerance.
+      2. tolerance values, if the metric has them (cosine similarity is only computed, but not checked and have no tolerance)
+      3. metrics dictionary mapping a metric name to:
+         - a dictionary that maps rank id to a metric value (if the metric doesn't have tolerance assigned, such as cosine similarity)
+         - a tuple of tolerance value and a dictionary that maps rank id to a tuple of metric value and a flag if it is below the tolerance (if the metric has tolerance)
 
 ### Components, paths and calls
 
@@ -426,15 +429,17 @@ Instance B runs both replays: first it runs fidelity check replays on its own in
 
 **RL100.** Call replays run in "replay list" order (RL60), and in a lock step, with a stream synchronization and a barrier before and after replay. This helps to time execution properly to ensure correct call timeouts (TD100.3), and help to correctly attribute crashes, should they happen. For each call in ordered "replay list", the rank does:
 1. if this is a fidelity check replay and call's case has the instance-specific fidelity check override flag set: the rank logs `status=FIDELITY_SKIPPED case=<case_id> call=<call_id>` and proceeds to the next call in the list (since all ranks obtain the same "replay list" (RL80) and have the same flag value, the same case calls will be skipped on all ranks simultaneously and that can't lead to a hang).
-2. the rank reads inputs, rng states and outputs (only if it's a fidelity check), from the call replay files (the paths are recoverable from data directory path and the call identifier).
-3. the rank logs `status=<status> case=<case_id> call=<call_id> file=<file>` where the `<status>` is `PRE_FIDELITY` if this is fidelity check, or `PRE_REPLAY` if this is B replaying inputs from A; `<file>` is a file path that will contain outputs of the call.
+2. the rank logs `status=<status> case=<case_id> call=<call_id> file=<file>` where the `<status>` is `PRE_FIDELITY` if this is fidelity check, or `PRE_REPLAY` if this is B replaying inputs from A; `<file>` is a file path that will contain outputs of the call.
+3. the rank reads inputs, rng states and outputs (only if it's a fidelity check), from the call replay files (the paths are recoverable from data directory path and the call identifier).
 4. The rank executes a stream synchronization and a barrier.
 5. the rank saves current CPU and CUDA rng states into a temporary variable; restores rng states from loaded from the input file values, execute the call with loaded inputs (B must have casted them to the reference dtype first), obtains the replayed call outputs and saves them to the `<file>`. Finally it restores the original CPU and CUDA rng states from the temporary variable.
 6. The rank executes a stream synchronization and a barrier.
-7. if this is a fidelity check, the rank perform bitwise comparison of each of the elements of obtained output with expected (read in point 2). Any mismatch in the outputs structure or content gives `status=FIDELITY_FAILED case=<case_id> call=<call_id>`. If the check passes, the rank logs instead `status=FIDELITY_PASSED case=<case_id> call=<call_id>`.
+7. if this is a fidelity check, the rank perform bitwise comparison of each of the elements of obtained output with expected (read in point 3). Any mismatch in the outputs structure or content gives `status=FIDELITY_FAILED case=<case_id> call=<call_id>`. If the check passes, the rank logs instead `status=FIDELITY_PASSED case=<case_id> call=<call_id>`.
 8. Otherwise if this isn't a fidelity check, the rank logs `status=REPLAYED case=<case_id> call=<call_id>`.
 
 *Rationale:* strict call execution order and synchronization with barriers are necessary to ensure proper collectives functioning and along with detailed logging help to correctly attribute crashes. A fault that silently damages memory and shows only in a later case is an accepted limit.
+
+**RL110.** Duration rules and `duration_excluded` counter of RL70 also apply to replay calls of phase=replay in RL100.
 
 ### pytest integration
 
@@ -488,7 +493,7 @@ Neither part contains `/`, so the ID gives back the configuration name and the c
 
 **PM50.** **Failed.** Every other status combination for a test case, whenever possible still runs tolerances checks, but even if the checks passes, necessary leads to a "failed" test outcome. Failure message MUST list all independent reasons that led to the failure.
 
-**PM60.** A test reached test function (i.e. configuration and test fixture didn't generate errors or skips) independently checks captured outputs of each rank of A versus corresponding outputs of a replay with the inputs A that B rank did, against the same tolerance. The test runs as many checks as possible before it fails, like the `EXPECT_` macros of GoogleTest. It uses the installed `pytest-check` package. After/during doing checks, before generating failure, it writes a record to the case metric file with per-output tolerances, per-output per-rank values of tested metrics and the test per-output per-rank test outcome. If metric values can't be computed (for example, dumps weren't generated, or absent), a per-rank test outcome with a short but descriptive and unique explanation is written, mentioning actual status.
+**PM60.** A test reached test function (i.e. configuration and test fixture didn't generate errors or skips) independently checks captured outputs of each rank of A versus corresponding outputs of a replay with the inputs A that B rank did, against the same tolerance. The test runs as many checks as possible before it fails, like the `EXPECT_` macros of GoogleTest. It uses the installed `pytest-check` package. After/during doing checks, before generating failure, it writes a record to the case metric file with per-output tolerances, per-output per-rank values of tested metrics and the test per-output per-rank test outcome.
 
 **PM70.** The error or failure message lists every rank with its status and, if known, the call identifier, the reason and other applicable information the requirements of this file require to present to a user.
 

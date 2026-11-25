@@ -40,6 +40,7 @@ def build(monkeypatch):
         ("black-forest-labs/FLUX.1-dev", "auto"),
         ("black-forest-labs/FLUX.2-klein-9B", "auto"),
         ("black-forest-labs/FLUX.2-klein-4B", "auto"),
+        ("Tongyi-MAI/Z-Image", "auto"),
     ],
 )
 def test_default_is_mha_v4_with_the_model_split(build, name, splits):
@@ -78,6 +79,7 @@ def test_without_split_kv_the_global_default_stays(build):
         "MiniMax-H3",
         "black-forest-labs/FLUX.1-dev",
         "black-forest-labs/FLUX.2-klein-9B",
+        "Tongyi-MAI/Z-Image",
     ],
 )
 def test_gfx942_keeps_the_global_default(build, name):

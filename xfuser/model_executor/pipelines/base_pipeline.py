@@ -43,7 +43,6 @@ from xfuser.envs import (
 from xfuser.core.fast_attention import (
     get_fast_attn_enable,
     initialize_fast_attn_state,
-    fast_attention_compression,
 )
 from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
 from xfuser.model_executor.pipefusion import pipefusion_should_update_progress
@@ -57,7 +56,10 @@ PACKAGES_CHECKER.check_diffusers_version()
 # These imports follow the diffusers version check on purpose.
 from xfuser.model_executor.schedulers import xFuserSchedulerBaseWrapper, xFuserSchedulerWrappersRegister  # noqa: E402
 from xfuser.model_executor.models.transformers import xFuserTransformerWrappersRegister  # noqa: E402
-from xfuser.model_executor.layers.attention_processor import xFuserAttentionBaseWrapper  # noqa: E402
+from xfuser.model_executor.fast_attention_calibration import (  # noqa: E402
+    fast_attention_compression,
+    reset_fast_attn_layers,
+)
 from xfuser.model_executor.cache.adapters import apply_cache  # noqa: E402
 
 try:
@@ -143,19 +145,9 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         @wraps(func)
         def fast_attn_fn(self, *args, **kwargs):
             if get_fast_attn_enable():
-                for block in self.module.transformer.transformer_blocks:
-                    for layer in block.children():
-                        if isinstance(layer, xFuserAttentionBaseWrapper):
-                            layer.stepi = 0
-                            layer.cached_residual = None
-                            layer.cached_output = None
+                reset_fast_attn_layers(self.module.transformer)
                 out = func(self, *args, **kwargs)
-                for block in self.module.transformer.transformer_blocks:
-                    for layer in block.children():
-                        if isinstance(layer, xFuserAttentionBaseWrapper):
-                            layer.stepi = 0
-                            layer.cached_residual = None
-                            layer.cached_output = None
+                reset_fast_attn_layers(self.module.transformer)
                 return out
             else:
                 return func(self, *args, **kwargs)

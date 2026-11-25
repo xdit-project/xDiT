@@ -386,6 +386,8 @@ class xFuserQwenImage21Model(xFuserModel):
 
     min_diffusers_version = "0.41.0"
     attention_head_dims = frozenset({128})
+    # Measured on the base checkpoint only; Turbo keeps the global default.
+    default_mha_v4 = True
 
     load_support = LoadSupport(
         meta_transformers=("transformer",),
@@ -423,6 +425,11 @@ class xFuserQwenImage21Model(xFuserModel):
             },
         },
     )
+
+    def _customize_settings(self, config: xFuserArgs) -> None:
+        super()._customize_settings(config)
+        if self.default_mha_v4:
+            prefer_mha_v4(self.settings, "auto")
 
     def _fuses_projections(self) -> bool:
         # RDNA4 is not measured.
@@ -545,6 +552,7 @@ class xFuserQwenImage21TurboModel(xFuserQwenImage21Model):
     """
 
     _TURBO_STEPS = 8
+    default_mha_v4 = False
 
     default_input_values = replace(xFuserQwenImage21Model.default_input_values, num_inference_steps=_TURBO_STEPS)
     settings = replace(

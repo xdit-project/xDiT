@@ -142,9 +142,11 @@ Each entry (a component path) of the list of components defines a separate test 
 
 **TD70.** Configuration names are unique. The harness raises an error for two configurations with the same name. The check runs during collection, and it also covers the configurations that `-k` deselects. A separate check in the configuration fixture stops a configuration that starts a second time in one session. Unique names across sessions are the responsibility of the user.
 
-**TD75.** During the test session, tests of the same configuration write files (data files with dumped data and rank log files) to the same directory specific to the configuration that uses configuration's name. This directory may persist between tests execution sessions (see PI10).
+**TD75.** During the test session, tests of the same configuration write files (data files with dumped data and rank log files) to a directory named after the configuration name, under `--xdit_data_dir` (PI20.2.1). This directory may persist between tests execution sessions (see PI10). Rank log files naming is described in RL10. Data files have basenames according to the `<instance>_<rank>_<call_id>_<content_id>` scheme where `<instance>` is A for instance A, or B otherwise, and `<content_id>` uniquely identifies the content of the file (this depends on exact implementation and if one file with all inputs/outputs, or many standalone files are used; the only requirement for the actual scheme for that is to be consistent and documented).
 
-**TD80.** A name contains only letters, digits, `_`, `.` and `-`. The literal names `.` and `..` are not allowed. The `--ff` option of pytest, `pytest-xdist` and random-order pytest plugins are not supported.
+**TD80.** A configuration name can contains only `[a-zA-Z0-9_.-]` symbols, i.e. ASCII letter characters, digits, `_`, `.` and `-`. The literal names `.` and `..`, or empty strings are errors. Names starting with `.` or `-` are errors. Maximum name length is 200 characters.
+
+**TD85.** The `--ff` option of pytest, `pytest-xdist` and random-order pytest plugins are not supported.
 
 **TD90.** The harness forces these settings in A and B: no warmup calls, one execution ("iteration" in terms of xDiT runner), and `use_torch_compile` off.
 
@@ -205,7 +207,7 @@ an attribute, and an empty name for a bare tensor. Nested containers flatten to 
 
 ### Components, paths and calls
 
-**CP10.** The harness tests only components mentioned in an explicit list of component path strings. Each path string defines a component to test and is the path from the runner model object to the callable component or a method. Only the listed components are captured. A listed component must run at least once during pipeline run. This document also calls a pytorch object with `forward()` method as callable too (since that is what's happening in a model).
+**CP10.** The harness tests only components mentioned in an explicit list of component path strings. Each path string defines a component to test and is the path from the runner model object to the callable component or a method. Only the listed components are captured. A listed component must run at least once during pipeline run. A callable component/element is a Python object that can be called, or a PyTorch object with a `forward()` method (since it behaves like a callable in a forward pass of a model).
 
 **CP20.** The list is known before the run. The harness makes the test cases from the list only (without a
 model) and list's items (component paths) serve as test case identifiers, so there is an exact 1-to-1 relationship between a component path and a test case.
@@ -447,7 +449,7 @@ If `--xdit_no_cache_passed` is set, a passed test doesn't add any record to the 
 
 #### Files and directories
 
-**FD10.** A session level fixture reads pytest CLI arguments (PI20.2) and resolves `--xdit_data_dir` and `--xdit_metrics_dir` to absolute paths and stores it somehow, so other fixtures or test functions work only with absolute paths for these directories. The user is responsible to never run two testing sessions in parallel using the same `--xdit_data_dir` or `--xdit_metrics_dir`. No code checks or prevents that.
+**FD10.** A session level fixture reads pytest CLI arguments (PI20.2) and resolves `--xdit_data_dir` and `--xdit_metrics_dir` to absolute paths, resolving symlinks. It's an error if the directories resolve to the same path, or if `--xdit_metrics_dir` turns to be a descendant of `--xdit_data_dir`. Then it stores directories somehow, so other fixtures or test functions work only with absolute paths for these directories. The user is responsible to never run two testing sessions in parallel using the same `--xdit_data_dir` or `--xdit_metrics_dir`. No code checks or prevents that.
 
 **FD20.** `--xdit_data_dir` contain subdirectories, where each subdirectory corresponds to a single configuration (TD10) and contain its data files and rank log files. `--xdit_metrics_dir` contain flat metric log files (TM60, PI20.2.2).
 

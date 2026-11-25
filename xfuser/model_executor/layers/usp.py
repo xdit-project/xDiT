@@ -319,6 +319,115 @@ def _ft_c_output_all_to_all(x):
     return x
 
 
+def _packed_input_all_to_all(tensors):
+    """One Ulysses input exchange for several [b, h, s_i, d_i] tensors (s_i may differ)."""
+    world_size = get_ulysses_parallel_world_size()
+    chunks = [t.permute(1, 0, 2, 3).contiguous().reshape(world_size, -1) for t in tensors]
+    sizes = [c.shape[1] for c in chunks]
+    exchanged = _sdpa_all_to_all_single(torch.cat(chunks, dim=1))
+    outputs = []
+    for chunk, t in zip(exchanged.split(sizes, dim=1), tensors):
+        b, h, s, d = t.shape
+        outputs.append(
+            chunk.reshape(world_size, h // world_size, b, s, d)
+            .permute(2, 1, 0, 3, 4)
+            .reshape(b, h // world_size, -1, d)
+        )
+    return outputs
+
+
+def _packed_output_all_to_all(tensors):
+    """One Ulysses output exchange for several [b, h/P, S_i, d] tensors (S_i may differ)."""
+    world_size = get_ulysses_parallel_world_size()
+    chunks = [t.permute(2, 0, 1, 3).contiguous().reshape(world_size, -1) for t in tensors]
+    sizes = [c.shape[1] for c in chunks]
+    exchanged = _sdpa_all_to_all_single(torch.cat(chunks, dim=1))
+    outputs = []
+    for chunk, t in zip(exchanged.split(sizes, dim=1), tensors):
+        b, hl, s, d = t.shape
+        outputs.append(
+            chunk.reshape(world_size, s // world_size, b, hl, d)
+            .permute(2, 0, 3, 1, 4)
+            .reshape(b, -1, s // world_size, d)
+        )
+    return outputs
+
+
+def _plain_ulysses_exchange() -> bool:
+    """True when Ulysses attention is a bare all-to-all around the backend, so a
+    caller may run the exchange itself. Anything else goes through USP."""
+    return (
+        get_ulysses_parallel_world_size() > 1
+        and get_ring_parallel_world_size() == 1
+        and not _compile_capture_bypasses_attention()
+        and get_runtime_state().fp8_comms is None
+        and not usp_sdma.selected()
+    )
+
+
+def USP_pair(qkv_a, qkv_b, kwargs_a=None, kwargs_b=None):
+    """Ulysses-only attention for two independent sequences with one input and one
+    output all-to-all shared by both."""
+    if not _plain_ulysses_exchange():
+        return (
+            USP(*qkv_a, dropout_p=0.0, is_causal=False, attention_kwargs=kwargs_a, combine_qkv_a2a=True),
+            USP(*qkv_b, dropout_p=0.0, is_causal=False, attention_kwargs=kwargs_b, combine_qkv_a2a=True),
+        )
+    backend = get_runtime_state().attention_backend
+    attention_function = _get_attention_function(backend=None)
+    q_a, k_a, v_a, q_b, k_b, v_b = _packed_input_all_to_all((*qkv_a, *qkv_b))
+    outs = []
+    for q, k, v, kw in ((q_a, k_a, v_a, kwargs_a), (q_b, k_b, v_b, kwargs_b)):
+        k, v, kw = _trim_trailing_kv_padding(k, v, kw, backend)
+        out, _ = attention_function(
+            q, k, v, dropout_p=0.0, is_causal=False, joint_attn_kwargs=None, attention_kwargs=kw
+        )
+        outs.append(out)
+    return tuple(_packed_output_all_to_all(outs))
+
+
+def USP_bshd(query, key, value, attention_kwargs=None):
+    """Ulysses attention on token-major send buffers; returns ``[1, S/P, H*D]``.
+
+    ``query``/``key``/``value`` are ``[P, S/P, H/P, D]``: chunk ``p`` holds this
+    rank's tokens for the heads rank ``p`` owns, e.g. as written by
+    ``flydsl_fused_qk_norm_rope(..., send_world=P)``. The input all-to-all then
+    lands as one BSHD ``[1, S, H/P, D]`` tensor the backend reads in place, and
+    the backend's BSHD output is already the output all-to-all's send buffer, so
+    the head-major transposes and copies USP pays on both sides go away. Batch 1
+    only; falls back to USP whenever the exchange is not a plain all-to-all.
+    """
+    world, local_len, local_heads, head_dim = query.shape
+    if not _plain_ulysses_exchange() or world != get_ulysses_parallel_world_size():
+
+        def head_major(x):
+            return x.transpose(0, 1).reshape(1, local_len, world * local_heads, head_dim).transpose(1, 2)
+
+        out = USP(
+            head_major(query),
+            head_major(key),
+            head_major(value),
+            dropout_p=0.0,
+            is_causal=False,
+            attention_kwargs=attention_kwargs,
+            combine_qkv_a2a=True,
+        )
+        return out.transpose(1, 2).flatten(2)
+
+    def exchange_in(x):
+        return _sdpa_all_to_all_single(x).view(1, world * local_len, local_heads, head_dim).transpose(1, 2)
+
+    query, key, value = exchange_in(query), exchange_in(key), exchange_in(value)
+    backend = get_runtime_state().attention_backend
+    key, value, attention_kwargs = _trim_trailing_kv_padding(key, value, attention_kwargs, backend)
+    out, _ = _get_attention_function()(
+        query, key, value, dropout_p=0.0, is_causal=False, joint_attn_kwargs=None, attention_kwargs=attention_kwargs
+    )
+    out = out.transpose(1, 2).contiguous().view(world, local_len, local_heads, head_dim)
+    out = _sdpa_all_to_all_single(out)
+    return out.transpose(0, 1).reshape(1, local_len, world * local_heads * head_dim)
+
+
 def _preprocess_joint_tensors(joint_key, joint_value):
     """
     Preprocess the joint key and value tensors for Ulysses parallelism.

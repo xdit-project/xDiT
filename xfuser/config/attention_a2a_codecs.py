@@ -10,6 +10,8 @@ imports this module and must load without them, for example to show
 Thus torch loads only in the function that uses it.
 """
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -29,7 +31,7 @@ GEMM_FORMAT_OUTPUT_CODECS = {
 OUTPUT_CODECS = tuple(dict.fromkeys(GEMM_FORMAT_OUTPUT_CODECS.values()))
 
 
-def e4m3_external_scale_from_amax(amax: "torch.Tensor") -> "torch.Tensor":
+def e4m3_external_scale_from_amax(amax: torch.Tensor) -> torch.Tensor:
     """FP32 descales that TorchAO's dynamic per-tensor FP8 quantization derives from ``amax``.
 
     ``amax`` must keep the activation dtype: TorchAO clamps and divides in that dtype

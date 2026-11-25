@@ -5,9 +5,14 @@ import torch
 
 pytest.importorskip("diffusers")
 
+from xfuser.model_executor.layers import fused_qk_rope_flydsl  # noqa: E402
+from xfuser.model_executor.models.transformers import transformer_moss_image  # noqa: E402
 from xfuser.model_executor.models.transformers.transformer_moss_image import (  # noqa: E402
     MOSSImageScheduler,
     MOSSImageTransformer,
+    RMSNorm,
+    _neox_rope_tables,
+    _rotate,
     validate_skip_layers,
 )
 from xfuser.model_executor.pipelines.pipeline_moss_image import (  # noqa: E402
@@ -75,6 +80,46 @@ def test_rope_frequencies_stay_fp32_when_the_module_is_cast():
     assert table.dtype == torch.float32
 
 
+def test_rmsnorm_keeps_its_numerics_and_the_flydsl_rounding_schedule():
+    """The FlyDSL QK-norm kernel keys its bf16 rounding on the module type."""
+    norm = RMSNorm(16).to(torch.bfloat16)
+    with torch.no_grad():
+        norm.weight.copy_(torch.randn(16))
+    x = torch.randn(3, 16, dtype=torch.bfloat16)
+    y = x.float() * torch.rsqrt(x.float().square().mean(-1, keepdim=True) + 1e-6)
+    with torch.no_grad():
+        assert torch.equal(norm(x), y.to(x.dtype) * norm.weight)
+    assert fused_qk_rope_flydsl._norm_schedule(norm) == (True, True)
+    assert list(norm.state_dict()) == ["weight"]
+
+
+def test_neox_rope_tables_drive_the_fused_fallback_to_the_eager_rotation():
+    """MOSS's ``_rotate`` is rotate-half over the whole head, i.e. neox with rotary_dim == head_dim."""
+    pytest.importorskip("diffusers.models.transformers.transformer_minimax_h3")
+    rope = _tiny().rope(height=2, width=2, text_length=3, device=torch.device("cpu")).to(torch.bfloat16)
+    query = torch.randn(1, 7, 4, 16, dtype=torch.bfloat16)
+    key = torch.randn(1, 7, 4, 16, dtype=torch.bfloat16)
+    norm_q, norm_k = RMSNorm(16).to(torch.bfloat16), RMSNorm(16).to(torch.bfloat16)
+    cos, sin, cos_pad, sin_fold = _neox_rope_tables(rope)
+    with torch.no_grad():
+        got_q, got_k = fused_qk_rope_flydsl._reference_neox(query, key, norm_q, norm_k, (cos, sin))
+        assert torch.equal(got_q, _rotate(norm_q(query), rope))
+        assert torch.equal(got_k, _rotate(norm_k(key), rope))
+    assert cos_pad.shape == sin_fold.shape == (7, 16)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_context_carries_rope_tables_only_when_flydsl_is_available(enabled, monkeypatch):
+    monkeypatch.setattr(transformer_moss_image, "_HAS_FLYDSL", enabled)
+    model = _tiny().eval()
+    text = torch.randn(1, 2, 32)
+    with torch.no_grad():
+        ((_, rope, tables),) = model.encode_context(text, None, 2, 2)
+    assert (tables is not None) == enabled
+    if enabled:
+        assert torch.equal(tables[0], _neox_rope_tables(rope)[0])
+
+
 def test_masked_text_tokens_do_not_change_the_sample():
     model = _tiny().eval()
     hidden = torch.randn(1, 8, 2, 2)
@@ -86,6 +131,34 @@ def test_masked_text_tokens_do_not_change_the_sample():
         padded = model(hidden, timestep, text, encoder_attention_mask=mask, return_dict=False)[0]
     assert short.shape == (1, 8, 2, 2)
     assert torch.allclose(short, padded)
+
+
+def test_interleaved_pair_matches_two_separate_passes():
+    model = _tiny().eval()
+    hidden = torch.randn(1, 8, 2, 2)
+    text_a, text_b = torch.randn(1, 3, 32), torch.randn(1, 2, 32)
+    timestep = torch.tensor(500.0)
+    with torch.no_grad():
+        pair = model(
+            hidden, timestep, text_a, pair_encoder_hidden_states=text_b, pair_skip_layers=(0,), return_dict=False
+        )[0]
+        first = model(hidden, timestep, text_a, return_dict=False)[0]
+        second = model(hidden, timestep, text_b, skip_layers=(0,), return_dict=False)[0]
+    torch.testing.assert_close(pair, torch.cat((first, second)), atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize("names", [("q", "k"), ("q", "k", "v")])
+def test_fused_projections_keep_the_prediction(names):
+    model = _tiny().eval()
+    hidden = torch.randn(1, 8, 2, 2)
+    text = torch.randn(1, 3, 32)
+    timestep = torch.tensor(500.0)
+    with torch.no_grad():
+        expected = model(hidden, timestep, text, return_dict=False)[0]
+        model.fuse_qkv_projections(names)
+        got = model(hidden, timestep, text, return_dict=False)[0]
+    assert "".join(names) in model.layers[0].proj
+    torch.testing.assert_close(got, expected, atol=1e-5, rtol=1e-5)
 
 
 def test_skipping_a_block_changes_the_prediction():
@@ -121,7 +194,7 @@ def test_pipeline_skips_the_negative_block_only_inside_the_window():
     original = transformer.forward
 
     def wrapped(*args, **kwargs):
-        seen.append(kwargs.get("skip_layers"))
+        seen.append((kwargs.get("skip_layers"), kwargs.get("pair_skip_layers")))
         return original(*args, **kwargs)
 
     transformer.forward = wrapped
@@ -143,7 +216,8 @@ def test_pipeline_skips_the_negative_block_only_inside_the_window():
         output_type="latent",
         generator=torch.Generator().manual_seed(0),
     )
-    assert seen == [None, None, None, frozenset({0})]
+    # Serial CFG runs the negative pass interleaved with the positive one, as its pair.
+    assert seen == [(None, None), (None, frozenset({0}))]
     assert output.images.shape == (1, 8, 2, 2)
     assert output.images.dtype == torch.float32
 
@@ -154,7 +228,7 @@ def test_pipeline_adds_the_positive_skip_pass_when_requested():
     original = transformer.forward
 
     def wrapped(*args, **kwargs):
-        seen.append(kwargs.get("skip_layers"))
+        seen.append((kwargs.get("skip_layers"), kwargs.get("pair_skip_layers")))
         return original(*args, **kwargs)
 
     transformer.forward = wrapped
@@ -176,7 +250,7 @@ def test_pipeline_adds_the_positive_skip_pass_when_requested():
         slg_start=0.0,
         output_type="latent",
     )
-    assert seen == [None, frozenset({0}), frozenset({1})]
+    assert seen == [(None, frozenset({0})), (frozenset({1}), None)]
 
 
 def test_pipeline_rejects_a_resolution_the_vae_cannot_pack():

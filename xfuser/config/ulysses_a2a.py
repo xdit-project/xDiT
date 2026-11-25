@@ -1,3 +1,10 @@
+"""The Ulysses all-to-all configuration.
+
+Do not import torch or the runtime at module level. The argument parser
+imports this module and must load without them, for example to show
+``--help``. tests/integration/cpu/test_startup_imports.py checks this.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

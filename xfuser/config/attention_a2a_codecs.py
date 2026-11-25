@@ -4,8 +4,10 @@ Each codec names the AITER attention-output A2A layout that an output-projection
 GEMM consumes. The transport, the startup validation, and the quantized linears
 share these names.
 
-The argument parser imports this module, so torch loads only in the function
-that uses it.
+Do not import torch or the runtime at module level. The argument parser
+imports this module and must load without them, for example to show
+``--help``. tests/integration/cpu/test_startup_imports.py checks this.
+Thus torch loads only in the function that uses it.
 """
 
 from typing import TYPE_CHECKING

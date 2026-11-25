@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 _PROFILE_RECIPES = {
     "e4m3-e4m3": {
@@ -111,20 +111,24 @@ ATTENTION_A2A_HADAMARD_PLACEMENTS = (
     "epilogue",
     "none",
 )
+ATTENTION_A2A_OUTPUT_HOPS = ("none", "mori")
 
 
 @dataclass(frozen=True)
 class AttentionA2AConfig:
-    """Validated configuration for the dense Ulysses Attention A2A input hop."""
+    """Validated configuration for the dense Ulysses Attention A2A hops."""
 
     profile: str = "none"
     hadamard: str = "auto"
+    output: str = "none"
 
     def __post_init__(self) -> None:
         profile = self.profile.strip().lower()
         hadamard = self.hadamard.strip().lower()
+        output = self.output.strip().lower()
         object.__setattr__(self, "profile", profile)
         object.__setattr__(self, "hadamard", hadamard)
+        object.__setattr__(self, "output", output)
 
         if profile not in ATTENTION_A2A_PROFILES:
             raise ValueError(
@@ -135,8 +139,15 @@ class AttentionA2AConfig:
                 f"unsupported Attention A2A Hadamard placement {hadamard!r}; "
                 f"expected one of {', '.join(ATTENTION_A2A_HADAMARD_PLACEMENTS)}"
             )
+        if output not in ATTENTION_A2A_OUTPUT_HOPS:
+            raise ValueError(
+                f"unsupported Attention A2A output hop {output!r}; "
+                f"expected one of {', '.join(ATTENTION_A2A_OUTPUT_HOPS)}"
+            )
         if profile == "none" and hadamard != "auto":
             raise ValueError("--attention_a2a_hadamard requires an enabled --attention_a2a profile")
+        if profile == "none" and output != "none":
+            raise ValueError("--attention_a2a_output requires an enabled --attention_a2a profile")
         if profile == "int8-e4m3" and hadamard == "transport":
             raise ValueError(
                 "INT8 Attention A2A cannot apply Hadamard in transport; use "
@@ -150,6 +161,10 @@ class AttentionA2AConfig:
     @property
     def is_auto(self) -> bool:
         return self.profile == "auto"
+
+    @property
+    def output_enabled(self) -> bool:
+        return self.output != "none"
 
     def resolve_for_backend(self, backend) -> AttentionA2AConfig:
         """Resolve ``auto`` and validate explicit profiles against one backend."""
@@ -165,7 +180,7 @@ class AttentionA2AConfig:
                     f"attention backend {backend_name!r} has no packed Attention "
                     "A2A recipe" + (f": {detail}" if detail else "")
                 ) from None
-            return AttentionA2AConfig(profile=profile, hadamard=self.hadamard)
+            return replace(self, profile=profile)
         compatible_backends = {self.attention_backend}
         if self.profile == "mxfp4-mxfp4":
             compatible_backends.add("aiter_f4f4")

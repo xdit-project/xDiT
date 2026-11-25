@@ -38,6 +38,8 @@ def build(monkeypatch):
         ("black-forest-labs/FLUX.2-dev", "auto"),
         ("MiniMax-H3", "auto"),
         ("black-forest-labs/FLUX.1-dev", "auto"),
+        ("black-forest-labs/FLUX.2-klein-9B", "auto"),
+        ("black-forest-labs/FLUX.2-klein-4B", "auto"),
         ("Tongyi-MAI/Z-Image", "auto"),
     ],
 )
@@ -76,6 +78,7 @@ def test_without_split_kv_the_global_default_stays(build):
         "black-forest-labs/FLUX.2-dev",
         "MiniMax-H3",
         "black-forest-labs/FLUX.1-dev",
+        "black-forest-labs/FLUX.2-klein-9B",
         "Tongyi-MAI/Z-Image",
     ],
 )
@@ -100,5 +103,11 @@ def test_minimax_h3_default_is_only_for_the_base_runner(build, name, cli):
 
 def test_flux1_pipefusion_keeps_the_global_default(build):
     config = build("black-forest-labs/FLUX.1-dev", mha_v4=True, pipefusion_parallel_degree=2)
+    assert config.attention_backend is None
+    assert config.mha_v4_kv_splits is None
+
+
+def test_flux2_klein_pipefusion_keeps_the_global_default(build):
+    config = build("black-forest-labs/FLUX.2-klein-9B", mha_v4=True, pipefusion_parallel_degree=2)
     assert config.attention_backend is None
     assert config.mha_v4_kv_splits is None

@@ -47,14 +47,21 @@ from xfuser.core.attention.sparsity.head_balance import (
 from xfuser.core.distributed.attention_a2a import (
     fused_a2a_input,
     fused_a2a_input_role,
+    fused_a2a_output,
     get_fused_a2a_codecs,
     get_fused_a2a_mode,
     get_fused_a2a_profile,
     launch_attention_a2a_packed,
     use_fused_a2a_interleave,
+    use_fused_a2a_output,
     use_fused_a2a_packed,
 )
 from xfuser.model_executor.layers import usp_sdma
+from xfuser.model_executor.layers.quantized_attention_output import (
+    QuantizedAttentionOutput,
+    attention_output_codec,
+    project_attention_output,
+)
 
 # Backends whose kernel cost can be load-balanced across Ulysses ranks, i.e. the
 # ones that write a per-head cost into the head-balance "cost sink". The Sparge
@@ -310,6 +317,115 @@ def _ft_c_output_all_to_all(x):
     x = _sdpa_all_to_all_single(x)
     x = x.reshape(world_size, s // world_size, b, -1, d).permute(2, 0, 3, 1, 4).reshape(b, -1, s // world_size, d)
     return x
+
+
+def _packed_input_all_to_all(tensors):
+    """One Ulysses input exchange for several [b, h, s_i, d_i] tensors (s_i may differ)."""
+    world_size = get_ulysses_parallel_world_size()
+    chunks = [t.permute(1, 0, 2, 3).contiguous().reshape(world_size, -1) for t in tensors]
+    sizes = [c.shape[1] for c in chunks]
+    exchanged = _sdpa_all_to_all_single(torch.cat(chunks, dim=1))
+    outputs = []
+    for chunk, t in zip(exchanged.split(sizes, dim=1), tensors):
+        b, h, s, d = t.shape
+        outputs.append(
+            chunk.reshape(world_size, h // world_size, b, s, d)
+            .permute(2, 1, 0, 3, 4)
+            .reshape(b, h // world_size, -1, d)
+        )
+    return outputs
+
+
+def _packed_output_all_to_all(tensors):
+    """One Ulysses output exchange for several [b, h/P, S_i, d] tensors (S_i may differ)."""
+    world_size = get_ulysses_parallel_world_size()
+    chunks = [t.permute(2, 0, 1, 3).contiguous().reshape(world_size, -1) for t in tensors]
+    sizes = [c.shape[1] for c in chunks]
+    exchanged = _sdpa_all_to_all_single(torch.cat(chunks, dim=1))
+    outputs = []
+    for chunk, t in zip(exchanged.split(sizes, dim=1), tensors):
+        b, hl, s, d = t.shape
+        outputs.append(
+            chunk.reshape(world_size, s // world_size, b, hl, d)
+            .permute(2, 0, 3, 1, 4)
+            .reshape(b, -1, s // world_size, d)
+        )
+    return outputs
+
+
+def _plain_ulysses_exchange() -> bool:
+    """True when Ulysses attention is a bare all-to-all around the backend, so a
+    caller may run the exchange itself. Anything else goes through USP."""
+    return (
+        get_ulysses_parallel_world_size() > 1
+        and get_ring_parallel_world_size() == 1
+        and not _compile_capture_bypasses_attention()
+        and get_runtime_state().fp8_comms is None
+        and not usp_sdma.selected()
+    )
+
+
+def USP_pair(qkv_a, qkv_b, kwargs_a=None, kwargs_b=None):
+    """Ulysses-only attention for two independent sequences with one input and one
+    output all-to-all shared by both."""
+    if not _plain_ulysses_exchange():
+        return (
+            USP(*qkv_a, dropout_p=0.0, is_causal=False, attention_kwargs=kwargs_a, combine_qkv_a2a=True),
+            USP(*qkv_b, dropout_p=0.0, is_causal=False, attention_kwargs=kwargs_b, combine_qkv_a2a=True),
+        )
+    backend = get_runtime_state().attention_backend
+    attention_function = _get_attention_function(backend=None)
+    q_a, k_a, v_a, q_b, k_b, v_b = _packed_input_all_to_all((*qkv_a, *qkv_b))
+    outs = []
+    for q, k, v, kw in ((q_a, k_a, v_a, kwargs_a), (q_b, k_b, v_b, kwargs_b)):
+        k, v, kw = _trim_trailing_kv_padding(k, v, kw, backend)
+        out, _ = attention_function(
+            q, k, v, dropout_p=0.0, is_causal=False, joint_attn_kwargs=None, attention_kwargs=kw
+        )
+        outs.append(out)
+    return tuple(_packed_output_all_to_all(outs))
+
+
+def USP_bshd(query, key, value, attention_kwargs=None):
+    """Ulysses attention on token-major send buffers; returns ``[1, S/P, H*D]``.
+
+    ``query``/``key``/``value`` are ``[P, S/P, H/P, D]``: chunk ``p`` holds this
+    rank's tokens for the heads rank ``p`` owns, e.g. as written by
+    ``flydsl_fused_qk_norm_rope(..., send_world=P)``. The input all-to-all then
+    lands as one BSHD ``[1, S, H/P, D]`` tensor the backend reads in place, and
+    the backend's BSHD output is already the output all-to-all's send buffer, so
+    the head-major transposes and copies USP pays on both sides go away. Batch 1
+    only; falls back to USP whenever the exchange is not a plain all-to-all.
+    """
+    world, local_len, local_heads, head_dim = query.shape
+    if not _plain_ulysses_exchange() or world != get_ulysses_parallel_world_size():
+
+        def head_major(x):
+            return x.transpose(0, 1).reshape(1, local_len, world * local_heads, head_dim).transpose(1, 2)
+
+        out = USP(
+            head_major(query),
+            head_major(key),
+            head_major(value),
+            dropout_p=0.0,
+            is_causal=False,
+            attention_kwargs=attention_kwargs,
+            combine_qkv_a2a=True,
+        )
+        return out.transpose(1, 2).flatten(2)
+
+    def exchange_in(x):
+        return _sdpa_all_to_all_single(x).view(1, world * local_len, local_heads, head_dim).transpose(1, 2)
+
+    query, key, value = exchange_in(query), exchange_in(key), exchange_in(value)
+    backend = get_runtime_state().attention_backend
+    key, value, attention_kwargs = _trim_trailing_kv_padding(key, value, attention_kwargs, backend)
+    out, _ = _get_attention_function()(
+        query, key, value, dropout_p=0.0, is_causal=False, joint_attn_kwargs=None, attention_kwargs=attention_kwargs
+    )
+    out = out.transpose(1, 2).contiguous().view(world, local_len, local_heads, head_dim)
+    out = _sdpa_all_to_all_single(out)
+    return out.transpose(0, 1).reshape(1, local_len, world * local_heads * head_dim)
 
 
 def _preprocess_joint_tensors(joint_key, joint_value):
@@ -635,7 +751,7 @@ def usp_fused_a2a_input_v(input, pending, valid_kv_len=None):
     )
 
 
-def _attention_a2a_usp(
+def _attention_a2a_mha(
     query,
     key,
     value,
@@ -648,7 +764,10 @@ def _attention_a2a_usp(
     kv_head_repeat,
     pending,
 ):
-    """Run the deliberately narrow AITER/MORI Ulysses input path."""
+    """Run the deliberately narrow AITER/MORI Ulysses input path and packed MHA.
+
+    Returns the BSHD attention output of this rank's heads over the full sequence.
+    """
     runtime_state = get_runtime_state()
     ulysses_world_size = get_ulysses_parallel_world_size()
     ring_world_size = get_ring_parallel_world_size()
@@ -707,15 +826,61 @@ def _attention_a2a_usp(
         get_fused_a2a_codecs(),
         profile,
     )
-    output = launch_attention_a2a_packed(
+    return launch_attention_a2a_packed(
         query,
         key,
         value,
         *packed_scales,
         profile,
         query.shape[-1] ** -0.5,
-    ).transpose(1, 2)
-    return _ft_c_output_all_to_all(output)
+    )
+
+
+def usp_attention_a2a_projected(
+    query,
+    key,
+    value,
+    *,
+    projection,
+    attn_layer=None,
+    attention_kwargs=None,
+    pending=None,
+):
+    """Attention A2A with the output hop: return ``projection`` applied to the attention output.
+
+    Takes the same BHSD inputs as ``USP`` and returns the projection's BF16 output for
+    this rank's sequence shard, ``[B, S, output features]``. The attention output is
+    quantized for the projection's GEMM and exchanged through MoRI instead of the
+    regular output all-to-all. The quantized activation aliases transport buffers that
+    later attention calls rewrite, so it is projected before this function returns.
+    """
+    b, h, s, d = query.shape
+    logical_shape = (b, s, h * d)
+    if _compile_capture_bypasses_attention():
+        return projection(query.new_zeros(logical_shape))
+    if not (get_fused_a2a_mode() > 0 and use_fused_a2a_output()):
+        raise ValueError("usp_attention_a2a_projected requires the Attention A2A output hop")
+    codec = attention_output_codec(projection)
+    if codec is None:
+        raise RuntimeError(
+            "--attention_a2a_output mori requires a quantized output projection; "
+            f"{type(projection).__name__} consumes a BF16 activation"
+        )
+
+    output = _attention_a2a_mha(
+        query,
+        key,
+        value,
+        dropout_p=0.0,
+        is_causal=False,
+        joint_strategy=None,
+        attn_layer=attn_layer,
+        attention_kwargs=attention_kwargs,
+        kv_head_repeat=1,
+        pending=pending,
+    )
+    payload, scale = fused_a2a_output(output, PROCESS_GROUP.ULYSSES_PG, get_ulysses_parallel_rank(), codec)
+    return project_attention_output(projection, QuantizedAttentionOutput(payload, scale, codec), logical_shape)
 
 
 def USP(
@@ -782,7 +947,7 @@ def USP(
     if attention_a2a_pending is not None and not use_attention_a2a:
         raise ValueError("interleaved input requires eligible Attention A2A transport")
     if use_attention_a2a:
-        return _attention_a2a_usp(
+        output = _attention_a2a_mha(
             query,
             key,
             value,
@@ -794,6 +959,7 @@ def USP(
             kv_head_repeat=kv_head_repeat,
             pending=attention_a2a_pending,
         )
+        return _ft_c_output_all_to_all(output.transpose(1, 2))
 
     runtime_state = get_runtime_state()
     ulysses_world_size = get_ulysses_parallel_world_size()

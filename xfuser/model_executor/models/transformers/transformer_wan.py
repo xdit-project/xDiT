@@ -12,12 +12,14 @@ from xfuser.model_executor.layers.usp import (
     usp_fused_a2a_input_k,
     usp_fused_a2a_input_q,
     usp_fused_a2a_input_v,
+    usp_attention_a2a_projected,
 )
 from xfuser.core.distributed.attention_a2a import (
     fused_a2a_pad_multiple,
     get_fused_a2a_hadamard_placement,
     get_fused_a2a_mode,
     use_fused_a2a_interleave,
+    use_fused_a2a_output,
 )
 from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
 from xfuser.core.distributed import (
@@ -258,6 +260,17 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
                 key = wan_flydsl_hadamard(key)
             value = value.unflatten(2, (attn.heads, -1))
 
+        if use_fused_a2a_output():
+            hidden_states = usp_attention_a2a_projected(
+                query.transpose(1, 2),
+                key.transpose(1, 2),
+                value.transpose(1, 2),
+                projection=attn.to_out[0],
+                attn_layer=attn,
+                attention_kwargs=self.attention_kwargs,
+                pending=pending,
+            )
+            return attn.to_out[1](hidden_states)
         output = self.attention_function(
             query.transpose(1, 2),
             key.transpose(1, 2),

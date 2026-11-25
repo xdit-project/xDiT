@@ -106,3 +106,31 @@ def test_explicit_sampling_choices_are_kept():
 def test_resolution_must_be_divisible_by_16():
     with pytest.raises(ValueError, match="divisible by 16"):
         _model().preprocess_args({"prompt": "a cat", "height": 24, "width": 32})
+
+
+def test_compile_mode_records_cuda_graphs_except_on_rdna4(monkeypatch):
+    from xfuser.model_executor.models.runner_models import moss_image
+
+    model = _model()
+    monkeypatch.setattr(moss_image.PACKAGES_CHECKER, "_on_rdna4", lambda: False)
+    assert model._get_compile_mode() == "reduce-overhead"
+    assert model._get_compiled_pipe_components() == ["transformer", "text_encoder"]
+    monkeypatch.setattr(moss_image.PACKAGES_CHECKER, "_on_rdna4", lambda: True)
+    assert model._get_compile_mode() == "default"
+
+
+@pytest.mark.parametrize("cfg_parallel, fused", [(False, ("q", "k", "v")), (True, ("q", "k"))])
+def test_projection_fusion_follows_the_cfg_layout(monkeypatch, cfg_parallel, fused):
+    import torch
+
+    from xfuser.model_executor.pipelines import pipeline_moss_image
+
+    seen = {}
+    monkeypatch.setattr(
+        pipeline_moss_image.xFuserMOSSImagePipeline, "from_pretrained", lambda **kwargs: seen.update(kwargs)
+    )
+    model = _model()
+    monkeypatch.setattr(model.config, "use_cfg_parallel", cfg_parallel)
+    model._load_model()
+    assert seen["fuse_projections"] == fused
+    assert seen["vae_dtype"] is torch.bfloat16

@@ -30,7 +30,7 @@ change while the implementation changes.
 tolerances, and does not run A and B again. By default, after all cases pass, the next run starts from the beginning
 automatically. This behavior, however, can be modified if test functions executions on the same data without rerunning A and B is needed.
 
-**UC8. Select single cases.** The user selects cases with pytest, for example with `-k` or a node ID. The user is responsible this doesn't conflict with UC7.
+**UC8. Select single cases.** The user selects cases with pytest, for example with `-k` or a node ID. 
 
 **UC9. Keep the tests valid while xDiT changes.**
 *Rationale:* xDiT changes fast, and its components get new augmentations all the time. Hard-coded tests become
@@ -50,6 +50,8 @@ other determinism expectations.
 **HL10.** The harness tests individual components of xDiT diffusion models, for example a VAE, a transformer, a
 transformer block, an attention module, a text encoder, or a method such as the VAE decode. It uses exactly
 the configuration and the weights that the xDiT runner uses for a model configuration.
+
+**HL15.** Support for pytest `-k` argument is limited. The user is responsible to do fresh runs each time they change `-k` value (including removing it) or node ID that wasn't covered by previous fresh run. The harness doesn't track scope of different runs and doesn't warn if certain promised behavior may not work correctly due to an incompatible value of `-k` in a new run/rerun.
 
 **HL20.** The harness takes each component from the model that the xDiT runner builds. It does not extract,
 hard-code or build a component itself.
@@ -89,7 +91,7 @@ precision to obtain reference values to compare against.
 test data acquisition in batches: one batch gathers data to test (A), and the other batch gather
 reference data (B).
 
-**HL120.** Multi-node model execution isn't supported, but single node multi-GPU is supported, hence a term "rank" is an alias to "local rank". A term "worker" is an alias to "local rank" too.
+**HL120.** Multi-node model execution isn't supported, but single node multi-GPU is supported, hence a term "rank" is an alias to "local rank". A term "worker" is an alias to "local rank" too. An instance has N ranks with the numbers 0 to N-1. N is the number of processes that torchrun starts for the instance. The configuration fixture gives N to the launcher as a parameter, and N is the same for A and B (IB10). Every part of the harness takes the set of ranks from N and never infers it from the files that exist. For the pytest part, a rank log that does not exist is a log without records.
 
 **HL130.** The pytest prototype integration in [_prototypes/pytest_integration/](../_prototypes/pytest_integration/) shows how a set of tests can share two expensive processes, select single cases, show live output, and leave no processes behind. The harness takes the parts that fit and changes them as this document requires to adapt to the requirements. The prototype is an implementation hint, not a binding rule, but the final implementation must have no weaker child process handling guarantees and child process console output visibility, than the prototype.
 
@@ -101,20 +103,49 @@ reference data (B).
 
 **HLS10.** A component path in the list of components to test for a configuration (TD10) identifies a single component, for which a test case is created, and the component must be executed (called by the model) at least once during a model/pipeline execution. Statues are written in CAPITAL_LETTERS and carry information necessary for proper conversion of behavior observed during an attempt to run instances into pytest outcomes, while giving a user enough information for debugging.
 
-**HLS15.** Statuses describe nodes of an exactly one directed acyclic graph of evolution of the knowledge about certain properties that matter for the testing of:
-1. a component call on a rank (ABOUT_TO_START, DUMPED, UNSUPPORTED, FIDELITY_SKIPPED, PRE_FIDELITY, PRE_REPLAY, FIDELITY_FAILED, FIDELITY_PASSED, REPLAYED; also additionally CRASHED or HANGED if such an event happens during the call processing), or
-2. a whole component/case on a rank(NOT_REACHED, FAILED_TO_START) or all ranks (UNRESOLVABLE_PATH, UNSUPPORTED, CASE_CALLS_MISMATCH), or
-3. a whole configuration on all ranks (UNSUPPORTED; also additionally CRASHED or HANGED if such an event happens outside of some call processing); Configuration statuses per se do not exist: these are shortcuts for an algorithm of assigning certain statuses for all ranks of some or all cases of the configuration:
-   1. UNSUPPORTED configuration means "set all configuration component/case statuses to UNSUPPORTED on all ranks"
-   2. CRASHED or HANGED configuration (when the crash or hang happen outside of processing of some component call) means "record the status, for all cases of the configuration that don't have at least ABOUT_TO_START call status recorded, record FAILED_TO_START status."
+**HLS15.** Statuses are the nodes of exactly one directed acyclic graph. The graph describes how the knowledge about a call, a case, or an instance grows. HLS17 is the normative list of the statuses and of the permitted transitions. A status has one of three scopes:
+1. a component call on a rank: ABOUT_TO_START, DUMPED, UNSUPPORTED, FIDELITY_SKIPPED, PRE_FIDELITY, FIDELITY_PASSED, FIDELITY_FAILED, PRE_REPLAY, REPLAYED, and CRASHED or HANGED if the instance ended while the call was open (HLS16);
+2. a case on a rank: UNRESOLVABLE_PATH, NOT_REACHED, CASE_CALLS_MISMATCH, FAILED_TO_START, UNSUPPORTED;
+3. an instance, as one rank log shows it: UNSUPPORTED, CRASHED, HANGED. An instance-level status says only that the event happened. It never attributes the event to a case or a call, and it never gives a pytest outcome by itself. It is the reason for the case statuses that the launcher derives from it (TD120).
 
 **TODO for an agent:** ALWAYS verify consistency of HLS15 with the other parts of the document!
+
+**HLS16.** The last status of a call in a rank log puts the call into exactly one class:
+1. *open*: ABOUT_TO_START, PRE_FIDELITY, PRE_REPLAY. The component can be executing.
+2. *settled*: no step of the call is due. In A and in B: UNSUPPORTED, CRASHED, HANGED. In A only: FIDELITY_PASSED, FIDELITY_FAILED, FIDELITY_SKIPPED. In B only: REPLAYED.
+3. *pending*: every other last status, that is DUMPED in A and in B, and FIDELITY_PASSED, FIDELITY_FAILED, or FIDELITY_SKIPPED in B. A step of the call is due and has not started.
+
+**HLS17.** The table below is the normative list of the statuses and of the permitted transitions. "Previous" is the last status of the same call, or the records of the same case, before the new record. "Class" is the HLS16 class.
+
+| # | Status | Scope | Writer | Written when | Previous | Class | Contribution to the outcome of the case |
+|---|---|---|---|---|---|---|---|
+| 1 | ABOUT_TO_START | call | rank | phase=run, the hook fires (RL60 step 1) | none | open | Cannot be the last status after TD120. If it is, the case cannot pass |
+| 2 | DUMPED | call | rank | phase=run, inputs and outputs are saved (RL60 step 5) | ABOUT_TO_START | pending | Counts for TD115 and PM20. As the last status: the case cannot pass; row 14 or 15 gives the reason |
+| 3 | UNSUPPORTED | call | rank | The rank cannot dump the inputs of the call (RL60 step 2, before the call) or its outputs (RL60 step 4, after the call). The rank writes the record when the call returns. Or: the pipeline run ended and the call did not return normally (RL80 item 4) | ABOUT_TO_START | settled | The case cannot pass |
+| 4 | FIDELITY_SKIPPED | call | rank | Fidelity stage, override flag set (RL100 step 1) | DUMPED | A: settled, B: pending | As the last status in A: does not cause a failure from A. As the last status in B: the case cannot pass, because the replay of A's inputs is missing. PM80 warning in both |
+| 5 | PRE_FIDELITY | call | rank | Fidelity stage (RL100 step 3) | DUMPED | open | As row 1 |
+| 6 | FIDELITY_PASSED | call | rank | RL100 step 7 | PRE_FIDELITY | A: settled, B: pending | As the last status in A: does not cause a failure from A. As the last status in B: the case cannot pass, because the replay of A's inputs is missing; the reason is row 14 or 15, or the call does not exist in A (IB10 item 6) |
+| 7 | FIDELITY_FAILED | call | rank | RL100 step 7 | PRE_FIDELITY | A: settled, B: pending | The case cannot pass (IA60), in A and in B, also when REPLAYED follows in B |
+| 8 | PRE_REPLAY | call | rank of B | Replay of A's inputs (RL100 step 3) | FIDELITY_PASSED, FIDELITY_FAILED, FIDELITY_SKIPPED | open | As row 1 |
+| 9 | REPLAYED | call | rank of B | RL100 step 8 | PRE_REPLAY | settled | As the last status in B: does not cause a failure from B, if the call has FIDELITY_PASSED or FIDELITY_SKIPPED (PM40) |
+| 10 | CRASHED | call | launcher | TD120 item 2.2, the instance crashed | ABOUT_TO_START, PRE_FIDELITY, PRE_REPLAY | settled | The case cannot pass |
+| 11 | HANGED | call | launcher | TD120 item 2.2, the launcher killed the instance for a missed deadline | as row 10 | settled | The case cannot pass |
+| 12 | UNRESOLVABLE_PATH | case | rank | Start of phase=run, path resolution (RL60, CP120, CP140) | none | - | The case has no call on this rank, so the case cannot pass |
+| 13 | NOT_REACHED | case | rank | The pipeline run ended and the case had no call (RL80) | none | - | As row 12 |
+| 14 | CASE_CALLS_MISMATCH | case | rank, the same on all ranks | After the pipeline run, list comparison (RL80) | Any record of the case; no call of the case is open | calls keep their class and are not replayed | The case cannot pass |
+| 15 | FAILED_TO_START | case | launcher | TD120 item 2.3 | no record, or call records | - | The case cannot pass |
+| 16 | UNSUPPORTED | case | launcher, in all rank logs | TD120 item 1 | none | - | The case cannot pass |
+| 17 | UNSUPPORTED | instance | rank | phase=initialization (RL40) | - | - | None directly. Cause of row 16 |
+| 18 | CRASHED | instance | launcher, in all rank logs | TD120 item 2.1 | - | - | None directly. Reason for rows 10 and 15 |
+| 19 | HANGED | instance | launcher, in all rank logs | TD120 item 2.1 | - | - | None directly. Reason for rows 11 and 15 |
+
+The last column says only what a status contributes. PM10-PM50 give the outcome of a case from all ranks of A and B and from the tolerance checks. "The case cannot pass" means failed (PM50), or error where PM20 applies. A record sequence that the table does not permit is a harness defect, and PM50 makes such a case fail.
 
 **HLS19.** Users do not need to see status identifiers: the harness raises verbose exceptions with explanations that a person can read.
 
 **HLS20.** This document follows a convention: if a certain status X has _A or _B suffix, that only means that status X applies to a rank of instance A or B correspondingly. There are no distinct statuses X_A or X_B, there's only a status X and a rank of instance A or B on which it appears. It's always known to which instance a rank belongs, so instance specific statuses aren't generally needed.
 
-**HLS30.** Status is written to the rank's log file immediately when it happens as `status=X` record (the record should have other fields providing additional information). In the rank's log, when `status=` field is recorded with `case=` entry (setting a current test case identifier), the status applies to the test case. When `status=` is recorded together with `case=` and `call=` identifiers, the status applies to the given call of the given case. It's an error to have a `case=` field without `status=` or `pass=` fields (PI30), or `case=` and `call=` fields without `status=`.
+**HLS30.** Status is written to the rank's log file immediately when it happens as `status=X` record (the record should have other fields providing additional information). In the rank's log, a `status=` record has one of three scopes. With `case=` and `call=`, the status applies to that call of that case. With `case=` and without `call=`, it applies to the case. Without `case=`, it applies to the instance (HLS15 item 3). A `call=` field without a `case=` field is an error. It's an error to have a `case=` field without `status=` or `pass=` fields (PI30), or `case=` and `call=` fields without `status=`.
 
 **HLS40.** When the harness processes data obtained from instances A and B, it loads individual case data
 from each of the instances and by aggregating statuses from all ranks decides how it's going
@@ -167,9 +198,15 @@ Each entry (a component path) of the list of components defines a separate test 
 
 **TD115.** The launcher first runs instance A. If at least one call on any rank of A reached `status=DUMPED`, the launcher also runs instance B for the same test cases that A used.
 
-**TD120.** Since the launcher is the only entity that knows of missed deadlines, and also only it can detect crashes or other premature exits, upon the instance finishing execution (whatever the reasons for instance process ending were) the launcher is responsible for reading rank log files and appending correct statuses to rank log files for the cases that were executed last (these might need `status=CRASHED` or `status=HANGED` if that happened) or don't have records at all (these might need UNSUPPORTED if whole configuration is unsupported, or FAILED_TO_START if the rank crashed or hanged and just didn't have an opportunity to try to run the case).
+**TD120.** Only the launcher knows of a missed deadline, a crash, or another premature exit. After the instance ends, for whatever reason, the launcher reads all rank logs and appends records as follows. It never appends a status to a call that is not open, so each call that already ran keeps its status.
+1. *Unsupported instance:* at least one rank log has the instance-level record `status=UNSUPPORTED` (RL40). The launcher appends `status=UNSUPPORTED case=<case_id> reason=<the same reason>` for each case of the instance to each rank log, and nothing else.
+2. *Crash or hang:* the instance ended in another abnormal way. The status X is HANGED if the launcher killed the instance for a missed deadline (TD110), and CRASHED otherwise. To each rank log the launcher appends:
+   1. the instance-level record `status=X reason=<why>`. For HANGED the reason names the missed deadline of TD100. For CRASHED it gives the exit code or the signal;
+   2. `status=X case=<case_id> call=<call_id>` for each open call (HLS16). Several calls can be open, because listed components can be nested;
+   3. `status=FAILED_TO_START case=<case_id>` for each case of the instance that (a) has no NOT_REACHED, UNRESOLVABLE_PATH, or CASE_CALLS_MISMATCH record, (b) has no call with CRASHED or HANGED, and (c) has no call record, or has at least one pending call (HLS16).
+3. *Normal end:* the launcher appends nothing.
 
-**TD125.** *Sanity check* The launcher knows which cases the instance should run, so after completing the above it validates that each case is mentioned on the log at least once. It's a harness bug if the launcher detects cases that are still absent.
+**TD125.** *Sanity check* The launcher knows which cases the instance should run, so after completing the above it validates that each case is mentioned at least once in the log of each of the N ranks (HL120). It's a harness bug if the launcher detects cases that are still absent.
 
 **TD130.** At the launcher start, if `HSA_DISABLE_COREDUMP_ON_EXCEPTION` environment variable isn't defined for the launcher process, it must set `HSA_DISABLE_COREDUMP_ON_EXCEPTION=1` for self and all child processes it runs. For instance B only (to reduce memory pressure), if none of `PYTORCH_ALLOC_CONF`, `PYTORCH_CUDA_ALLOC_CONF` and `PYTORCH_HIP_ALLOC_CONF` environment variables are defined, the launcher sets `PYTORCH_ALLOC_CONF=expandable_segments:True` for self and all child processes it runs.
 
@@ -187,7 +224,7 @@ For tensors, the cosine similarity is also computed but reported without an asse
 
 **TM20.** Each output of each component path must be named in the configuration, and may have
 a tolerance override. An output of a component that doesn't have a set name is an error, so
-is a name that is not an output.
+is a name that is not an output. The test function checks the names for each call when it loads the outputs of A and of B. A mismatch fails the test (PM50). The message lists, for each call, the outputs without a name and the names without an output. The check runs in pytest, so it has no status.
 *Rationale:* there must be a guarantee that the test itself has no mistake and that it tests each output.
 
 **TM30.** The metrics are computed on the CPU in float64, separately for each rank and call. The test always
@@ -258,7 +295,7 @@ are callable and what their path descendants are.
 when its counter is 3 and the counter of `b` is 2. During the run of pipelines in A or B, the harness
 writes the inputs of each selected call, random-number states and the outputs after the call returns
 to data files (it doesn't store them in memory). These data files are read later for call replays and
-checks. Only the corresponding test case function can delete these data files.
+checks. Only the corresponding test case function or fixture can delete these data files; also - configuration fixture preparing for a fresh run.
 
 **CP100.** A call identifier `<call_id>` is a component path in which each tracked callable element carries its counter value at the time of the call, for example `pipe.transformer:3.blocks[0]:1`. The first path element, such as `pipe`, `second_pipe` or `refiner_pipe` is usually callable, but version 1 does not track it due to complications, and assumes it to be a non-callable instead. This identifier is unique within a run, reads with the CP30 rules, and is the same in A and B when their call order is the same.
 
@@ -266,7 +303,7 @@ checks. Only the corresponding test case function can delete these data files.
 call. Calls from another pipeline, from the runner, or from any other code are tested like all other calls.
 
 **CP120.** Two entries of the same component with different call numbers are separate cases, for example
-`pipe.transformer:1` and `pipe.transformer:2`. Overlapping entries are an error at path resolution. Two
+`pipe.transformer:1` and `pipe.transformer:2`. Overlapping entries are a path error: each of the overlapping cases gets UNRESOLVABLE_PATH (CP140), and the reason names the other entry. Two
 entries on the same component are disjoint only if one object has a call number in both entries and the
 numbers differ. Then `pipe.transformer:1` and `second_pipe.transformer:2` in the LTX-2.3 runner
 are permitted.
@@ -276,7 +313,7 @@ complex.
 **CP130.** Calls such as `pipe.vae.decode`, where `.vae` isn't callable or doesn't run in the pipeline,
 and `decode` is a method, also must be testable. A path through a module that the run never calls must be valid.
 
-**CP140.** A path must resolve in A and in B. If it doesn't, the case gets (logs) `status=UNRESOLVABLE_PATH case=<case_id>`. Path errors that need a built model show only after the initialization of A; this cost is accepted.
+**CP140.** A path must resolve in A and in B. If it doesn't, the rank logs `status=UNRESOLVABLE_PATH case=<case_id> reason=<why>` at the start of phase=run (RL60). Path errors that need a built model show only after the initialization of A; this cost is accepted.
 
 **CP150.** A component path goes into the test case name in the form that PI50 defines, so every test case can be selected with `-k`.
 
@@ -340,7 +377,7 @@ so a fidelity check on own inputs is needed.
 
 **IB70.** B has three run-related parameters for the user: the reference dtype, the self-attention backend and the cross-attention backend, and also own per-path determinism override setting, and deadlines.
 
-**IB80.** An attention backend that declares a fallback, or that needs a blocked vendor package, makes the configuration UNSUPPORTED. A cross-attention parameter for a model without a separate cross-attention backend is an error. The default attention backend is `sdpa_efficient`.
+**IB80.** An attention backend that declares a fallback, or that needs a blocked vendor package, makes instance B UNSUPPORTED (RL40). A cross-attention parameter for a model without a separate cross-attention backend is an error. The default attention backend is `sdpa_efficient`.
 
 ### Rank lifecycle
 
@@ -348,32 +385,33 @@ so a fidelity check on own inputs is needed.
 
 Each log record must have at least one common field: a UTC timestamp in ISO 8601 `YYYY-MM-DDThh:mm:ssZ` format. Records related to a case must have another common field `case=<case_id>` - the case identifier, so one can use it to find entries related to the case. A case call related records must also have `call=<call_id>` field set. The file hence serves as a structured timestamped log of all important events the rank observed. Neither rank, nor launcher never deletes anything from the file, only appends to it.
 
-After the instance ends, the ownership of the log files of all ranks is passed to the launcher: it reads the records of all ranks (grepping for files with a known pattern and inferring ranks from it, instead of assuming a certain number of ranks) and appends final statuses for cases that must run, but didn't finish according to the file records. This enables crashes/hangs detection as per TD110, and sets FAILED_TO_START for cases that didn't run (TD120).
+After the instance ends, the ownership of the rank logs passes to the launcher (TD120). The launcher takes the number of ranks N of the instance from its parameter (HL120) and does not infer it from the files that exist. If the log of one of the ranks 0 to N-1 does not exist, the launcher creates it. TD120 then applies to it as to a log without case records.
 
 **RL20.** Getting to the next phase is recorded in the rank's log with a corresponding field `phase=`. These records are used by the launcher to enforce deadlines (TD110).
 
 **RL30.** When a rank just starts, it writes `started=true` log record.
 
-**RL40.** **phase=initialization** This is where the rank parses its xDiT setting (TD50) and determines if it can run the configuration. If the configuration gets `status=UNSUPPORTED` record with an appropriate value of `reason=` field describing what exactly isn't supported, and then rank exits with an error. This automatically forces torchrun to kill all other ranks. By reading the log files the launcher is able to correctly identify the cause and set all cases statuses to UNSUPPORTED too.
+**RL40.** **phase=initialization** This is where the rank parses its xDiT setting (TD50) and determines if it can run the configuration. If the rank cannot run the configuration, it writes the instance-level record `status=UNSUPPORTED reason=<what is not supported>` and exits with an error. This automatically forces torchrun to kill all other ranks. By reading the log files the launcher is able to correctly identify the cause and set all cases statuses to UNSUPPORTED too.
 *Rationale for not setting case statuses in rank code:* In case of a hang or a crash, the launcher have to identify cases that didn't run to assign them appropriate statuses. We simply reuse this machinery for setting case statuses for unsupported configuration too.
 
 **RL50.** **phase=loading** Doesn't have specific statuses.
 
-**RL60.** **phase=run** During this phase rank runs the model pipeline and captures data. From the beginning, the rank has a set of cases it has to run; it makes a copy of this set into "unseen cases set". The rank installs hooks to tracked components and when a hook fires, if the case call conditions are met, the rank:
+**RL60.** **phase=run** During this phase rank runs the model pipeline and captures data. From the beginning, the rank has a set of cases it has to run; it makes a copy of this set into "unseen cases set". Before it installs hooks, the rank resolves the path of each case (CP30-CP50) and checks the entries for overlap (CP120). For each case with a path error it logs `status=UNRESOLVABLE_PATH case=<case_id> reason=<why>` and removes the case from the set of cases it has to run and from the "unseen cases set". Such a case gets no hook and no NOT_REACHED. The rank installs hooks to tracked components and when a hook fires, if the case call conditions are met, the rank:
 1. removes the case from "unseen cases set" if it's still there; logs `status=ABOUT_TO_START case=<case_id> call=<call_id> files=<files>` (where `<files>` is a 2-element tuple, each element of which is a list of filepaths to files that will contain dumped data for the call of the case. The first element is for files having data necessary to start the call, such as inputs, rng states & etc, and the second element is for outputs; Filepaths follow a pattern and can be recovered by the rank later from the generic data path it has and a call identifier),
 2. saves component inputs and other applicable runtime data to the case call specific dump file it previously allocated (or files, depending on what is more convenient),
 3. runs the call and
 4. similarly saves outputs on the call return
 5. if dumps were successful: the rank writes a `status=DUMPED case=<case_id> call=<call_id>` record to the log and appends the call identifier to an internal ordered list of calls to replay (called "replay list").
 
-If during steps 2 or 4 the rank finds that it can't process the call data correctly (for example, some of the data to dump isn't serializable, a tensor has quantized dtype, which can't be de-quantized without special knowledge and hence used for B, or a data file basename is longer than 255 bytes (FD40)), instead of step 5 that case call records `status=UNSUPPORTED case=<case_id> call=<call_id> reason=<why>`. If that happened on step 2 the rank still runs the call, but don't do steps 4 and 5. Then the pipeline run proceeds further.
+If during steps 2 or 4 the rank finds that it can't process the call data correctly (for example, some of the data to dump isn't serializable, a tensor has quantized dtype, which can't be de-quantized without special knowledge and hence used for B, or a data file basename is longer than 255 bytes (FD40)), instead of step 5 that case call records `status=UNSUPPORTED case=<case_id> call=<call_id> reason=<why>`. The rank writes this record when the call returns, also when it found the problem in step 2. The call thus stays open (HLS16) while it runs. If the rank found the problem in step 2, it still runs the call, but it does not do step 4. Then the pipeline run proceeds.
 
 **RL70.** **Duration of phase=run for the timeouts of TD110.** Since this phase execute a potentially lengthy code that isn't meant to be accounted for in the phase's deadline timeout calculation, the rank maintains an internal counter `duration_excluded` that is set to 0 when the phase starts. Execution of the code doesn't belong to the pipeline duration deadline threshold (such as dumping input, output & etc) is timed and added to the `duration_excluded`. During the phase, to each log record the rank produces, it automatically adds a  `duration_excluded=` field with the current value of the counter. Hence the launcher can always calculate a true duration of the phase for TD100-TD110 by subtracting from the `now()` timestamp, the timestamp of the latest `phase=` change, and the latest observed `duration_excluded=`.
 
 **RL80.** Once the model finishes running, only these things could have happened to each of the calls of each of the cases that the rank should have run during the model run phase:
-1. the call could have obtained UNSUPPORTED status. It makes the call excluded from replays.
-2. the call could have completed successfully (this doesn't need a changed status, the original ABOUT_TO_START is ok).
+1. the call have obtained UNSUPPORTED status. It makes the call excluded from replays.
+2. the call have completed successfully and got `status=DUMPED`.
 3. the whole case never had a single call; the case is in the "unseen cases set" (RL60)
+4. the call started but did not return normally, because the component raised an exception that the pipeline handled. The hook writes no record for the exception. When the pipeline run ends, the rank logs `status=UNSUPPORTED case=<case_id> call=<call_id> reason=<the exception>` for each such call.
 
 For each case in the "unseen cases set" the rank logs `status=NOT_REACHED case=<case_id>`.
 In version 1 no cross-rank synchronization about which cases to replay is performed, and the user is responsible for choosing components that runs equally successfully (in terms of statuses) on all ranks simultaneously.
@@ -384,7 +422,7 @@ However, to alleviate debugging, all ranks compare their "replay lists" with one
 
 **RL90.** **phase=replay** Two kind of replays are needed:
 - both instance A and B should replay each call for fidelity check IA40-IA60;
-- instance B also replays all calls that got status=DUMPED on A (B can read logs of A for this) and then either passed B's fidelity check or the check was disabled for a call by instance-specific override flag, using A's data casted to reference dtype to obtain reference outputs of the component.
+- instance B also replays each call of its list of A's calls (RL80: the calls that got status=DUMPED on A; B can read logs of A for this) that is also in B's own replay list, using A's data casted to reference dtype to obtain reference outputs of the component. The result of B's fidelity check for the call does not matter here: it is local to a rank, so it must not decide which calls a rank replays (RL100). A failed fidelity check still makes the case fail (IA60, PM40).
 
 Instance B runs both replays: first it runs fidelity check replays on its own inputs and outputs, then it runs replays on A's inputs.
 
@@ -429,14 +467,14 @@ Neither part contains `/`, so the ID gives back the configuration name and the c
 1. Each pytest module defines configurations (TD10) of a single xDiT model to test. A module level `pytest_generate_tests()` hook parses each configuration of the module and spawns an individual test case for each element of configuration's component list.
 2. A global session scoped fixture determines the run mode (PI10) and sets a global `run_mode` flag defining the mode, so other test code could use it:
    1. if `--xdit_force_fresh_run` CLI flag (PI20) is set, it's always a fresh run; The user is responsible to use it manually if any underlying code or configurations change.
-   2. otherwise, since the fixture has access to all test case name that are about to execute, and each test case name allow to reconstruct the configuration name exactly, the fixture can determine if a fresh run, or a rerun is needed by inspecting rank log files (if they exist; otherwise it's a fresh rerun). If and only if for all generated cases (i.e. before pytest `-k` filtering is applied) all rank log files contain `case=<case_id> pass=true` record for the case, the fixture chooses a fresh run mode for the session; otherwise it choose rerun mode.
+   2. otherwise, since the fixture has access to all test case name that are about to execute, and each test case name allow to reconstruct the configuration name exactly, the fixture can determine if a fresh run, or a rerun is needed by inspecting rank log files (if they exist; otherwise it's a fresh run). If and only if for all cases to run all rank log files contain `case=<case_id> pass=true` record for the case, the fixture chooses a fresh run mode for the session; otherwise it choose rerun mode.
 
    Whenever a fresh run mode is chosen, the fixture then deletes all configuration directories (TD75; every directory under `--xdit_data_dir`) with all their content (data files with dumps and rank log files). The user is responsible the fresh run doesn't wipe out more data than they wanted, if they use test case selection with `-k` argument.
 3. A configuration (TD10) level fixture depending on the value of the global `run_mode` flag either do a fresh run or rerun of the configuration (PI10). After a configuration level fixture runs the configuration's individual test case functions (that weren't skipped by pytest `-k` parameter, or by other valid reason that the fixture might detect). After that the loop repeats: another configuration level fixture runs, then its test cases.
 
 #### Mapping statuses to pytest outcomes
 
-**PM10.** A configuration level fixture, a test case-level fixture and a test case function implement different parts of the mapping from statuses to pytest outcomes:
+**PM10.** A configuration level fixture, a test case-level fixture and a test case function implement different parts of the mapping from statuses to pytest outcomes. The rules apply in this order, and the first rule that applies gives the outcome of the case: (1) the launcher exited with a nonzero code (TD140): error; (2) PM20 item 1: error; (3) PM30: skip; (4) PM20 item 2: error; (5) PM40: passed; (6) PM50: failed. IA60 and IB10 item 6 name conditions under which a case cannot pass. They do not change this order.
 
 **PM20.** **Errors.** In pytest, only setup/teardown or fixture code could emit errors. We generally turn into an error any situation where a test case doesn't have dumped data to work with:
 1. a configuration level fixture inspects all rank log files and if not a single case of any single rank reached DUMPED status, it marks all test cases of the configuration as "error".
@@ -449,7 +487,7 @@ Neither part contains `/`, so the ID gives back the configuration name and the c
 **PM40.** **Passed.** Only a successfully ran test case function sets "passed" outcome. A test case is "passed" if and only if these conditions holds simultaneously:
    1. every call on all ranks of A and B reached the following last status:
       - instance A, which only does a fidelity check: the last call status is FIDELITY_SKIPPED when fidelity check override flag is set, or FIDELITY_PASSED otherwise;
-      - instance B, which does a fidelity check and replay of A inputs: the last call status is REPLAYED.
+      - instance B, which does a fidelity check and replay of A inputs: the call has FIDELITY_SKIPPED when the fidelity check override flag that applies to B (IA50) is set, or FIDELITY_PASSED otherwise, and the last call status is REPLAYED.
    2. for all calls observed for the case/component, all outputs obtained on all ranks of A are within specified tolerances from outputs obtained from corresponding ranks of B.
 
 **PM50.** **Failed.** Every other status combination for a test case, whenever possible still runs tolerances checks, but even if the checks passes, necessary leads to a "failed" test outcome. Failure message MUST list all independent reasons that led to the failure.
@@ -467,7 +505,7 @@ Neither part contains `/`, so the ID gives back the configuration name and the c
 
 **FD20.** `--xdit_data_dir` and `--xdit_metrics_dir` each contain one subdirectory per configuration (TD10), named exactly as the configuration (TD60, TD80). The subdirectory in `--xdit_data_dir` contains the data files (TD75) and the rank log files (RL10) of the configuration. The subdirectory in `--xdit_metrics_dir` contains the metrics files (TM60, PI20.2.2) of the configuration's cases.
 
-**FD30.** **Data files.** Tensors go into safetensors files. Structure and plain values go into JSON. Non-serializable types or data types that don't fit into the above give UNSUPPORTED for the affected case.
+**FD30.** **Data files.** Tensors go into safetensors files. Structure and plain values go into JSON. Non-serializable types or data types that don't fit into the above give UNSUPPORTED for the affected call (RL60).
 
 **FD40.** **Identifiers in file names.** A case identifier (CP20) or a call identifier (CP100) goes into a basename in encoded form. The encoding uses the identifier string only (it does not parse CP30), so it works for every `[key]` of an `nn.ModuleDict`:
 1. `[a-zA-Z0-9_.-]` symbols stay unchanged, except a `.` or `-` at the first position;

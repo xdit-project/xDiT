@@ -63,9 +63,7 @@ run every configuration.
 **HL40.** The reference is the same xDiT component, built by the xDiT runner, run potentially
 with an extended precision (fp32 by default). It is not a `diffusers` implementation.
 
-**HL50.** One test answers one question: "Does this component, in this regime, with these inputs, work
-correctly?" A failed check belongs to one test, so only that test fails.
-A misattribution of failure due to a crash or a hang is an accepted limitation of version 1.
+**HL50.** One test answers one question: "Does this component, in this regime, with these inputs, work correctly?" A failed check belongs to one test, so only that test fails. A misattribution of failure due to a crash or a hang is an accepted limitation of version 1.
 
 **HL60.** A test fails for a deviation beyond its tolerance, a crash, a hang, nondeterminism, or any other
 detectable issue. "Flaky" includes a crash and a hang.
@@ -94,7 +92,7 @@ reference data (B).
 **HL130.** The pytest prototype integration in [_prototypes/pytest_integration/](../_prototypes/pytest_integration/) shows how a set of tests can share two expensive processes, select single cases, show live output, and leave no processes behind. The harness takes the parts that fit and changes them as this document requires to adapt to the requirements. The prototype is an implementation hint, not a binding rule, but the final implementation must have no weaker child process handling guarantees and child process console output visibility, than the prototype.
 
 **HL140.** The harness itself must have a test set, ensuring the harness adheres to the requirements. Most important tests are (not exhaustive list):
-- random rank fails fidelity check, or crashes, or hangs - correctly changes pytest outcomes for all cases of the configuration
+- random rank fails fidelity check, or crashes, or hangs - the tests must ensure the harness causes correct pytest outcomes in any of these events, for all cases of the configuration.
 - all possible values for logged statuses in rank log files correctly reflected by pytest outcomes
 
 #### Statuses
@@ -121,10 +119,10 @@ reference data (B).
 | 2 | DUMPED | call | rank | phase=run, inputs and outputs are saved (RL60 step 5) | ABOUT_TO_START | pending | Counts for TD115 and PM20. As the last status: the case cannot pass; row 14 or 15 gives the reason |
 | 3 | UNSUPPORTED | call | rank | The rank cannot dump the inputs of the call (RL60 step 2, before the call) or its outputs (RL60 step 4, after the call). The rank writes the record when the call returns. Or: the pipeline run ended and the call did not return normally (RL80 item 4) | ABOUT_TO_START | settled | The case cannot pass |
 | 4 | FIDELITY_SKIPPED | call | rank | Fidelity stage, override flag set (RL100 step 1) | DUMPED | A: settled, B: pending | As the last status in A: does not cause a failure from A. As the last status in B: the case cannot pass, because the replay of A's inputs is missing. PM80 warning in both |
-| 5 | PRE_FIDELITY | call | rank | Fidelity stage (RL100 step 3) | DUMPED | open | As row 1 |
+| 5 | PRE_FIDELITY | call | rank | Fidelity stage (RL100 step 2) | DUMPED | open | As row 1 |
 | 6 | FIDELITY_PASSED | call | rank | RL100 step 7 | PRE_FIDELITY | A: settled, B: pending | As the last status in A: does not cause a failure from A. As the last status in B: the case cannot pass, because the replay of A's inputs is missing; the reason is row 14 or 15, or the call does not exist in A (IB10 item 6) |
 | 7 | FIDELITY_FAILED | call | rank | RL100 step 7 | PRE_FIDELITY | A: settled, B: pending | The case cannot pass (IA60), in A and in B, also when REPLAYED follows in B |
-| 8 | PRE_REPLAY | call | rank of B | Replay of A's inputs (RL100 step 3) | FIDELITY_PASSED, FIDELITY_FAILED, FIDELITY_SKIPPED | open | As row 1 |
+| 8 | PRE_REPLAY | call | rank of B | Replay of A's inputs (RL100 step 2) | FIDELITY_PASSED, FIDELITY_FAILED, FIDELITY_SKIPPED | open | As row 1 |
 | 9 | REPLAYED | call | rank of B | RL100 step 8 | PRE_REPLAY | settled | As the last status in B: does not cause a failure from B, if the call has FIDELITY_PASSED or FIDELITY_SKIPPED (PM40) |
 | 10 | CRASHED | call | launcher | TD120 item 2.2, the instance crashed | ABOUT_TO_START, PRE_FIDELITY, PRE_REPLAY | settled | The case cannot pass |
 | 11 | HANGED | call | launcher | TD120 item 2.2, the launcher killed the instance for a missed deadline | as row 10 | settled | The case cannot pass |
@@ -185,9 +183,9 @@ Each entry (a component path) of the list of components defines a separate test 
 **TD90.** The harness forces these settings in A and B: no warmup calls, one execution ("iteration" in terms of xDiT runner), and `use_torch_compile` off.
 
 **TD100.** Deadlines have default values, and a configuration (TD10) can override them. The defaults are:
-1. A: 5 minutes for the `phase=loading` (RL40), 10 minutes for the `phase=run`, 2 minutes for `phase=after_run` (RL60-RL80).
-2. B: 10 minutes for the `phase=loading` (RL40), 20 minutes for the `phase=run`, 2 minutes for `phase=after_run` (RL60-RL80).
-3. each individual call as measured between the call's starting status (ABOUT_TO_START for RL60; PRE_FIDELITY or PRE_REPLAY for RL100) and ending status (DUMPED for RL60; FIDELITY_FAILED or FIDELITY_PASSED or REPLAYED for RL100): 2 minutes in A and 4 minutes in B. It's a limitation of version 1 that these timeouts include file operations.
+1. A: 5 minutes for the `phase=loading` (RL50), 10 minutes for the `phase=run`, 2 minutes for `phase=after_run` (RL60-RL80).
+2. B: 10 minutes for the `phase=loading` (RL50), 20 minutes for the `phase=run`, 2 minutes for `phase=after_run` (RL60-RL80).
+3. each individual call as measured between the call's starting status (ABOUT_TO_START for RL60; PRE_FIDELITY or PRE_REPLAY for RL100) and ending status (DUMPED or UNSUPPORTED for RL60; FIDELITY_FAILED or FIDELITY_PASSED or REPLAYED for RL100): 2 minutes in A and 4 minutes in B. It's a limitation of version 1 that these timeouts include file operations.
 4. 5 (for A) or 10 (for B) minutes since the last record in the log file in all other cases
 
 **TD110.** **Deadlines enforcement.** For all configuration paths / cases if pytest `-k` wasn't used, or only for cases selected by `-k` otherwise, the configuration fixture (TD40) runs each instance sequentially (TD115) using a supplementary launcher process that actually launches the instance with torchrun. The launcher takes care of deadlines, child processes cleanup and statuses of instance's case in some cases. Each rank of the instance writes its deadline -related progress and timestamps to a certain rank-specific log file known to the launcher. The launcher then periodically reads these files and uses progress records and timestamps to enforce deadlines. A missed deadline leads to a warning message and killing the instance and all its descendant processes.
@@ -311,7 +309,7 @@ are permitted.
 *Rationale for the error:* it is better not to support such cases than to make the implementation more
 complex.
 
-**CP130.** Methods calls such as `pipe.vae.decode`, where `.vae` isn't callable or doesn't run in the pipeline, and `decode` is a method, also must be testable. A path through a module that the run never calls must be valid.
+**CP130.** Methods calls such as `pipe.vae.decode`, where `.vae` isn't callable or is never called, and `decode` is a method, also must be testable. A path through a module that the run never calls must be valid.
 
 **CP140.** A path must resolve in A and in B. If it doesn't, the rank logs `status=UNRESOLVABLE_PATH case=<case_id> reason=<why>` at the start of phase=run (RL60). Path errors that need a built model show only after the initialization of A; this cost is accepted.
 
@@ -362,7 +360,7 @@ the same world size and parallel layout as A, with these changes:
 5. no compile, no step cache, no FP8 communication, no hybrid schedules.
 6. B gets the same list of component paths (cases) to work on as A. B knows where A stores its dump files, and for the case calls for which it can run replays, it can try to read dump files that A produced to replay them with higher precision. Calls that exist in A (have at least status DUMPED) but never replayed in B (this means replay on A's data, since other replay is fidelity check and it's irrelevant in the context, i.e. calls in B with status REPLAYED), or calls that have at least status DUMPED in B, but never had that status in A, necessary fail its pytest test function even if other calls of the case might pass tolerance checks.
 
-**IB20.** B loads the model in bf16 or in more precise data type that A uses, and casts to the reference dtype if the data dtype offers less precision (less mantissa bits) than the reference dtype (so if the reference dtype is bf16 and there's fp32 data, that higher precision data stays unmodified). It does not load a checkpoint in the reference dtype. B converts all components at once.
+**IB20.** B loads the model in bf16, but if A uses a more precise data type, B loads in that type, and casts to the reference dtype if the data dtype offers less precision (less mantissa bits) than the reference dtype (so if the reference dtype is bf16 and there's fp32 data, that higher precision data stays unmodified). It does not load a checkpoint in the reference dtype (unless it coincides with what A uses). B converts all components at once.
 
 **IB30.** After B loads a model, a `TorchDispatchMode` audit checks all dtypes used to run the model (including replays). It warns about dtypes with less precision than the reference dtype, and about custom calls. The check does not fail, only prints a warning informing about an imprecise dtype use, or a custom call. (it's a known limitation of version 1 needs to be addressed in future versions that these warnings aren't recorded and are produced only during instance B runs)
 
@@ -461,7 +459,7 @@ If `--xdit_no_cache_passed` is set, a passed test doesn't add any record to the 
 1. `[a-zA-Z0-9_.:-]`, `[` and `]` symbols stay unchanged, so a component path that follows CP30 and CP50 does not change;
 2. each other symbol becomes `+XX` for each byte of its UTF-8 encoding (`XX` is uppercase hexadecimal).
 
-Neither part contains `/`, so the ID gives back the configuration name and the component path exactly. A test case function has only this one parametrization, so the pytest ID of a case is exactly this string (pytest joins the IDs of several parametrizations with `-`, which configuration names can contain). All symbols of the ID can be part of one `-k` identifier, and pytest does not escape them. The harness needs pytest 7.0 or later, because older versions do not accept `/` in `-k` identifiers. `testcase_id()` and `parse_testcase_id()` of [Appendix A](requirements_appendix_a.md#appendix-a-names-of-files-directories-and-test-cases) implement this scheme.
+Neither part contains `/`, so the ID gives back the configuration name and the component path exactly. A test case function has only this one parametrization, so the pytest ID of a case is exactly this string (pytest joins the IDs of several parametrizations with `-`, which configuration names can contain). All symbols of the ID can be part of one `-k` identifier, and pytest does not escape them. The harness needs pytest 7.0 or later, because older versions do not accept `/` in `-k` identifiers. `tstcase_id()` and `parse_tstcase_id()` of [Appendix A](requirements_appendix_a.md#appendix-a-names-of-files-directories-and-test-cases) implement this scheme.
 
 `-k` matches substrings without regard to letter case. For example, `-k "flux2.default/pipe.transformer"` also selects `flux2.default/pipe.transformer:1`, while `-k "[flux2.default/pipe.transformer]"` (with the brackets of the test name) selects only that case. `-k` cannot tell apart configuration names that differ only in letter case; a node ID can.
 

@@ -150,12 +150,13 @@ def check_config_name(name: str) -> str:
 TEST_ID_SEP = "/"
 
 
-def testcase_id(config_name: str, case_id: str) -> str:
+# the name is distorted to prevent pytest from detecting it as a test case function
+def tstcase_id(config_name: str, case_id: str) -> str:
     """``<config_name>/<T(case_id)>``, the only parametrization ID of the case's pytest item."""
     return f"{check_config_name(config_name)}{TEST_ID_SEP}{_TEST_ID_CODEC.encode(case_id)}"
 
 
-def parse_testcase_id(test_id: str) -> tuple[str, str]:
+def parse_tstcase_id(test_id: str) -> tuple[str, str]:
     """Return ``(config_name, case_id)``. Neither part can contain "/", so the split is unique."""
     config_name, sep, part = test_id.partition(TEST_ID_SEP)
     if not sep:

@@ -7,12 +7,11 @@ import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional, List, Tuple, Union
 
-import torch
-import torch.distributed
-
 from xfuser.logger import init_logger
+from xfuser.config.attention_a2a_codecs import GEMM_FORMAT_OUTPUT_CODECS
 from xfuser.config.attention_a2a import (
     ATTENTION_A2A_HADAMARD_PLACEMENTS,
+    ATTENTION_A2A_OUTPUT_HOPS,
     ATTENTION_A2A_PROFILES,
     AttentionA2AConfig,
 )
@@ -24,9 +23,12 @@ from xfuser.config.gemm import (
     parse_gemm_quantization,
 )
 
-# Do not import the runtime (xfuser.config.config, xfuser.core) at module level.
-# The argument parser must load without it, for example to show --help.
+# Do not import torch or the runtime (xfuser.config.config, xfuser.core) at
+# module level. The argument parser must load without them, for example to
+# show --help.
 if TYPE_CHECKING:
+    import torch
+
     from xfuser.config.config import EngineConfig, InputConfig
 
 logger = init_logger(__name__)
@@ -85,8 +87,8 @@ def block_size(val: str) -> Tuple[int, int]:
     return q_tile, kv_tile
 
 
-# --vae_dtype choices.
-VAE_DTYPES = {"bf16": torch.bfloat16, "fp32": torch.float32}
+# --vae_dtype choices -> torch dtype attribute names.
+VAE_DTYPES = {"bf16": "bfloat16", "fp32": "float32"}
 
 
 _DETERMINISM_CHECK_HELP = (
@@ -207,6 +209,19 @@ def _add_attention_a2a_args(parser) -> None:
             "default (none for INT8, preprocess for the MX/FP8 profiles)."
         ),
     )
+    parser.add_argument(
+        "--attention_a2a_output",
+        choices=ATTENTION_A2A_OUTPUT_HOPS,
+        default="none",
+        help=(
+            "Attention A2A output-hop transport. 'mori' quantizes the MHA output "
+            "to the activation format of the following output-projection GEMM "
+            "(TorchAO FP8, MXFP4, MXFP6, or A6W4) and performs the inverse "
+            "Ulysses all-to-all through MoRI. Requires an enabled "
+            "--attention_a2a profile and a --gemm_quantization profile built "
+            "from fp8, fp4, fp6, or a6w4."
+        ),
+    )
 
 
 @dataclass
@@ -288,7 +303,7 @@ class xFuserArgs:
     shard_t5_encoder: bool = False
     attention_backend: Optional[str] = None
     cross_attention_backend: Optional[str] = None
-    mha_v4_kv_splits: Union[str, int] = 1
+    mha_v4_kv_splits: Union[str, int, None] = None
     gemm_quantization: Union[GemmQuantizationSpec, str, None] = None
     gemm_config: Optional[str] = None
     use_int8_gemms: bool = False
@@ -305,6 +320,7 @@ class xFuserArgs:
     fp8_comms_safety_factor: float = DEFAULT_FP8_COMMS_SAFETY_FACTOR
     attention_a2a: str = "none"
     attention_a2a_hadamard: str = "auto"
+    attention_a2a_output: str = "none"
     # Ulysses all-to-all transport (xfuser/model_executor/layers/usp_sdma.py). The head-group
     # count is None when not given (2 with --ulysses_a2a sdma), so an explicit one is checked.
     ulysses_a2a: str = "default"
@@ -339,7 +355,7 @@ class xFuserArgs:
     memory_efficient_sharding: bool = False
     memory_efficient_replicated_load: bool = False
     use_vae_channels_last_format: bool = False
-    vae_dtype: Optional[torch.dtype] = None
+    vae_dtype: Optional["torch.dtype"] = None
     # Hybrid attention schedule
     use_hybrid_attn_schedule: bool = False
     hybrid_attn_low_precision_backend: Optional[str] = None
@@ -398,7 +414,9 @@ class xFuserArgs:
         if isinstance(self.vae_dtype, str):
             if self.vae_dtype not in VAE_DTYPES:
                 raise ValueError(f"--vae_dtype must be one of {', '.join(VAE_DTYPES)}; got {self.vae_dtype!r}")
-            self.vae_dtype = VAE_DTYPES[self.vae_dtype]
+            import torch
+
+            self.vae_dtype = getattr(torch, VAE_DTYPES[self.vae_dtype])
         if not math.isfinite(self.lora_scale):
             raise ValueError("lora_scale must be finite")
         if not self.lora_path and (self.lora_weight_name or self.lora_scale != 1.0):
@@ -414,7 +432,8 @@ class xFuserArgs:
             )
             self.use_sparseattn_head_balance = True
         self._resolve_attention_a2a()
-        self.mha_v4_kv_splits = _normalize_mha_v4_kv_splits(self.mha_v4_kv_splits)
+        if self.mha_v4_kv_splits is not None:
+            self.mha_v4_kv_splits = _normalize_mha_v4_kv_splits(self.mha_v4_kv_splits)
         self._validate_ulysses_a2a()
         if self.warmup_steps < 0:
             raise ValueError("--warmup_steps must be greater than or equal to 0")
@@ -445,6 +464,7 @@ class xFuserArgs:
                 "--fully_shard_components."
             )
         self._resolve_gemm_quantization()
+        self._validate_attention_a2a_output()
         if self.cache_method is None:
             if self.use_fbcache:
                 warnings.warn(
@@ -482,11 +502,13 @@ class xFuserArgs:
         config = AttentionA2AConfig(
             profile=self.attention_a2a,
             hadamard=self.attention_a2a_hadamard,
+            output=self.attention_a2a_output,
         )
         # Keep programmatic construction aligned with CLI parsing: the config
         # object strips whitespace and normalizes case before validation.
         self.attention_a2a = config.profile
         self.attention_a2a_hadamard = config.hadamard
+        self.attention_a2a_output = config.output
         if not config.enabled:
             return
         if self.use_hybrid_attn_schedule:
@@ -536,6 +558,20 @@ class xFuserArgs:
             raise ValueError("--attention_a2a does not support ring parallelism")
         if self.use_sparseattn_head_balance:
             raise ValueError("--attention_a2a does not support sparse-attention head balancing")
+
+    def _validate_attention_a2a_output(self) -> None:
+        if self.attention_a2a_output == "none":
+            return
+        if self.enable_sequential_cpu_offload:
+            raise ValueError(
+                "--attention_a2a_output mori does not support --enable_sequential_cpu_offload: "
+                "the output projection consumes the transported activation outside its offload hook"
+            )
+        if not self.gemm_quantization_spec.formats <= GEMM_FORMAT_OUTPUT_CODECS.keys():
+            raise ValueError(
+                "--attention_a2a_output mori requires --gemm_quantization built from "
+                f"{', '.join(GEMM_FORMAT_OUTPUT_CODECS)}; got {self.gemm_quantization_spec}"
+            )
 
     @property
     def gemm_quantization_spec(self) -> GemmQuantizationSpec:
@@ -1080,9 +1116,10 @@ class xFuserArgs:
         parser.add_argument(
             "--mha_v4_kv_splits",
             type=str,
-            default="1",
+            default=None,
             help=(
                 "Dense AITER MHA v4 KV split count: 1 disables splitting; 'auto' delegates to AITER. "
+                "Unset means the model's default, else 1. "
                 "A larger count requires a compatible AITER kernel and shape. Tune with measured latency; "
                 "splitting adds host overhead and does not apply to every attention format."
             ),
@@ -1849,6 +1886,8 @@ class xFuserArgs:
             InputConfig,
             RuntimeConfig,
         )
+        import torch.distributed
+
         from xfuser.core.distributed import init_distributed_environment
         from xfuser.core.distributed.attention_schedule import SolAttnBetaSchedule
 
@@ -1915,7 +1954,7 @@ class xFuserArgs:
             use_fp8_t5_encoder=self.use_fp8_t5_encoder,
             attention_backend=self.attention_backend,
             cross_attention_backend=self.cross_attention_backend,
-            mha_v4_kv_splits=self.mha_v4_kv_splits,
+            mha_v4_kv_splits=1 if self.mha_v4_kv_splits is None else self.mha_v4_kv_splits,
             spargeattn_reorder_sequence=self.spargeattn_reorder_sequence,
             use_spargeattn_static_block_mask=self.use_spargeattn_static_block_mask,
             spargeattn_simthreshold=self.spargeattn_simthreshold,
@@ -1945,6 +1984,7 @@ class xFuserArgs:
             attention_a2a=AttentionA2AConfig(
                 profile=self.attention_a2a,
                 hadamard=self.attention_a2a_hadamard,
+                output=self.attention_a2a_output,
             ),
             ulysses_a2a=UlyssesA2AConfig(
                 mode=self.ulysses_a2a,

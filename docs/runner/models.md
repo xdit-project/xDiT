@@ -61,7 +61,7 @@ Text-encoder TP is separate; see the **Text TP** column.
 | [MiniMax-H3-Image](#model-minimax-h3-image) | ✓ | — | — | — | — | — | ✓ | ✓ | D |
 | [MiniMax-H3-Ref2VA](#model-minimax-h3-ref2va) | ✓ | — | — | — | — | — | ✓ | ✓ | D |
 | [MiniMax-H3-Turbo](#model-minimax-h3-turbo) | ✓ | — | — | — | — | — | ✓ | ✓ | D |
-| [MOSS-Image](#model-moss-image) | ✓ | ✓ | ✓ | — | ✓ | — | — | — | — |
+| [MOSS-Image](#model-moss-image) | ✓ | ✓ | ✓ | — | ✓ | — | — | — | D |
 | [Prism](#model-prism) | ✓ | — | — | — | — | — | — | — | — |
 | [Qwen-Image](#model-qwen-image) | ✓ | ✓ | — | ✓ | ✓ | — | ✓ | — | D |
 | [Qwen-Image-2.1](#model-qwen-image-2-1) | ✓ | — | — | — | ✓ | — | ✓ | — | — |

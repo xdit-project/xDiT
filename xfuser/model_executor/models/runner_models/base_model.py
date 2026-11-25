@@ -5,7 +5,7 @@ import json
 import os
 from math import gcd
 from PIL.Image import Image
-from typing import Callable, List, Optional, Tuple, Generator
+from typing import Callable, List, Optional, Tuple, Generator, Union
 from dataclasses import dataclass, field, replace
 from torch.profiler import profile, record_function, ProfilerActivity
 from torch.utils._pytree import tree_map_only
@@ -63,7 +63,8 @@ from xfuser.core.distributed import (
     init_distributed_environment,
 )
 from xfuser.core.attention import registry as attention_registry
-from xfuser.core.attention.requirements import device_arch
+from xfuser.core.attention.backends.aiter_mha_v4.spec import GFX950
+from xfuser.core.attention.requirements import PARAM, device_arch
 from xfuser.core.attention.spec import AttentionBackendType, Sparsity
 from xfuser.core.distributed.fp8_comms import setup_fp8_comms, validate_fp8_comms_config
 from xfuser.core.distributed.attention_schedule import (
@@ -243,6 +244,7 @@ class ModelCapabilities:
     supports_lora_with_quantized_gemms: bool = False
     use_fp8_comms: bool = False
     supports_attention_a2a: bool = False
+    supports_attention_a2a_output: bool = False
     use_hybrid_attn_schedule: bool = False
     use_hybrid_gemm_schedule: bool = False
     cross_attention_backend: bool = False
@@ -320,8 +322,25 @@ class ModelSettings:
     # Attention backend used when --attention_backend is omitted. Leave None to
     # keep the global default.
     default_attention_backend: Optional[str] = None
+    # --mha_v4_kv_splits that comes with default_attention_backend, unless the CLI sets a split count.
+    default_mha_v4_kv_splits: Optional[Union[str, int]] = None
     resolution_divisor: Optional[int] = None
     transformer_attr_names: List[str] = field(default_factory=lambda: ["transformer"])
+
+
+_MHA_V4_KV_SPLITS = PARAM("aiter.ops.mha_v4:mha_v4", "kv_splits")
+
+
+def prefer_mha_v4(settings: ModelSettings, kv_splits: Union[str, int]) -> None:
+    """Default to AITER MHA v4 BF16 with split KV where the installed AITER can run it."""
+    # AITER refuses kv_splits > 1 where it does not export the MHA v4 LSE, which is everywhere but gfx950.
+    if (
+        GFX950.satisfied()
+        and attention_registry.available(AttentionBackendType.AITER_BF16) is None
+        and _MHA_V4_KV_SPLITS.satisfied()
+    ):
+        settings.default_attention_backend = AttentionBackendType.AITER_BF16.name
+        settings.default_mha_v4_kv_splits = kv_splits
 
 
 class DiffusionOutput:
@@ -778,6 +797,10 @@ class xFuserModel(abc.ABC):
         _parse_attention_backend(default, f"default attention backend for {self.settings.model_name}")
         config.attention_backend = default
         log(f"--attention_backend not set, using {self.settings.model_name} default: {default}")
+        splits = self.settings.default_mha_v4_kv_splits
+        if splits is not None and config.mha_v4_kv_splits is None:
+            config.mha_v4_kv_splits = splits
+            log(f"--mha_v4_kv_splits not set, using {self.settings.model_name} default: {splits}")
 
     def _validate_sparse_attention_families(self, config: xFuserArgs) -> None:
         """Refuse a sparse backend the model has not opted into, wherever the run selects it --
@@ -856,6 +879,8 @@ class xFuserModel(abc.ABC):
         _validate_attention_head_dims(self, config)
         if config.attention_a2a != "none" and not self.capabilities.supports_attention_a2a:
             raise ValueError(f"Model {self.settings.model_name} does not support --attention_a2a.")
+        if config.attention_a2a_output != "none" and not self.capabilities.supports_attention_a2a_output:
+            raise ValueError(f"Model {self.settings.model_name} does not support --attention_a2a_output.")
         for key in ModelCapabilities.__annotations__.keys():
             config_value = getattr(
                 config, key, None

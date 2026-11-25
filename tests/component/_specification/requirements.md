@@ -137,8 +137,6 @@ reference data (B).
 
 The last column says only what a status contributes. PM10-PM50 give the outcome of a case from all ranks of A and B and from the tolerance checks. "The case cannot pass" means failed (PM50), or error where PM20 applies. A record sequence that the table does not permit is a harness defect, and PM50 makes such a case fail.
 
-**HLS19.** Users do not need to see status identifiers: the harness raises verbose exceptions with explanations that a person can read.
-
 **HLS20.** This document follows a convention: if a certain status X has _A or _B suffix, that only means that status X applies to a rank of instance A or B correspondingly. There are no distinct statuses X_A or X_B, there's only a status X and a rank of instance A or B on which it appears. It's always known to which instance a rank belongs, so instance specific statuses aren't generally needed.
 
 **HLS30.** Status is written to the rank's log file immediately when it happens as `status=X` record (the record should have other fields providing additional information). In the rank's log, a `status=` record has one of three scopes. With `case=` and `call=`, the status applies to that call of that case. With `case=` and without `call=`, it applies to the case. Without `case=`, it applies to the instance (HLS15 item 3). A `call=` field without a `case=` field is an error. It's an error to have a `case=` field without `status=` or `pass=` fields (PI30), or `case=` and `call=` fields without `status=`.
@@ -155,9 +153,9 @@ is raised, it's message contain all important information to explain the reason 
 **TD10.** The definition is in Python. One call defines one configuration: its xDiT settings, its list of components to test, the tolerances for each output of each component, special parameters of B instance, per component path determinism overrides, deadlines and other things the requirements mandate to be user-overridable.
 Each entry (a component path) of the list of components defines a separate test case, selectable with `-k` pytest parameter. Each configuration is a separate call.
 
-**TD20.** The xDiT settings usually come from an entry of a CI benchmark YAML file. The `yaml_path` configuration (TD10) parameter defines path to the file (in the same format as the benchmark configurations), and the `entry` field defines name of the entry in the file. There's a helper that reads an entry from a file.  If both `yaml_path` and `entry` are `None` (default), helper returns an empty dictionary. If `yaml_path` can be read and it has an entry with `name` field equal to the `entry`, - the helper returns the read dictionary of xDiT settings. Otherwise the helper raise an exception.
+**TD20.** The xDiT settings usually come from an entry of a CI benchmark YAML file. The `yaml_path` configuration (TD10) parameter defines path to the file (in the same format as the benchmark configurations; relative path is resolved from `os.getcwd()`), and the `entry` field defines name of the entry in the file. There's a helper that reads an entry from a file.  If both `yaml_path` and `entry` are `None` (default), helper returns an empty dictionary. If `yaml_path` can be read and it has an entry with `name` field equal to the `entry`, - the helper returns the read dictionary of xDiT settings. Otherwise the helper raise an exception.
 
-**TD30.** Test configuration call (TD10) can override every field of the xDiT settings, and overrides can be sufficient to define these settings alone, without a YAML file. `overrides` is a dictionary with the structure of a YAML entry. The permitted fields are only those of the `Experiment` class of CI; other fields are an error. After the helper of TD20 returns a dictionary read from `yaml_path` and `entry`, the `overrides` is used to override some fields: `args` key is a dictionary and it is merged key by key: if its key is `None`, the corresponding key is remove from final dictionary, otherwise its value replaces the value in the final xDiT settings dictionary. Similarly, other fields replace the value of the entry, and `None` removes the field.
+**TD30.** Test configuration call (TD10) can override every field of the xDiT settings, and overrides can be sufficient to define these settings alone, without a YAML file. `overrides` is a dictionary with the structure of a YAML entry. The permitted fields are only those of the `Experiment` class of CI; other fields are an error. After the helper of TD20 returns a dictionary read from `yaml_path` and `entry`, the `overrides` is used to override some fields: `args` key is a dictionary and it is merged key by key: if a key's value is `None`, the key is remove from final dictionary, otherwise its value replaces the value in the final xDiT settings dictionary. Similarly, other fields replace the value of the entry, and `None` removes the field.
 
 **TD40.** The resulting xDiT settings dictionary of TD30 apply both to A and to B. Each configuration has its own fixture, which applies instance-specific overrides (TD90, IB10, IB70) to the xDiT settings, launches instances A and B, processes results and lets individual test fixtures + test cases of the configuration run later.
 
@@ -185,14 +183,14 @@ Each entry (a component path) of the list of components defines a separate test 
 **TD90.** The harness forces these settings in A and B: no warmup calls, one execution ("iteration" in terms of xDiT runner), and `use_torch_compile` off.
 
 **TD100.** Deadlines have default values, and a configuration (TD10) can override them. The defaults are:
-1. A: 5 minutes for the `phase=loading` (RL40), 10 minutes for the `phase=run` (RL60-RL70).
-2. B: 10 minutes for the `phase=loading` (RL40), 20 minutes for the `phase=run` (RL60-RL70).
+1. A: 5 minutes for the `phase=loading` (RL40), 10 minutes for the `phase=run`, 2 minutes for `phase=after_run` (RL60-RL80).
+2. B: 10 minutes for the `phase=loading` (RL40), 20 minutes for the `phase=run`, 2 minutes for `phase=after_run` (RL60-RL80).
 3. each individual call as measured between the call's starting status (ABOUT_TO_START for RL60; PRE_FIDELITY or PRE_REPLAY for RL100) and ending status (DUMPED for RL60; FIDELITY_FAILED or FIDELITY_PASSED or REPLAYED for RL100): 2 minutes in A and 4 minutes in B. It's a limitation of version 1 that these timeouts include file operations.
 4. 5 (for A) or 10 (for B) minutes since the last record in the log file in all other cases
 
-**TD110.** **Deadlines enforcement.** For all configuration paths / cases if pytest `-k` wasn't used, or only for cases selected by `-k` otherwise, the configuration fixture (TD40) launches each instance sequentially (TD115) using a supplementary launcher process that takes care of deadlines, child processes cleanup, actually launching an instance with torchrun and statuses of instance's case in some cases. Each rank of the instance writes its deadline -related progress and timestamps to a certain rank-specific log file known to the launcher. The launcher then periodically reads these files and uses progress records and timestamps to enforce deadlines. A missed deadline leads to a warning message and killing the instance and all its descendant processes.
+**TD110.** **Deadlines enforcement.** For all configuration paths / cases if pytest `-k` wasn't used, or only for cases selected by `-k` otherwise, the configuration fixture (TD40) runs each instance sequentially (TD115) using a supplementary launcher process that actually launches the instance with torchrun. The launcher takes care of deadlines, child processes cleanup and statuses of instance's case in some cases. Each rank of the instance writes its deadline -related progress and timestamps to a certain rank-specific log file known to the launcher. The launcher then periodically reads these files and uses progress records and timestamps to enforce deadlines. A missed deadline leads to a warning message and killing the instance and all its descendant processes.
 
-**TD115.** The launcher first runs instance A. If at least one call on any rank of A reached `status=DUMPED`, the launcher also runs instance B for the same test cases that A used.
+**TD115.** The configuration fixture first launches instance A with the launcher. If at least one call on any rank of A reached `status=DUMPED`, the fixture then runs instance B for the same test cases that A used.
 
 **TD120.** Only the launcher knows of a missed deadline, a crash, or another premature exit. After the instance ends, for whatever reason, the launcher reads all rank logs and appends records as follows. It never appends a status to a call that is not open, so each call that already ran keeps its status.
 1. *Unsupported instance:* at least one rank log has the instance-level record `status=UNSUPPORTED` (RL40). The launcher appends `status=UNSUPPORTED case=<case_id> reason=<the same reason>` for each case of the instance to each rank log, and nothing else.
@@ -206,9 +204,9 @@ Each entry (a component path) of the list of components defines a separate test 
 
 **TD130.** At the launcher start, if `HSA_DISABLE_COREDUMP_ON_EXCEPTION` environment variable isn't defined for the launcher process, it must set `HSA_DISABLE_COREDUMP_ON_EXCEPTION=1` for self and all child processes it runs. For instance B only (to reduce memory pressure), if none of `PYTORCH_ALLOC_CONF`, `PYTORCH_CUDA_ALLOC_CONF` and `PYTORCH_HIP_ALLOC_CONF` environment variables are defined, the launcher sets `PYTORCH_ALLOC_CONF=expandable_segments:True` for self and all child processes it runs.
 
-**TD140.** The launcher exits with 0 when it worked; the detailed statuses and other run information go through rank log files. A nonzero launcher exit means that the launcher failed and that no data exists, so every case of the configuration fails triggering a pytest error.
+**TD140.** The launcher exits with 0 when it worked; the detailed statuses and other run information go through rank log files. A nonzero launcher exit means that the launcher failed and not enough data for tests exists, so every case of the configuration fails triggering a pytest error.
 
-**TD200.** Configurations with step caching or hybrid schedules aren't supported. The configuration fixture detects that before running the launcher for instance A, and errors out.
+**TD200.** Configurations with step caching or hybrid schedules aren't supported. The ranks check this after xDiT arguments parser completes and applies all its defaults, and writes an instance-level record `status=UNSUPPORTED reason=<what is not supported>`, if found.
 
 ### Tolerances and metrics
 
@@ -311,8 +309,7 @@ are permitted.
 *Rationale for the error:* it is better not to support such cases than to make the implementation more
 complex.
 
-**CP130.** Calls such as `pipe.vae.decode`, where `.vae` isn't callable or doesn't run in the pipeline,
-and `decode` is a method, also must be testable. A path through a module that the run never calls must be valid.
+**CP130.** Methods calls such as `pipe.vae.decode`, where `.vae` isn't callable or doesn't run in the pipeline, and `decode` is a method, also must be testable. A path through a module that the run never calls must be valid.
 
 **CP140.** A path must resolve in A and in B. If it doesn't, the rank logs `status=UNRESOLVABLE_PATH case=<case_id> reason=<why>` at the start of phase=run (RL60). Path errors that need a built model show only after the initialization of A; this cost is accepted.
 
@@ -398,7 +395,7 @@ After the instance ends, the ownership of the rank logs passes to the launcher (
 **RL50.** **phase=loading** Doesn't have specific statuses.
 
 **RL60.** **phase=run** During this phase rank runs the model pipeline and captures data. From the beginning, the rank has a set of cases it has to run; it makes a copy of this set into "unseen cases set". Before it installs hooks, the rank resolves the path of each case (CP30-CP50) and checks the entries for overlap (CP120). For each case with a path error it logs `status=UNRESOLVABLE_PATH case=<case_id> reason=<why>` and removes the case from the set of cases it has to run and from the "unseen cases set". Such a case gets no hook and no NOT_REACHED. The rank installs hooks to tracked components and when a hook fires, if the case call conditions are met, the rank:
-1. removes the case from "unseen cases set" if it's still there; logs `status=ABOUT_TO_START case=<case_id> call=<call_id> files=<files>` (where `<files>` is a 2-element tuple, each element of which is a list of filepaths to files that will contain dumped data for the call of the case. The first element is for files having data necessary to start the call, such as inputs, rng states & etc, and the second element is for outputs; Filepaths follow a pattern and can be recovered by the rank later from the generic data path it has and a call identifier),
+1. removes the case from "unseen cases set" if it's still there; logs `status=ABOUT_TO_START case=<case_id> call=<call_id> files=<files>` (where `<files>` is a 2-element tuple, each element of which is a list of filenames in the same directory that will contain dumped data for the call of the case. The first element is for files having data necessary to start the call, such as inputs, rng states & etc, and the second element is for outputs; Filepaths follow a pattern and can be recovered by the rank later from the generic data path it has and a call identifier),
 2. saves component inputs and other applicable runtime data to the case call specific dump file it previously allocated (or files, depending on what is more convenient),
 3. runs the call and
 4. similarly saves outputs on the call return
@@ -408,7 +405,7 @@ If during steps 2 or 4 the rank finds that it can't process the call data correc
 
 **RL70.** **Duration of phase=run for the timeouts of TD110.** Since this phase execute a potentially lengthy code that isn't meant to be accounted for in the phase's deadline timeout calculation, the rank maintains an internal counter `duration_excluded` that is set to 0 when the phase starts. Execution of the code doesn't belong to the pipeline duration deadline threshold (such as dumping input, output & etc) is timed and added to the `duration_excluded`. During the phase, to each log record the rank produces, it automatically adds a  `duration_excluded=` field with the current value of the counter. Hence the launcher can always calculate a true duration of the phase for TD100-TD110 by subtracting from the `now()` timestamp, the timestamp of the latest `phase=` change, and the latest observed `duration_excluded=`.
 
-**RL80.** Once the model finishes running, only these things could have happened to each of the calls of each of the cases that the rank should have run during the model run phase:
+**RL80.** **phase=after_run** Once the model finishes running, only these things could have happened to each of the calls of each of the cases that the rank should have run during the model run phase:
 1. the call have obtained UNSUPPORTED status. It makes the call excluded from replays.
 2. the call have completed successfully and got `status=DUMPED`.
 3. the whole case never had a single call; the case is in the "unseen cases set" (RL60)
@@ -429,7 +426,7 @@ Instance B runs both replays: first it runs fidelity check replays on its own in
 
 **RL100.** Call replays run in "replay list" order (RL60), and in a lock step, with a stream synchronization and a barrier before and after replay. This helps to time execution properly to ensure correct call timeouts (TD100.3), and help to correctly attribute crashes, should they happen. For each call in ordered "replay list", the rank does:
 1. if this is a fidelity check replay and call's case has the instance-specific fidelity check override flag set: the rank logs `status=FIDELITY_SKIPPED case=<case_id> call=<call_id>` and proceeds to the next call in the list (since all ranks obtain the same "replay list" (RL80) and have the same flag value, the same case calls will be skipped on all ranks simultaneously and that can't lead to a hang).
-2. the rank logs `status=<status> case=<case_id> call=<call_id> file=<file>` where the `<status>` is `PRE_FIDELITY` if this is fidelity check, or `PRE_REPLAY` if this is B replaying inputs from A; `<file>` is a file path that will contain outputs of the call.
+2. the rank logs `status=<status> case=<case_id> call=<call_id> file=<file>` where the `<status>` is `PRE_FIDELITY` if this is fidelity check, or `PRE_REPLAY` if this is B replaying inputs from A; `<file>` is a filename in the same directory that will contain outputs of the call.
 3. the rank reads inputs, rng states and outputs (only if it's a fidelity check), from the call replay files (the paths are recoverable from data directory path and the call identifier).
 4. The rank executes a stream synchronization and a barrier.
 5. the rank saves current CPU and CUDA rng states into a temporary variable; restores rng states from loaded from the input file values, execute the call with loaded inputs (B must have casted them to the reference dtype first), obtains the replayed call outputs and saves them to the `<file>`. Finally it restores the original CPU and CUDA rng states from the temporary variable.
@@ -462,7 +459,7 @@ If `--xdit_no_cache_passed` is set, a passed test doesn't add any record to the 
 1. `[a-zA-Z0-9_.:-]`, `[` and `]` symbols stay unchanged, so a component path that follows CP30 and CP50 does not change;
 2. each other symbol becomes `+XX` for each byte of its UTF-8 encoding (`XX` is uppercase hexadecimal).
 
-Neither part contains `/`, so the ID gives back the configuration name and the component path exactly. A test case function has only this one parametrization, so the pytest ID of a case is exactly this string (pytest joins the IDs of several parametrizations with `-`, which configuration names can contain). All symbols of the ID can be part of one `-k` identifier, and pytest does not escape them. The harness needs pytest 7.0 or later, because older versions do not accept `/` in `-k` identifiers. `test_case_id()` and `parse_test_case_id()` of [Appendix A](#appendix-a-names-of-files-directories-and-test-cases) implement this scheme.
+Neither part contains `/`, so the ID gives back the configuration name and the component path exactly. A test case function has only this one parametrization, so the pytest ID of a case is exactly this string (pytest joins the IDs of several parametrizations with `-`, which configuration names can contain). All symbols of the ID can be part of one `-k` identifier, and pytest does not escape them. The harness needs pytest 7.0 or later, because older versions do not accept `/` in `-k` identifiers. `testcase_id()` and `parse_testcase_id()` of [Appendix A](#appendix-a-names-of-files-directories-and-test-cases) implement this scheme.
 
 `-k` matches substrings without regard to letter case. For example, `-k "flux2.default/pipe.transformer"` also selects `flux2.default/pipe.transformer:1`, while `-k "[flux2.default/pipe.transformer]"` (with the brackets of the test name) selects only that case. `-k` cannot tell apart configuration names that differ only in letter case; a node ID can.
 
@@ -661,12 +658,12 @@ def check_config_name(name: str) -> str:
 TEST_ID_SEP = "/"
 
 
-def test_case_id(config_name: str, case_id: str) -> str:
+def testcase_id(config_name: str, case_id: str) -> str:
     """``<config_name>/<T(case_id)>``, the only parametrization ID of the case's pytest item."""
     return f"{check_config_name(config_name)}{TEST_ID_SEP}{_TEST_ID_CODEC.encode(case_id)}"
 
 
-def parse_test_case_id(test_id: str) -> tuple[str, str]:
+def parse_testcase_id(test_id: str) -> tuple[str, str]:
     """Return ``(config_name, case_id)``. Neither part can contain "/", so the split is unique."""
     config_name, sep, part = test_id.partition(TEST_ID_SEP)
     if not sep:

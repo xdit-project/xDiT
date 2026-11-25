@@ -26,9 +26,7 @@ VAE decode method, and one specific call of a transformer.
 fail, so the user sets tolerances from the reported values. The metrics history shows how the deviations
 change while the implementation changes.
 
-**UC7. Run the tests again after failures.** A new run compares the stored data again, for example with new
-tolerances, and does not run A and B again. By default, after all cases pass, the next run starts from the beginning
-automatically. This behavior, however, can be modified if test functions executions on the same data without rerunning A and B is needed.
+**UC7. Run the tests again after failures.** By default, each run starts from the beginning and runs A and B again. On the user's request, a new run compares the stored data again, for example with new tolerances, and does not run A and B again. Also with such a request, after all cases pass, the next run starts from the beginning automatically. This behavior, however, can be modified if test functions executions on the same data without rerunning A and B is needed.
 
 **UC8. Select single cases.** The user selects cases with pytest, for example with `-k` or a node ID. 
 
@@ -51,7 +49,7 @@ other determinism expectations.
 transformer block, an attention module, a text encoder, or a method such as the VAE decode. It uses exactly
 the configuration and the weights that the xDiT runner uses for a model configuration.
 
-**HL15.** Support for pytest `-k` argument is limited. The user is responsible to do fresh runs each time they change `-k` value (including removing it) or node ID that wasn't covered by previous fresh run. The harness doesn't track scope of different runs and doesn't warn if certain promised behavior may not work correctly due to an incompatible value of `-k` in a new run/rerun.
+**HL15.** Support for pytest `-k` argument is limited. The user is responsible to not request a rerun (`--xdit_allow_rerun`, PI20) after they change `-k` value (including removing it) or node ID to a selection that wasn't covered by previous fresh run. The harness doesn't track scope of different runs and doesn't warn if certain promised behavior may not work correctly due to an incompatible value of `-k` in a new run/rerun.
 
 **HL20.** The harness takes each component from the model that the xDiT runner builds. It does not extract,
 hard-code or build a component itself.
@@ -445,7 +443,7 @@ Instance B runs both replays: first it runs fidelity check replays on its own in
 2. a "rerun" whenever possible reuses results of a previous fresh run (i.e. it never runs a single instance A or B for any configuration, instead it only uses previously created files to run test case functions).
 
 **PI20.** The harness defines these custom pytest CLI arguments:
-1. flags: `--xdit_no_cache_passed` and `--xdit_force_fresh_run`. Both aren't set by default.
+1. flags: `--xdit_no_cache_passed` and `--xdit_allow_rerun`. Both aren't set by default.
 2. strings with absolute or relative paths (relative paths are resolved relative to `os.getcwd()`, see FD10):
     1. `--xdit_data_dir` (default: `./_data`) to set the data directory, which contains the configuration subdirectories (FD20) with the data files (TD75) and rank log files (RL10);
     2. `--xdit_metrics_dir` (default: `./_metrics`) to set the metrics directory. The metrics file (TM60) of a case is `<xdit_metrics_dir>/<configuration_name>/<case_part>.jsonl`, where `<configuration_name>` is the configuration name (TD60) and `<case_part>` is the case identifier (CP20) encoded for file names (FD40); see `metrics_file_path()` of [Appendix A](#appendix-a-names-of-files-directories-and-test-cases).
@@ -453,7 +451,7 @@ Instance B runs both replays: first it runs fidelity check replays on its own in
 **PI30.** If `--xdit_no_cache_passed` CLI flag (PI20) is NOT set, for each test passed in a fresh runs or a rerun, the harness appends to each rank log file a record `case=<case_id> pass=true` and deletes their data files. Subsequent reruns detect these records in the log files and "skip" corresponding tests with a message "Passed in previous run" (all ranks of the case must have this `pass=true`; otherwise the case fails with a message "inconsistent pass record for the case: ranks <..> have `pass=true` while ranks <..> doesn't have it").
 If `--xdit_no_cache_passed` is set, a passed test doesn't add any record to the rank log files, and does not delete data files, so a subsequent rerun doesn't observe `case=<case_id> pass=true` in rank log files, expects to find data files and executes test case function in full.
 
-**PI40.** If `--xdit_force_fresh_run` CLI flag (PI20) is set, the harness ALWAYS clean up existing data and rank log files, and do a fresh run.
+**PI40.** If `--xdit_allow_rerun` CLI flag (PI20) is NOT set, which is the default, the harness ALWAYS clean up existing data and rank log files of the configurations that have cases to run (PI60.3), and do a fresh run. If the flag is set, the harness does a rerun only when PI60.2.2 chooses it: the flag permits a rerun, but doesn't guarantee it.
 
 **PI50.** Test case names are generated automatically from a configuration call (TD10). The parametrization ID of a test case is `<configuration_name>/<case_part>`, where `<configuration_name>` is the configuration name (TD60-TD80) and `<case_part>` is the component path (CP20) encoded as follows:
 1. `[a-zA-Z0-9_.:-]`, `[` and `]` symbols stay unchanged, so a component path that follows CP30 and CP50 does not change;
@@ -466,11 +464,9 @@ Neither part contains `/`, so the ID gives back the configuration name and the c
 **PI60.** **Pytest life cycle.** Here's how execution steps maps onto pytest:
 1. Each pytest module defines configurations (TD10) of a single xDiT model to test. A module level `pytest_generate_tests()` hook parses each configuration of the module and spawns an individual test case for each element of configuration's component list.
 2. A global session scoped fixture determines the run mode (PI10) and sets a global `run_mode` flag defining the mode, so other test code could use it:
-   1. if `--xdit_force_fresh_run` CLI flag (PI20) is set, it's always a fresh run; The user is responsible to use it manually if any underlying code or configurations change.
-   2. otherwise, since the fixture has access to all test case name that are about to execute, and each test case name allow to reconstruct the configuration name exactly, the fixture can determine if a fresh run, or a rerun is needed by inspecting rank log files (if they exist; otherwise it's a fresh run). If and only if for all cases to run all rank log files contain `case=<case_id> pass=true` record for the case, the fixture chooses a fresh run mode for the session; otherwise it choose rerun mode.
-
-   Whenever a fresh run mode is chosen, the fixture then deletes all configuration directories (TD75; every directory under `--xdit_data_dir`) with all their content (data files with dumps and rank log files). The user is responsible the fresh run doesn't wipe out more data than they wanted, if they use test case selection with `-k` argument.
-3. A configuration (TD10) level fixture depending on the value of the global `run_mode` flag either do a fresh run or rerun of the configuration (PI10). After a configuration level fixture runs the configuration's individual test case functions (that weren't skipped by pytest `-k` parameter, or by other valid reason that the fixture might detect). After that the loop repeats: another configuration level fixture runs, then its test cases.
+   1. if `--xdit_allow_rerun` CLI flag (PI20) is NOT set, it's always a fresh run;
+   2. otherwise, since the fixture has access to all test case name that are about to execute, and each test case name allow to reconstruct the configuration name exactly, the fixture can determine if a fresh run, or a rerun is needed by inspecting rank log files of the configurations of these cases. If none of these files exists, it's a fresh run. Otherwise a rank log that does not exist is a log without records (HL120), and if and only if for all cases to run all rank log files contain `case=<case_id> pass=true` record for the case, the fixture chooses a fresh run mode for the session; otherwise it choose rerun mode. The user is responsible to not set the flag if any underlying code or configurations changed after the fresh run that created the data.
+3. A configuration (TD10) level fixture depending on the value of the global `run_mode` flag either do a fresh run or rerun of the configuration (PI10). For a fresh run, before it launches instance A, the fixture deletes the directory of its configuration in `--xdit_data_dir` (TD75) with all its content (data files with dumps and rank log files). It deletes no other directory: the directories of the configurations that have no case to run in the session stay. The user is responsible the fresh run doesn't wipe out more data than they wanted: it deletes the data of all cases of the configuration, also of the cases that `-k` deselects. After a configuration level fixture runs the configuration's individual test case functions (that weren't skipped by pytest `-k` parameter, or by other valid reason that the fixture might detect). After that the loop repeats: another configuration level fixture runs, then its test cases.
 
 #### Mapping statuses to pytest outcomes
 
@@ -501,7 +497,7 @@ Neither part contains `/`, so the ID gives back the configuration name and the c
 #### Files and directories
 
 **FD10.** A session level fixture reads pytest CLI arguments (PI20.2) and resolves `--xdit_data_dir` and `--xdit_metrics_dir` to absolute paths, resolving symlinks. It's an error if the directories resolve to the same path, or if one of them turns out to be a descendant of the other (`check_roots()` of [Appendix A](#appendix-a-names-of-files-directories-and-test-cases)). Then it stores directories somehow, so other fixtures or test functions work only with absolute paths for these directories. The user is responsible to never run two testing sessions in parallel using the same `--xdit_data_dir` or `--xdit_metrics_dir`. No code checks or prevents that.
-*Rationale:* a fresh run deletes every directory under `--xdit_data_dir` (PI60.2), and the harness never deletes a metrics file (TM60). A data directory inside the metrics directory can be the metrics subdirectory of a configuration (FD20).
+*Rationale:* a fresh run deletes configuration directories under `--xdit_data_dir` (PI60.3), and the harness never deletes a metrics file (TM60). A data directory inside the metrics directory can be the metrics subdirectory of a configuration (FD20).
 
 **FD20.** `--xdit_data_dir` and `--xdit_metrics_dir` each contain one subdirectory per configuration (TD10), named exactly as the configuration (TD60, TD80). The subdirectory in `--xdit_data_dir` contains the data files (TD75) and the rank log files (RL10) of the configuration. The subdirectory in `--xdit_metrics_dir` contains the metrics files (TM60, PI20.2.2) of the configuration's cases.
 
@@ -692,9 +688,9 @@ def _check_instance_rank(instance: str, rank: int) -> None:
 def check_roots(data_dir: str, metrics_dir: str) -> tuple[str, str]:
     """FD10: return both roots resolved; raise if they are equal or one is inside the other.
 
-    A fresh run deletes every directory under the data root (PI60.2), and TM60 forbids deleting a
-    metrics file. A data root inside the metrics root can be the metrics subdirectory of a
-    configuration (FD20).
+    A fresh run deletes configuration directories under the data root (PI60.3), and TM60 forbids
+    deleting a metrics file. A data root inside the metrics root can be the metrics subdirectory of
+    a configuration (FD20).
     """
     data, metrics = os.path.realpath(data_dir), os.path.realpath(metrics_dir)
     if os.path.commonpath([data, metrics]) in (data, metrics):

@@ -12,6 +12,7 @@ from xfuser.model_executor.models.runner_models.flux import (
     xFuserFluxKontextModel,
     xFuserFluxModel,
 )
+from xfuser.model_executor.models.runner_models.flux3 import xFuserFlux3KleinBaseModel, xFuserFlux3KleinModel
 from xfuser.model_executor.models.runner_models.qwen import (
     xFuserQwenImage21Model,
     xFuserQwenImage21TurboModel,
@@ -101,12 +102,14 @@ def test_a_lora_fused_at_load_does_not_turn_it_off(monkeypatch):
         (xFuserFluxModel, True),
         (xFuserQwenImage21Model, True),
         (xFuserQwenImage21TurboModel, True),
+        (xFuserFlux3KleinBaseModel, True),
         # Measured within noise or slower.
         (xFuserFlux2Klein9BModel, False),
         (xFuserFluxKontextModel, False),
         (xFuserQwenImageModel, False),
         # Not measured.
         (xFuserZImageTurboModel, False),
+        (xFuserFlux3KleinModel, False),
     ],
 )
 def test_which_runners_transpose(model_cls, expected):

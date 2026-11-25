@@ -174,19 +174,23 @@ def test_sequence_parallel_matches_single_gpu_diffusers(accelerator_ranks, ulyss
     )
 
 
-def _cfg_worker(rank, world_size, init_method):
+def _cfg_worker(rank, world_size, init_method, transposed):
     import torch
     from diffusers.guiders import ClassifierFreeGuidance
     from diffusers.modular_pipelines.flux3.denoise import Flux3LoopDenoiser
     from diffusers.modular_pipelines.modular_pipeline import BlockState
 
     from xfuser.core.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
+    from xfuser.model_executor.layers.transposed_linear import transpose_plain_linears
     from xfuser.model_executor.pipelines.guiders import xFuserCFGParallelGuidance
 
     try:
         device = _setup(rank, world_size, init_method, ulysses_degree=world_size // 2, cfg_degree=2)
         stock = _tiny_model(device, flow_map=False)
         wrapper = _wrapper_of(stock, device)
+        if transposed:
+            # As the FLUX.3-klein-base runner does on gfx942 once the weights are placed.
+            assert transpose_plain_linears(wrapper) > 0
 
         # The branches differ in text length, as a prompt and an empty negative prompt do,
         # so they cannot simply be batched.
@@ -220,6 +224,7 @@ def _cfg_worker(rank, world_size, init_method):
         destroy_distributed_environment()
 
 
+@pytest.mark.parametrize("transposed", [False, True], ids=["default", "transposed"])
 @pytest.mark.parametrize("world_size", [2, 4])
-def test_cfg_parallel_matches_single_gpu_diffusers(accelerator_ranks, world_size):
-    accelerator_ranks(_cfg_worker, world_size=world_size, timeout=300)
+def test_cfg_parallel_matches_single_gpu_diffusers(accelerator_ranks, world_size, transposed):
+    accelerator_ranks(_cfg_worker, world_size=world_size, timeout=300, args=(transposed,))

@@ -13,6 +13,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
     ModelCapabilities,
+    ModelFeatures,
     ModelSettings,
     register_model,
     xFuserModel,
@@ -301,6 +302,7 @@ class xFuserFlux3KleinBaseModel(_Flux3Model):
 
     capabilities = replace(_Flux3Model.capabilities, use_cfg_parallel=True)
     default_input_values = DefaultInputValues(num_inference_steps=50, guidance_scale=3.5)
+    features = ModelFeatures(transposes_linears=True)
     settings = replace(
         _Flux3Model.settings,
         model_name="black-forest-labs/flux-3-image-klein-base",

@@ -1,7 +1,11 @@
-"""Dependency-floor and optional-import helpers.
+"""Dependency-floor, optional-import, and lazy-export helpers.
 
 Imports nothing heavy (no torch, no diffusers) so that package ``__init__`` files can
-use it before those dependencies are known to work.
+use it before those dependencies are known to work. Do not import torch, diffusers,
+or the runtime at module level here: the launcher and the argument parser load this
+module through ``xfuser`` and ``xfuser.config``, and
+``tests/integration/cpu/test_startup_imports.py`` checks that they load without the
+runtime.
 """
 
 import importlib
@@ -9,7 +13,7 @@ import importlib.metadata
 import importlib.util
 from functools import lru_cache
 from types import ModuleType
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
@@ -175,3 +179,73 @@ def optional_exporter(namespace: Dict[str, Any]) -> Callable[..., None]:
             exported.append(symbol)
 
     return optional
+
+
+def lazy_exports(
+    namespace: Dict[str, Any],
+    exports: Mapping[str, Sequence[str]],
+    optional: Optional[Mapping[str, Sequence[str]]] = None,
+) -> Tuple[Callable[[str], Any], Callable[[], List[str]]]:
+    """Return ``__getattr__`` and ``__dir__`` for a package whose exports load on first access.
+
+    Declare the exports by the submodule that supplies them::
+
+        __getattr__, __dir__ = lazy_exports(
+            globals(),
+            {".config": ("xFuserArgs", "EngineConfig")},
+            optional={".model_executor.pipelines": ("xFuserFlux2Pipeline",)},
+        )
+
+    A submodule may be relative to the package. The package must not set
+    ``__all__``: the first access resolves it to the exports, plus the optional
+    exports that this install supplies. Thus ``from package import *`` loads only
+    the submodules of the optional exports, and ``__dir__`` loads nothing.
+
+    An optional export is one that the submodule can leave unbound, for example
+    because the installed diffusers is too old for it. Access to an optional
+    export that the submodule does not supply raises AttributeError, so
+    ``from package import name`` raises ImportError at the import site.
+
+    Each resolved export is stored in the package, so a second access does not
+    call ``__getattr__``. The submodules load through ``import_submodule``.
+    """
+    package = namespace["__name__"]
+    if "__all__" in namespace:
+        raise ValueError(f"{package} sets __all__; lazy_exports resolves it on first access")
+    optional = optional or {}
+
+    sources: Dict[str, str] = {}
+    for modules in (exports, optional):
+        for module, names in modules.items():
+            for name in names:
+                if name in sources:
+                    raise ValueError(f"{package} declares the export {name!r} more than once")
+                sources[name] = module
+    optional_names = frozenset(name for names in optional.values() for name in names)
+
+    def missing(name: str) -> AttributeError:
+        return AttributeError(f"module {package!r} has no attribute {name!r}")
+
+    def supplies(name: str) -> bool:
+        return hasattr(import_submodule(sources[name], package), name)
+
+    def __getattr__(name: str) -> Any:
+        if name == "__all__":
+            value = [export for export in sources if export not in optional_names or supplies(export)]
+        elif name not in sources:
+            raise missing(name)
+        else:
+            submodule = import_submodule(sources[name], package)
+            if name in optional_names and not hasattr(submodule, name):
+                # An optional export that this install does not supply.
+                raise missing(name)
+            value = getattr(submodule, name)
+        namespace[name] = value
+        return value
+
+    def __dir__() -> List[str]:
+        # Lists every declared export, without loading a submodule. __all__
+        # lists only the exports that this install supplies.
+        return sorted(set(namespace) | set(sources))
+
+    return __getattr__, __dir__

@@ -34,7 +34,7 @@ VAE decode method, and one specific call of a transformer.
 *Rationale:* xDiT changes fast, and its components get new augmentations all the time. Hard-coded tests become
 obsolete.
 
-**UC10. Accept nondeterminism that is valid.** An override of one test changes the result of nondeterminism in that test from a failure to a warning. The determinism checks of all other tests stay active. B should have its own override.
+**UC10. Accept nondeterminism that is valid.** A fidelity check override flag of one test changes the result of nondeterminism in that test from a failure to a warning. The fidelity checks of all other tests stay active. B should have its own flag.
 *Rationale:* some operations are validly nondeterministic. A model can have one nondeterministic component
 among many, and that component must be testable. Instance B generally uses different kernels that might have
 other determinism expectations.
@@ -65,8 +65,7 @@ with an extended precision (fp32 by default). It is not a `diffusers` implementa
 
 **HL50.** One test answers one question: "Does this component, in this regime, with these inputs, work correctly?" A failed check belongs to one test, so only that test fails. A misattribution of failure due to a crash or a hang is an accepted limitation of version 1.
 
-**HL60.** A test fails for a deviation beyond its tolerance, a crash, a hang, nondeterminism, or any other
-detectable issue. "Flaky" includes a crash and a hang.
+**HL60.** A test fails for a deviation beyond its tolerance, a crash, a hang, nondeterminism, or any other detectable issue. Nondeterminism that a fidelity check override flag accepts (UC10, IA50) gives a warning instead. "Flaky" includes a crash and a hang.
 
 **HL70.** **Working tests first.** Test coverage has priority over correct reports, for example a correct call identifier. A wrong report is acceptable as a documented limitation, possibly with a corresponding future-work item. A deviation from some requirements that a working test needs is permitted with a due documentation.
 
@@ -100,7 +99,7 @@ reference data (B).
 **HLS10.** A component path in the list of components to test for a configuration (TD10) identifies a single component, for which a test case is created, and the component must be executed (called by the model) at least once during a model/pipeline execution. Statues are written in CAPITAL_LETTERS and carry information necessary for proper conversion of behavior observed during an attempt to run instances into pytest outcomes, while giving a user enough information for debugging.
 
 **HLS15.** Statuses are the nodes of exactly one directed acyclic graph. The graph describes how the knowledge about a call, a case, or an instance grows. HLS17 is the normative list of the statuses and of the permitted transitions. A status has one of three scopes:
-1. a component call on a rank: ABOUT_TO_START, DUMPED, UNSUPPORTED, FIDELITY_SKIPPED, PRE_FIDELITY, FIDELITY_PASSED, FIDELITY_FAILED, PRE_REPLAY, REPLAYED, and CRASHED or HANGED if the instance ended while the call was open (HLS16);
+1. a component call on a rank: ABOUT_TO_START, DUMPED, UNSUPPORTED, PRE_FIDELITY, FIDELITY_PASSED, FIDELITY_FAILED, PRE_REPLAY, REPLAYED, and CRASHED or HANGED if the instance ended while the call was open (HLS16);
 2. a case on a rank: UNRESOLVABLE_PATH, NOT_REACHED, CASE_CALLS_MISMATCH, FAILED_TO_START, UNSUPPORTED;
 3. an instance, as one rank log shows it: UNSUPPORTED, CRASHED, HANGED. An instance-level status says only that the event happened. It never attributes the event to a case or a call, and it never gives a pytest outcome by itself. It is the reason for the case statuses that the launcher derives from it (TD120).
 
@@ -108,32 +107,31 @@ reference data (B).
 
 **HLS16.** The last status of a call in a rank log puts the call into exactly one class:
 1. *open*: ABOUT_TO_START, PRE_FIDELITY, PRE_REPLAY. The component can be executing.
-2. *settled*: no step of the call is due. In A and in B: UNSUPPORTED, CRASHED, HANGED. In A only: FIDELITY_PASSED, FIDELITY_FAILED, FIDELITY_SKIPPED. In B only: REPLAYED.
-3. *pending*: every other last status, that is DUMPED in A and in B, and FIDELITY_PASSED, FIDELITY_FAILED, or FIDELITY_SKIPPED in B. A step of the call is due and has not started.
+2. *settled*: no step of the call is due. In A and in B: UNSUPPORTED, CRASHED, HANGED. In A only: FIDELITY_PASSED, FIDELITY_FAILED. In B only: REPLAYED.
+3. *pending*: every other last status, that is DUMPED in A and in B, and FIDELITY_PASSED or FIDELITY_FAILED in B. A step of the call is due and has not started.
 
 **HLS17.** The table below is the normative list of the statuses and of the permitted transitions. "Previous" is the last status of the same call, or the records of the same case, before the new record. "Class" is the HLS16 class.
 
 | # | Status | Scope | Writer | Written when | Previous | Class | Contribution to the outcome of the case |
 |---|---|---|---|---|---|---|---|
 | 1 | ABOUT_TO_START | call | rank | phase=run, the hook fires (RL60 step 1) | none | open | Cannot be the last status after TD120. If it is, the case cannot pass |
-| 2 | DUMPED | call | rank | phase=run, inputs and outputs are saved (RL60 step 5) | ABOUT_TO_START | pending | Counts for TD115 and PM20. As the last status: the case cannot pass; row 14 or 15 gives the reason |
+| 2 | DUMPED | call | rank | phase=run, inputs and outputs are saved (RL60 step 5) | ABOUT_TO_START | pending | Counts for TD115 and PM20. As the last status: the case cannot pass; row 13 or 14 gives the reason |
 | 3 | UNSUPPORTED | call | rank | The rank cannot dump the inputs of the call (RL60 step 2, before the call) or its outputs (RL60 step 4, after the call). The rank writes the record when the call returns. Or: the pipeline run ended and the call did not return normally (RL80 item 4) | ABOUT_TO_START | settled | The case cannot pass |
-| 4 | FIDELITY_SKIPPED | call | rank | Fidelity stage, override flag set (RL100 step 1) | DUMPED | A: settled, B: pending | As the last status in A: does not cause a failure from A. As the last status in B: the case cannot pass, because the replay of A's inputs is missing. PM80 warning in both |
-| 5 | PRE_FIDELITY | call | rank | Fidelity stage (RL100 step 2) | DUMPED | open | As row 1 |
-| 6 | FIDELITY_PASSED | call | rank | RL100 step 7 | PRE_FIDELITY | A: settled, B: pending | As the last status in A: does not cause a failure from A. As the last status in B: the case cannot pass, because the replay of A's inputs is missing; the reason is row 14 or 15, or the call does not exist in A (IB10 item 6) |
-| 7 | FIDELITY_FAILED | call | rank | RL100 step 7 | PRE_FIDELITY | A: settled, B: pending | The case cannot pass (IA60), in A and in B, also when REPLAYED follows in B |
-| 8 | PRE_REPLAY | call | rank of B | Replay of A's inputs (RL100 step 2) | FIDELITY_PASSED, FIDELITY_FAILED, FIDELITY_SKIPPED | open | As row 1 |
-| 9 | REPLAYED | call | rank of B | RL100 step 8 | PRE_REPLAY | settled | As the last status in B: does not cause a failure from B, if the call has FIDELITY_PASSED or FIDELITY_SKIPPED (PM40) |
-| 10 | CRASHED | call | launcher | TD120 item 2.2, the instance crashed | ABOUT_TO_START, PRE_FIDELITY, PRE_REPLAY | settled | The case cannot pass |
-| 11 | HANGED | call | launcher | TD120 item 2.2, the launcher killed the instance for a missed deadline | as row 10 | settled | The case cannot pass |
-| 12 | UNRESOLVABLE_PATH | case | rank | Start of phase=run, path resolution (RL60, CP120, CP140) | none | - | The case has no call on this rank, so the case cannot pass |
-| 13 | NOT_REACHED | case | rank | The pipeline run ended and the case had no call (RL80) | none | - | As row 12 |
-| 14 | CASE_CALLS_MISMATCH | case | rank, the same on all ranks | After the pipeline run, list comparison (RL80) | Any record of the case; no call of the case is open | calls keep their class and are not replayed | The case cannot pass |
-| 15 | FAILED_TO_START | case | launcher | TD120 item 2.3 | no record, or call records | - | The case cannot pass |
-| 16 | UNSUPPORTED | case | launcher, in all rank logs | TD120 item 1 | none | - | The case cannot pass |
-| 17 | UNSUPPORTED | instance | rank | phase=initialization (RL40) | - | - | None directly. Cause of row 16 |
-| 18 | CRASHED | instance | launcher, in all rank logs | TD120 item 2.1 | - | - | None directly. Reason for rows 10 and 15 |
-| 19 | HANGED | instance | launcher, in all rank logs | TD120 item 2.1 | - | - | None directly. Reason for rows 11 and 15 |
+| 4 | PRE_FIDELITY | call | rank | Fidelity stage (RL100 step 1) | DUMPED | open | As row 1 |
+| 5 | FIDELITY_PASSED | call | rank | RL100 step 6 | PRE_FIDELITY | A: settled, B: pending | As the last status in A: does not cause a failure from A. As the last status in B: the case cannot pass, because the replay of A's inputs is missing; the reason is row 13 or 14, or the call does not exist in A (IB10 item 6) |
+| 6 | FIDELITY_FAILED | call | rank | RL100 step 6 | PRE_FIDELITY | A: settled, B: pending | If the fidelity check override flag of the instance is not set (IA50): the case cannot pass (IA60), in A and in B, also when REPLAYED follows in B. If the flag is set: this status does not cause a failure by itself, and the case fixture issues a PM80 warning; as the last status in B, it contributes as row 5 |
+| 7 | PRE_REPLAY | call | rank of B | Replay of A's inputs (RL100 step 1) | FIDELITY_PASSED, FIDELITY_FAILED | open | As row 1 |
+| 8 | REPLAYED | call | rank of B | RL100 step 7 | PRE_REPLAY | settled | As the last status in B: does not cause a failure from B, if the call has FIDELITY_PASSED, or has FIDELITY_FAILED and the fidelity check override flag of B is set (PM40) |
+| 9 | CRASHED | call | launcher | TD120 item 2.2, the instance crashed | ABOUT_TO_START, PRE_FIDELITY, PRE_REPLAY | settled | The case cannot pass |
+| 10 | HANGED | call | launcher | TD120 item 2.2, the launcher killed the instance for a missed deadline | as row 9 | settled | The case cannot pass |
+| 11 | UNRESOLVABLE_PATH | case | rank | Start of phase=run, path resolution (RL60, CP120, CP140) | none | - | The case has no call on this rank, so the case cannot pass |
+| 12 | NOT_REACHED | case | rank | The pipeline run ended and the case had no call (RL80) | none | - | As row 11 |
+| 13 | CASE_CALLS_MISMATCH | case | rank, the same on all ranks | After the pipeline run, list comparison (RL80) | Any record of the case; no call of the case is open | calls keep their class and are not replayed | The case cannot pass |
+| 14 | FAILED_TO_START | case | launcher | TD120 item 2.3 | no record, or call records | - | The case cannot pass |
+| 15 | UNSUPPORTED | case | launcher, in all rank logs | TD120 item 1 | none | - | The case cannot pass |
+| 16 | UNSUPPORTED | instance | rank | phase=initialization (RL40) | - | - | None directly. Cause of row 15 |
+| 17 | CRASHED | instance | launcher, in all rank logs | TD120 item 2.1 | - | - | None directly. Reason for rows 9 and 14 |
+| 18 | HANGED | instance | launcher, in all rank logs | TD120 item 2.1 | - | - | None directly. Reason for rows 10 and 14 |
 
 The last column says only what a status contributes. PM10-PM50 give the outcome of a case from all ranks of A and B and from the tolerance checks. "The case cannot pass" means failed (PM50), or error where PM20 applies. A record sequence that the table does not permit is a harness defect, and PM50 makes such a case fail.
 
@@ -150,14 +148,15 @@ is raised, it's message contain all important information to explain the reason 
 
 ### Tests definition
 
-**TD10.** The definition is in Python. One call defines one configuration: its xDiT settings, its list of components to test, the tolerances for each output of each component, special parameters of B instance, per component path determinism overrides, deadlines and other things the requirements mandate to be user-overridable.
-Each entry (a component path) of the list of components defines a separate test case, selectable with `-k` pytest parameter. Each configuration is a separate call.
+**TD10.** The definition is in Python. One call of the configuration decorator on a test class defines one configuration: its xDiT settings, its list of components to test, the tolerances for each output of each component, special parameters of B instance, per component path fidelity check override flags of A and B (IA50), deadlines and other things the requirements mandate to be user-overridable. The decorator gives the class the configuration fixture and the case fixture (TD40), the test function of the cases, and the `pytest_generate_tests()` hook (PI60 item 1).
+Each entry (a component path) of the list of components defines a separate test case, selectable with `-k` pytest parameter. Each configuration is a separate class with a separate decorator call. The class name starts with `Test`, because by default pytest collects only such classes. The class name is a second name of the configuration: pytest node IDs contain it (PI50), and everything else uses the configuration name (TD60).
 
 **TD20.** The xDiT settings usually come from an entry of a CI benchmark YAML file. The `yaml_path` configuration (TD10) parameter defines path to the file (in the same format as the benchmark configurations; relative path is resolved from `os.getcwd()`), and the `entry` field defines name of the entry in the file. There's a helper that reads an entry from a file.  If both `yaml_path` and `entry` are `None` (default), helper returns an empty dictionary. If `yaml_path` can be read and it has an entry with `name` field equal to the `entry`, - the helper returns the read dictionary of xDiT settings. Otherwise the helper raise an exception.
 
 **TD30.** Test configuration call (TD10) can override every field of the xDiT settings, and overrides can be sufficient to define these settings alone, without a YAML file. `overrides` is a dictionary with the structure of a YAML entry. The permitted fields are only those of the `Experiment` class of CI; other fields are an error. After the helper of TD20 returns a dictionary read from `yaml_path` and `entry`, the `overrides` is used to override some fields: `args` key is a dictionary and it is merged key by key: if a key's value is `None`, the key is remove from final dictionary, otherwise its value replaces the value in the final xDiT settings dictionary. Similarly, other fields replace the value of the entry, and `None` removes the field.
 
-**TD40.** The resulting xDiT settings dictionary of TD30 apply both to A and to B. Each configuration has its own fixture, which applies instance-specific overrides (TD90, IB10, IB70) to the xDiT settings, launches instances A and B, processes results and lets individual test fixtures + test cases of the configuration run later.
+**TD40.** The resulting xDiT settings dictionary of TD30 apply both to A and to B. Each configuration has its own configuration fixture, a class-scoped fixture of the configuration class (TD10). It applies instance-specific overrides (TD90, IB10, IB70) to the xDiT settings, launches instances A and B, and processes results. Then, for each case, the case fixture (a function-scoped fixture of the class) and the test function of the case run. The configuration fixture gives its results to the case fixtures through its return value.
+*Rationale:* pytest makes a new instance of the class for each test, so values on `self` are not shared between tests, and class attributes keep the data of a configuration in memory after its tests end.
 
 **TD50.** After the configuration fixture (TD40) prepares instance-specific xDiT settings, it passes them to the instance. The instance uses these settings to build the command-line flags as CI does, and then to parse them with the parser of the xDiT runner.
 
@@ -165,7 +164,8 @@ Each entry (a component path) of the list of components defines a separate test 
 
 **TD60.** The configuration call has no explicit `name` parameter. The configuration name is the `name` field of the merged xDiT settings (TD30). Hence, if `yaml_path` and `entry` aren't used (i.e. have default `None` value), the `overrides` parameter must have a valid `name` value. The `name` value of the merged xDiT settings (TD30) becomes the configuration name. The configuration name is the name of the configuration's subdirectory in `--xdit_data_dir` and in `--xdit_metrics_dir` (FD20), and the first part of the names of the configuration's test cases (PI50). By convention, a configuration name also let identify the xDiT model to which it applies.
 
-**TD70.** Configuration names are unique. The harness raises an error for two configurations with the same name. The check runs during collection, and it also covers the configurations that `-k` deselects. A separate check in the configuration fixture stops a configuration that starts a second time in one session. Unique names across sessions are the responsibility of the user.
+**TD70.** Configuration names are unique. The harness raises an error for two configurations with the same name. The check runs during collection, and it also covers the configurations that `-k` deselects. Two configuration classes with the same name in one test module are also an error, and so is a configuration class that pytest collects in a module other than the module that defines it, for example after an import. These checks also run during collection. A separate check in the configuration fixture stops a configuration that starts a second time in one session. Unique names across sessions are the responsibility of the user.
+*Rationale:* Python keeps only the last of two classes with the same name in a module, so the first configuration would disappear without an error. pytest collects an imported class again, so its instances would run a second time.
 
 **TD75.** During the test session, tests of the same configuration write files (data files with dumped data and rank log files) to the configuration's subdirectory of `--xdit_data_dir` (FD20). This directory may persist between tests execution sessions (see PI10). Rank log files naming is described in RL10. Data files have basenames according to the `<instance>_<rank>_<call_part>_<content_id>` scheme, where:
 1. `<instance>` is `A` for instance A, or `B` otherwise;
@@ -179,6 +179,7 @@ Each entry (a component path) of the list of components defines a separate test 
 *Rationale:* such a name is a valid directory name (FD20) and a valid part of a `-k` identifier (PI50) without any encoding.
 
 **TD85.** The `--ff` option of pytest, `pytest-xdist` and random-order pytest plugins are not supported.
+*Rationale:* the configuration fixture (TD40) runs once only if the selected cases of its class run one after another. The default order of pytest does this. These options and plugins can interleave the cases of different classes, and then pytest sets up the configuration fixture again (TD70 stops it).
 
 **TD90.** The harness forces these settings in A and B: no warmup calls, one execution ("iteration" in terms of xDiT runner), and `use_torch_compile` off.
 
@@ -188,7 +189,7 @@ Each entry (a component path) of the list of components defines a separate test 
 3. each individual call as measured between the call's starting status (ABOUT_TO_START for RL60; PRE_FIDELITY or PRE_REPLAY for RL100) and ending status (DUMPED or UNSUPPORTED for RL60; FIDELITY_FAILED or FIDELITY_PASSED or REPLAYED for RL100): 2 minutes in A and 4 minutes in B. It's a limitation of version 1 that these timeouts include file operations.
 4. 5 (for A) or 10 (for B) minutes since the last record in the log file in all other cases
 
-**TD110.** **Deadlines enforcement.** For all configuration paths / cases if pytest `-k` wasn't used, or only for cases selected by `-k` otherwise, the configuration fixture (TD40) runs each instance sequentially (TD115) using a supplementary launcher process that actually launches the instance with torchrun. The launcher takes care of deadlines, child processes cleanup and statuses of instance's case in some cases. Each rank of the instance writes its deadline -related progress and timestamps to a certain rank-specific log file known to the launcher. The launcher then periodically reads these files and uses progress records and timestamps to enforce deadlines. A missed deadline leads to a warning message and killing the instance and all its descendant processes.
+**TD110.** **Deadlines enforcement.** For the cases of the configuration that pytest selected to run (with `-k`, a node ID, or another pytest selection; without a selection, all cases), the configuration fixture (TD40) runs each instance sequentially (TD115) using a supplementary launcher process that actually launches the instance with torchrun. The launcher takes care of deadlines, child processes cleanup and statuses of instance's case in some cases. Each rank of the instance writes its deadline -related progress and timestamps to a certain rank-specific log file known to the launcher. The launcher then periodically reads these files and uses progress records and timestamps to enforce deadlines. A missed deadline leads to a warning message and killing the instance and all its descendant processes.
 
 **TD115.** The configuration fixture first launches instance A with the launcher. If at least one call on any rank of A reached `status=DUMPED`, the fixture then runs instance B for the same test cases that A used.
 
@@ -250,12 +251,12 @@ an attribute, and an empty name for a bare tensor. Nested containers flatten to 
 
 ### Components, paths and calls
 
-**CP10.** The harness tests only components mentioned in an explicit list of component path strings. Each path string defines a component to test and is the path from the runner model object to the callable component or a method. Only the listed components are captured. A listed component must run at least once during pipeline run. A callable component/element is a Python object that can be called, or a PyTorch object with a `forward()` method (since it behaves like a callable in a forward pass of a model).
+**CP10.** The harness tests only components mentioned in an explicit list of component path strings. Each path string defines a component to test and is the path from the runner model object to the callable component or a method. Only the listed components are captured. A listed component must run at least once during pipeline run. A callable component/element is a Python object that can be called, or a PyTorch object with a `forward()` method (since it behaves like a callable in a forward pass of a model). For example, every `nn.Module` is callable, also one that the run never calls.
 
 **CP20.** The list is known before the run. The harness makes the test cases from the list only (without a
 model) and list's items (component paths) serve as test case identifiers, so there is an exact 1-to-1 relationship between a component path and a test case.
 
-**CP30.** Component path syntax: dots separate the path elements, and `[i]` indexes a container, for example `pipe.transformer.blocks[0].attn1` and `pipe.transformer.blocks[-1]`. A path has no leading dot. `[key]` selects an item of an `nn.ModuleDict`.
+**CP30.** Component path syntax: dots separate the path elements, and `[i]` indexes a container, for example `pipe.transformer.blocks[0].attn1` and `pipe.transformer.blocks[-1]`. A path has no leading dot. `[key]` selects an item of an `nn.ModuleDict`. An element is a name with all its indexes, for example `blocks[0]`. A container that an index selects from is not an element, so it has no counter and no call number.
 
 **CP40.** The first element names an attribute of the runner model object, for example `pipe`, `second_pipe` or
 `refiner_pipe`. The harness does not check that the attribute holds a pipeline. An attribute that holds `None`
@@ -263,8 +264,8 @@ is a path error.
 
 **CP50.** A call number follows the element after a colon, for example `pipe.transformer:3.blocks[0]:3`. A path without a call number selects all calls, and its one case checks every call. The case fails if one call fails, and the message names the failing calls. Version 1 has accepted limitation: the first path element ignores its call number.
 
-**CP60.** Call numbers are not negative.
-*Rationale:* then the harness can save the tensors of a call at once.
+**CP60.** Call numbers are not negative. The call number 0 is valid: the counter of an element is 0 while the element was not called since the last call of its nearest tracked ancestor (CP80 item 3). For example, `pipe.vae:0.decode` selects the `decode` calls made while the counter of `vae` is 0. A call number 0 on the last element of a path never matches, because the counter is incremented before the check (CP80 item 2). It is an error during collection.
+*Rationale for non-negative call numbers:* then the harness can save the tensors of a call at once.
 
 **CP70.** A path only tells how to reach the component. It does not describe the call stack, and the harness
 never uses it to recover the call stack. Each path addresses only one component: the component that the path
@@ -296,7 +297,7 @@ writes the inputs of each selected call, random-number states and the outputs af
 to data files (it doesn't store them in memory). These data files are read later for call replays and
 checks. Only the corresponding test case function or fixture can delete these data files; also - configuration fixture preparing for a fresh run.
 
-**CP100.** A call identifier `<call_id>` is a component path in which each tracked callable element carries its counter value at the time of the call, for example `pipe.transformer:3.blocks[0]:1`. The first path element, such as `pipe`, `second_pipe` or `refiner_pipe` is usually callable, but version 1 does not track it due to complications, and assumes it to be a non-callable instead. This identifier is unique within a run, reads with the CP30 rules, and is the same in A and B when their call order is the same.
+**CP100.** A call identifier `<call_id>` is a component path in which each tracked callable element carries its counter value at the time of the call, for example `pipe.transformer:3.blocks[0]:1`. The first path element, such as `pipe`, `second_pipe` or `refiner_pipe` is usually callable, but version 1 does not track it due to complications, and assumes it to be a non-callable instead. This identifier is unique within a run, reads with the CP30 rules, and is the same in A and B when their call order is the same. An element that is callable but not called carries 0. For example, if the run never calls `vae`, the first `decode` call has the identifier `pipe.vae:0.decode:1`.
 
 **CP110.** The harness does not care who calls a component. It uses only the inputs and the outputs of each
 call. Calls from another pipeline, from the runner, or from any other code are tested like all other calls.
@@ -309,7 +310,7 @@ are permitted.
 *Rationale for the error:* it is better not to support such cases than to make the implementation more
 complex.
 
-**CP130.** Methods calls such as `pipe.vae.decode`, where `.vae` isn't callable or is never called, and `decode` is a method, also must be testable. A path through a module that the run never calls must be valid.
+**CP130.** Method calls such as `pipe.vae.decode` must be testable, where `decode` is a method and `vae` is callable (CP10) but never called, or is not callable. A path through a callable element that the run never calls is valid: the counter of such an element stays 0 (CP80 item 3), so the call identifiers of the path carry `:0` for it (CP100), and the call number `:0` selects these calls (CP60).
 
 **CP140.** A path must resolve in A and in B. If it doesn't, the rank logs `status=UNRESOLVABLE_PATH case=<case_id> reason=<why>` at the start of phase=run (RL60). Path errors that need a built model show only after the initialization of A; this cost is accepted.
 
@@ -338,10 +339,9 @@ asynchronous work that is still running, hooks by other features running, higher
 
 **IA40.** **Fidelity check (A and B).** Each instance replays a captured call once to ensure the component was properly isolated and rerunning it yields binary the same result. B also needs it since it run different dtype specific code. Fidelity check may also fail for another reason: if the component is non-deterministic.
 
-**IA50.** Some components may be validly non-deterministic, hence each case / component path may have an instance-specific fidelity check override flag (set on per-case basic during configuration call TD10), that if set, simply excludes all case calls from fidelity check replays. By default, each case (all calls of the case/component) must pass fidelity check in A and in B, so when the flag isn't set it's assumed to be `false`
-The harness arranges the following behavior: if set, A's instance flag value is used for B if B doesn't set own flag value.
+**IA50.** Some components may be validly non-deterministic, hence each case / component path may have an instance-specific fidelity check override flag, set per case in the configuration call (TD10). The flag is `false` by default, so by default each case (all calls of the case/component) must pass the fidelity check in A and in B. If the configuration does not set the flag of B, B uses the flag value of A. The flag does not change what the instances run: A and B always run the fidelity check of each call (RL100). It changes only the outcome: if the flag of an instance is set, a failed fidelity check on a rank of that instance does not fail the case by itself, and the case fixture issues a warning (PM80). Other reasons, for example a deviation beyond the tolerance, still fail the case.
 
-**IA60.** If the case policy requires fidelity check and the check fails on any rank of A or B, this necessary fails the pytest tests function outcome even if output tolerances are within bounds.
+**IA60.** If the fidelity check override flag of an instance is not set for the case (IA50) and the fidelity check fails on any rank of that instance, this necessarily fails the pytest test function outcome even if output tolerances are within bounds.
 
 **IA80.** A crash or a hang ends the instance. Version 1 does not recover. An exception that ends the instance counts as a crash.
 
@@ -373,7 +373,7 @@ so a fidelity check on own inputs is needed.
 
 **IB50.** After pipeline run and components fidelity check B replays the inputs of A (using A's random-number states, but restoring the original state after a replay).
 
-**IB70.** B has three run-related parameters for the user: the reference dtype, the self-attention backend and the cross-attention backend, and also own per-path determinism override setting, and deadlines.
+**IB70.** B has three run-related parameters for the user: the reference dtype, the self-attention backend and the cross-attention backend, and also own per-path fidelity check override flag (IA50), and deadlines.
 
 **IB80.** An attention backend that declares a fallback, or that needs a blocked vendor package, makes instance B UNSUPPORTED (RL40). A cross-attention parameter for a model without a separate cross-attention backend is an error. The default attention backend is `sdpa_efficient`.
 
@@ -419,20 +419,19 @@ In version 1 no cross-rank synchronization about which cases to replay is perfor
 However, to alleviate debugging, all ranks compare their "replay lists" with one `all_gather_object()` call. Cases whose lists differ get `status=CASE_CALLS_MISMATCH case=<case_id>` on all ranks, and are dropped on all ranks. B runs the same check on its list of A's calls.
 
 **RL90.** **phase=replay** Two kind of replays are needed:
-- both instance A and B should replay each call for fidelity check IA40-IA60;
-- instance B also replays each call of its list of A's calls (RL80: the calls that got status=DUMPED on A; B can read logs of A for this) that is also in B's own replay list, using A's data casted to reference dtype to obtain reference outputs of the component. The result of B's fidelity check for the call does not matter here: it is local to a rank, so it must not decide which calls a rank replays (RL100). A failed fidelity check still makes the case fail (IA60, PM40).
+- both instance A and B should replay each call for fidelity check IA40-IA60, also when the fidelity check override flag is set (IA50);
+- instance B also replays each call of its list of A's calls (RL80: the calls that got status=DUMPED on A; B can read logs of A for this) that is also in B's own replay list, using A's data casted to reference dtype to obtain reference outputs of the component. The result of B's fidelity check for the call does not matter here: it is local to a rank, so it must not decide which calls a rank replays (RL100). A failed fidelity check still makes the case fail, unless the fidelity check override flag of B is set (IA50, IA60, PM40).
 
 Instance B runs both replays: first it runs fidelity check replays on its own inputs and outputs, then it runs replays on A's inputs.
 
 **RL100.** Call replays run in "replay list" order (RL60), and in a lock step, with a stream synchronization and a barrier before and after replay. This helps to time execution properly to ensure correct call timeouts (TD100.3), and help to correctly attribute crashes, should they happen. For each call in ordered "replay list", the rank does:
-1. if this is a fidelity check replay and call's case has the instance-specific fidelity check override flag set: the rank logs `status=FIDELITY_SKIPPED case=<case_id> call=<call_id>` and proceeds to the next call in the list (since all ranks obtain the same "replay list" (RL80) and have the same flag value, the same case calls will be skipped on all ranks simultaneously and that can't lead to a hang).
-2. the rank logs `status=<status> case=<case_id> call=<call_id> file=<file>` where the `<status>` is `PRE_FIDELITY` if this is fidelity check, or `PRE_REPLAY` if this is B replaying inputs from A; `<file>` is a filename in the same directory that will contain outputs of the call.
-3. the rank reads inputs, rng states and outputs (only if it's a fidelity check), from the call replay files (the paths are recoverable from data directory path and the call identifier).
-4. The rank executes a stream synchronization and a barrier.
-5. the rank saves current CPU and CUDA rng states into a temporary variable; restores rng states from loaded from the input file values, execute the call with loaded inputs (B must have casted them to the reference dtype first), obtains the replayed call outputs and saves them to the `<file>`. Finally it restores the original CPU and CUDA rng states from the temporary variable.
-6. The rank executes a stream synchronization and a barrier.
-7. if this is a fidelity check, the rank perform bitwise comparison of each of the elements of obtained output with expected (read in point 3). Any mismatch in the outputs structure or content gives `status=FIDELITY_FAILED case=<case_id> call=<call_id>`. If the check passes, the rank logs instead `status=FIDELITY_PASSED case=<case_id> call=<call_id>`.
-8. Otherwise if this isn't a fidelity check, the rank logs `status=REPLAYED case=<case_id> call=<call_id>`.
+1. the rank logs `status=<status> case=<case_id> call=<call_id> file=<file>` where the `<status>` is `PRE_FIDELITY` if this is fidelity check, or `PRE_REPLAY` if this is B replaying inputs from A; `<file>` is a filename in the same directory that will contain outputs of the call.
+2. the rank reads inputs, rng states and outputs (only if it's a fidelity check), from the call replay files (the paths are recoverable from data directory path and the call identifier).
+3. The rank executes a stream synchronization and a barrier.
+4. the rank saves current CPU and CUDA rng states into a temporary variable; restores rng states from loaded from the input file values, execute the call with loaded inputs (B must have casted them to the reference dtype first), obtains the replayed call outputs and saves them to the `<file>`. Finally it restores the original CPU and CUDA rng states from the temporary variable.
+5. The rank executes a stream synchronization and a barrier.
+6. if this is a fidelity check, the rank perform bitwise comparison of each of the elements of obtained output with expected (read in step 2). Any mismatch in the outputs structure or content gives `status=FIDELITY_FAILED case=<case_id> call=<call_id>`. If the check passes, the rank logs instead `status=FIDELITY_PASSED case=<case_id> call=<call_id>`.
+7. Otherwise if this isn't a fidelity check, the rank logs `status=REPLAYED case=<case_id> call=<call_id>`.
 
 *Rationale:* strict call execution order and synchronization with barriers are necessary to ensure proper collectives functioning and along with detailed logging help to correctly attribute crashes. A fault that silently damages memory and shows only in a later case is an accepted limit.
 
@@ -459,24 +458,24 @@ If `--xdit_no_cache_passed` is set, a passed test doesn't add any record to the 
 1. `[a-zA-Z0-9_.:-]`, `[` and `]` symbols stay unchanged, so a component path that follows CP30 and CP50 does not change;
 2. each other symbol becomes `+XX` for each byte of its UTF-8 encoding (`XX` is uppercase hexadecimal).
 
-Neither part contains `/`, so the ID gives back the configuration name and the component path exactly. A test case function has only this one parametrization, so the pytest ID of a case is exactly this string (pytest joins the IDs of several parametrizations with `-`, which configuration names can contain). All symbols of the ID can be part of one `-k` identifier, and pytest does not escape them. The harness needs pytest 7.0 or later, because older versions do not accept `/` in `-k` identifiers. `tstcase_id()` and `parse_tstcase_id()` of [Appendix A](requirements_appendix_a.md#appendix-a-names-of-files-directories-and-test-cases) implement this scheme.
+Neither part contains `/`, so the ID gives back the configuration name and the component path exactly. The test function of a configuration class (TD10) has only this one parametrization, so the parametrization ID of a case is exactly this string (pytest joins the IDs of several parametrizations with `-`, which configuration names can contain). The node ID of a case is `<module path>::<class name>::<test function name>[<parametrization ID>]`, and the node ID `<module path>::<class name>` selects all cases of one configuration. All symbols of the ID can be part of one `-k` identifier, and pytest does not escape them. The harness needs pytest 7.0 or later, because older versions do not accept `/` in `-k` identifiers. `tstcase_id()` and `parse_tstcase_id()` of [Appendix A](requirements_appendix_a.md#appendix-a-names-of-files-directories-and-test-cases) implement this scheme.
 
 `-k` matches substrings without regard to letter case. For example, `-k "flux2.default/pipe.transformer"` also selects `flux2.default/pipe.transformer:1`, while `-k "[flux2.default/pipe.transformer]"` (with the brackets of the test name) selects only that case. `-k` cannot tell apart configuration names that differ only in letter case; a node ID can.
 
 **PI60.** **Pytest life cycle.** Here's how execution steps maps onto pytest:
-1. Each pytest module defines configurations (TD10) of a single xDiT model to test. A module level `pytest_generate_tests()` hook parses each configuration of the module and spawns an individual test case for each element of configuration's component list.
+1. Each pytest module defines configurations (TD10) of a single xDiT model to test, one configuration class for each configuration. The `pytest_generate_tests()` hook of each configuration class parametrizes the test function of the class with an individual test case for each element of configuration's component list (PI50).
 2. A global session scoped fixture determines the run mode (PI10) and sets a global `run_mode` flag defining the mode, so other test code could use it:
    1. if `--xdit_allow_rerun` CLI flag (PI20) is NOT set, it's always a fresh run;
    2. otherwise, since the fixture has access to all test case name that are about to execute, and each test case name allow to reconstruct the configuration name exactly, the fixture can determine if a fresh run, or a rerun is needed by inspecting rank log files of the configurations of these cases. If none of these files exists, it's a fresh run. Otherwise a rank log that does not exist is a log without records (HL120), and if and only if for all cases to run all rank log files contain `case=<case_id> pass=true` record for the case, the fixture chooses a fresh run mode for the session; otherwise it choose rerun mode. The user is responsible to not set the flag if any underlying code or configurations changed after the fresh run that created the data.
-3. A configuration (TD10) level fixture depending on the value of the global `run_mode` flag either do a fresh run or rerun of the configuration (PI10). For a fresh run, before it launches instance A, the fixture deletes the directory of its configuration in `--xdit_data_dir` (TD75) with all its content (data files with dumps and rank log files). It deletes no other directory: the directories of the configurations that have no case to run in the session stay. The user is responsible the fresh run doesn't wipe out more data than they wanted: it deletes the data of all cases of the configuration, also of the cases that `-k` deselects. After a configuration level fixture runs the configuration's individual test case functions (that weren't skipped by pytest `-k` parameter, or by other valid reason that the fixture might detect). After that the loop repeats: another configuration level fixture runs, then its test cases.
+3. The configuration fixture (TD40) depending on the value of the global `run_mode` flag either do a fresh run or rerun of the configuration (PI10). For a fresh run, before it launches instance A, the fixture deletes the directory of its configuration in `--xdit_data_dir` (TD75) with all its content (data files with dumps and rank log files). It deletes no other directory: the directories of the configurations that have no case to run in the session stay. The user is responsible the fresh run doesn't wipe out more data than they wanted: it deletes the data of all cases of the configuration, also of the cases that the pytest selection excludes (TD110). After the configuration fixture, the configuration's individual test case functions run (those that pytest selected, unless a fixture skips them for another valid reason). After that the loop repeats: another configuration fixture runs, then its test cases.
 
 #### Mapping statuses to pytest outcomes
 
-**PM10.** A configuration level fixture, a test case-level fixture and a test case function implement different parts of the mapping from statuses to pytest outcomes. The rules apply in this order, and the first rule that applies gives the outcome of the case: (1) the launcher exited with a nonzero code (TD140): error; (2) PM20 item 1: error; (3) PM30: skip; (4) PM20 item 2: error; (5) PM40: passed; (6) PM50: failed. IA60 and IB10 item 6 name conditions under which a case cannot pass. They do not change this order.
+**PM10.** The configuration fixture, the case fixture (TD40) and the test function implement different parts of the mapping from statuses to pytest outcomes. The rules apply in this order, and the first rule that applies gives the outcome of the case: (1) the launcher exited with a nonzero code (TD140): error; (2) PM20 item 1: error; (3) PM30: skip; (4) PM20 item 2: error; (5) PM40: passed; (6) PM50: failed. IA60 and IB10 item 6 name conditions under which a case cannot pass. They do not change this order.
 
 **PM20.** **Errors.** In pytest, only setup/teardown or fixture code could emit errors. We generally turn into an error any situation where a test case doesn't have dumped data to work with:
-1. a configuration level fixture inspects all rank log files and if not a single case of any single rank reached DUMPED status, it marks all test cases of the configuration as "error".
-2. a case level fixture inspects all rank log files and if it finds that no single pair of ranks of A and B reached DUMPED status for the case, it marks the case as "error". If some rank pairs reached DUMPED, but others don't, the test function runs on the obtained data, but eventually necessary fails later.
+1. the configuration fixture inspects all rank log files and if not a single case of any single rank reached DUMPED status, it raises an exception, so pytest reports all test cases of the configuration class as "error".
+2. the case fixture inspects all rank log files and if it finds that no single pair of ranks of A and B reached DUMPED status for the case, it marks the case as "error". If some rank pairs reached DUMPED, but others don't, the test function runs on the obtained data, but eventually necessary fails later.
 
 **PM30.** **Skips.** Skips in pytest can be generated from both fixtures and test functions.
 1. In a fresh run mode, a whole configuration (all cases of the configuration) can be "skipped" only if the configuration is explicitly not supported on the current hardware (not the case for harness version 1).
@@ -484,8 +483,8 @@ Neither part contains `/`, so the ID gives back the configuration name and the c
 
 **PM40.** **Passed.** Only a successfully ran test case function sets "passed" outcome. A test case is "passed" if and only if these conditions holds simultaneously:
    1. every call on all ranks of A and B reached the following last status:
-      - instance A, which only does a fidelity check: the last call status is FIDELITY_SKIPPED when fidelity check override flag is set, or FIDELITY_PASSED otherwise;
-      - instance B, which does a fidelity check and replay of A inputs: the call has FIDELITY_SKIPPED when the fidelity check override flag that applies to B (IA50) is set, or FIDELITY_PASSED otherwise, and the last call status is REPLAYED.
+      - instance A, which only does a fidelity check: the last call status is FIDELITY_PASSED, or FIDELITY_FAILED when the fidelity check override flag of A is set;
+      - instance B, which does a fidelity check and replay of A inputs: the call has FIDELITY_PASSED, or FIDELITY_FAILED when the fidelity check override flag that applies to B (IA50) is set, and the last call status is REPLAYED.
    2. for all calls observed for the case/component, all outputs obtained on all ranks of A are within specified tolerances from outputs obtained from corresponding ranks of B.
 
 **PM50.** **Failed.** Every other status combination for a test case, whenever possible still runs tolerances checks, but even if the checks passes, necessary leads to a "failed" test outcome. Failure message MUST list all independent reasons that led to the failure.
@@ -494,7 +493,7 @@ Neither part contains `/`, so the ID gives back the configuration name and the c
 
 **PM70.** The error or failure message lists every rank with its status and, if known, the call identifier, the reason and other applicable information the requirements of this file require to present to a user.
 
-**PM80.** Whatever the pytest outcome is, a test case fixture must issue a warning for each call that have `status=FIDELITY_SKIPPED` on at least one rank. Message is "WARNING: instances A and B didn't run fidelity check for the call <call_id> due to fidelity override flag set. You are responsible to ensure the component is properly isolated and its determinism state is known."
+**PM80.** Whatever the pytest outcome is, the case fixture must issue one warning for each call and instance where the call has `status=FIDELITY_FAILED` on at least one rank of the instance and the fidelity check override flag of the instance is set (IA50). Message is "WARNING: the fidelity check of the call <call_id> failed on ranks <ranks> of instance <A or B>. The fidelity check override flag of the instance is set, so this failure does not fail the test. The cause can be valid nondeterminism or an incomplete isolation of the component. You are responsible to know which one it is."
 
 #### Files and directories
 

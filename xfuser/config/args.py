@@ -7,9 +7,6 @@ import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional, List, Tuple, Union
 
-import torch
-import torch.distributed
-
 from xfuser.logger import init_logger
 from xfuser.config.attention_a2a_codecs import GEMM_FORMAT_OUTPUT_CODECS
 from xfuser.config.attention_a2a import (
@@ -26,9 +23,12 @@ from xfuser.config.gemm import (
     parse_gemm_quantization,
 )
 
-# Do not import the runtime (xfuser.config.config, xfuser.core) at module level.
-# The argument parser must load without it, for example to show --help.
+# Do not import torch or the runtime (xfuser.config.config, xfuser.core) at
+# module level. The argument parser must load without them, for example to
+# show --help.
 if TYPE_CHECKING:
+    import torch
+
     from xfuser.config.config import EngineConfig, InputConfig
 
 logger = init_logger(__name__)
@@ -87,8 +87,8 @@ def block_size(val: str) -> Tuple[int, int]:
     return q_tile, kv_tile
 
 
-# --vae_dtype choices.
-VAE_DTYPES = {"bf16": torch.bfloat16, "fp32": torch.float32}
+# --vae_dtype choices -> torch dtype attribute names.
+VAE_DTYPES = {"bf16": "bfloat16", "fp32": "float32"}
 
 
 _DETERMINISM_CHECK_HELP = (
@@ -355,7 +355,7 @@ class xFuserArgs:
     memory_efficient_sharding: bool = False
     memory_efficient_replicated_load: bool = False
     use_vae_channels_last_format: bool = False
-    vae_dtype: Optional[torch.dtype] = None
+    vae_dtype: Optional["torch.dtype"] = None
     # Hybrid attention schedule
     use_hybrid_attn_schedule: bool = False
     hybrid_attn_low_precision_backend: Optional[str] = None
@@ -414,7 +414,9 @@ class xFuserArgs:
         if isinstance(self.vae_dtype, str):
             if self.vae_dtype not in VAE_DTYPES:
                 raise ValueError(f"--vae_dtype must be one of {', '.join(VAE_DTYPES)}; got {self.vae_dtype!r}")
-            self.vae_dtype = VAE_DTYPES[self.vae_dtype]
+            import torch
+
+            self.vae_dtype = getattr(torch, VAE_DTYPES[self.vae_dtype])
         if not math.isfinite(self.lora_scale):
             raise ValueError("lora_scale must be finite")
         if not self.lora_path and (self.lora_weight_name or self.lora_scale != 1.0):
@@ -1884,6 +1886,8 @@ class xFuserArgs:
             InputConfig,
             RuntimeConfig,
         )
+        import torch.distributed
+
         from xfuser.core.distributed import init_distributed_environment
         from xfuser.core.distributed.attention_schedule import SolAttnBetaSchedule
 

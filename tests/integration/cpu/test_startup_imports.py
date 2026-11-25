@@ -1,9 +1,10 @@
 """The launcher and the argument parser must load without the runtime.
 
 ``xdit --help`` and argument errors must not wait for diffusers, aiter (which
-can compile kernels when it loads), and the model registry. Each case runs in
-a fresh interpreter because an earlier test can already have loaded these
-modules into the pytest process.
+can compile kernels when it loads), and the model registry. The launcher and
+the parser also load without torch. Each case runs in a fresh interpreter
+because an earlier test can already have loaded these modules into the pytest
+process.
 """
 
 import json
@@ -15,7 +16,7 @@ import pytest
 
 pytestmark = pytest.mark.slow
 
-RUNTIME_MODULES = ("xfuser.envs", "xfuser.model_executor", "xfuser.core.distributed", "diffusers", "aiter")
+RUNTIME_MODULES = ("torch", "xfuser.envs", "xfuser.model_executor", "xfuser.core.distributed", "diffusers", "aiter")
 
 REPORT = textwrap.dedent(
     """
@@ -82,5 +83,7 @@ def test_runner_exits_on_arguments_before_it_loads_the_runtime(argv, exit_code, 
         """
     )
 
-    assert report == {"exit_code": exit_code, "runtime_modules": []}
+    assert report["exit_code"] == exit_code
+    # The runner module itself can import torch, but nothing else of the runtime.
+    assert set(report["runtime_modules"]) <= {"torch"}
     assert message in result.stdout + result.stderr

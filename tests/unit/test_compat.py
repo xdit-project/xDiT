@@ -13,6 +13,7 @@ from xfuser.compat import (
     declared_floor,
     import_optional,
     is_diffusers_import_error,
+    lazy_exports,
     optional_exporter,
     reraise_unless_diffusers,
     version_at_least,
@@ -264,6 +265,74 @@ class TestReexportChain(unittest.TestCase):
         for new_diffusers in (True, False):
             with self.subTest(new_diffusers=new_diffusers):
                 self.assertEqual(self._load(new_diffusers).Stable, "stable")
+
+
+class TestLazyExports(unittest.TestCase):
+    """A package that uses lazy_exports loads a submodule only when an export needs it."""
+
+    PACKAGE = "_xfuser_lazy_fixture"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        root = pathlib.Path(self.tmp) / self.PACKAGE
+        root.mkdir()
+        (root / "__init__.py").write_text(
+            "from xfuser.compat import lazy_exports\n"
+            "__getattr__, __dir__ = lazy_exports(\n"
+            "    globals(),\n"
+            "    {'.light': ('Light',), '.heavy': ('Heavy',)},\n"
+            "    optional={'.gated': ('Supplied', 'NotSupplied')},\n"
+            ")\n"
+        )
+        (root / "light.py").write_text("Light = 'light'\n")
+        (root / "heavy.py").write_text("Heavy = 'heavy'\n")
+        (root / "gated.py").write_text("Supplied = 'supplied'\n")
+        sys.path.insert(0, self.tmp)
+        self.package = importlib.import_module(self.PACKAGE)
+
+    def tearDown(self):
+        sys.path.remove(self.tmp)
+        shutil.rmtree(self.tmp)
+        for name in [m for m in sys.modules if m.startswith(self.PACKAGE)]:
+            del sys.modules[name]
+
+    def _loaded(self):
+        return sorted(name.rpartition(".")[2] for name in sys.modules if name.startswith(f"{self.PACKAGE}."))
+
+    def test_dir_lists_every_declared_export_without_loading(self):
+        names = dir(self.package)
+        for name in ("Light", "Heavy", "Supplied", "NotSupplied"):
+            self.assertIn(name, names)
+        self.assertEqual(self._loaded(), [])
+
+    def test_an_export_loads_only_its_submodule_and_is_stored(self):
+        self.assertEqual(self.package.Light, "light")
+        self.assertEqual(self._loaded(), ["light"])
+        self.assertEqual(vars(self.package)["Light"], "light")
+
+    def test_all_lists_the_optional_exports_that_the_install_supplies(self):
+        self.assertEqual(self.package.__all__, ["Light", "Heavy", "Supplied"])
+        # Only the optional exports need their submodule to resolve __all__.
+        self.assertEqual(self._loaded(), ["gated"])
+
+    def test_an_optional_export_that_the_install_does_not_supply_fails_to_import(self):
+        self.assertEqual(self.package.Supplied, "supplied")
+        with self.assertRaises(ImportError):
+            exec(f"from {self.PACKAGE} import NotSupplied", {})
+
+    def test_an_unknown_name_is_an_attribute_error(self):
+        with self.assertRaises(AttributeError):
+            self.package.Unknown
+        self.assertEqual(self._loaded(), [])
+
+    def test_an_export_declared_twice_is_rejected(self):
+        with self.assertRaises(ValueError):
+            lazy_exports({"__name__": "package"}, {".a": ("Name",)}, optional={".b": ("Name",)})
+
+    def test_a_package_that_sets_all_is_rejected(self):
+        # A static __all__ would hide the lazily resolved one.
+        with self.assertRaises(ValueError):
+            lazy_exports({"__name__": "package", "__all__": []}, {".a": ("Name",)})
 
 
 if __name__ == "__main__":

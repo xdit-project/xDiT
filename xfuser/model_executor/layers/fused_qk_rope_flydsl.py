@@ -1,4 +1,4 @@
-"""Fused QK-RMSNorm + RoPE (FlyDSL), for FLUX joint attention and MiniMax-H3.
+"""Fused QK-RMSNorm + RoPE (FlyDSL), for FLUX joint attention, MiniMax-H3 and MOSS-Image.
 
 Written in the high-level ``flydsl.expr`` (fx) API on top of aiter's
 ``GTensor`` buffer-tensor shim (the same style aiter uses in
@@ -10,7 +10,7 @@ build time with ``const_expr`` so neither pays for the other:
 ``"gptj"`` (default; FLUX)
     Interleaved pairs ``(2k, 2k+1)``, full-width tables, rotate in fp32.
 
-``"neox"`` (MiniMax-H3)
+``"neox"`` (MiniMax-H3; MOSS-Image with ``rotary_dim == D``)
     ``rotate_half`` pairs ``(k, k + rotary_dim/2)`` over the leading
     ``rotary_dim`` channels with the remainder passed through, rotate in bf16.
     The partner channel lives in a *different* lane, and ``shuffle_xor`` cannot
@@ -49,7 +49,9 @@ Inputs may be non-contiguous: real models build q/k as chunks of a fused QKV
 projection, so the row stride is passed to the kernel at runtime and rows are
 read in place rather than copied.  Only the ``(H, D)`` block within a token has
 to be packed.  Outputs are freshly allocated and contiguous, except that the
-key can be written into a caller's buffer (``key_out``).
+key can be written into a caller's buffer (``key_out``): ``[B, S, H, D]``, or,
+with ``send_world = P > 1`` (batch 1), the Ulysses all-to-all send buffer
+``[P, S, H/P, D]`` so the caller needs no transpose before the exchange.
 
 Envelope: bf16 activations, 4-D ``[B, S, H, D]`` (sequence_dim == 1), even ``D``
 that factors into a power-of-two lane count with an even per-lane width, plain
@@ -246,6 +248,7 @@ if _HAS_FLYDSL:
         CONTIG: bool,
         NEOX: bool,
         HALF: int,
+        SEND_WORLD: int = 1,
     ):
         """Build + cache the @flyc.jit launcher for one config.
 
@@ -269,22 +272,26 @@ if _HAS_FLYDSL:
         # Guarded so the GPT-J build never forms ``% 0``; under NEOX this is the
         # full rotary span and the partner index is ``(c + HALF) % ROT``.
         ROT = 2 * HALF if NEOX else 1
+        # Ulysses send layout [P, T, H/P, D]: peer-major, token-major per peer.
+        SEND_HEADS = H // SEND_WORLD
+        SEND_HD = SEND_HEADS * D
 
         # CONTIG must be in the symbol name: the two addressing variants are
         # separate compilations and would otherwise share an MLIR symbol.  The
-        # same applies to NEOX/HALF, which change the emitted addressing -- a
-        # collision here is a silent miscompile, not an error.
+        # same applies to NEOX/HALF and SEND_WORLD, which change the emitted
+        # addressing -- a collision here is a silent miscompile, not an error.
         _kname = (
             f"fused_qk_norm_rope_H{H}_D{D}_v{VEC}_p{PAIRS_PER_BLOCK}"
-            f"{f'_n{HALF}' if NEOX else ''}{'_c' if CONTIG else '_s'}_flydsl"
+            f"{f'_n{HALF}' if NEOX else ''}{f'_w{SEND_WORLD}' if SEND_WORLD > 1 else ''}"
+            f"{'_c' if CONTIG else '_s'}_flydsl"
         )
 
         @flyc.kernel(name=_kname)
         def kernel(
             q_in: fx.Tensor,  # [T, H, D] bf16, row stride q_rs, (H, D) packed
             k_in: fx.Tensor,  # [T, H, D] bf16, row stride k_rs, (H, D) packed
-            q_out: fx.Tensor,  # [T, H, D] bf16, contiguous
-            k_out: fx.Tensor,  # [T, H, D] bf16, contiguous
+            q_out: fx.Tensor,  # [T, H, D] bf16, or [P, T, H/P, D] when SEND_WORLD > 1
+            k_out: fx.Tensor,  # same layout as q_out
             wq: fx.Tensor,  # [D] bf16 (dummy when not HAS_WQ)
             wk: fx.Tensor,  # [D] bf16 (dummy when not HAS_WK)
             cos: fx.Tensor,  # [cos_rows, D] cos_dt
@@ -293,6 +300,7 @@ if _HAS_FLYDSL:
             tok_off: Int32,  # global token index of this chunk's row 0
             q_rs: Int32,  # q_in row stride in elements (H*D if contiguous)
             k_rs: Int32,  # k_in row stride in elements
+            peer_stride: Int32,  # T*H/P*D, elements per peer chunk (SEND_WORLD > 1 only)
         ):
             fm_fast = FastMathFlags.fast
             # Resolve element types inside the kernel body: T.* needs a live MLIR
@@ -338,6 +346,12 @@ if _HAS_FLYDSL:
                 q_base = gtok * fx.Int32(q_rs) + hoff
                 k_base = gtok * fx.Int32(k_rs) + hoff
                 out_base = gtok * HD + hoff
+            if const_expr(SEND_WORLD > 1):
+                # Store straight into the Ulysses all-to-all send buffer, so the
+                # caller skips the [T, P, H/P, D] -> [P, T, H/P, D] transpose copy.
+                out_base = (
+                    (head // SEND_HEADS) * fx.Int32(peer_stride) + gtok * SEND_HD + (head % SEND_HEADS) * D + lih * VEC
+                )
             row = gtok % fx.Int32(cos_rows)
             coff = row * D + lih * VEC
             woff = lih * VEC
@@ -504,6 +518,7 @@ if _HAS_FLYDSL:
             tok_off: fx.Int32,
             q_rs: fx.Int32,
             k_rs: fx.Int32,
+            peer_stride: fx.Int32,
             n_blocks: fx.Int32,
             stream: fx.Stream = fx.Stream(None),
         ):
@@ -520,6 +535,7 @@ if _HAS_FLYDSL:
                 tok_off,
                 q_rs,
                 k_rs,
+                peer_stride,
             )
             # ``n_blocks`` is a runtime Int32.  Pass it to the grid raw and let
             # ``KernelLauncher.launch`` cast each dim to index (via
@@ -559,6 +575,7 @@ if _HAS_FLYDSL:
         round_after_affine: bool,
         neox: bool,
         half_rot: int,
+        send_world: int = 1,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Body of the launch custom ops below.
 
@@ -602,10 +619,11 @@ if _HAS_FLYDSL:
         # body is not replayed at all, while cudagraph trees materialize the
         # views, and the resulting copy is permanent in the replay.  The models
         # use reduce-overhead, so separate buffers win where it counts.
-        oq = q.new_empty((t_tok, h, d))
+        out_shape = (send_world, t_tok, h // send_world, d) if send_world > 1 else (t_tok, h, d)
+        oq = q.new_empty(out_shape)
         # The kernel writes packed rows, so a strided destination goes through a scratch buffer.
         k_out_packed = k_out is not None and k_out.is_contiguous()
-        ok = k_out.view(t_tok, h, d) if k_out_packed else k.new_empty((t_tok, h, d))
+        ok = k_out.view(t_tok, h, d) if k_out_packed else k.new_empty(out_shape)
 
         # Row strides come off the tensors we actually marshal, so they can
         # never disagree with the data pointer DLPack hands the kernel.
@@ -633,6 +651,7 @@ if _HAS_FLYDSL:
             CONTIG=(q_rs == h * d and k_rs == h * d),
             NEOX=neox,
             HALF=half_rot,
+            SEND_WORLD=send_world,
         )
 
         # kernel always binds wq/wk params; pass a 1-elem dummy when unused (the
@@ -672,10 +691,13 @@ if _HAS_FLYDSL:
                     start,
                     q_rs,
                     k_rs,
+                    t_tok * (h // send_world) * d,
                     n,
                     stream,
                 )
 
+        if send_world > 1:
+            return oq, ok
         if k_out is not None and not k_out_packed:
             k_out.copy_(ok.view(b, s, h, d))
         return oq.view(b, s, h, d), ok.view(b, s, h, d)
@@ -700,6 +722,7 @@ if _HAS_FLYDSL:
         round_after_affine: bool,
         neox: bool,
         half_rot: int,
+        send_world: int = 1,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return _launch(
             q,
@@ -721,6 +744,7 @@ if _HAS_FLYDSL:
             round_after_affine,
             neox,
             half_rot,
+            send_world,
         )
 
     @torch.library.custom_op("xfuser::flydsl_qk_norm_rope_into", mutates_args=("k_out",))
@@ -812,11 +836,16 @@ if _HAS_FLYDSL:
         round_after_affine,
         neox,
         half_rot,
+        send_world=1,
     ):
         # Contiguous, matching the real op exactly -- a fake/real stride
         # mismatch is a silent miscompile under Inductor.  Output shapes do not
         # depend on the neox flags, but the parameter list must still match the
         # real op positionally.
+        if send_world > 1:
+            b, s, h, d = q.shape
+            shape = (send_world, b * s, h // send_world, d)
+            return q.new_empty(shape), k.new_empty(shape)
         return q.new_empty(q.shape), k.new_empty(k.shape)
 
 
@@ -953,6 +982,7 @@ def flydsl_fused_qk_norm_rope(
     rotary_dim: Optional[int] = None,
     neox_tables: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     key_out: Optional[torch.Tensor] = None,
+    send_world: int = 1,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """FlyDSL RMSNorm(q)/RMSNorm(k) + RoPE, fused.
 
@@ -984,14 +1014,25 @@ def flydsl_fused_qk_norm_rope(
 
     With ``key_out`` (``key``'s shape, e.g. a slice of a KV cache) the key result
     is written there and ``key_out`` is returned in its place.
+
+    ``send_world > 1`` (batch 1 only) returns q and k as Ulysses all-to-all send
+    buffers ``[P, S, H/P, D]`` instead of ``[1, S, H, D]``, written directly by
+    the kernel's store.  It cannot be combined with ``key_out``.
     """
     neox = rope_style == "neox"
+    if send_world != 1 and (send_world < 1 or query.dim() != 4 or query.shape[0] != 1 or query.shape[2] % send_world):
+        raise ValueError("send_world > 1 needs [1, S, H, D] inputs with H divisible by send_world")
+    if send_world != 1 and key_out is not None:
+        raise ValueError("key_out cannot be combined with send_world > 1")
 
     def _ref():
         if neox:
             q, k = _reference_neox(query, key, norm_q, norm_k, rotary_emb)
         else:
             q, k = _reference(query, key, norm_q, norm_k, rotary_emb)
+        if send_world > 1:
+            _, s, h, d = query.shape
+            return tuple(x.reshape(s, send_world, h // send_world, d).transpose(0, 1).contiguous() for x in (q, k))
         if key_out is None:
             return q, k
         key_out.copy_(k)
@@ -1122,5 +1163,5 @@ def flydsl_fused_qk_norm_rope(
         half if half is not None else 0,
     )
     if key_out is None:
-        return _flydsl_qk_norm_rope_launch(query, key, *args)
+        return _flydsl_qk_norm_rope_launch(query, key, *args, send_world)
     return _flydsl_qk_norm_rope_into_launch(query, key, key_out, *args), key_out

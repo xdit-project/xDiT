@@ -323,3 +323,60 @@ def test_default_rope_style_is_still_the_interleaved_rotation():
         neox_tables=prepare_neox_rope_tables(cos, sin, HEAD_DIM),
     )
     assert not torch.equal(neox_q, got_q)
+
+
+@pytest.mark.parametrize("rope_style", ["gptj", "neox"])
+@pytest.mark.parametrize("world", [2, 4])
+def test_send_world_fallback_is_the_reference_in_ulysses_send_layout(rope_style, world, envelope_probe):
+    """``send_world`` changes only where q/k land: ``[P, S, H/P, D]``, peer-major."""
+    cos, sin = _rope_tables(64, HEAD_DIM)
+    query, key = _qk(64, 4, HEAD_DIM)
+    norm_q = torch.nn.RMSNorm(HEAD_DIM, eps=1e-5, dtype=torch.bfloat16)
+    norm_k = torch.nn.RMSNorm(HEAD_DIM, eps=1e-5, dtype=torch.bfloat16)
+    kwargs = {}
+    if rope_style == "neox":
+        kwargs = {"rotary_dim": HEAD_DIM, "neox_tables": prepare_neox_rope_tables(cos, sin, HEAD_DIM)}
+
+    with torch.no_grad():
+        want = flydsl_fused_qk_norm_rope(query, key, norm_q, norm_k, (cos, sin), rope_style=rope_style, **kwargs)
+        got = flydsl_fused_qk_norm_rope(
+            query, key, norm_q, norm_k, (cos, sin), rope_style=rope_style, send_world=world, **kwargs
+        )
+
+    for got_x, want_x in zip(got, want):
+        assert got_x.shape == (world, 64, 4 // world, HEAD_DIM)
+        assert got_x.is_contiguous()
+        for peer in range(world):
+            heads = slice(peer * (4 // world), (peer + 1) * (4 // world))
+            assert torch.equal(got_x[peer], want_x[0, :, heads])
+
+
+@pytest.mark.parametrize(
+    ("batch", "heads", "world"),
+    [
+        (1, 4, 3),  # heads not divisible by the Ulysses degree
+        (2, 4, 2),  # the send layout is per sample
+        (1, 4, 0),
+    ],
+)
+def test_send_world_rejects_layouts_it_cannot_express(batch, heads, world):
+    cos, sin = _rope_tables(16, HEAD_DIM)
+    query = torch.zeros(batch, 16, heads, HEAD_DIM, dtype=torch.bfloat16)
+
+    with pytest.raises(ValueError):
+        flydsl_fused_qk_norm_rope(query, query, None, None, (cos, sin), send_world=world)
+
+
+@pytest.mark.skipif(not _module._HAS_FLYDSL, reason="the custom op is only registered with FlyDSL")
+@pytest.mark.parametrize("world", [1, 4])
+def test_fake_op_matches_the_real_output_layout(world):
+    """A fake/real shape mismatch is a silent miscompile under Inductor."""
+    q = torch.empty(1, 64, 8, HEAD_DIM, dtype=torch.bfloat16, device="meta")
+    cos = torch.empty(64, HEAD_DIM, dtype=torch.bfloat16, device="meta")
+
+    out_q, out_k = _module._flydsl_qk_norm_rope_launch_fake(
+        q, q, None, None, cos, cos, 64, 1e-6, 8, 256, 16, 16, True, True, True, True, True, 64, world
+    )
+
+    want = (1, 64, 8, HEAD_DIM) if world == 1 else (world, 64, 8 // world, HEAD_DIM)
+    assert out_q.shape == out_k.shape == want

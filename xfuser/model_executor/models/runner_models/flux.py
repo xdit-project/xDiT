@@ -554,6 +554,12 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         step_cache_config={"fbcache": None},
     )
 
+    def _customize_settings(self, config) -> None:
+        super()._customize_settings(config)
+        # PipeFusion runs FLUX.2-klein in FP16, which AITER_BF16 does not serve.
+        if config.pipefusion_parallel_degree <= 1:
+            prefer_mha_v4(self.settings, "auto")
+
     def _compiles_vae_decoder(self) -> bool:
         """Compile the VAE decoder alongside the transformer and the text encoder."""
         return True

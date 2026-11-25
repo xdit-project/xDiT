@@ -400,6 +400,53 @@ def test_usp_refuses_a_declared_pad_with_joint_tensors_where_the_backend_would_k
         )
 
 
+def _send_layout(x, world):
+    # [1, H, S, D] -> [P, S, H/P, D], chunk p holding the heads rank p owns.
+    _, heads, seq, dim = x.shape
+    return x.transpose(1, 2).reshape(seq, world, heads // world, dim).transpose(0, 1).contiguous()
+
+
+def test_usp_bshd_hands_head_major_tensors_to_usp_when_the_exchange_is_not_plain(monkeypatch):
+    query, key, value = (torch.randn(1, 4, 6, 8) for _ in range(3))
+    seen = {}
+
+    def fake_usp(q, k, v, **kwargs):
+        seen.update(kwargs)
+        return torch.nn.functional.scaled_dot_product_attention(q, k, v)
+
+    monkeypatch.setattr(usp, "_plain_ulysses_exchange", lambda: False)
+    monkeypatch.setattr(usp, "USP", fake_usp)
+    send = [_send_layout(x, 2) for x in (query, key, value)]
+
+    out = usp.USP_bshd(*send, attention_kwargs={"valid_kv_len": 5})
+
+    expected = torch.nn.functional.scaled_dot_product_attention(query, key, value)
+    torch.testing.assert_close(out, expected.transpose(1, 2).flatten(2))
+    assert seen["attention_kwargs"] == {"valid_kv_len": 5} and seen["combine_qkv_a2a"]
+
+
+def test_usp_bshd_trims_the_key_pad_and_returns_token_major_rows(monkeypatch):
+    query, key, value = (torch.randn(1, 4, 6, 8) for _ in range(3))
+    kv_lens = []
+
+    def fake_attention(q, k, v, **kwargs):
+        kv_lens.append(k.shape[2])
+        return torch.nn.functional.scaled_dot_product_attention(q, k, v), None
+
+    monkeypatch.setattr(usp, "_plain_ulysses_exchange", lambda: True)
+    monkeypatch.setattr(usp, "get_ulysses_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(usp, "_sdpa_all_to_all_single", lambda x: x)
+    monkeypatch.setattr(usp, "get_runtime_state", lambda: SimpleNamespace(attention_backend=None))
+    monkeypatch.setattr(usp, "_get_attention_function", lambda backend=None: fake_attention)
+    send = [_send_layout(x, 1) for x in (query, key, value)]
+
+    out = usp.USP_bshd(*send, attention_kwargs={"valid_kv_len": 5})
+
+    expected = torch.nn.functional.scaled_dot_product_attention(query, key[:, :, :5], value[:, :, :5])
+    torch.testing.assert_close(out, expected.transpose(1, 2).flatten(2))
+    assert kv_lens == [5]
+
+
 @pytest.mark.parametrize("route", ["native", "fallback", "override"])
 @pytest.mark.parametrize("additive", [False, True])
 def test_dense_mask_preserves_output_and_backend_selection(route, additive):

@@ -11,6 +11,7 @@ path and measure your workload before changing the transport.
 | `--ulysses_a2a sdma` | Uses SDMA copy engines for eligible input and output exchanges | ROCm, one node, and supported dense attention calls |
 | `--use_fp8_comms` | Quantizes eligible Q/K/V and attention-output exchanges | Model support and a pre-quantization attention backend; current kernels use ROCm/AITER |
 | `--attention_a2a` | Replaces the input exchange with AITER's intranode transport | Supported Wan models, ROCm/AITER, and MORI SHMEM |
+| `--attention_a2a_output mori` | Also replaces the output exchange, sending the attention output already quantized for the output projection | `--attention_a2a`, Wan2.2 T2V on `gfx950`, and a quantized output-projection GEMM profile |
 
 These controls affect communication tensors. [GEMM quantization](quantization.md)
 controls linear-layer compute precision. [Attention backend selection](attention.md)
@@ -83,8 +84,9 @@ output. It does not guarantee lower latency. Compare the same prompts and seeds 
 
 Supported Wan2.2 T2V and Wan2.1/2.2 I2V adapters can use AITER's intranode
 Attention A2A transport for the input Ulysses exchange. The output exchange uses
-the regular collective. `--attention_a2a` and `--use_fp8_comms` are mutually
-exclusive. Choose one transport optimization.
+the regular collective unless the [output hop](#output-hop) is enabled.
+`--attention_a2a` and `--use_fp8_comms` are mutually exclusive. Choose one
+transport optimization.
 
 ```bash
 xdit --model Wan2.2-T2V --prompt "A motorcycle on a coastal highway" \
@@ -122,6 +124,34 @@ Overrides are `preprocess`, `transport`, `epilogue`, and `none`.
 The `int8-e4m3` profile rejects `transport` rotation; use `auto`/`none` for its
 native recipe or `preprocess` for explicit rotation. The runner rejects unsupported
 Torch/AITER interfaces. Set `--attention_a2a none` to use the default transport.
+
+### Output hop
+
+`--attention_a2a_output mori` also replaces the output Ulysses exchange. xDiT
+quantizes the attention output directly into the activation format of the
+following output projection and sends it with AITER's intranode transport, so the
+projection skips its own activation quantization:
+
+```bash
+xdit --model Wan2.2-T2V --prompt "A motorcycle on a coastal highway" \
+    --ulysses_degree 8 --attention_backend aiter_fp8 \
+    --attention_a2a auto --attention_a2a_output mori \
+    --gemm_quantization fp8 --use_torch_compile
+```
+
+Each block transports the format its output projection consumes:
+
+| Output projection | Transported activation |
+| --- | --- |
+| TorchAO FP8 (`fp8`) | `e4m3_external_scale`: FP8 with one descale per destination rank, derived exactly as TorchAO's dynamic per-tensor activation quantization would |
+| MXFP4 (`fp4`) | `mxfp4`: E2M1 with E8M0 per-1x32 scales in the A4W4 layout |
+| MXFP6 (`fp6`) and A6W4 (`a6w4`) | `mxfp6`: packed values and scales in the A6W6/A6W4 layout |
+
+The output hop requires an enabled `--attention_a2a` profile, `gfx950`, and a
+`--gemm_quantization` profile built from `fp8`, `fp4`, `fp6`, or `a6w4`,
+including the `low=fp4` pairs and `--use_hybrid_gemm_schedule`. A projection that
+consumes BF16 is an error rather than a silent fallback to the regular
+collective. Wan2.2 T2V is currently the only runner that supports the output hop.
 
 See the [CLI reference](cli.md#attention-backends-and-communication) for syntax,
 [FP8 communication implementation](https://github.com/xdit-project/xDiT/blob/main/xfuser/core/distributed/fp8_comms.py),

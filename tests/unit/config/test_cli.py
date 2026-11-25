@@ -3,7 +3,10 @@ from types import SimpleNamespace
 import pytest
 
 from xfuser import cli
-from xfuser.cli import get_nproc_from_args
+
+
+def _nproc(args):
+    return cli.get_nproc(cli._launcher_parser().parse_args(["--model", "m", *args]))
 
 
 def test_text_encoder_tp_reuses_model_ranks():
@@ -14,18 +17,18 @@ def test_text_encoder_tp_reuses_model_ranks():
         "8",
     ]
 
-    assert get_nproc_from_args(args) == 8
+    assert _nproc(args) == 8
 
 
 @pytest.mark.parametrize("cfg_flag", ["--use_cfg_parallel", "--use-cfg-parallel"])
 def test_cfg_parallel_doubles_the_processes_in_either_spelling(cfg_flag):
-    assert get_nproc_from_args(["--model", "m", "--ulysses-degree", "2", cfg_flag]) == 4
+    assert _nproc(["--ulysses-degree", "2", cfg_flag]) == 4
 
 
 def test_degrees_multiply_across_spellings_and_value_forms():
     args = ["--ulysses_degree=2", "--ring-degree", "2", "--data-parallel-degree=2", "--prompt", "a cat"]
 
-    assert get_nproc_from_args(args) == 8
+    assert _nproc(args) == 8
 
 
 def _launch(monkeypatch, args):
@@ -92,3 +95,60 @@ def test_a_malformed_degree_is_reported_as_an_xdit_usage_error(monkeypatch, caps
     assert launched == []
     assert exit_status.code == 2
     assert "xdit: error: argument --ulysses_degree" in capsys.readouterr().err
+
+
+def test_help_lists_launcher_and_runner_options_without_starting_torchrun(monkeypatch, capsys):
+    launched, exit_status = _launch(monkeypatch, ["--help"])
+
+    assert launched == []
+    assert exit_status.code == 0
+    help_text = capsys.readouterr().out
+    assert help_text.startswith("usage: xdit")
+    assert "launcher options" in help_text
+    assert "--nproc_per_node" in help_text
+    assert "--model" in help_text
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["--ulysses_degree", "2"], "the following arguments are required: --model"),
+        (["--model", "m", "--not_an_option"], "unrecognized arguments: --not_an_option"),
+        (["--model", "m", "--vae_dtype", "fp16"], "argument --vae_dtype: invalid choice"),
+    ],
+    ids=["missing_model", "unknown_option", "invalid_choice"],
+)
+def test_a_runner_argument_error_stops_before_torchrun_starts(monkeypatch, capsys, args, message):
+    launched, exit_status = _launch(monkeypatch, args)
+
+    assert launched == []
+    assert exit_status.code == 2
+    assert message in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("args", "flag"),
+    [
+        (["--nnode", "2", "--node_rank", "1"], "--nnodes"),
+        (["--nnode", "1"], "--nnodes"),
+        (["--nproc", "4"], "--nproc_per_node"),
+        (["--master_p=29501"], "--master_port"),
+        (["--node-r", "1"], "--node_rank"),
+    ],
+    ids=["nnodes", "nnodes_default_value", "nproc_per_node", "master_port_with_equals", "node_rank_with_dashes"],
+)
+def test_a_shortened_launcher_flag_stops_before_torchrun_starts(monkeypatch, capsys, args, flag):
+    launched, exit_status = _launch(monkeypatch, ["--model", "m", "--ulysses_degree", "2", *args])
+
+    assert launched == []
+    assert exit_status.code == 2
+    assert f"xdit: error: write {flag} in full, not {args[0]}" in capsys.readouterr().err
+
+
+def test_a_shortened_degree_flag_sets_the_processes_as_in_the_runner(monkeypatch):
+    launched, exit_status = _launch(monkeypatch, ["--model", "m", "--ring", "2", "--ulysses_d=2"])
+
+    assert exit_status.code == 0
+    (cmd,) = launched
+    assert "--nproc_per_node=4" in cmd
+    assert cmd[cmd.index("xfuser.runner") + 1 :] == ["--model", "m", "--ring", "2", "--ulysses_d=2"]

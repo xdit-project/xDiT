@@ -51,6 +51,21 @@ def test_launcher_loads_without_the_runtime():
     assert report["runtime_modules"] == []
 
 
+def test_launcher_help_loads_without_torch_and_the_runtime():
+    result, report = _run(
+        """
+        import xfuser.cli
+        try:
+            xfuser.cli.main(["--help"])
+        except SystemExit as exit:
+            report(exit.code)
+        """
+    )
+
+    assert report == {"exit_code": 0, "runtime_modules": []}
+    assert "usage: xdit" in result.stdout
+
+
 def test_runner_parser_builds_without_the_runtime():
     _, report = _run(
         """

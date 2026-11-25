@@ -40,29 +40,31 @@ def _spellings(flag: str) -> List[str]:
     return [flag, "--" + flag[2:].replace("_", "-")]
 
 
-def _degree_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="xdit", add_help=False, allow_abbrev=False)
-    for flag in DEGREE_ARGS:
-        parser.add_argument(*_spellings(flag), dest=flag[2:], type=int, default=1)
-    parser.add_argument(*_spellings("--use_cfg_parallel"), dest="use_cfg_parallel", action="store_true")
-    return parser
+# Keep this help text in step with get_nproc and get_nproc_per_node.
+_NPROC_PER_NODE_HELP = (
+    "Processes to start on each node. Default: the product of the parallel degrees "
+    "(doubled with --use_cfg_parallel), divided by --nnodes."
+)
 
 
-def get_nproc_from_args(args: List[str]) -> int:
+def get_nproc(parsed: argparse.Namespace) -> int:
     """
-    Infer the total number of processes from the runner's parallel degrees.
+    The total number of processes that the runner's parallel degrees need.
+
+    Read the degrees from the namespace of _launcher_parser(). Then the
+    launcher reads each flag as the runner does, also in shortened form.
     """
-    parsed, _ = _degree_parser().parse_known_args(args)
     degrees = [getattr(parsed, flag[2:]) for flag in DEGREE_ARGS]
     cfg_degree = 2 if parsed.use_cfg_parallel else 1
     return math.prod(degrees) * cfg_degree
 
 
-def get_nproc_per_node(args: List[str], nnodes: str) -> int:
+def get_nproc_per_node(parsed: argparse.Namespace) -> int:
     """
     The processes each node starts so that all nodes together run the
     product of the parallel degrees.
     """
+    nnodes = parsed.nnodes
     try:
         num_nodes = int(nnodes)
     except ValueError:
@@ -71,7 +73,7 @@ def get_nproc_per_node(args: List[str], nnodes: str) -> int:
         ) from None
     if num_nodes < 1:
         raise ValueError(f"--nnodes must be at least 1, got {nnodes}.")
-    total = get_nproc_from_args(args)
+    total = get_nproc(parsed)
     if total % num_nodes != 0:
         raise ValueError(
             f"The parallel degrees need {total} processes, which cannot be split evenly across --nnodes={num_nodes}."
@@ -79,9 +81,42 @@ def get_nproc_per_node(args: List[str], nnodes: str) -> int:
     return total // num_nodes
 
 
+_LAUNCHER_HELP = {
+    "--nproc_per_node": _NPROC_PER_NODE_HELP,
+    "--nnodes": "Number of nodes. Default: %(default)s.",
+    "--node_rank": "Rank of this node. Default: %(default)s.",
+    "--master_addr": "Address of the rank 0 node. Default: %(default)s.",
+    "--master_port": "Port of the rank 0 node. Default: %(default)s.",
+}
+
+
+def _launcher_parser() -> argparse.ArgumentParser:
+    """The runner's parser, with the torchrun options that xdit takes.
+
+    The launcher uses it to show --help and to check the arguments before it
+    starts torchrun. The parser loads without torch and the runtime.
+    """
+    from xfuser.config.args import FlexibleArgumentParser, xFuserArgs
+
+    parser = FlexibleArgumentParser(
+        prog="xdit",
+        description="Run xDiT inference. xdit starts torchrun with the processes that the parallel "
+        "degrees need, and gives the other options to xfuser.runner.",
+    )
+    launcher = parser.add_argument_group(
+        "launcher options", "Options for torchrun. xdit does not give them to the runner."
+    )
+    for flag, help_text in _LAUNCHER_HELP.items():
+        launcher.add_argument(flag, default=TORCHRUN_ARGS[flag], help=help_text)
+    return xFuserArgs.add_runner_args(parser)
+
+
 def extract_torchrun_args(args: List[str]) -> Tuple[dict, List[str]]:
     """
     Extract torchrun-specific arguments from the command line args.
+
+    The scan finds only the full spellings of the launcher flags. main()
+    stops on a shortened launcher flag, which argparse accepts.
 
     Returns:
         Tuple of (torchrun_args dict, remaining runner args)
@@ -106,6 +141,32 @@ def extract_torchrun_args(args: List[str]) -> Tuple[dict, List[str]]:
     return torchrun_values, runner_args
 
 
+def _shortened_launcher_flag(parser: argparse.ArgumentParser, runner_args: List[str]) -> Optional[Tuple[str, str]]:
+    """
+    Find a runner argument that argparse reads as a shortened launcher flag.
+
+    argparse accepts a unique prefix of an option, for example --nnode for
+    --nnodes. extract_torchrun_args does not find it, so torchrun would use
+    the default value and each runner would fail on the flag.
+
+    Returns:
+        The argument and the launcher flag it shortens, or None.
+    """
+    for arg in runner_args:
+        if arg == "--":
+            break
+        if not arg.startswith("--"):
+            continue
+        # Normalize the name as FlexibleArgumentParser does.
+        key = "--" + arg.partition("=")[0][2:].replace("-", "_")
+        if key in parser._option_string_actions:
+            continue
+        for flag in TORCHRUN_ARGS:
+            if flag.startswith(key):
+                return arg, flag
+    return None
+
+
 def main(args: Optional[List[str]] = None) -> None:
     """
     Main entry point for the xdit CLI.
@@ -115,13 +176,22 @@ def main(args: Optional[List[str]] = None) -> None:
     if args is None:
         args = sys.argv[1:]
 
+    # Show --help and report argument errors here, before torchrun starts:
+    # one message, and no torch import in torchrun and in each runner process.
+    parser = _launcher_parser()
+    parsed = parser.parse_args(args)
+
     # Extract torchrun args and get runner args
     torchrun_values, runner_args = extract_torchrun_args(args)
+    shortened = _shortened_launcher_flag(parser, runner_args)
+    if shortened is not None:
+        arg, flag = shortened
+        parser.error(f"write {flag} in full, not {arg}; xdit does not accept a shortened launcher option")
 
     # Infer nproc if not explicitly provided
     if torchrun_values["--nproc_per_node"] is None:
         try:
-            nproc_per_node = get_nproc_per_node(runner_args, torchrun_values["--nnodes"])
+            nproc_per_node = get_nproc_per_node(parsed)
         except ValueError as error:
             sys.exit(f"xdit: {error}")
         torchrun_values["--nproc_per_node"] = str(nproc_per_node)

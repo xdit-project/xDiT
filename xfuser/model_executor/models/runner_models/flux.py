@@ -57,7 +57,7 @@ class xFuserFluxModel(xFuserModel):
         supports_lora=True,
         profile_capture_phase=True,
     )
-    features = ModelFeatures(shards_modulation=True)
+    features = ModelFeatures(shards_modulation=True, transposes_linears=True)
     default_input_values = DefaultInputValues(
         height=1024,
         width=1024,
@@ -329,6 +329,8 @@ class xFuserFluxKontextModel(xFuserModel):
 class xFuserFlux2Model(xFuserModel):
     # From the registered checkpoint's transformer config.
     attention_heads = 48
+
+    features = ModelFeatures(transposes_linears=True)
 
     # Flux2Pipeline and the transformer symbols the wrapper needs, including the
     # PipeFusion pipeline, all landed in 0.36.

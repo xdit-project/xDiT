@@ -28,6 +28,7 @@ from xfuser.core.distributed.parallel_state import (
     destroy_distributed_environment,
     destroy_model_parallel,
 )
+from xfuser.model_executor.layers.transposed_linear import transpose_plain_linears
 
 _HEADS = 6
 _HEAD_DIM = 16
@@ -349,7 +350,11 @@ def _parity_worker(rank, world_size, init_method, model, ulysses, ring, tokens):
     engine_config = _init(rank, world_size, init_method, ulysses, ring)
     try:
         device = torch.device("cuda", rank)
+        model, _, transposed = model.partition("+")
         reference, parallel, reference_inputs, parallel_inputs = _build(model, tokens, device, engine_config, ring)
+        if transposed:
+            # As the runner does on gfx942 once the weights are placed.
+            assert transpose_plain_linears(parallel) > 0
         checked = []
 
         def check_padding(module, args, output):
@@ -423,10 +428,12 @@ _PARITY_CASES = [
     pytest.param("flux2", 3, (16, 9), id="flux2-padded-u3"),
     pytest.param("flux2", 2, (16, 7), id="flux2-replicated-text"),
     pytest.param("flux2", 3, (16, 8), id="flux2-padded-replicated-text-u3"),
+    pytest.param("flux2+transposed", 3, (16, 8), id="flux2-transposed-padded-replicated-text-u3"),
     # Z-Image pads every stream to a multiple of 32 tokens, so only degrees
     # that do not divide 32 need sequence-parallel padding.
     pytest.param("z_image", 2, ((4, 4), 10), id="z_image-divisible"),
     pytest.param("z_image", 3, ((4, 4), 10), id="z_image-padded-u3"),
+    pytest.param("z_image+transposed", 3, ((4, 4), 10), id="z_image-transposed-padded-u3"),
     # Cosmos3: ((frames, height, width) gen tokens, und tokens). The und tokens
     # are replicated on every rank. One KV head per query head: the SDPA kernels
     # here are called without `enable_gqa`.

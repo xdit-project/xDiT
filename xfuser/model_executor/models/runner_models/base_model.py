@@ -33,6 +33,7 @@ from xfuser.core.utils.runner_utils import (
 )
 from xfuser.model_executor.models.runner_models.image_postprocess import enable_fast_pil_postprocess
 from xfuser.model_executor.layers import usp_sdma
+from xfuser.model_executor.layers.transposed_linear import prefers_untransposed_weights, transpose_plain_linears
 from xfuser.model_executor.pipelines.base_pipeline import xFuserPipelineBaseWrapper
 from xfuser.model_executor.models.runner_models.vae_manager import (
     VAEManager,
@@ -63,7 +64,7 @@ from xfuser.core.distributed import (
 )
 from xfuser.core.attention import registry as attention_registry
 from xfuser.core.attention.backends.aiter_mha_v4.spec import GFX950
-from xfuser.core.attention.requirements import PARAM
+from xfuser.core.attention.requirements import PARAM, device_arch
 from xfuser.core.attention.spec import AttentionBackendType, Sparsity
 from xfuser.core.distributed.fp8_comms import setup_fp8_comms, validate_fp8_comms_config
 from xfuser.core.distributed.attention_schedule import (
@@ -261,6 +262,8 @@ class ModelFeatures:
 
     # The transformer wrapper has `shard_modulation()` and gains from it (see `_shard_modulation`).
     shards_modulation: bool = False
+    # The transformer gains from linear weights stored transposed where the GEMM prefers it (see `_transpose_linears`).
+    transposes_linears: bool = False
 
 
 @dataclass(frozen=True)
@@ -1080,6 +1083,17 @@ class xFuserModel(abc.ABC):
     def _get_compiled_pipe_components(self) -> List[str]:
         return ["transformer"]
 
+    def _weights_whole_and_resident(self) -> bool:
+        """Whether each rank holds whole weights on its device: not sharded (FSDP, memory-efficient sharding) or offloaded."""
+        config = self.config
+        return not (
+            config.fully_shard_degree > 1
+            or config.memory_efficient_sharding
+            or config.enable_group_cpu_offload
+            or config.enable_sequential_cpu_offload
+            or config.enable_model_cpu_offload
+        )
+
     def _shard_modulation(self) -> None:
         """Share the transformer's timestep modulation out over the sequence-parallel ranks.
 
@@ -1094,11 +1108,7 @@ class xFuserModel(abc.ABC):
         if (
             size <= 1
             or config.pipefusion_parallel_degree > 1
-            or config.fully_shard_degree > 1
-            or config.memory_efficient_sharding
-            or config.enable_group_cpu_offload
-            or config.enable_sequential_cpu_offload
-            or config.enable_model_cpu_offload
+            or not self._weights_whole_and_resident()
             or config.cache_method
             or PACKAGES_CHECKER._on_rdna4()
         ):
@@ -1113,6 +1123,24 @@ class xFuserModel(abc.ABC):
                 f"each holds {share:.2f} GiB of its weights."
             )
 
+    def _transpose_linears(self) -> None:
+        """Store the transformer's plain linear weights transposed, where the GEMM prefers it.
+
+        For runners that set `transposes_linears` in their features, once the weights are placed
+        and fused. On some GPUs (`prefers_untransposed_weights`) the GEMM behind a linear is slower
+        when its weight is a transposed operand, which is what `F.linear` hands it. Stays off where
+        the weights are sharded or offloaded. A LoRA is fused into the weights at load, and a
+        module that still wraps one is not a plain linear, so it keeps its layout.
+        """
+        if not prefers_untransposed_weights() or not self._weights_whole_and_resident():
+            return
+        count = transpose_plain_linears(self.pipe.transformer)
+        if count:
+            # Hand the weights' old copies back to the device.
+            torch.cuda.empty_cache()
+            arch = device_arch().split(":")[0]
+            log(f"{type(self).__name__}: stored the weights of {count} linears transposed for {arch}.")
+
     def _fuses_projections(self) -> bool:
         """Whether the compiled components compute the projections of one input with one fused GEMM.
 
@@ -1126,14 +1154,7 @@ class xFuserModel(abc.ABC):
 
     def _fuse_projections(self) -> None:
         """Fuse the same-input projections of the compiled components, unless their weights are sharded or offloaded."""
-        config = self.config
-        if (
-            config.fully_shard_degree > 1
-            or config.memory_efficient_sharding
-            or config.enable_group_cpu_offload
-            or config.enable_sequential_cpu_offload
-            or config.enable_model_cpu_offload
-        ):
+        if not self._weights_whole_and_resident():
             return
         fused: dict[str, int] = {}
         for name in self._get_compiled_pipe_components():
@@ -1736,6 +1757,9 @@ class xFuserModel(abc.ABC):
 
         if self.features.shards_modulation:
             self._shard_modulation()
+
+        if self.features.transposes_linears:
+            self._transpose_linears()
 
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
         return 1

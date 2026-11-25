@@ -384,6 +384,8 @@ class xFuserQwenImage21Model(xFuserModel):
     # From the registered checkpoint's transformer config.
     attention_heads = 32
 
+    features = ModelFeatures(transposes_linears=True)
+
     min_diffusers_version = "0.41.0"
     attention_head_dims = frozenset({128})
     # Measured on the base checkpoint only; Turbo keeps the global default.

@@ -14,6 +14,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
     ModelCapabilities,
+    ModelFeatures,
     ModelSettings,
     prefer_mha_v4,
 )
@@ -138,6 +139,8 @@ class xFuserZImageModel(_ZImageCompileMixin, xFuserModel):
     attention_heads = 30
     # The attention processor pads heads before the Ulysses exchange.
     supports_ulysses_head_padding = True
+
+    features = ModelFeatures(transposes_linears=True)
 
     min_diffusers_version = "0.36.0"
 

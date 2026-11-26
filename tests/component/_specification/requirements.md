@@ -276,7 +276,7 @@ an attribute, and an empty name for a bare tensor. Nested containers flatten to 
 
 ### Components, paths and calls
 
-**CP10.** The harness tests only components mentioned in an explicit list of component path strings. Each path string defines a component to test and is the path from the runner model object to the callable component or a method. Only the listed components are captured. A listed component must run at least once during pipeline run. A callable component/element is a Python object that can be called, or a PyTorch object with a `forward()` method (since it behaves like a callable in a forward pass of a model). For example, every `nn.Module` is callable, also one that the run never calls.
+**CP10.** The harness tests only components mentioned in an explicit list of component path strings. Each path string defines a component to test and is the path from the runner model object to the callable component or a method. Only the listed components are captured. A listed component must run at least once during pipeline run. A callable component/element is a Python object `obj` such that `True == callable(obj)`. Note that a non-callable PyTorch object with a `forward()` method isn't considered callable even if PyTorch might use it in a forward pass. Use the path that includes `.forward` as the last element to hook the method itself.
 
 **CP20.** The list is known before the run. The harness makes the test cases from the list only (without a
 model) and list's items (component paths) serve as test case identifiers, so there is an exact 1-to-1 relationship between a component path and a test case.
@@ -455,7 +455,7 @@ In version 1 no cross-rank synchronization about which cases to replay is perfor
 
 *Rationale for the absence of replay synchronization:* Synchronization adds considerable complexity to the code. Instead we assume that each component runs on every rank the same number of calls, and each of the calls is handled by the rank successfully, so ordered "replay lists" are identical across all ranks, therefore letting each rank to use its private "replay list" is harmless. The user is responsible to ensure the component they select meets the assumptions.
 
-However, to alleviate debugging, all ranks compare their "replay lists" with one `all_gather_object()` call. Cases whose lists differ get `status=CASE_CALLS_MISMATCH case=<case_id>` on all ranks, and are dropped on all ranks. B runs the same check on its list of A's calls.
+However, to alleviate debugging, all ranks compare their "replay lists" with one `all_gather_object()` call. Cases whose lists differ get `status=CASE_CALLS_MISMATCH case=<case_id>` on all ranks, and are dropped on all ranks. B runs the same check on its list of A's calls. It's an accepted limitation of version 1 that the same list of calls still doesn't guarantee the same code executing in the calls.
 
 **RL90.** **phase=replay** Two kind of replays are needed:
 - both instance A and B should replay each call for fidelity check IA40-IA60, also when the fidelity check override flag is set (IA50);

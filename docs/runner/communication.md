@@ -23,6 +23,11 @@ On ROCm, `--ulysses_a2a sdma` uses GPU copy engines for both Ulysses exchanges.
 It can overlap communication with attention and Q/K/V projections. Support was
 validated upstream on `gfx942` and `gfx950`; measure latency on your workload.
 
+> [!WARNING]
+> FLUX.3-klein-base defaults to `--ulysses_a2a sdma` on `gfx950` (one node, `--ulysses_degree` above 1,
+> no `--attention_a2a`). Its images are not bit-identical to those of the default all-to-all. Pass
+> `--ulysses_a2a default` when results must match NCCL/RCCL runs or other GPUs.
+
 ```bash
 xdit --model flux-3-image-klein-base --prompt "A lighthouse on a rocky coast" \
     --use_cfg_parallel --ulysses_degree 4 --attention_backend aiter_bf16 \

@@ -16,6 +16,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     ModelFeatures,
     ModelSettings,
     prefer_mha_v4,
+    prefer_sdma_ulysses_a2a,
     register_model,
     xFuserModel,
 )
@@ -313,6 +314,7 @@ class xFuserFlux3KleinBaseModel(_Flux3Model):
     def _customize_settings(self, config) -> None:
         super()._customize_settings(config)
         prefer_mha_v4(self.settings, "auto")
+        prefer_sdma_ulysses_a2a(self.settings)
 
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
         # Without CFG parallel the guider calls the transformer once per branch; it turns

@@ -324,6 +324,8 @@ class ModelSettings:
     default_attention_backend: Optional[str] = None
     # --mha_v4_kv_splits that comes with default_attention_backend, unless the CLI sets a split count.
     default_mha_v4_kv_splits: Optional[Union[str, int]] = None
+    # --ulysses_a2a used when the CLI omits it. Leave None to keep the default all-to-all.
+    default_ulysses_a2a: Optional[str] = None
     resolution_divisor: Optional[int] = None
     transformer_attr_names: List[str] = field(default_factory=lambda: ["transformer"])
 
@@ -341,6 +343,12 @@ def prefer_mha_v4(settings: ModelSettings, kv_splits: Union[str, int]) -> None:
     ):
         settings.default_attention_backend = AttentionBackendType.AITER_BF16.name
         settings.default_mha_v4_kv_splits = kv_splits
+
+
+def prefer_sdma_ulysses_a2a(settings: ModelSettings) -> None:
+    """Default the Ulysses all-to-all to SDMA on gfx950. Outputs are not bit-identical to the default's."""
+    if GFX950.satisfied():
+        settings.default_ulysses_a2a = "sdma"
 
 
 class DiffusionOutput:
@@ -454,6 +462,7 @@ class xFuserModel(abc.ABC):
         self._customize_settings(config)
         self._vae_manager = VAEManager(config, self.capabilities, self.settings)
         self._apply_default_attention_backend(config)
+        self._apply_default_ulysses_a2a(config)
         self._validate_config(config)
         self._update_model_settings(config)
         self.config = config
@@ -801,6 +810,23 @@ class xFuserModel(abc.ABC):
         if splits is not None and config.mha_v4_kv_splits is None:
             config.mha_v4_kv_splits = splits
             log(f"--mha_v4_kv_splits not set, using {self.settings.model_name} default: {splits}")
+
+    def _apply_default_ulysses_a2a(self, config: xFuserArgs) -> None:
+        """Fill in the model's preferred Ulysses all-to-all when the CLI left it unset."""
+        default = self.settings.default_ulysses_a2a
+        if default is None or config.ulysses_a2a is not None:
+            return
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        # SDMA moves data between the GPUs of one node and is exclusive with --attention_a2a.
+        one_node = int(os.environ.get("LOCAL_WORLD_SIZE", world_size)) >= world_size
+        if config.ulysses_degree <= 1 or config.attention_a2a != "none" or not one_node:
+            return
+        config.ulysses_a2a = default
+        warn_once(
+            logger,
+            f"--ulysses_a2a not set, using {self.settings.model_name} default: {default}. Outputs are not "
+            "bit-identical to --ulysses_a2a default (NCCL/RCCL); pass it for reproducible results.",
+        )
 
     def _validate_sparse_attention_families(self, config: xFuserArgs) -> None:
         """Refuse a sparse backend the model has not opted into, wherever the run selects it --

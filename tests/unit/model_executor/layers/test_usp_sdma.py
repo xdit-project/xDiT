@@ -170,7 +170,7 @@ def test_runner_options_select_the_transport():
         args.ulysses_sdma_group_streams,
         args.ulysses_sdma_overlap_qkv,
     ) == ("sdma", 3, True, False)
-    assert parser.parse_args(["--model", "Wan2.2-T2V"]).ulysses_a2a == "default"
+    assert parser.parse_args(["--model", "Wan2.2-T2V"]).ulysses_a2a is None
 
 
 @pytest.mark.parametrize(("mode", "head_groups"), [("rccl", 1), ("sdma", 0)])

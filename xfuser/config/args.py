@@ -321,10 +321,9 @@ class xFuserArgs:
     attention_a2a: str = "none"
     attention_a2a_hadamard: str = "auto"
     attention_a2a_output: str = "none"
-    # Ulysses all-to-all transport (xfuser/model_executor/layers/usp_sdma.py); None when not given, so a
-    # model can pick its own ("default" otherwise). The head-group count is None when not given (2 with
-    # --ulysses_a2a sdma), so an explicit one is checked.
-    ulysses_a2a: Optional[str] = None
+    # Ulysses all-to-all transport (xfuser/model_executor/layers/usp_sdma.py). The head-group
+    # count is None when not given (2 with --ulysses_a2a sdma), so an explicit one is checked.
+    ulysses_a2a: str = "default"
     ulysses_sdma_head_groups: Optional[int] = None
     ulysses_sdma_group_streams: bool = False
     ulysses_sdma_overlap_qkv: bool = False
@@ -487,7 +486,7 @@ class xFuserArgs:
             raise ValueError("--cache_method pipefusion requires --pipefusion_parallel_degree greater than 1.")
 
     def _validate_ulysses_a2a(self) -> None:
-        if self.ulysses_a2a not in (None, "default", "sdma"):
+        if self.ulysses_a2a not in ("default", "sdma"):
             raise ValueError(f"--ulysses_a2a must be default or sdma; got {self.ulysses_a2a!r}")
         tuning = (
             self.ulysses_sdma_head_groups is not None
@@ -951,10 +950,9 @@ class xFuserArgs:
         runtime_group.add_argument(
             "--ulysses_a2a",
             choices=["default", "sdma"],
-            default=None,
+            default="default",
             help="Ulysses all-to-all transport: default (the process group's collective, NCCL or RCCL) "
-            "or sdma (the GPUs' SDMA copy engines; ROCm, one node). When omitted, default, unless the "
-            "model prefers sdma (FLUX.3-klein-base on gfx950, whose outputs then differ from default's).",
+            "or sdma (the GPUs' SDMA copy engines; ROCm, one node).",
         )
         runtime_group.add_argument(
             "--ulysses_sdma_head_groups",
@@ -1376,10 +1374,9 @@ class xFuserArgs:
         parser.add_argument(
             "--ulysses_a2a",
             choices=["default", "sdma"],
-            default=None,
+            default="default",
             help="Ulysses all-to-all transport: default (the process group's collective, NCCL or RCCL) "
-            "or sdma (the GPUs' SDMA copy engines; ROCm, one node). When omitted, default, unless the "
-            "model prefers sdma (FLUX.3-klein-base on gfx950, whose outputs then differ from default's).",
+            "or sdma (the GPUs' SDMA copy engines; ROCm, one node).",
         )
         parser.add_argument(
             "--ulysses_sdma_head_groups",
@@ -1990,7 +1987,7 @@ class xFuserArgs:
                 output=self.attention_a2a_output,
             ),
             ulysses_a2a=UlyssesA2AConfig(
-                mode=self.ulysses_a2a or "default",
+                mode=self.ulysses_a2a,
                 head_groups=self.ulysses_sdma_head_groups or 2,
                 group_streams=self.ulysses_sdma_group_streams,
                 overlap_qkv=self.ulysses_sdma_overlap_qkv,

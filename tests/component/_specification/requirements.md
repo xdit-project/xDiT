@@ -26,7 +26,7 @@ VAE decode method, and one specific call of a transformer.
 
 **UC6. Tune tolerances over time.** A test reports its metrics in each run. The metrics history shows how the deviations change while the implementation changes.
 
-**UC7. Run the tests again after failures.** By default, each run starts from the beginning and runs A and B again. On the user's request, a new run compares the stored data again, for example with new tolerances, and does not run A and B again. Also with such a request, after all cases pass, the next run starts from the beginning automatically. This behavior, however, can be modified if test functions executions on the same data without rerunning A and B is needed.
+**UC7. Run the tests again after failures.** By default, each run starts from the beginning and runs A and B again. On the user's request, a new run compares the stored data again, for example with new tolerances, and does not run A and B again. Also with such a request, after all cases pass, the next run starts from the beginning automatically. This behavior, however, can be modified if test functions executions on the same data without rerunning A and B is needed. The user is responsible for ensuring the dumped data from a fresh run is consistent with a rerun request (i.e. the fresh run executed successfully till the end, no relevant code or configuration affecting a fresh run has changed between reruns).
 
 **UC8. Select single cases.** The user selects cases with pytest, for example with `-k` or a node ID. 
 
@@ -45,9 +45,8 @@ other determinism expectations.
 
 ### High-level requirements
 
-**HL10.** The harness tests individual components of xDiT diffusion models, for example a VAE, a transformer, a
-transformer block, an attention module, a text encoder, or a method such as the VAE decode. It uses exactly
-the configuration and the weights that the xDiT runner uses for a model configuration.
+**HL10.** The harness tests individual components of xDiT diffusion models, for example a VAE, a transformer, a transformer block, an attention module, a text encoder, or a method such as the VAE decode. It uses exactly the configuration and the weights that the xDiT runner uses for a model configuration.
+Version 1 of the harness only supports components that run on all ranks simultaneously. Rank-specific components support is the future work.
 
 **HL15.** Support for pytest `-k` argument is limited. The user is responsible to not request a rerun (`--xdit_allow_rerun`, PI20) after they change `-k` value (including removing it) or node ID to a selection that wasn't covered by previous fresh run. The harness doesn't track scope of different runs and doesn't warn if certain promised behavior may not work correctly due to an incompatible value of `-k` in a new run/rerun.
 
@@ -99,7 +98,7 @@ reference data (B).
 **HLS10.** A component path in the list of components to test for a configuration (TD10) identifies a single component, for which a test case is created, and the component must be executed (called by the model) at least once during a model/pipeline execution. Statues are written in CAPITAL_LETTERS and carry information necessary for proper conversion of behavior observed during an attempt to run instances into pytest outcomes, while giving a user enough information for debugging.
 
 **HLS15.** Statuses are the nodes of exactly one directed acyclic graph. The graph describes how the knowledge about a call, a case, or an instance grows. HLS17 is the normative list of the statuses and of the permitted transitions. A status has one of three scopes:
-1. a component call on a rank: ABOUT_TO_START, DUMPED, UNSUPPORTED, PRE_FIDELITY, FIDELITY_PASSED, FIDELITY_FAILED, PRE_REPLAY, REPLAYED, and CRASHED or HANGED if the instance ended while the call was open (HLS16);
+1. a component call on a rank: ABOUT_TO_START, DUMPED, UNSUPPORTED, CALL_EXCEPTION, PRE_FIDELITY, FIDELITY_PASSED, FIDELITY_FAILED, FIDELITY_READ_FAILED, FIDELITY_EXCEPTION, PRE_REPLAY, REPLAY_READ_FAILED, REPLAY_CAST_FAILED, REPLAY_EXCEPTION, REPLAY_WRITE_FAILED, REPLAYED, and CRASHED or HANGED if the instance ended while the call was open (HLS16);
 2. a case on a rank: UNRESOLVABLE_PATH, NOT_REACHED, CASE_CALLS_MISMATCH, FAILED_TO_START, UNSUPPORTED;
 3. an instance, as one rank log shows it: UNSUPPORTED, CRASHED, HANGED. An instance-level status says only that the event happened. It never attributes the event to a case or a call, and it never gives a pytest outcome by itself. It is the reason for the case statuses that the launcher derives from it (TD120).
 
@@ -107,31 +106,40 @@ reference data (B).
 
 **HLS16.** The last status of a call in a rank log puts the call into exactly one class:
 1. *open*: ABOUT_TO_START, PRE_FIDELITY, PRE_REPLAY. The component can be executing.
-2. *settled*: no step of the call is due. In A and in B: UNSUPPORTED, CRASHED, HANGED. In A only: FIDELITY_PASSED, FIDELITY_FAILED. In B only: REPLAYED.
-3. *pending*: every other last status, that is DUMPED in A and in B, and FIDELITY_PASSED or FIDELITY_FAILED in B. A step of the call is due and has not started.
+2. *settled*: no step of the call is due. In A and in B: UNSUPPORTED, CALL_EXCEPTION, CRASHED, HANGED. In A only: FIDELITY_PASSED, FIDELITY_FAILED, FIDELITY_READ_FAILED, FIDELITY_EXCEPTION. In B only: REPLAY_READ_FAILED, REPLAY_CAST_FAILED, REPLAY_EXCEPTION, REPLAY_WRITE_FAILED, REPLAYED.
+3. *pending*: every other last status, that is DUMPED in A and in B, and FIDELITY_PASSED, FIDELITY_FAILED, FIDELITY_READ_FAILED or FIDELITY_EXCEPTION in B. A step of the call is due and has not started.
+
+*Rationale for separate failure statuses of the fidelity check and of the replay of A's inputs:* in B, the replay of A's inputs follows the fidelity check also when the fidelity check fails (RL90). One status for the failures of both stages would make a cycle in the graph (HLS15), and its class would depend on the previous status.
 
 **HLS17.** The table below is the normative list of the statuses and of the permitted transitions. "Previous" is the last status of the same call, or the records of the same case, before the new record. "Class" is the HLS16 class.
 
 | # | Status | Scope | Writer | Written when | Previous | Class | Contribution to the outcome of the case |
 |---|---|---|---|---|---|---|---|
 | 1 | ABOUT_TO_START | call | rank | phase=run, the hook fires (RL60 step 1) | none | open | Cannot be the last status after TD120. If it is, the case cannot pass |
-| 2 | DUMPED | call | rank | phase=run, inputs and outputs are saved (RL60 step 5) | ABOUT_TO_START | pending | Counts for TD115 and PM20. As the last status: the case cannot pass; row 13 or 14 gives the reason |
-| 3 | UNSUPPORTED | call | rank | The rank cannot dump the inputs of the call (RL60 step 2, before the call) or its outputs (RL60 step 4, after the call). The rank writes the record when the call returns. Or: the pipeline run ended and the call did not return normally (RL80 item 4) | ABOUT_TO_START | settled | The case cannot pass |
-| 4 | PRE_FIDELITY | call | rank | Fidelity stage (RL100 step 1) | DUMPED | open | As row 1 |
-| 5 | FIDELITY_PASSED | call | rank | RL100 step 6 | PRE_FIDELITY | A: settled, B: pending | As the last status in A: does not cause a failure from A. As the last status in B: the case cannot pass, because the replay of A's inputs is missing; the reason is row 13 or 14, or the call does not exist in A (IB10 item 6) |
-| 6 | FIDELITY_FAILED | call | rank | RL100 step 6 | PRE_FIDELITY | A: settled, B: pending | If the fidelity check override flag of the instance is not set (IA50): the case cannot pass (IA60), in A and in B, also when REPLAYED follows in B. If the flag is set: this status does not cause a failure by itself, and the case fixture issues a PM80 warning; as the last status in B, it contributes as row 5 |
-| 7 | PRE_REPLAY | call | rank of B | Replay of A's inputs (RL100 step 1) | FIDELITY_PASSED, FIDELITY_FAILED | open | As row 1 |
-| 8 | REPLAYED | call | rank of B | RL100 step 7 | PRE_REPLAY | settled | As the last status in B: does not cause a failure from B, if the call has FIDELITY_PASSED, or has FIDELITY_FAILED and the fidelity check override flag of B is set (PM40) |
-| 9 | CRASHED | call | launcher | TD120 item 2.2, the instance crashed | ABOUT_TO_START, PRE_FIDELITY, PRE_REPLAY | settled | The case cannot pass |
-| 10 | HANGED | call | launcher | TD120 item 2.2, the launcher killed the instance for a missed deadline | as row 9 | settled | The case cannot pass |
-| 11 | UNRESOLVABLE_PATH | case | rank | Start of phase=run, path resolution (RL60, CP120, CP140) | none | - | The case has no call on this rank, so the case cannot pass |
-| 12 | NOT_REACHED | case | rank | The pipeline run ended and the case had no call (RL80) | none | - | As row 11 |
-| 13 | CASE_CALLS_MISMATCH | case | rank, the same on all ranks | After the pipeline run, list comparison (RL80) | Any record of the case; no call of the case is open | calls keep their class and are not replayed | The case cannot pass |
-| 14 | FAILED_TO_START | case | launcher | TD120 item 2.3 | no record, or call records | - | The case cannot pass |
-| 15 | UNSUPPORTED | case | launcher, in all rank logs | TD120 item 1 | none | - | The case cannot pass |
-| 16 | UNSUPPORTED | instance | rank | phase=initialization (RL40) | - | - | None directly. Cause of row 15 |
-| 17 | CRASHED | instance | launcher, in all rank logs | TD120 item 2.1 | - | - | None directly. Reason for rows 9 and 14 |
-| 18 | HANGED | instance | launcher, in all rank logs | TD120 item 2.1 | - | - | None directly. Reason for rows 10 and 14 |
+| 2 | DUMPED | call | rank | phase=run, inputs and outputs are saved (RL60 step 5) | ABOUT_TO_START | pending | Counts for TD115 and PM20. As the last status: the case cannot pass; row 20 or 21 gives the reason |
+| 3 | UNSUPPORTED | call | rank | The rank cannot dump the inputs of the call (RL60 step 2, before the call) or its outputs (RL60 step 4, after the call). The rank writes the record when the call returns. If the call raises an exception, row 4 applies instead | ABOUT_TO_START | settled | The case cannot pass |
+| 4 | CALL_EXCEPTION | call | rank | phase=run, the call raised an exception (RL60, RL65 item 1) | ABOUT_TO_START | settled | The case cannot pass |
+| 5 | PRE_FIDELITY | call | rank | Fidelity stage (RL100 step 1) | DUMPED | open | As row 1 |
+| 6 | FIDELITY_PASSED | call | rank | RL100 step 6 | PRE_FIDELITY | A: settled, B: pending | As the last status in A: does not cause a failure from A. As the last status in B: the case cannot pass, because the replay of A's inputs is missing; the reason is row 20 or 21, or the call does not exist in A (IB10 item 6) |
+| 7 | FIDELITY_FAILED | call | rank | RL100 step 6 | PRE_FIDELITY | A: settled, B: pending | If the fidelity check override flag of the instance is not set (IA50): the case cannot pass (IA60), in A and in B, also when REPLAYED follows in B. If the flag is set: this status does not cause a failure by itself, and the case fixture issues a PM80 warning; as the last status in B, it contributes as row 6 |
+| 8 | FIDELITY_READ_FAILED | call | rank | Fidelity stage, the rank cannot read the data of the call (RL100 step 2) | PRE_FIDELITY | A: settled, B: pending | The case cannot pass, also when the fidelity check override flag of the instance is set (IA50) |
+| 9 | FIDELITY_EXCEPTION | call | rank | Fidelity stage, the call raised an exception (RL100 step 4, RL65 item 1) | PRE_FIDELITY | A: settled, B: pending | As row 8 |
+| 10 | PRE_REPLAY | call | rank of B | Replay of A's inputs (RL100 step 1) | FIDELITY_PASSED, FIDELITY_FAILED, FIDELITY_READ_FAILED, FIDELITY_EXCEPTION | open | As row 1 |
+| 11 | REPLAY_READ_FAILED | call | rank of B | Replay of A's inputs, the rank cannot read the data of the call (RL100 step 2) | PRE_REPLAY | settled | The case cannot pass |
+| 12 | REPLAY_CAST_FAILED | call | rank of B | Replay of A's inputs, the cast of the inputs to the reference dtype raised an exception (RL100 step 2) | PRE_REPLAY | settled | The case cannot pass |
+| 13 | REPLAY_EXCEPTION | call | rank of B | Replay of A's inputs, the call raised an exception (RL100 step 4, RL65 item 1) | PRE_REPLAY | settled | The case cannot pass |
+| 14 | REPLAY_WRITE_FAILED | call | rank of B | Replay of A's inputs, the rank cannot save the outputs of the call (RL100 step 4) | PRE_REPLAY | settled | The case cannot pass |
+| 15 | REPLAYED | call | rank of B | RL100 step 7 | PRE_REPLAY | settled | As the last status in B: does not cause a failure from B, if the call has FIDELITY_PASSED, or has FIDELITY_FAILED and the fidelity check override flag of B is set (PM40) |
+| 16 | CRASHED | call | launcher | TD120 item 2.2, the instance crashed | ABOUT_TO_START, PRE_FIDELITY, PRE_REPLAY | settled | The case cannot pass |
+| 17 | HANGED | call | launcher | TD120 item 2.2, the launcher killed the instance for a missed deadline | as row 16 | settled | The case cannot pass |
+| 18 | UNRESOLVABLE_PATH | case | rank | Start of phase=run, path resolution (RL60, CP120, CP140) | none | - | The case has no call on this rank, so the case cannot pass |
+| 19 | NOT_REACHED | case | rank | The pipeline run ended and the case had no call (RL80) | none | - | As row 18 |
+| 20 | CASE_CALLS_MISMATCH | case | rank, the same on all ranks | After the pipeline run, list comparison (RL80) | Any record of the case; no call of the case is open | calls keep their class and are not replayed | The case cannot pass |
+| 21 | FAILED_TO_START | case | launcher | TD120 item 2.3 | no record, or call records | - | The case cannot pass |
+| 22 | UNSUPPORTED | case | launcher, in all rank logs | TD120 item 1 | none | - | The case cannot pass |
+| 23 | UNSUPPORTED | instance | rank | phase=initialization (RL40) | - | - | None directly. Cause of row 22 |
+| 24 | CRASHED | instance | launcher, in all rank logs | TD120 item 2.1 | - | - | None directly. Reason for rows 16 and 21 |
+| 25 | HANGED | instance | launcher, in all rank logs | TD120 item 2.1 | - | - | None directly. Reason for rows 17 and 21 |
 
 The last column says only what a status contributes. PM10-PM50 give the outcome of a case from all ranks of A and B and from the tolerance checks. "The case cannot pass" means failed (PM50), or error where PM20 applies. A record sequence that the table does not permit is a harness defect, and PM50 makes such a case fail.
 
@@ -186,7 +194,7 @@ Each entry (a component path) of the list of components defines a separate test 
 **TD100.** Deadlines have default values, and a configuration (TD10) can override them. The defaults are:
 1. A: 5 minutes for the `phase=loading` (RL50), 10 minutes for the `phase=run`, 2 minutes for `phase=after_run` (RL60-RL80).
 2. B: 10 minutes for the `phase=loading` (RL50), 20 minutes for the `phase=run`, 2 minutes for `phase=after_run` (RL60-RL80).
-3. each individual call as measured between the call's starting status (ABOUT_TO_START for RL60; PRE_FIDELITY or PRE_REPLAY for RL100) and ending status (DUMPED or UNSUPPORTED for RL60; FIDELITY_FAILED or FIDELITY_PASSED or REPLAYED for RL100): 2 minutes in A and 4 minutes in B. It's a limitation of version 1 that these timeouts include file operations.
+3. each individual call as measured between the call's starting status (ABOUT_TO_START for RL60; PRE_FIDELITY or PRE_REPLAY for RL100) and ending status (DUMPED, UNSUPPORTED or CALL_EXCEPTION for RL60; FIDELITY_FAILED, FIDELITY_PASSED, REPLAYED, or a failure status of RL100): 2 minutes in A and 4 minutes in B. It's a limitation of version 1 that these timeouts include file operations.
 4. 5 (for A) or 10 (for B) minutes since the last record in the log file in all other cases
 
 **TD110.** **Deadlines enforcement.** For the cases of the configuration that pytest selected to run (with `-k`, a node ID, or another pytest selection; without a selection, all cases), the configuration fixture (TD40) runs each instance sequentially (TD115) using a supplementary launcher process that actually launches the instance with torchrun. The launcher takes care of deadlines, child processes cleanup and statuses of instance's case in some cases. Each rank of the instance writes its deadline -related progress and timestamps to a certain rank-specific log file known to the launcher. The launcher then periodically reads these files and uses progress records and timestamps to enforce deadlines. A missed deadline leads to a warning message and killing the instance and all its descendant processes.
@@ -235,7 +243,7 @@ an attribute, and an empty name for a bare tensor. Nested containers flatten to 
 **TM60.** For all calls of each test case, all computed metrics, thresholds and comparison results are logged to a permanent structured log file called "a metrics file". The file is meant to preserve a history of values and comparisons obtained for the test case calls and the harness never deletes that file; only creates it if absent and appends a record to it. Each record stores all information from a single test function run that was able to compute at least one metric value. The metrics file isn't updated otherwise.
 
 **TM70.** Each metrics file record has these fields:
-1. a UTC timestamp field with value in ISO 8601 `YYYY-MM-DDThh:mm:ssZ` format.
+1. a UTC timestamp field with value in ISO 8601 `YYYY-MM-DDThh:mm:ssZ` format, and a schema version number.
 2. the xDiT commit, and whether the working tree had uncommitted changes; For reruns, the user is responsible to ensure the commit corresponds to the version that created data on which the rerun worked.
 3. the GPU architecture;
 4. run mode (fresh, or rerun)
@@ -339,11 +347,11 @@ asynchronous work that is still running, hooks by other features running, higher
 
 **IA40.** **Fidelity check (A and B).** Each instance replays a captured call once to ensure the component was properly isolated and rerunning it yields binary the same result. B also needs it since it run different dtype specific code. Fidelity check may also fail for another reason: if the component is non-deterministic.
 
-**IA50.** Some components may be validly non-deterministic, hence each case / component path may have an instance-specific fidelity check override flag, set per case in the configuration call (TD10). The flag is `false` by default, so by default each case (all calls of the case/component) must pass the fidelity check in A and in B. If the configuration does not set the flag of B, B uses the flag value of A. The flag does not change what the instances run: A and B always run the fidelity check of each call (RL100). It changes only the outcome: if the flag of an instance is set, a failed fidelity check on a rank of that instance does not fail the case by itself, and the case fixture issues a warning (PM80). Other reasons, for example a deviation beyond the tolerance, still fail the case.
+**IA50.** Some components may be validly non-deterministic, hence each case / component path may have an instance-specific fidelity check override flag, set per case in the configuration call (TD10). The flag is `false` by default, so by default each case (all calls of the case/component) must pass the fidelity check in A and in B. If the configuration does not set the flag of B, B uses the flag value of A. The flag does not change what the instances run: A and B always run the fidelity check of each call (RL100). It changes only the outcome: if the flag of an instance is set, a failed fidelity check on a rank of that instance does not fail the case by itself, and the case fixture issues a warning (PM80). Other reasons, for example a deviation beyond the tolerance, still fail the case. The flag applies only to FIDELITY_FAILED: FIDELITY_READ_FAILED and FIDELITY_EXCEPTION (RL100) are not nondeterminism, so they fail the case also when the flag is set.
 
 **IA60.** If the fidelity check override flag of an instance is not set for the case (IA50) and the fidelity check fails on any rank of that instance, this necessarily fails the pytest test function outcome even if output tolerances are within bounds.
 
-**IA80.** A crash or a hang ends the instance. Version 1 does not recover. An exception that ends the instance counts as a crash.
+**IA80.** A crash or a hang ends the instance. Version 1 does not recover. An exception that ends the instance counts as a crash. An exception of a component call does not end the instance by itself: the rank records it as CALL_EXCEPTION (RL60), FIDELITY_EXCEPTION or REPLAY_EXCEPTION (RL100) and continues as these requirements say. The rank ends if the device is not usable after the exception (RL65 item 2).
 
 ### Instance B
 
@@ -359,6 +367,8 @@ the same world size and parallel layout as A, with these changes:
 4. vendor packages blocked;
 5. no compile, no step cache, no FP8 communication, no hybrid schedules.
 6. B gets the same list of component paths (cases) to work on as A. B knows where A stores its dump files, and for the case calls for which it can run replays, it can try to read dump files that A produced to replay them with higher precision. Calls that exist in A (have at least status DUMPED) but never replayed in B (this means replay on A's data, since other replay is fidelity check and it's irrelevant in the context, i.e. calls in B with status REPLAYED), or calls that have at least status DUMPED in B, but never had that status in A, necessary fail its pytest test function even if other calls of the case might pass tolerance checks.
+
+**IB15.** Version 1 protects B from known lossy xDiT features only (such as against sparse attention algorithms, or against caching), so it's possible that a new lossy feature might lead to "inexact"/approximate results in B (the user is responsible for checking that). Generalizing the protection is the future work item.
 
 **IB20.** B loads the model in bf16, but if A uses a more precise data type, B loads in that type, and casts to the reference dtype if the data dtype offers less precision (less mantissa bits) than the reference dtype (so if the reference dtype is bf16 and there's fp32 data, that higher precision data stays unmodified). It does not load a checkpoint in the reference dtype (unless it coincides with what A uses). B converts all components at once.
 
@@ -397,11 +407,19 @@ After the instance ends, the ownership of the rank logs passes to the launcher (
 **RL60.** **phase=run** During this phase rank runs the model pipeline and captures data. From the beginning, the rank has a set of cases it has to run; it makes a copy of this set into "unseen cases set". Before it installs hooks, the rank resolves the path of each case (CP30-CP50) and checks the entries for overlap (CP120). For each case with a path error it logs `status=UNRESOLVABLE_PATH case=<case_id> reason=<why>` and removes the case from the set of cases it has to run and from the "unseen cases set". Such a case gets no hook and no NOT_REACHED. The rank installs hooks to tracked components and when a hook fires, if the case call conditions are met, the rank:
 1. removes the case from "unseen cases set" if it's still there; logs `status=ABOUT_TO_START case=<case_id> call=<call_id> files=<files>` (where `<files>` is a 2-element tuple, each element of which is a list of filenames in the same directory that will contain dumped data for the call of the case. The first element is for files having data necessary to start the call, such as inputs, rng states & etc, and the second element is for outputs; Filepaths follow a pattern and can be recovered by the rank later from the generic data path it has and a call identifier),
 2. saves component inputs and other applicable runtime data to the case call specific dump file it previously allocated (or files, depending on what is more convenient),
-3. runs the call and
+3. runs the call and synchronizes the stream directly after it (RL65 item 1),
 4. similarly saves outputs on the call return
 5. if dumps were successful: the rank writes a `status=DUMPED case=<case_id> call=<call_id>` record to the log and appends the call identifier to an internal ordered list of calls to replay (called "replay list").
 
 If during steps 2 or 4 the rank finds that it can't process the call data correctly (for example, some of the data to dump isn't serializable, a tensor has quantized dtype, which can't be de-quantized without special knowledge and hence used for B, or a data file basename is longer than 255 bytes (FD40)), instead of step 5 that case call records `status=UNSUPPORTED case=<case_id> call=<call_id> reason=<why>`. The rank writes this record when the call returns, also when it found the problem in step 2. The call thus stays open (HLS16) while it runs. If the rank found the problem in step 2, it still runs the call, but it does not do step 4. Then the pipeline run proceeds.
+
+If the call raises an exception in step 3, the rank logs `status=CALL_EXCEPTION case=<case_id> call=<call_id> reason=<exception_details>` and does not do steps 4 and 5. This record replaces the UNSUPPORTED record of a problem found in step 2, and its reason then also names that problem. Then the rank applies RL65 item 2 and raises the same exception again, so the pipeline handles it as it does without the harness. If the exception passes through other open calls of listed components on the rank (nested components), each of these calls also gets its own CALL_EXCEPTION record.
+
+**RL65.** **Errors of a call and the device.** This requirement applies to each call that the rank runs, in RL60 step 3 and in RL100 step 4.
+1. The rank synchronizes the stream directly after the call. An exception that the call or this synchronization raises is an exception of the call: CALL_EXCEPTION in RL60, FIDELITY_EXCEPTION or REPLAY_EXCEPTION in RL100.
+2. After the rank logs CALL_EXCEPTION (RL60) or a failure status of RL100, it synchronizes the device. If this synchronization raises an exception, the device is not usable, and the rank ends at once with a nonzero exit code. This is a crash (IA80): the launcher appends CRASHED to the open calls and FAILED_TO_START to the cases with pending calls (TD120).
+
+*Rationale:* a kernel can report an error asynchronously, at the next synchronization point. Without item 1, such an error shows in a later step or a later call and gets a wrong status, for example UNSUPPORTED in RL60 step 4, REPLAY_WRITE_FAILED in RL100 step 4, or an exception status of an unrelated later call. To save the outputs, RL60 step 4 must wait until the call finishes on the device anyway, so item 1 adds almost no waiting to a call that the rank dumps. Some device errors leave the device unusable. If the rank continued, all its later calls would fail with the same error, and their statuses would blame calls that did nothing wrong. When the rank ends, the later cases get FAILED_TO_START with the instance-level CRASHED as the reason, which is correct. The rank logs the failure status before the synchronization of item 2, because a synchronization on a broken device can also hang, and the record must exist also then.
 
 **RL70.** **Duration of phase=run for the timeouts of TD110.** Since this phase execute a potentially lengthy code that isn't meant to be accounted for in the phase's deadline timeout calculation, the rank maintains an internal counter `duration_excluded` that is set to 0 when the phase starts. Execution of the code doesn't belong to the pipeline duration deadline threshold (such as dumping input, output & etc) is timed and added to the `duration_excluded`. During the phase, to each log record the rank produces, it automatically adds a  `duration_excluded=` field with the current value of the counter. Hence the launcher can always calculate a true duration of the phase for TD100-TD110 by subtracting from the `now()` timestamp, the timestamp of the latest `phase=` change, and the latest observed `duration_excluded=`.
 
@@ -409,7 +427,7 @@ If during steps 2 or 4 the rank finds that it can't process the call data correc
 1. the call have obtained UNSUPPORTED status. It makes the call excluded from replays.
 2. the call have completed successfully and got `status=DUMPED`.
 3. the whole case never had a single call; the case is in the "unseen cases set" (RL60)
-4. the call started but did not return normally, because the component raised an exception that the pipeline handled. The hook writes no record for the exception. When the pipeline run ends, the rank logs `status=UNSUPPORTED case=<case_id> call=<call_id> reason=<the exception>` for each such call.
+4. the call raised an exception that the pipeline handled, and got `status=CALL_EXCEPTION` (RL60). It makes the call excluded from replays.
 
 For each case in the "unseen cases set" the rank logs `status=NOT_REACHED case=<case_id>`.
 In version 1 no cross-rank synchronization about which cases to replay is performed, and the user is responsible for choosing components that runs equally successfully (in terms of statuses) on all ranks simultaneously.
@@ -420,18 +438,26 @@ However, to alleviate debugging, all ranks compare their "replay lists" with one
 
 **RL90.** **phase=replay** Two kind of replays are needed:
 - both instance A and B should replay each call for fidelity check IA40-IA60, also when the fidelity check override flag is set (IA50);
-- instance B also replays each call of its list of A's calls (RL80: the calls that got status=DUMPED on A; B can read logs of A for this) that is also in B's own replay list, using A's data casted to reference dtype to obtain reference outputs of the component. The result of B's fidelity check for the call does not matter here: it is local to a rank, so it must not decide which calls a rank replays (RL100). A failed fidelity check still makes the case fail, unless the fidelity check override flag of B is set (IA50, IA60, PM40).
+- instance B also replays each call of its list of A's calls (RL80: the calls that got status=DUMPED on A; B can read logs of A for this) that is also in B's own replay list, using A's data casted to reference dtype to obtain reference outputs of the component. The result of B's fidelity check for the call, also FIDELITY_READ_FAILED or FIDELITY_EXCEPTION, does not matter here: it is local to a rank, so it must not decide which calls a rank replays (RL100). A failed fidelity check still makes the case fail, unless the fidelity check override flag of B is set (IA50, IA60, PM40).
 
 Instance B runs both replays: first it runs fidelity check replays on its own inputs and outputs, then it runs replays on A's inputs.
 
 **RL100.** Call replays run in "replay list" order (RL60), and in a lock step, with a stream synchronization and a barrier before and after replay. This helps to time execution properly to ensure correct call timeouts (TD100.3), and help to correctly attribute crashes, should they happen. For each call in ordered "replay list", the rank does:
-1. the rank logs `status=<status> case=<case_id> call=<call_id> file=<file>` where the `<status>` is `PRE_FIDELITY` if this is fidelity check, or `PRE_REPLAY` if this is B replaying inputs from A; `<file>` is a filename in the same directory that will contain outputs of the call.
-2. the rank reads inputs, rng states and outputs (only if it's a fidelity check), from the call replay files (the paths are recoverable from data directory path and the call identifier).
+1. the rank logs `status=<status> case=<case_id> call=<call_id>` where the `<status>` is `PRE_FIDELITY` if this is fidelity check, or `PRE_REPLAY` if this is B replaying inputs from A. For B replaying A, the log record also gets `file=<file>` entry with `<file>` being a filename in the same directory that will contain outputs of the call.
+2. the rank reads inputs, rng states and outputs (only if it's a fidelity check), from the call replay files (the paths are recoverable from data directory path and the call identifier). For B replaying A, the rank then casts the inputs to the reference dtype.
 3. The rank executes a stream synchronization and a barrier.
-4. the rank saves current CPU and CUDA rng states into a temporary variable; restores rng states from loaded from the input file values, execute the call with loaded inputs (B must have casted them to the reference dtype first), obtains the replayed call outputs and saves them to the `<file>`. Finally it restores the original CPU and CUDA rng states from the temporary variable.
+4. the rank saves current CPU and CUDA rng states into a temporary variable; restores rng states from loaded from the input file values, execute the call with loaded inputs (for B replaying A, the inputs cast in step 2) and synchronizes the stream (RL65 item 1), obtains the replayed call outputs, and, for B replaying A, saves them to the `<file>`. Finally it restores the original CPU and CUDA rng states from the temporary variable, also when a failure occurred in this step.
 5. The rank executes a stream synchronization and a barrier.
 6. if this is a fidelity check, the rank perform bitwise comparison of each of the elements of obtained output with expected (read in step 2). Any mismatch in the outputs structure or content gives `status=FIDELITY_FAILED case=<case_id> call=<call_id>`. If the check passes, the rank logs instead `status=FIDELITY_PASSED case=<case_id> call=<call_id>`.
 7. Otherwise if this isn't a fidelity check, the rank logs `status=REPLAYED case=<case_id> call=<call_id>`.
+
+A failure in step 2 or step 4 gives a failure status instead of the status of step 6 or step 7. The rank logs `status=<failure> case=<case_id> call=<call_id> reason=<why>` when the failure occurs, where `<failure>` is:
+1. in step 2: FIDELITY_READ_FAILED or REPLAY_READ_FAILED if the rank cannot read the data of the call; REPLAY_CAST_FAILED if the cast of A's inputs raises an exception. The rank does not execute step 4.
+2. in step 4: FIDELITY_EXCEPTION or REPLAY_EXCEPTION, with `reason=<exception_details>`, if the call raises an exception (RL65 item 1). The rank does not save outputs. REPLAY_WRITE_FAILED if the rank cannot save the outputs to the `<file>`.
+
+After a failure status, the rank applies RL65 item 2. It still executes the stream synchronizations and the barriers of steps 3 and 5 for the call, and then continues with the next call of the "replay list", so all ranks keep the lock step. A failure status affects only its call, and its class is as HLS16 says: after the fidelity check of B, the call stays pending, and B replays A's inputs for it as for any other call (RL90).
+
+*Limitation of version 1:* if a failure occurs on some ranks only, and the call uses collectives, the other ranks wait in a collective of the call until the call deadline (TD100 item 3) ends the instance as HANGED. The launcher then gives FAILED_TO_START to the cases with pending calls (TD120). So the replays after a failed call continue only when the failure occurs on all ranks, or when the call uses no collectives. Addressing this is future work.
 
 *Rationale:* strict call execution order and synchronization with barriers are necessary to ensure proper collectives functioning and along with detailed logging help to correctly attribute crashes. A fault that silently damages memory and shows only in a later case is an accepted limit.
 

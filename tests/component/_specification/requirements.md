@@ -276,7 +276,7 @@ an attribute, and an empty name for a bare tensor. Nested containers flatten to 
 
 ### Components, paths and calls
 
-**CP10.** The harness tests only components mentioned in an explicit list of component path strings. Each path string defines a component to test and is the path from the runner model object to the callable component or a method. Only the listed components are captured. A listed component must run at least once during pipeline run. A callable component/element is a Python object `obj` such that `True == callable(obj)`. Note that a non-callable PyTorch object with a `forward()` method isn't considered callable even if PyTorch might use it in a forward pass. Use the path that includes `.forward` as the last element to hook the method itself.
+**CP10.** The harness tests only components mentioned in an explicit list of component path strings. Each path string defines a component to test and is the path from the runner model object to the callable component or a method. Only the listed components are captured. A listed component must run at least once during pipeline run. A callable component/element is a Python object `obj` such that `True == callable(obj)` (the implementation must use this test). Note that an object whose type has no `__call__` but that has a `forward` attribute isn't considered callable even if PyTorch might use it in a forward pass. Use a path that includes `.forward` as the last element to hook the method itself.
 
 **CP20.** The list is known before the run. The harness makes the test cases from the list only (without a
 model) and list's items (component paths) serve as test case identifiers, so there is an exact 1-to-1 relationship between a component path and a test case.
@@ -287,7 +287,7 @@ model) and list's items (component paths) serve as test case identifiers, so the
 `refiner_pipe`. The harness does not check that the attribute holds a pipeline. An attribute that holds `None`
 is a path error.
 
-**CP50.** A call number follows the element after a colon, for example `pipe.transformer:3.blocks[0]:3`. A path without a call number selects all calls, and its one case checks every call. The case fails if one call fails, and the message names the failing calls. Version 1 has accepted limitation: the first path element ignores its call number.
+**CP50.** A call number follows the element after a colon, for example `pipe.transformer:3.blocks[0]:3`. A path without a call number selects all calls, and its one case checks every call. The case fails if one call fails, and the message names the failing calls. A path whose last element is non-callable is a path error (CP140). A path that puts a call number on a non-callable element is a path error. Version 1 treats the first element as non-callable (CP100), so a call number on the first element is a path error, and a path that has only the first element is a path error (CP140, even though this is detectable without model loading).
 
 **CP60.** Call numbers are not negative. The call number 0 is valid: the counter of an element is 0 while the element was not called since the last call of its nearest tracked ancestor (CP80 item 3). For example, `pipe.vae:0.decode` selects the `decode` calls made while the counter of `vae` is 0. A call number 0 on the last element of a path never matches, because the counter is incremented before the check (CP80 item 2). It is an error during collection.
 *Rationale for non-negative call numbers:* then the harness can save the tensors of a call at once.

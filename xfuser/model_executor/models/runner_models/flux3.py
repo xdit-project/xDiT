@@ -15,6 +15,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     ModelCapabilities,
     ModelFeatures,
     ModelSettings,
+    prefer_mha_v4,
     register_model,
     xFuserModel,
 )
@@ -308,6 +309,10 @@ class xFuserFlux3KleinBaseModel(_Flux3Model):
         model_name="black-forest-labs/flux-3-image-klein-base",
         output_name="flux_3_image_klein_base",
     )
+
+    def _customize_settings(self, config) -> None:
+        super()._customize_settings(config)
+        prefer_mha_v4(self.settings, "auto")
 
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
         # Without CFG parallel the guider calls the transformer once per branch; it turns

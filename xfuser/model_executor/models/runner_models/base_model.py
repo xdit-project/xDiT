@@ -1325,7 +1325,7 @@ class xFuserModel(abc.ABC):
         for name, module in components.items():
             kwargs = compile_kwargs
             if usp_sdma.uses_sdma() and name in self.settings.transformer_attr_names:
-                kwargs = {**compile_kwargs, "mode": usp_sdma.compile_mode(compile_kwargs["mode"])}
+                kwargs = {**compile_kwargs, **usp_sdma.compile_kwargs(compile_kwargs["mode"])}
             blockwise = name in stages or name in sharded or name in cache_targets or self._prefer_blockwise_compile()
             if not blockwise:
                 setattr(self.pipe, name, self._compile_whole(module, kwargs))

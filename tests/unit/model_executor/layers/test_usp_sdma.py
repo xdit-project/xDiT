@@ -306,3 +306,39 @@ def test_q_k_first_modules_are_reported_with_their_one_head_group(monkeypatch, r
 def test_host_issued_copies_compile_without_cuda_graphs(monkeypatch, mode, transport, world, expected):
     _ulysses_a2a(monkeypatch, transport, 2, world=world)
     assert usp_sdma.compile_mode(mode) == expected
+
+
+@pytest.mark.parametrize(
+    ("mode", "transport", "world", "overlap_qkv", "expected_mode"),
+    [
+        ("reduce-overhead", "sdma", 8, True, None),
+        ("max-autotune", "sdma", 8, True, None),
+        ("default", "sdma", 8, True, None),
+        ("default", "packed", 8, True, None),
+        ("reduce-overhead", "sdma", 8, False, "default"),
+        ("reduce-overhead", "sdma", 1, True, "reduce-overhead"),
+        # Under CUDA graphs the runner reads the mode back, so the mode stays.
+        ("reduce-overhead", "packed", 8, True, "reduce-overhead"),
+        ("reduce-overhead", "default", 8, True, "reduce-overhead"),
+    ],
+)
+def test_overlapped_projections_compile_in_deterministic_mode(
+    monkeypatch, mode, transport, world, overlap_qkv, expected_mode
+):
+    """Per-group projections leave a reduction whose block size Inductor would pick by timing."""
+    _ulysses_a2a(monkeypatch, transport, 2, overlap_qkv=overlap_qkv, world=world)
+    kwargs = usp_sdma.compile_kwargs(mode)
+    assert kwargs["mode"] == expected_mode
+    if expected_mode is not None:
+        assert kwargs["options"] is None
+    else:
+        without_graphs = usp_sdma.compile_mode(mode)
+        assert kwargs["options"] == {**torch._inductor.list_mode_options(without_graphs), "deterministic": True}
+    # torch.compile checks the option names and takes a mode or options, not both.
+    torch.compile(torch.nn.Identity(), **kwargs)
+
+
+def test_a_torch_without_deterministic_mode_compiles_as_before(monkeypatch):
+    _ulysses_a2a(monkeypatch, "sdma", 2, overlap_qkv=True)
+    monkeypatch.setattr(torch._inductor, "config", SimpleNamespace())
+    assert usp_sdma.compile_kwargs("reduce-overhead") == {"mode": "default", "options": None}

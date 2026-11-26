@@ -45,6 +45,9 @@ collectives with a warning: Ring, FP8 communication, PipeFusion KV caching, head
 balancing, sparse kernels, attention masks, and certain padded joint-text layouts.
 While SDMA is selected, the runner disables transformer CUDA graphs because its
 host-issued copies cannot replay; other components can retain their graphs.
+With `--ulysses_sdma_overlap_qkv` it also compiles the transformer in Inductor's
+deterministic mode: per-group projections leave a reduction whose block size
+Inductor would otherwise pick by timing, which changed the image between runs.
 `XDIT_SDMA_WAIT_S` sets the wait timeout in seconds (default 30).
 `XDIT_SDMA_ALLOW_UNTESTED=1` permits other GPU architectures.
 

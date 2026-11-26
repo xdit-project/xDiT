@@ -21,7 +21,8 @@ overlaps the projection of the next.
 
 The transport queues its copies from the host, so a CUDA graph would not replay them. The
 runner compiles the transformer without CUDA graphs (`compile_mode`); its other components
-keep theirs. The ops are also tagged cudagraph_unsafe, so a model compiled with graphs
+keep theirs. With --ulysses_sdma_overlap_qkv it also compiles the transformer in Inductor's
+deterministic mode (`compile_kwargs`), so results repeat from run to run. The ops are also tagged cudagraph_unsafe, so a model compiled with graphs
 some other way runs them between graph partitions.
 
 The path covers Ulysses with joint tensors (front or rear), extra per-head inputs and
@@ -96,6 +97,20 @@ def compile_mode(mode: str) -> str:
         return mode
     warn_once(logger, f"--ulysses_a2a sdma: compiling the transformer with mode {_WITHOUT_CUDAGRAPHS[mode]!r}.")
     return _WITHOUT_CUDAGRAPHS[mode]
+
+
+def compile_kwargs(mode: str) -> Dict[str, object]:
+    """torch.compile's `mode` and `options` (it takes one or the other) for a component whose
+    Ulysses attention takes this path: `compile_mode`, and with --ulysses_sdma_overlap_qkv that
+    mode's options plus Inductor's deterministic mode. The per-group Q/K norm is a reduction whose
+    block size, and so summation order, Inductor otherwise picks by timing, anew in every run.
+    Set per compilation: Dynamo rewrites the global flag. Older torch compiles as before."""
+    mode = compile_mode(mode)
+    if not overlap_qkv() or get_ulysses_parallel_world_size() <= 1 or mode in _WITHOUT_CUDAGRAPHS:
+        return {"mode": mode, "options": None}
+    if not hasattr(torch._inductor.config, "deterministic"):
+        return {"mode": mode, "options": None}
+    return {"mode": None, "options": {**torch._inductor.list_mode_options(mode), "deterministic": True}}
 
 
 def call_reason(

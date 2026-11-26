@@ -4,7 +4,12 @@ import torch
 
 try:
     import aiter as _aiter
+except Exception:  # noqa: BLE001 - without a visible GPU, aiter raises RuntimeError on import
+    _aiter = None
 
+_HAS_AITER = _aiter is not None
+
+if _HAS_AITER:
     # Wrapping aiter.rms_norm as a non-mutating custom op fixes graph capture
     @torch.library.custom_op("xfuser::aiter_rms_norm", mutates_args=())
     def _aiter_rms_norm(x: torch.Tensor, w: torch.Tensor, eps: float) -> torch.Tensor:
@@ -18,10 +23,6 @@ try:
     def _(ctx, grad_output):
         # Inference only, backward is never called; return identity gradient.
         return grad_output, None, None
-
-    _HAS_AITER = True
-except ImportError:
-    _HAS_AITER = False
 
 
 class _AITERRMSNorm(torch.nn.Module):

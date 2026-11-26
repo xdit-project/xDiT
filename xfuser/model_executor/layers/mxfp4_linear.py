@@ -5,7 +5,7 @@ import math
 try:
     import aiter
     from aiter.ops.shuffle import shuffle_weight
-except ImportError:
+except Exception:  # noqa: BLE001 - without a visible GPU, aiter raises RuntimeError on import
     pass  # Error will be thrown in base_model.py, if mxfp4 gemms are enabled but AITER is not available.
 from typing import Optional
 from xfuser.config.attention_a2a_codecs import MXFP4

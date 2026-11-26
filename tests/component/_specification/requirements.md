@@ -231,6 +231,8 @@ Each entry (a component path) of the list of components defines a separate test 
 
 **TD140.** The launcher exits with 0 when it worked; the detailed statuses and other run information go through rank log files. A nonzero launcher exit means that the launcher failed and not enough data for tests exists, so every case of the configuration fails triggering a pytest error.
 
+**TD150.** After the launcher finished with running instance B (no matter if B ended properly, or crashed, or hanged), it also implements that same cleanup as RL120: for each call on each rank of B that reached status=DUMPED, the launcher deletes data files produced by the DUMPED status.
+
 **TD200.** Configurations with step caching or hybrid schedules aren't supported. The ranks check this after xDiT arguments parser completes and applies all its defaults, and writes an instance-level record `status=UNSUPPORTED reason=<what is not supported>`, if found.
 
 ### Tolerances and metrics
@@ -426,7 +428,7 @@ After the instance ends, the ownership of the rank logs passes to the launcher (
 2. saves component inputs and other applicable runtime data to the case call specific dump file it previously allocated (or files, depending on what is more convenient),
 3. runs the call and synchronizes the stream directly after it (RL65 item 1),
 4. similarly saves outputs on the call return
-5. if dumps were successful: the rank writes a `status=DUMPED case=<case_id> call=<call_id>` record to the log and appends the call identifier to an internal ordered list of calls to replay (called "replay list").
+5. if dumps were successful: the rank writes a `status=DUMPED case=<case_id> call=<call_id> files=<files>` (`<files>` have the same value as step 1 sets) record to the log and appends the call identifier to an internal ordered list of calls to replay (called "replay list").
 
 If during steps 2 or 4 the rank finds that it can't process the call data correctly (for example, some of the data to dump isn't serializable, a tensor has quantized dtype, which can't be de-quantized without special knowledge and hence used for B, or a data file basename is longer than 255 bytes (FD40)), instead of step 5 that case call records `status=UNSUPPORTED case=<case_id> call=<call_id> reason=<why>`. The rank writes this record when the call returns, also when it found the problem in step 2. The call thus stays open (HLS16) while it runs. If the rank found the problem in step 2, it still runs the call, but it does not do step 4. Then the pipeline run proceeds.
 
@@ -468,7 +470,7 @@ Instance B runs both replays: first it runs fidelity check replays on its own in
 4. the rank saves current CPU and CUDA rng states into a temporary variable; restores rng states from loaded from the input file values, execute the call with loaded inputs (for B replaying A, the inputs cast in step 2) and synchronizes the stream (RL65 item 1), obtains the replayed call outputs, and, for B replaying A, saves them to the `<file>`. Finally it restores the original CPU and CUDA rng states from the temporary variable, also when a failure occurred in this step.
 5. The rank executes a stream synchronization and a barrier.
 6. if this is a fidelity check, the rank perform bitwise comparison of each of the elements of obtained output with expected (read in step 2). Any mismatch in the outputs structure or content gives `status=FIDELITY_FAILED case=<case_id> call=<call_id>`. If the check passes, the rank logs instead `status=FIDELITY_PASSED case=<case_id> call=<call_id>`.
-7. Otherwise if this isn't a fidelity check, the rank logs `status=REPLAYED case=<case_id> call=<call_id>`.
+7. Otherwise if this isn't a fidelity check, the rank logs `status=REPLAYED case=<case_id> call=<call_id> file=<file>` (`<file>` has the same value as item 1 sets for it).
 
 A failure in step 2 or step 4 gives a failure status instead of the status of step 6 or step 7. The rank logs `status=<failure> case=<case_id> call=<call_id> reason=<why>` when the failure occurs, where `<failure>` is:
 1. in step 2: FIDELITY_READ_FAILED or REPLAY_READ_FAILED if the rank cannot read the data of the call; REPLAY_CAST_FAILED if the cast of A's inputs raises an exception. The rank does not execute step 4.
@@ -481,6 +483,8 @@ After a failure status, the rank applies RL65 item 2. It still executes the stre
 *Rationale:* strict call execution order and synchronization with barriers are necessary to ensure proper collectives functioning and along with detailed logging help to correctly attribute crashes. A fault that silently damages memory and shows only in a later case is an accepted limit.
 
 **RL110.** Duration rules and `duration_excluded` counter of RL70 also apply to replay calls of phase=replay in RL100.
+
+**RL120.** If a call on a rank of B reaches status=DUMPED, after it reaches any settled status, the rank automatically deletes data files produced by the DUMPED status.
 
 ### pytest integration
 

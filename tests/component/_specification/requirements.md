@@ -50,14 +50,11 @@ Version 1 of the harness only supports components that run on all ranks simultan
 
 **HL15.** Support for pytest `-k` argument is limited. The user is responsible to not request a rerun (`--xdit_allow_rerun`, PI20) after they change `-k` value (including removing it) or node ID to a selection that wasn't covered by previous fresh run. The harness doesn't track scope of different runs and doesn't warn if certain promised behavior may not work correctly due to an incompatible value of `-k` in a new run/rerun.
 
-**HL20.** The harness takes each component from the model that the xDiT runner builds. It does not extract,
-hard-code or build a component itself.
-*Rationale:* the setup of a component depends on the model configuration. For example, the VAE of Wan2.2 can
-be the VAE of `diffusers`, a DistVAE, or something else. Also, xDiT changes fast (UC9).
+**HL20.** The harness takes each component from the model that the xDiT runner builds. It does not extract, hard-code or build a component itself.
+Tests for the harness itself are an exception from this requirement.
+*Rationale:* the setup of a component depends on the model configuration. For example, the VAE of Wan2.2 can be the VAE of `diffusers`, a DistVAE, or something else. Also, xDiT changes fast (UC9).
 
-**HL30.** The details of a configuration are private to the configuration: Ulysses, ring, classifier-free
-guidance, quantized GEMMs and others. The tests do not depend on them. The tests are generic, so that they can
-run every configuration.
+**HL30.** The details of a configuration are private to the configuration: Ulysses, ring, classifier-free guidance, quantized GEMMs and others. The tests do not depend on them. The tests are generic, so that they can run every configuration.
 
 **HL40.** The reference is the same xDiT component, built by the xDiT runner, run potentially
 with an extended precision (fp32 by default). It is not a `diffusers` implementation.
@@ -81,7 +78,7 @@ A process that loads and initializes a model, and dumps components execution dat
 is called "an instance". There are two instances: an instance A works with the model to test, and
 an instance B works with the same model as A, but configured to perform computations in a higher
 precision to obtain reference values to compare against.
-*Rationale:* it may take 5–10 minutes to fully load and initialize a model, so we have to perform
+*Rationale:* it may take several minutes to fully load and initialize a model, so we have to perform
 test data acquisition in batches: one batch gathers data to test (A), and the other batch gather
 reference data (B).
 
@@ -92,6 +89,25 @@ reference data (B).
 **HL140.** The harness itself must have a test set, ensuring the harness adheres to the requirements. Most important tests are (not exhaustive list):
 - random rank fails fidelity check, or crashes, or hangs - the tests must ensure the harness causes correct pytest outcomes in any of these events, for all cases of the configuration.
 - all possible values for logged statuses in rank log files correctly reflected by pytest outcomes
+
+**HL150.** Comparison of floating-point values should be guarded against `NaN`s that could make them produce wrong results. Separate checks for `NaN`s are needed where it matters; generally, there should be no `NaN`s anywhere.
+
+**HL160.** Whenever the document talks about serializing data into JSON, the JSON strict mode should be used with `NaN`s and infinities turned into predefined strings with the following or similar recursive pre-pass:
+
+```py
+import json, math
+
+def to_json_safe(x):
+    if isinstance(x, float) and not math.isfinite(x):
+        return "NaN" if math.isnan(x) else ("Infinity" if x > 0 else "-Infinity")
+    if isinstance(x, dict):
+        return {k: to_json_safe(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [to_json_safe(v) for v in x]
+    return x
+
+line = json.dumps(to_json_safe(record), allow_nan=False)  # allow_nan=False is a guard
+```
 
 #### Statuses
 
@@ -195,7 +211,7 @@ Each entry (a component path) of the list of components defines a separate test 
 1. A: 5 minutes for the `phase=loading` (RL50), 10 minutes for the `phase=run`, 2 minutes for `phase=after_run` (RL60-RL80).
 2. B: 10 minutes for the `phase=loading` (RL50), 20 minutes for the `phase=run`, 2 minutes for `phase=after_run` (RL60-RL80).
 3. each individual call as measured between the call's starting status (ABOUT_TO_START for RL60; PRE_FIDELITY or PRE_REPLAY for RL100) and ending status (DUMPED, UNSUPPORTED or CALL_EXCEPTION for RL60; FIDELITY_FAILED, FIDELITY_PASSED, REPLAYED, or a failure status of RL100): 2 minutes in A and 4 minutes in B. It's a limitation of version 1 that these timeouts include file operations.
-4. 5 (for A) or 10 (for B) minutes since the last record in the log file in all other cases
+4. while no deadline of items 1-3 applies (for example in `phase=initialization`, in `phase=replay` between the call intervals of item 3, before the first `phase=` record, and so on): 5 (for A) or 10 (for B) minutes since the last record in the log file. Before the log file is created by the rank, launcher uses a timestamp of the instance start moment as the timestamp of the last record.
 
 **TD110.** **Deadlines enforcement.** For the cases of the configuration that pytest selected to run (with `-k`, a node ID, or another pytest selection; without a selection, all cases), the configuration fixture (TD40) runs each instance sequentially (TD115) using a supplementary launcher process that actually launches the instance with torchrun. The launcher takes care of deadlines, child processes cleanup and statuses of instance's case in some cases. Each rank of the instance writes its deadline -related progress and timestamps to a certain rank-specific log file known to the launcher. The launcher then periodically reads these files and uses progress records and timestamps to enforce deadlines. A missed deadline leads to a warning message and killing the instance and all its descendant processes.
 
@@ -247,13 +263,12 @@ an attribute, and an empty name for a bare tensor. Nested containers flatten to 
 2. the xDiT commit, and whether the working tree had uncommitted changes; For reruns, the user is responsible to ensure the commit corresponds to the version that created data on which the rerun worked.
 3. the GPU architecture;
 4. run mode (fresh, or rerun)
-5. list of calls made, where each element has:
+5. list of calls made, where each element (a call) has:
    1. a call identifier
-   2. flag is fidelity check passed
-   3. list of outputs, where each element has:
+   2. a dictionary mapping `<instance><rank_id>` (where `<instance>` is the usual A or B, and the `<rank_id>` is the usual decimal rank number) to a flag is fidelity check passed
+   3. list of outputs, where each element (an output) has:
       1. output name
-      2. tolerance values, if the metric has them (cosine similarity is only computed, but not checked and have no tolerance)
-      3. metrics dictionary mapping a metric name to:
+      2. metrics dictionary mapping a metric name to:
          - a dictionary that maps rank id to a metric value (if the metric doesn't have tolerance assigned, such as cosine similarity)
          - a tuple of tolerance value and a dictionary that maps rank id to a tuple of metric value and a flag if it is below the tolerance (if the metric has tolerance)
 
@@ -370,6 +385,8 @@ the same world size and parallel layout as A, with these changes:
 
 **IB15.** Version 1 protects B from known lossy xDiT features only (such as against sparse attention algorithms, or against caching), so it's possible that a new lossy feature might lead to "inexact"/approximate results in B (the user is responsible for checking that). Generalizing the protection is the future work item.
 
+**IB18.** Unless explicitly said otherwise, whenever the document says that B casts data to the reference type, the mantissa rule applies: B casts to the reference dtype if the data dtype offers less precision (less mantissa bits) than the reference dtype. Boolean and integer dtypes aren't converted to the reference dtype regardless.
+
 **IB20.** B loads the model in bf16, but if A uses a more precise data type, B loads in that type, and casts to the reference dtype if the data dtype offers less precision (less mantissa bits) than the reference dtype (so if the reference dtype is bf16 and there's fp32 data, that higher precision data stays unmodified). It does not load a checkpoint in the reference dtype (unless it coincides with what A uses). B converts all components at once.
 
 **IB30.** After B loads a model, a `TorchDispatchMode` audit checks all dtypes used to run the model (including replays). It warns about dtypes with less precision than the reference dtype, and about custom calls. The check does not fail, only prints a warning informing about an imprecise dtype use, or a custom call. (it's a known limitation of version 1 needs to be addressed in future versions that these warnings aren't recorded and are produced only during instance B runs)
@@ -423,6 +440,8 @@ If the call raises an exception in step 3, the rank logs `status=CALL_EXCEPTION 
 
 **RL70.** **Duration of phase=run for the timeouts of TD110.** Since this phase execute a potentially lengthy code that isn't meant to be accounted for in the phase's deadline timeout calculation, the rank maintains an internal counter `duration_excluded` that is set to 0 when the phase starts. Execution of the code doesn't belong to the pipeline duration deadline threshold (such as dumping input, output & etc) is timed and added to the `duration_excluded`. During the phase, to each log record the rank produces, it automatically adds a  `duration_excluded=` field with the current value of the counter. Hence the launcher can always calculate a true duration of the phase for TD100-TD110 by subtracting from the `now()` timestamp, the timestamp of the latest `phase=` change, and the latest observed `duration_excluded=`.
 
+Imprecise timing of the dumps in progress and nested calls in progress, which might still get timed out due to lengthy inner dump operation is an accepted limitation of version 1 and is a future work.
+
 **RL80.** **phase=after_run** Once the model finishes running, only these things could have happened to each of the calls of each of the cases that the rank should have run during the model run phase:
 1. the call have obtained UNSUPPORTED status. It makes the call excluded from replays.
 2. the call have completed successfully and got `status=DUMPED`.
@@ -438,13 +457,13 @@ However, to alleviate debugging, all ranks compare their "replay lists" with one
 
 **RL90.** **phase=replay** Two kind of replays are needed:
 - both instance A and B should replay each call for fidelity check IA40-IA60, also when the fidelity check override flag is set (IA50);
-- instance B also replays each call of its list of A's calls (RL80: the calls that got status=DUMPED on A; B can read logs of A for this) that is also in B's own replay list, using A's data casted to reference dtype to obtain reference outputs of the component. The result of B's fidelity check for the call, also FIDELITY_READ_FAILED or FIDELITY_EXCEPTION, does not matter here: it is local to a rank, so it must not decide which calls a rank replays (RL100). A failed fidelity check still makes the case fail, unless the fidelity check override flag of B is set (IA50, IA60, PM40).
+- instance B also replays each call of its list of A's calls (RL80: the calls that got status=DUMPED on A; B can read logs of A for this) that is also in B's own replay list, using A's data casted to reference dtype (IB18) to obtain reference outputs of the component. The result of B's fidelity check for the call, also FIDELITY_READ_FAILED or FIDELITY_EXCEPTION, does not matter here: it is local to a rank, so it must not decide which calls a rank replays (RL100). A failed fidelity check still makes the case fail, unless the fidelity check override flag of B is set (IA50, IA60, PM40).
 
 Instance B runs both replays: first it runs fidelity check replays on its own inputs and outputs, then it runs replays on A's inputs.
 
 **RL100.** Call replays run in "replay list" order (RL60), and in a lock step, with a stream synchronization and a barrier before and after replay. This helps to time execution properly to ensure correct call timeouts (TD100.3), and help to correctly attribute crashes, should they happen. For each call in ordered "replay list", the rank does:
 1. the rank logs `status=<status> case=<case_id> call=<call_id>` where the `<status>` is `PRE_FIDELITY` if this is fidelity check, or `PRE_REPLAY` if this is B replaying inputs from A. For B replaying A, the log record also gets `file=<file>` entry with `<file>` being a filename in the same directory that will contain outputs of the call.
-2. the rank reads inputs, rng states and outputs (only if it's a fidelity check), from the call replay files (the paths are recoverable from data directory path and the call identifier). For B replaying A, the rank then casts the inputs to the reference dtype.
+2. the rank reads inputs, rng states and outputs (only if it's a fidelity check), from the call replay files (the paths are recoverable from data directory path and the call identifier). For B replaying A, the rank then casts the inputs to the reference dtype (IB18 applies).
 3. The rank executes a stream synchronization and a barrier.
 4. the rank saves current CPU and CUDA rng states into a temporary variable; restores rng states from loaded from the input file values, execute the call with loaded inputs (for B replaying A, the inputs cast in step 2) and synchronizes the stream (RL65 item 1), obtains the replayed call outputs, and, for B replaying A, saves them to the `<file>`. Finally it restores the original CPU and CUDA rng states from the temporary variable, also when a failure occurred in this step.
 5. The rank executes a stream synchronization and a barrier.
@@ -501,7 +520,7 @@ Neither part contains `/`, so the ID gives back the configuration name and the c
 
 **PM20.** **Errors.** In pytest, only setup/teardown or fixture code could emit errors. We generally turn into an error any situation where a test case doesn't have dumped data to work with:
 1. the configuration fixture inspects all rank log files and if not a single case of any single rank reached DUMPED status, it raises an exception, so pytest reports all test cases of the configuration class as "error".
-2. the case fixture inspects all rank log files and if it finds that no single pair of ranks of A and B reached DUMPED status for the case, it marks the case as "error". If some rank pairs reached DUMPED, but others don't, the test function runs on the obtained data, but eventually necessary fails later.
+2. the case fixture inspects all rank log files and if it finds that no single pair of ranks of A and B reached DUMPED status for the case, it marks the case as "error". If some rank pairs reached DUMPED_A and REPLAYED_B, but others don't, the test function runs on the obtained data, but eventually necessary fails later.
 
 **PM30.** **Skips.** Skips in pytest can be generated from both fixtures and test functions.
 1. In a fresh run mode, a whole configuration (all cases of the configuration) can be "skipped" only if the configuration is explicitly not supported on the current hardware (not the case for harness version 1).

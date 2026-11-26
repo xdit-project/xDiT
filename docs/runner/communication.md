@@ -37,8 +37,7 @@ FLUX.3-klein-base on eight MI355X (`gfx950`), CFG parallel with `--ulysses_degre
 In the same setup MiniMax-H3 at 768x1344 was 7% faster, and Z-Image, FLUX.2-dev,
 Qwen-Image and Qwen-Image-Edit were 4% to 12% slower at 1024x1024 to 2048x2048.
 On `gfx950` the FLUX.3-klein-base image is not bit-identical to the default
-all-to-all's (about 43 dB PSNR) but repeats from run to run; with
-`--ulysses_sdma_overlap_qkv` it also differs between runs.
+all-to-all's (about 43 dB PSNR) but repeats from run to run.
 
 ```bash
 xdit --model flux-3-image-klein-base --prompt "A lighthouse on a rocky coast" \

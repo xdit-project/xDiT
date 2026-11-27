@@ -1,5 +1,6 @@
 # Requests AMD benchmarks and accelerator tests manually, by PR comment, or nightly.
 # Scheduled runs require their GitHub actor in the downstream XDIT_CI_ALLOWED_ACTORS.
+# Editing the cron schedule can change that actor; if they are not allowed, the nightly is skipped downstream.
 name: ROCm Hardware CI
 run-name: "ROCm HW CI [origin:${{ inputs.original_run_id || github.run_id }}]"
 
@@ -91,6 +92,7 @@ jobs:
       - name: Select nightly configuration source
         if: github.event_name == 'schedule'
         run: |
+          # The downstream image copies xDiT's .ci/configs/*.yaml into its upstream benchmark config directory.
           shopt -s nullglob
           configs=(.ci/configs/*.yaml)
           if [ "${#configs[@]}" -eq 0 ]; then
@@ -176,6 +178,27 @@ jobs:
           if [[ "$RUN_BENCHMARKS" == false && "$RUN_TESTS" == false ]]; then
             echo "::error::Nothing to do: enable run_benchmarks, run_tests, or both."
             exit 1
+          fi
+          if [[ "$RUN_BENCHMARKS" == true && "$DOWNSTREAM_CONFIGS" == false ]]; then
+            xdit_sha="${XDIT_SHA:-$GITHUB_SHA}"
+            if [[ ! "$xdit_sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
+              echo "::error::Cannot verify benchmark configs: invalid xDiT commit SHA '${xdit_sha}'."
+              exit 1
+            fi
+            if ! configs=$(gh api "repos/${GITHUB_REPOSITORY}/contents/.ci/configs?ref=${xdit_sha}" 2>&1); then
+              if [[ "$configs" == *"(HTTP 404)"* ]]; then
+                echo "::error::xDiT commit ${xdit_sha} has no .ci/configs directory; pass downstream_configs=true."
+              else
+                echo "$configs" >&2
+                echo "::error::Could not verify .ci/configs at xDiT commit ${xdit_sha}."
+              fi
+              exit 1
+            fi
+            if ! jq -e 'type == "array" and any(.[]; .type == "file" and (.name | endswith(".yaml")))' \
+              <<< "$configs" >/dev/null; then
+              echo "::error::xDiT commit ${xdit_sha} has no top-level .ci/configs/*.yaml files; pass downstream_configs=true."
+              exit 1
+            fi
           fi
 
           echo "WAIT_DEADLINE=$(( $(date +%s) + 21000 ))" >> "$GITHUB_ENV"

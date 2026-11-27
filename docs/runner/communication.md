@@ -73,6 +73,10 @@ changed the image between runs. Models that send Q/K first (Wan) and runs under
 CPU offload project all heads at once and compile as before.
 `XDIT_SDMA_WAIT_S` sets the wait timeout in seconds (default 30).
 `XDIT_SDMA_ALLOW_UNTESTED=1` permits other GPU architectures.
+With `--ulysses_a2a sdma` the runner starts ROCr with `HSA_ENABLE_SDMA_HDP_FLUSH=0`,
+which drops a flush of the host data path that ROCr otherwise queues before every SDMA
+copy in the process; the transport's GPU-to-GPU copies do not need it. Set the variable
+to `1` to keep ROCr's default.
 
 ## FP8 communication
 

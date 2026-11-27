@@ -50,6 +50,17 @@ def _log(message: str) -> None:
     log(message)
 
 
+def _set_rocr_options(config: dict) -> None:
+    """Set the options ROCr reads once, when the process first uses a GPU; the environment wins.
+
+    Where a GPU hangs off the host by PCIe, ROCr queues a flush of the host data path before
+    every SDMA copy, for writes the host made into GPU memory. The SDMA transport copies what
+    kernels wrote, GPU to GPU, and would pay that flush on each of its copies for nothing.
+    """
+    if config.get("ulysses_a2a") == "sdma":
+        os.environ.setdefault("HSA_ENABLE_SDMA_HDP_FLUSH", "0")
+
+
 def _has_output_payload(output: DiffusionOutput | None) -> bool:
     return bool(output and (output.images or output.videos))
 
@@ -83,6 +94,8 @@ class xFuserModelRunner:
     """
 
     def __init__(self, config: dict) -> None:
+        # Before the runtime loads: its imports can be the process's first GPU use.
+        _set_rocr_options(config)
         # Keep the startup order from before the lazy imports: load the runtime
         # (the xfuser.envs checks and the import-time patches, for example the
         # torchao Float8 FSDP2 patches in xfuser.core.utils.runner_utils) before

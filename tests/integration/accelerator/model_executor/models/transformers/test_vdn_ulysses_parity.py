@@ -12,7 +12,7 @@ import pytest
 import torch
 from torch import nn
 
-pytestmark = pytest.mark.accelerator
+pytestmark = pytest.mark.multi_gpu
 
 
 class _ToyAttn(nn.Module):

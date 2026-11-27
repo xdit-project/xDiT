@@ -1,9 +1,20 @@
 """Parse /ci-rocm comments without evaluating their contents."""
 
+import argparse
 import json
 import os
 from pathlib import Path
 import shlex
+
+DEFAULT_REQUEST = {
+    "benchmarks": "--tag nightly",
+    "architectures": "gfx942,gfx950",
+    "amd_ref": "main",
+    "downstream_configs": "false",
+    "run_benchmarks": "true",
+    "run_tests": "false",
+}
+SCHEDULE_REQUEST = {**DEFAULT_REQUEST, "run_tests": "true"}
 
 
 def parse_command(body: str) -> dict[str, str]:
@@ -12,14 +23,7 @@ def parse_command(body: str) -> dict[str, str]:
     tokens = shlex.split(body)
     if not tokens or tokens[0] != "/ci-rocm":
         raise ValueError("Expected /ci-rocm.")
-    request = {
-        "benchmarks": "--tag nightly",
-        "architectures": "gfx942,gfx950",
-        "amd_ref": "main",
-        "downstream_configs": "false",
-        "run_benchmarks": "true",
-        "run_tests": "false",
-    }
+    request = dict(DEFAULT_REQUEST)
     seen = set()
     for token in tokens[1:]:
         key, separator, value = token.partition("=")
@@ -35,11 +39,18 @@ def parse_command(body: str) -> dict[str, str]:
 
 
 def main() -> None:
-    event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
-    try:
-        request = parse_command(event["comment"]["body"])
-    except ValueError as error:
-        raise SystemExit(f"::error::{error}") from error
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--schedule", action="store_true")
+    args = parser.parse_args()
+    if args.schedule:
+        request = dict(SCHEDULE_REQUEST)
+    else:
+        event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+        try:
+            request = parse_command(event["comment"]["body"])
+        except ValueError as error:
+            raise SystemExit(f"::error::{error}") from error
+
     with Path(os.environ["GITHUB_ENV"]).open("a") as output:
         for key, value in request.items():
             output.write(f"{key.upper()}={value}\n")

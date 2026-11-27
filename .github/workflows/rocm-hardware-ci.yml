@@ -75,12 +75,12 @@ jobs:
       SELF_WORKFLOW: rocm-hardware-ci.yml
       ORIGINAL_RUN_ID: ${{ inputs.original_run_id || github.run_id }}
       CONTINUATION_COUNT: ${{ inputs.original_run_id && inputs.continuation_count || '0' }}
-      BENCHMARKS: ${{ github.event_name == 'schedule' && '--tag nightly' || inputs.benchmarks }}
-      ARCHITECTURES: ${{ github.event_name == 'schedule' && 'gfx942,gfx950' || inputs.architectures }}
-      AMD_REF: ${{ github.event_name == 'schedule' && 'main' || inputs.amd_ref }}
+      BENCHMARKS: ${{ inputs.benchmarks }}
+      ARCHITECTURES: ${{ inputs.architectures }}
+      AMD_REF: ${{ inputs.amd_ref }}
       DOWNSTREAM_CONFIGS: ${{ inputs.downstream_configs && 'true' || 'false' }}
-      RUN_BENCHMARKS: ${{ (github.event_name != 'workflow_dispatch' || inputs.run_benchmarks) && 'true' || 'false' }}
-      RUN_TESTS: ${{ (github.event_name == 'schedule' || inputs.run_tests) && 'true' || 'false' }}
+      RUN_BENCHMARKS: ${{ inputs.run_benchmarks && 'true' || 'false' }}
+      RUN_TESTS: ${{ inputs.run_tests && 'true' || 'false' }}
       PR_NUMBER: ${{ github.event.issue.number || inputs.pr_number }}
     steps:
       - name: Checkout nightly configuration
@@ -88,6 +88,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: false
+
+      - name: Load scheduled request defaults
+        if: github.event_name == 'schedule'
+        run: |
+          python3 .github/scripts/rocm_ci_request.py --schedule
 
       - name: Select nightly configuration source
         if: github.event_name == 'schedule'

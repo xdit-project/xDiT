@@ -18,9 +18,10 @@ word per sender at each rank, in uncached memory, so a kernel polling them sees
 the engines' writes. Engines: see sx_engine_plan in transport.hip.
 
 Ordering:
-- A copy waits for a trigger that the compute stream releases, so it never
-  reads data the stream has not written yet. Each send of a call has a trigger
-  of its own.
+- A send's first copy to each peer waits for a trigger that the compute stream
+  releases, and that peer's engine runs the send's other copies behind it, so
+  none reads data the stream has not written yet. Each send of a call has a
+  trigger of its own.
 - Behind a peer's copies, a 4-byte write on the same engine sets this rank's
   flag word at that peer; the engine runs them in order, and the flag lands
   after the data, and after every earlier send's copies to that peer, flagged

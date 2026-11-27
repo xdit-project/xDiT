@@ -7,9 +7,10 @@
 // Copies are pushes: this rank's SDMA engines write its data into peers' buffers, one engine
 // per peer, all peers at once. Behind a peer's copies, a 4-byte copy on the same engine sets
 // this rank's flag word at that peer (one word per sender, so no two engines write the same
-// word): an engine runs its copies in order, and the flag lands after the data. Every copy
-// first waits for a trigger signal that a one-thread kernel releases on the compute stream,
-// so no copy reads data the stream has not written.
+// word): an engine runs its copies in order, and the flag lands after the data. A send's first
+// copy to each peer waits for a trigger signal that a one-thread kernel releases on the compute
+// stream, and holds the engine's other copies of that send behind it, so no copy reads data
+// the stream has not written.
 //
 // A call's copies are described once, as a plan: for each peer, a list of (source offset,
 // destination address, bytes) and the flag word to set after them. A plan is issued with the
@@ -322,10 +323,12 @@ void* flag_target(uint64_t flag, int issue, int i) {
   return (void*)flag;
 }
 
-// Queues `bytes` from `src` to `dst` on `engine` once trigger k of `s` is released.
-hsa_status_t copy_after_trigger(Slot& s, int k, void* dst, const void* src, uint64_t bytes, hsa_signal_t done,
-                                int engine) {
-  return hsa_amd_memory_async_copy_on_engine(dst, g_local, src, g_local, bytes, 1, &s.trigger[k], done,
+// Queues `bytes` from `src` to `dst` on `engine`. A `gated` copy starts once trigger k of `s` is
+// released: ROCr puts a poll of the trigger in front of it, which the engine pays per copy.
+hsa_status_t queue_copy(Slot& s, int k, void* dst, const void* src, uint64_t bytes, hsa_signal_t done, int engine,
+                        bool gated) {
+  return hsa_amd_memory_async_copy_on_engine(dst, g_local, src, g_local, bytes, gated ? 1 : 0,
+                                             gated ? &s.trigger[k] : nullptr, done,
                                              (hsa_amd_sdma_engine_id_t)(1u << engine), true);
 }
 
@@ -384,6 +387,7 @@ int sx_plan_free(int id) {
 // Issues plan `id` on `slot`, its sources at src_base + their offsets, once trigger `k` is
 // released. Each data copy, and each peer's flag write (the 4 bytes at `flag_src`), takes the
 // slot's next signal, set to 1 here: the slot counts what its call used, for its next sx_arm.
+// Only a peer's first copy waits for the trigger: its engine runs the others behind it.
 int sx_plan_issue(int slot, int k, int id, uint64_t src_base, uint64_t flag_src) {
   if (id < 0 || id >= (int)g_plans.size() || !g_plans[id].live) return -2;
   const Plan& plan = g_plans[id];
@@ -394,18 +398,20 @@ int sx_plan_issue(int slot, int k, int id, uint64_t src_base, uint64_t flag_src)
   if (!grow(s.data, s.used_data + plan.copies) || !grow(s.flag, s.used_flags + n_flags)) return -3;
   int issue = g_issues++;
   for (int i = 0; i < n; ++i) {
+    bool gated = true;
     for (const PlanCopy& copy : plan.peers[i]) {
       hsa_signal_t done = s.data[s.used_data++];
       hsa_signal_store_relaxed(done, 1);
-      hsa_status_t st = copy_after_trigger(s, k, (void*)copy.dst, (const void*)(src_base + copy.src_offset), copy.bytes,
-                                           done, plan.engines[i]);
+      hsa_status_t st = queue_copy(s, k, (void*)copy.dst, (const void*)(src_base + copy.src_offset), copy.bytes, done,
+                                   plan.engines[i], gated);
       if (st != HSA_STATUS_SUCCESS) return -100 - (int)st;
+      gated = false;
     }
     if (n_flags == 0) continue;
     hsa_signal_t done = s.flag[s.used_flags++];
     hsa_signal_store_relaxed(done, 1);
-    hsa_status_t st =
-        copy_after_trigger(s, k, flag_target(plan.flags[i], issue, i), (const void*)flag_src, 4, done, plan.engines[i]);
+    hsa_status_t st = queue_copy(s, k, flag_target(plan.flags[i], issue, i), (const void*)flag_src, 4, done,
+                                 plan.engines[i], gated);
     if (st != HSA_STATUS_SUCCESS) return -200 - (int)st;
   }
   return 0;

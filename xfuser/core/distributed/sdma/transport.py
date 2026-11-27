@@ -203,6 +203,24 @@ def device_bytes(ptr: int, nbytes: int, device: torch.device) -> torch.Tensor:
     return torch.as_tensor(_CudaArray(ptr, nbytes), device=device)
 
 
+# sx_malloc rounds every allocation up to this size.
+_ALLOC_GRANULE = 2 << 20
+# Uncached allocations of released buffers, (pointer, bytes), for the next uncached buffer.
+# They are not freed: after about 130 cycles of freeing uncached memory that peers had mapped
+# and allocating it again, this rank no longer saw the peers' writes to a new allocation, so
+# flag waits gave up or ended before the data arrived.
+_spare_uncached: List[Tuple[int, int]] = []
+
+
+def _take_spare_uncached(nbytes: int) -> int:
+    """A spare uncached allocation of at least `nbytes`, or 0 if there is none."""
+    fits = [i for i, (_, size) in enumerate(_spare_uncached) if size >= nbytes]
+    if not fits:
+        return 0
+    best = min(fits, key=lambda i: _spare_uncached[i][1])
+    return _spare_uncached.pop(best)[0]
+
+
 class SharedBuffer:
     """Device memory of the same size on every rank of a group, mapped into every peer
     (interface.SymmetricBuffer).
@@ -219,9 +237,11 @@ class SharedBuffer:
         self.uncached = uncached
         # False once released: routes naming it are rebuilt.
         self.live = True
-        ptr = ctypes.c_uint64()
-        _check(lib.sx_malloc(nbytes, int(uncached), ctypes.byref(ptr)), f"sx_malloc({nbytes}, uncached={uncached})")
-        self.ptr = ptr.value
+        self.ptr = _take_spare_uncached(nbytes) if uncached else 0
+        if not self.ptr:
+            ptr = ctypes.c_uint64()
+            _check(lib.sx_malloc(nbytes, int(uncached), ctypes.byref(ptr)), f"sx_malloc({nbytes}, uncached={uncached})")
+            self.ptr = ptr.value
         _check(lib.sx_memset(self.ptr, 0, nbytes), "sx_memset")
         size = lib.sx_ipc_handle_size()
         handle = (ctypes.c_uint8 * size)()
@@ -249,8 +269,12 @@ class SharedBuffer:
 
     def free(self) -> None:
         """Free this rank's buffer; every peer must have unmapped it: a buffer freed while a peer
-        still maps it leaves later allocations that HIP cannot export."""
+        still maps it leaves later allocations that HIP cannot export. Uncached memory is kept
+        for a later uncached buffer (see _spare_uncached)."""
         self.local = None
+        if self.uncached:
+            _spare_uncached.append((self.ptr, -(-self.nbytes // _ALLOC_GRANULE) * _ALLOC_GRANULE))
+            return
         load().sx_free(self.ptr)
 
 

@@ -338,8 +338,8 @@ class xFuserArgs:
     profile: bool = False
     profile_capture_phase: bool = False
     profile_with_stack: bool = False
-    profile_wait: int = 2
-    profile_warmup: int = 2
+    profile_wait: int = 1
+    profile_warmup: int = 1
     profile_active: int = 1
     warmup_calls: int = 0
     output_directory: str = "."
@@ -1440,13 +1440,13 @@ class xFuserArgs:
         parser.add_argument(
             "--profile_wait",
             type=int,
-            default=2,
+            default=1,
             help="wait argument for torch.profiler.schedule. Only used with --profile.",
         )
         parser.add_argument(
             "--profile_warmup",
             type=int,
-            default=2,
+            default=1,
             help="warmup argument for torch.profiler.schedule. Only used with --profile.",
         )
         parser.add_argument(

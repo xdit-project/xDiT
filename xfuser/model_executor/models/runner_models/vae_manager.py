@@ -145,11 +145,16 @@ class VAEManager:
 
                 install_minimax_h3_image_tiled_decode(vae, coordinator)
                 continue
-            if self._tiles(vae) and vae_tiling.supports_tile_parallel(vae):
+            tile_parallel = vae_tiling.supports_tile_parallel(vae)
+            if tile_parallel and self._tiles(vae):
                 mark(vae, tile_context)
                 log(
                     "Parallel VAE will assign complete tiles of "
                     f"{type(vae).__name__} to ranks instead of sharding rows within each tile."
+                )
+            elif tile_parallel and vae_parallel.decoder_adapter_name(vae) is None:
+                raise ValueError(
+                    f"--use_parallel_vae can only distribute {type(vae).__name__} by whole tiles: add --enable_tiling."
                 )
             else:
                 adapter = vae_parallel.parallelize_decoder(vae, vae_group)

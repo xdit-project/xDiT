@@ -404,6 +404,7 @@ class xFuserQwenImage21Model(xFuserModel):
         use_fp8_gemms=True,
         enable_tiling=True,
         enable_slicing=True,
+        use_parallel_vae=True,
     )
     # No height/width: _preprocess_args_images resolves them, from the condition image when given.
     default_input_values = DefaultInputValues(

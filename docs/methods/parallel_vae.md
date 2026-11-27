@@ -53,6 +53,29 @@ diffusion decoder enables native tiling with parallel VAE. Some pipelines enable
 VAE tiling during loading. These pipelines use tiling without an explicit
 `--enable_tiling` flag.
 
+## Sharded Wan VAE decode
+
+For Wan's `AutoencoderKLWan` (Wan2.1 and Wan2.2 A14B), `--parallel_vae_impl sharded`
+replaces the DistVAE decoder with a row-sharded decode on fused channels-last
+kernels. Each rank decodes a band of latent rows. Before each 3x3 convolution
+it exchanges boundary rows with its neighbors. On ROCm the exchange uses the SDMA
+copy engines when available; otherwise it uses NCCL (`--parallel_vae_halo`). The
+mid-block attention gathers keys and values at latent resolution, and the decoded
+bands are gathered into the full video on every rank. The encoder, when it is
+parallelized, still uses DistVAE.
+
+```bash
+xdit --model Wan-AI/Wan2.2-T2V-A14B-Diffusers \
+    --prompt "A coastal lighthouse above calm water at sunrise" \
+    --ulysses_degree 8 --use_parallel_vae --parallel_vae_impl sharded
+```
+
+The convolutions use AITER's FlyDSL implicit-GEMM kernel when it is available,
+and a built-in Triton kernel otherwise. Set `XDIT_WAN_VAE_CONV=triton` to force
+the Triton kernel. Results are bitwise reproducible run to run, and identical
+for NCCL and SDMA exchanges. Other VAEs, tiling, and patched Wan VAEs (TI2V-5B)
+keep the DistVAE path. Batches decode one sample at a time.
+
 ## Set an exact tile window
 
 | Options | Units and requirements |

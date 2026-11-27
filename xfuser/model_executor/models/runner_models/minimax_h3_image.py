@@ -323,7 +323,7 @@ class xFuserMiniMaxH3ImageModel(MiniMaxH3TextEncoderMixin, xFuserModel):
         transformer._forward_body = torch.compile(
             transformer._forward_body,
             # Host-issued SDMA copies cannot be replayed by CUDA graphs.
-            mode=usp_sdma.compile_mode(mode),
+            **usp_sdma.compile_kwargs(mode, transformer),
             fullgraph=not get_runtime_state().has_attention_schedule(),
         )
         self._run_timed_pipe(copy.deepcopy(input_args))

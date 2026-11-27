@@ -306,3 +306,66 @@ def test_q_k_first_modules_are_reported_with_their_one_head_group(monkeypatch, r
 def test_host_issued_copies_compile_without_cuda_graphs(monkeypatch, mode, transport, world, expected):
     _ulysses_a2a(monkeypatch, transport, 2, world=world)
     assert usp_sdma.compile_mode(mode) == expected
+
+
+def _component(grouped):
+    """A transformer whose one attention module `prepare` did or did not set up to project per head group."""
+    component = torch.nn.Module()
+    component.add_module("attn", torch.nn.Module())
+    if grouped:
+        component.attn._xfuser_sdma_qkv_layout = (8, [(1,), (2,)], 128)
+    return component
+
+
+@pytest.mark.parametrize(
+    ("mode", "transport", "grouped", "expected_mode"),
+    [
+        ("reduce-overhead", "sdma", True, None),
+        ("max-autotune", "sdma", True, None),
+        ("default", "sdma", True, None),
+        ("default", "packed", True, None),
+        # Without the option, on one rank, with Q/K sent first (Wan) or under CPU offload: no module is set up.
+        ("reduce-overhead", "sdma", False, "default"),
+        ("default", "packed", False, "default"),
+        # Under CUDA graphs the runner reads the mode back, so the mode stays.
+        ("reduce-overhead", "packed", True, "reduce-overhead"),
+        ("reduce-overhead", "default", True, "reduce-overhead"),
+    ],
+)
+def test_per_group_projections_compile_in_deterministic_mode(monkeypatch, mode, transport, grouped, expected_mode):
+    """Per-group projections leave a reduction whose block size Inductor would pick by timing."""
+    _ulysses_a2a(monkeypatch, transport, 2, overlap_qkv=True)
+    kwargs = usp_sdma.compile_kwargs(mode, _component(grouped))
+    assert kwargs["mode"] == expected_mode
+    if expected_mode is not None:
+        assert kwargs["options"] is None
+    else:
+        without_graphs = usp_sdma.compile_mode(mode)
+        assert kwargs["options"] == {**torch._inductor.list_mode_options(without_graphs), "deterministic": True}
+    # torch.compile checks the option names and takes a mode or options, not both.
+    torch.compile(torch.nn.Identity(), **kwargs)
+
+
+def test_prepare_marks_the_modules_whose_compilation_turns_deterministic(monkeypatch, registered):
+    """The mark `compile_kwargs` reads is the one `prepare` leaves, and only where it copies weights."""
+    _ulysses_a2a(monkeypatch, "sdma", 2, overlap_qkv=True)
+
+    def transformer(cpu_offload):
+        pipe = _pipe((_Processor("a"), False))
+        attn = pipe.transformer.attn0
+        attn.heads = 16
+        attn.to_q, attn.to_k, attn.to_v = (torch.nn.Linear(32, 32) for _ in range(3))
+        usp_sdma.prepare(pipe, ["transformer"], cpu_offload=cpu_offload)
+        return pipe.transformer
+
+    assert usp_sdma.compile_kwargs("reduce-overhead", transformer(cpu_offload=False))["mode"] is None
+    assert usp_sdma.compile_kwargs("reduce-overhead", transformer(cpu_offload=True)) == {
+        "mode": "default",
+        "options": None,
+    }
+
+
+def test_a_torch_without_deterministic_mode_compiles_as_before(monkeypatch):
+    _ulysses_a2a(monkeypatch, "sdma", 2, overlap_qkv=True)
+    monkeypatch.setattr(torch._inductor, "config", SimpleNamespace())
+    assert usp_sdma.compile_kwargs("reduce-overhead", _component(True)) == {"mode": "default", "options": None}

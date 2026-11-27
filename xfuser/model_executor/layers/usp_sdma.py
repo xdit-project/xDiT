@@ -21,8 +21,10 @@ overlaps the projection of the next.
 
 The transport queues its copies from the host, so a CUDA graph would not replay them. The
 runner compiles the transformer without CUDA graphs (`compile_mode`); its other components
-keep theirs. The ops are also tagged cudagraph_unsafe, so a model compiled with graphs
-some other way runs them between graph partitions.
+keep theirs. Where --ulysses_sdma_overlap_qkv projects Q/K/V one head group at a time it also
+compiles the transformer in Inductor's deterministic mode (`compile_kwargs`), so results
+repeat from run to run. The ops are also tagged cudagraph_unsafe, so a model compiled with
+graphs some other way runs them between graph partitions.
 
 The path covers Ulysses with joint tensors (front or rear), extra per-head inputs and
 grouped-query K/V, with a dense backend. Ring attention, FP8 communication, the PipeFusion
@@ -96,6 +98,23 @@ def compile_mode(mode: str) -> str:
         return mode
     warn_once(logger, f"--ulysses_a2a sdma: compiling the transformer with mode {_WITHOUT_CUDAGRAPHS[mode]!r}.")
     return _WITHOUT_CUDAGRAPHS[mode]
+
+
+def compile_kwargs(mode: str, module: torch.nn.Module) -> Dict[str, object]:
+    """torch.compile's `mode` and `options` (it takes one or the other) for `module`, a component
+    whose Ulysses attention takes this path: `compile_mode`, and where `prepare` set attention
+    modules up to project Q/K/V per head group, that mode's options plus Inductor's deterministic
+    mode. The per-group Q/K norm is a reduction whose block size, and so summation order, Inductor
+    otherwise picks by timing, anew in every run. A component that projects all heads at once
+    under the option (Q/K sent first, CPU offload) has no such kernel and compiles as without it.
+    Set per compilation: Dynamo rewrites the global flag. Older torch compiles as before."""
+    mode = compile_mode(mode)
+    grouped = any(getattr(m, "_xfuser_sdma_qkv_layout", None) is not None for m in module.modules())
+    if not grouped or mode in _WITHOUT_CUDAGRAPHS:
+        return {"mode": mode, "options": None}
+    if not hasattr(torch._inductor.config, "deterministic"):
+        return {"mode": mode, "options": None}
+    return {"mode": None, "options": {**torch._inductor.list_mode_options(mode), "deterministic": True}}
 
 
 def call_reason(

@@ -66,6 +66,8 @@ def _worker(rank, world_size, init_method):
     backends = [
         b for b in (AttentionBackendType.AITER, AttentionBackendType.AITER_BF16) if registry.available(b) is None
     ]
+    # The worker can share its process with other tests, so restore the functions in `finally`.
+    originals = {module: module.get_runtime_state for module in (usp, transformer_qwen)}
     try:
         if not backends:
             pytest.skip("neither AITER FAv3 nor AITER MHA v4 BF16 is available")
@@ -116,6 +118,8 @@ def _worker(rank, world_size, init_method):
                 unpacked = _call(model, hidden_states.repeat(2, 1, 1), loud, img_shapes)
                 assert error(unpacked[1:], reference[1]) > 0.25 * prompt_effect, (where, prompt_effect)
     finally:
+        for module, get_runtime_state in originals.items():
+            module.get_runtime_state = get_runtime_state
         destroy_model_parallel()
         destroy_distributed_environment()
 

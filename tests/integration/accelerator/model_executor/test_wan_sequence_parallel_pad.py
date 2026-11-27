@@ -19,6 +19,7 @@ Every run also checks that the ranks holding pad rows keep them at zero in
 every block's output.
 """
 
+import contextlib
 import dataclasses
 from types import SimpleNamespace
 from typing import NamedTuple
@@ -110,13 +111,31 @@ def _inputs(name, latent_shape, batch):
     return inputs
 
 
+@contextlib.contextmanager
+def _dispatch_to(kernels):
+    """Have each attention spec dispatch to its kernel in `kernels`, and restore the old kernels on exit.
+
+    The specs are global and frozen; run() dispatches to whatever a spec holds
+    as resolved. The worker can share its process with other tests, so the
+    change must not outlive it.
+    """
+    originals = [(spec, spec._resolved) for spec, _ in kernels]
+    try:
+        for spec, kernel in kernels:
+            object.__setattr__(spec, "_resolved", kernel)
+        yield
+    finally:
+        for spec, kernel in originals:
+            object.__setattr__(spec, "_resolved", kernel)
+
+
 def _attend_in_bf16(backend):
     """Have the backend's kernel take bf16 copies of an fp32 model's Q/K/V, as it would in an all-bf16 model.
 
     AITER_BF16 serves bf16 only, while the padded runs need the rest of the
     model in fp32 (see the module docstring). Swapping the resolved kernel
     keeps the registry dispatch, the ring and USP's handling of the pad as they
-    run in production. Done in the spawned rank, so it never outlives the run.
+    run in production. A context manager: the kernels come back on exit.
     """
     from xfuser.core.attention import registry
     from xfuser.core.attention.spec import AttentionBackendType
@@ -126,6 +145,7 @@ def _attend_in_bf16(backend):
     # hands the text cross-attention's 16 keys to AITER.
     if specs[0].fallback is not None:
         specs.append(registry.get(specs[0].fallback))
+    kernels = []
     for spec in specs:
         kernel = spec.resolved()
 
@@ -133,8 +153,8 @@ def _attend_in_bf16(backend):
             output, lse = kernel(query.bfloat16(), key.bfloat16(), value.bfloat16(), call)
             return output.to(query.dtype), lse
 
-        # Spec is frozen; run() dispatches to whatever it holds as resolved.
-        object.__setattr__(spec, "_resolved", kernel_in_bf16)
+        kernels.append((spec, kernel_in_bf16))
+    return _dispatch_to(kernels)
 
 
 def _attend_as_fp8_comms(backend):
@@ -143,7 +163,8 @@ def _attend_as_fp8_comms(backend):
     FP8 comms runs only under Ulysses: USP rotates Q/K, quantizes Q/K/V with the
     layer's scales before the exchange, and quantizes the attention output for
     the exchange back. The exchanges move values unchanged, so the same steps
-    with the same fixed scale around the kernel give one GPU the same numbers.
+    with the same fixed scale around the kernel give one GPU the same numbers. A
+    context manager: the kernel comes back on exit.
     """
     from xfuser.core.attention import registry
     from xfuser.core.attention.spec import AttentionBackendType
@@ -170,7 +191,7 @@ def _attend_as_fp8_comms(backend):
         output_fp8, o_descale = _per_tensor_quant(output, scale)
         return (output_fp8.float() * o_descale).to(output.dtype), lse
 
-    object.__setattr__(spec, "_resolved", kernel_as_fp8_comms)
+    return _dispatch_to([(spec, kernel_as_fp8_comms)])
 
 
 def _watch_pad_rows(model, rows):
@@ -203,6 +224,7 @@ def _worker(rank, world_size, init_method, name, ulysses, ring, latent_shape, nu
     torch.cuda.set_device(rank)
     init_distributed_environment(rank=rank, world_size=world_size, local_rank=rank, distributed_init_method=init_method)
     initialize_model_parallel(ulysses_degree=ulysses, ring_degree=ring)
+    kernels = contextlib.ExitStack()
     try:
         args = xFuserArgs(
             attention_backend=numerics.backend,
@@ -218,11 +240,11 @@ def _worker(rank, world_size, init_method, name, ulysses, ring, latent_shape, nu
         # Without a pipeline there is no denoising schedule to advance, but the wrappers' forward asks to.
         runtime_state.increment_step_counter = lambda: None
         if numerics.attention_in_bf16:
-            _attend_in_bf16(numerics.backend)
+            kernels.enter_context(_attend_in_bf16(numerics.backend))
         if numerics.fp8_comms:
             runtime_state.set_cross_attention_backend("SDPA_EFFICIENT")
             if not fp8_comms:
-                _attend_as_fp8_comms(numerics.backend)
+                kernels.enter_context(_attend_as_fp8_comms(numerics.backend))
 
         device = torch.device("cuda", rank)
         # Seeded on the CPU, so every process builds the same weights.
@@ -251,6 +273,7 @@ def _worker(rank, world_size, init_method, name, ulysses, ring, latent_shape, nu
         if rank == 0:
             torch.save(output.cpu(), output_path)
     finally:
+        kernels.close()
         destroy_model_parallel()
         destroy_distributed_environment()
 

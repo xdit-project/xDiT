@@ -4,6 +4,7 @@ import functools
 from typing import List, Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 from distvae.vae import ParallelContext, VAERowSplitError, latent_rows, mark
 from distvae.vae import parallel as vae_parallel
 from distvae.vae import tile_parallel as vae_tile_parallel
@@ -47,6 +48,45 @@ def validate_vae_config(config, capabilities, settings) -> None:
     _validate_vae_tile_pair(config, capabilities, settings, "overlap", 0, "non-negative")
 
 
+def _single_frame_forward(conv, forward_3d, x, cache_x=None):
+    """A causal convolution's forward: one uncached frame as a 2D convolution, the rest as before."""
+    if cache_x is not None or x.shape[2] != 1:
+        return forward_3d(x, cache_x)
+    pad_w, _, pad_h, _, _, _ = conv._padding
+    frame = F.conv2d(
+        x[:, :, 0], conv.weight[:, :, -1], conv.bias, conv.stride[1:], (pad_h, pad_w), conv.dilation[1:], conv.groups
+    )
+    return frame.unsqueeze(2)
+
+
+def fold_single_frame_causal_convs(model: torch.nn.Module) -> int:
+    """Run `model`'s causal 3D convolutions as 2D convolutions where they see one uncached frame.
+
+    A causal convolution pads time in front only, with zeros when no frame is cached. On one
+    frame every temporal slice of its kernel but the last then multiplies zeros, so the 3D
+    convolution equals a 2D one with that last slice: a third of the arithmetic for a kernel
+    three frames deep, and no padded copy of the input. An image VAE built on a video VAE
+    (Qwen-Image's) decodes exactly one such frame. Several frames, or a cached one, keep the
+    3D path. Returns the number of convolutions changed.
+    """
+    try:
+        from diffusers.models.autoencoders.autoencoder_kl_qwenimage import QwenImageCausalConv3d
+    except ImportError:
+        return 0
+    folded = 0
+    for module in model.modules():
+        if type(module) is not QwenImageCausalConv3d or "forward" in vars(module):
+            continue
+        # One output frame per input frame, from zero padding that precedes it.
+        if module.kernel_size[0] != module._padding[4] + 1 or module.stride[0] != 1 or module.dilation[0] != 1:
+            continue
+        if module.padding != (0, 0, 0) or module.padding_mode != "zeros":
+            continue
+        module.forward = functools.partial(_single_frame_forward, module, module.forward)
+        folded += 1
+    return folded
+
+
 class VAEManager:
     """Owns all VAE-specific policy used by runner-model lifecycles."""
 
@@ -85,6 +125,21 @@ class VAEManager:
                 self._check_tiles_against_parallel_vae(vae, native_shape)
                 self._install_vae_tiled_decode(vae)
             self._install_vae_decode_guard(vae, applied_shape)
+
+    def fold_single_frame_convs(self, vaes) -> None:
+        """Run the decoders' causal 3D convolutions as 2D ones on single frames (`fold_single_frame_causal_convs`).
+
+        For a runner whose VAE only sees single frames. The encoder keeps its 3D convolutions:
+        an edited image follows the last bits of its input latents through every step, and
+        encoding is a small part of such a call. Not under ``--use_parallel_vae``, whose
+        adapters replace the convolutions with their own.
+        """
+        if self.config.use_parallel_vae:
+            return
+        for vae in vaes:
+            folded = fold_single_frame_causal_convs(vae.decoder)
+            if folded:
+                log(f"{type(vae).__name__}: {folded} causal 3D decoder convolutions run as 2D on single frames.")
 
     def prepare_run(self, vaes, input_args) -> None:
         """Apply shape-dependent VAE options for the current invocation."""

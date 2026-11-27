@@ -1,10 +1,14 @@
-# Requests AMD hardware validation manually or through a /ci-rocm PR comment.
+# Requests AMD benchmarks and accelerator tests manually, by PR comment, or nightly.
+# Scheduled runs require their GitHub actor in the downstream XDIT_CI_ALLOWED_ACTORS.
+# Editing the cron schedule can change that actor; if they are not allowed, the nightly is skipped downstream.
 name: ROCm Hardware CI
 run-name: "ROCm HW CI [origin:${{ inputs.original_run_id || github.run_id }}]"
 
 on:
   issue_comment:
     types: [created]
+  schedule:
+    - cron: '0 2 * * *'
   workflow_dispatch:
     inputs:
       benchmarks:
@@ -19,6 +23,16 @@ on:
         default: 'main'
       downstream_configs:
         description: 'Use downstream benchmark configurations'
+        type: boolean
+        required: false
+        default: false
+      run_benchmarks:
+        description: 'Run benchmarks'
+        type: boolean
+        required: false
+        default: true
+      run_tests:
+        description: 'Run tests'
         type: boolean
         required: false
         default: false
@@ -49,6 +63,7 @@ jobs:
   wait:
     if: >-
       github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
       (github.event.issue.pull_request &&
        (github.event.comment.body == '/ci-rocm' ||
         startsWith(github.event.comment.body, '/ci-rocm ')))
@@ -64,8 +79,35 @@ jobs:
       ARCHITECTURES: ${{ inputs.architectures }}
       AMD_REF: ${{ inputs.amd_ref }}
       DOWNSTREAM_CONFIGS: ${{ inputs.downstream_configs && 'true' || 'false' }}
+      RUN_BENCHMARKS: ${{ inputs.run_benchmarks && 'true' || 'false' }}
+      RUN_TESTS: ${{ inputs.run_tests && 'true' || 'false' }}
       PR_NUMBER: ${{ github.event.issue.number || inputs.pr_number }}
     steps:
+      - name: Checkout nightly configuration
+        if: github.event_name == 'schedule'
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Load scheduled request defaults
+        if: github.event_name == 'schedule'
+        run: |
+          python3 .github/scripts/rocm_ci_request.py --schedule
+
+      - name: Select nightly configuration source
+        if: github.event_name == 'schedule'
+        run: |
+          # The downstream image copies xDiT's .ci/configs/*.yaml into its upstream benchmark config directory.
+          shopt -s nullglob
+          configs=(.ci/configs/*.yaml)
+          if [ "${#configs[@]}" -eq 0 ]; then
+            echo "DOWNSTREAM_CONFIGS=true" >> "$GITHUB_ENV"
+            echo "No xDiT benchmark configs found; using downstream nightly configs."
+          else
+            echo "DOWNSTREAM_CONFIGS=false" >> "$GITHUB_ENV"
+            echo "Using xDiT benchmark configs."
+          fi
+
       - name: Checkout trusted comment parser
         if: github.event_name == 'issue_comment'
         uses: actions/checkout@v4
@@ -130,6 +172,39 @@ jobs:
             echo "::error::downstream_configs must be true or false."
             exit 1
           fi
+          if [[ "$RUN_BENCHMARKS" != true && "$RUN_BENCHMARKS" != false ]]; then
+            echo "::error::run_benchmarks must be true or false."
+            exit 1
+          fi
+          if [[ "$RUN_TESTS" != true && "$RUN_TESTS" != false ]]; then
+            echo "::error::run_tests must be true or false."
+            exit 1
+          fi
+          if [[ "$RUN_BENCHMARKS" == false && "$RUN_TESTS" == false ]]; then
+            echo "::error::Nothing to do: enable run_benchmarks, run_tests, or both."
+            exit 1
+          fi
+          if [[ "$RUN_BENCHMARKS" == true && "$DOWNSTREAM_CONFIGS" == false ]]; then
+            xdit_sha="${XDIT_SHA:-$GITHUB_SHA}"
+            if [[ ! "$xdit_sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
+              echo "::error::Cannot verify benchmark configs: invalid xDiT commit SHA '${xdit_sha}'."
+              exit 1
+            fi
+            if ! configs=$(gh api "repos/${GITHUB_REPOSITORY}/contents/.ci/configs?ref=${xdit_sha}" 2>&1); then
+              if [[ "$configs" == *"(HTTP 404)"* ]]; then
+                echo "::error::xDiT commit ${xdit_sha} has no .ci/configs directory; pass downstream_configs=true."
+              else
+                echo "$configs" >&2
+                echo "::error::Could not verify .ci/configs at xDiT commit ${xdit_sha}."
+              fi
+              exit 1
+            fi
+            if ! jq -e 'type == "array" and any(.[]; .type == "file" and (.name | endswith(".yaml")))' \
+              <<< "$configs" >/dev/null; then
+              echo "::error::xDiT commit ${xdit_sha} has no top-level .ci/configs/*.yaml files; pass downstream_configs=true."
+              exit 1
+            fi
+          fi
 
           echo "WAIT_DEADLINE=$(( $(date +%s) + 21000 ))" >> "$GITHUB_ENV"
           echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
@@ -144,7 +219,7 @@ jobs:
             -f content=eyes
 
       - name: Publish request metadata
-        if: github.event_name == 'issue_comment' || inputs.original_run_id == ''
+        if: github.event_name == 'schedule' || github.event_name == 'issue_comment' || inputs.original_run_id == ''
         run: |
           mkdir -p request
           jq -n \
@@ -153,10 +228,12 @@ jobs:
             --arg amd_ref "$AMD_REF" \
             --arg xdit_sha "${XDIT_SHA:-$GITHUB_SHA}" \
             --argjson downstream_configs "$DOWNSTREAM_CONFIGS" \
-            '{benchmarks: $benchmarks, architectures: $architectures, amd_ref: $amd_ref, xdit_sha: $xdit_sha, use_xdit_configs: ($downstream_configs | not)}' > request/request.json
+            --argjson run_benchmarks "$RUN_BENCHMARKS" \
+            --argjson run_tests "$RUN_TESTS" \
+            '{benchmarks: $benchmarks, architectures: $architectures, amd_ref: $amd_ref, xdit_sha: $xdit_sha, use_xdit_configs: ($downstream_configs | not), run_benchmarks: $run_benchmarks, run_tests: $run_tests}' > request/request.json
 
       - name: Upload request metadata
-        if: github.event_name == 'issue_comment' || inputs.original_run_id == ''
+        if: github.event_name == 'schedule' || github.event_name == 'issue_comment' || inputs.original_run_id == ''
         uses: actions/upload-artifact@v4
         with:
           name: rocm-hardware-request
@@ -224,6 +301,8 @@ jobs:
             -f 'inputs[architectures]='"$ARCHITECTURES" \
             -f 'inputs[amd_ref]='"$AMD_REF" \
             -F 'inputs[downstream_configs]='"$DOWNSTREAM_CONFIGS" \
+            -F 'inputs[run_benchmarks]='"$RUN_BENCHMARKS" \
+            -F 'inputs[run_tests]='"$RUN_TESTS" \
             -f 'inputs[original_run_id]='"$ORIGINAL_RUN_ID" \
             -f 'inputs[continuation_count]='"$next_continuation" \
             -f 'inputs[pr_number]='"$PR_NUMBER"

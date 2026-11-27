@@ -86,9 +86,14 @@ class _SingleFrameVAEMixin:
     """
 
     def _enable_options(self) -> None:
+        from diffusers.models.autoencoders.autoencoder_kl_qwenimage import (
+            QwenImageAttentionBlock,
+            QwenImageCausalConv3d,
+        )
+
         vaes = self._decoding_vaes()
-        self._vae_manager.fold_single_frame_convs(vaes)
-        self._vae_manager.pad_attention_heads(vaes)
+        self._vae_manager.fold_single_frame_convs(vaes, (QwenImageCausalConv3d,))
+        self._vae_manager.pad_attention_heads(vaes, (QwenImageAttentionBlock,))
         super()._enable_options()
 
 

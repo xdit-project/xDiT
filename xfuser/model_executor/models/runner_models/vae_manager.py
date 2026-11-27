@@ -60,23 +60,22 @@ def _single_frame_forward(conv, forward_3d, x, cache_x=None):
     return frame.unsqueeze(2)
 
 
-def fold_single_frame_causal_convs(model: torch.nn.Module) -> int:
+def fold_single_frame_causal_convs(model: torch.nn.Module, conv_types: Tuple[type, ...]) -> int:
     """Run `model`'s causal 3D convolutions as 2D convolutions where they see one uncached frame.
 
     A causal convolution pads time in front only, with zeros when no frame is cached. On one
     frame every temporal slice of its kernel but the last then multiplies zeros, so the 3D
     convolution equals a 2D one with that last slice: a third of the arithmetic for a kernel
     three frames deep, and no padded copy of the input. An image VAE built on a video VAE
-    (Qwen-Image's) decodes exactly one such frame. Several frames, or a cached one, keep the
-    3D path. Returns the number of convolutions changed.
+    decodes exactly one such frame. Several frames, or a cached one, keep the 3D path.
+
+    `conv_types` are the VAE's causal convolution classes: `nn.Conv3d` subclasses that pad by
+    `_padding` (`F.pad` order, all of time's in front) in a `forward(x, cache_x=None)`, as
+    diffusers' Qwen-Image VAE does. Returns the number of convolutions changed.
     """
-    try:
-        from diffusers.models.autoencoders.autoencoder_kl_qwenimage import QwenImageCausalConv3d
-    except ImportError:
-        return 0
     folded = 0
     for module in model.modules():
-        if type(module) is not QwenImageCausalConv3d or "forward" in vars(module):
+        if type(module) not in conv_types or "forward" in vars(module):
             continue
         # One output frame per input frame, from zero padding that precedes it.
         if module.kernel_size[0] != module._padding[4] + 1 or module.stride[0] != 1 or module.dilation[0] != 1:
@@ -97,7 +96,7 @@ _PADDED_HEAD_DIM = 512
 
 
 def _padded_head_forward(block, x):
-    """`QwenImageAttentionBlock.forward` with its one attention head zero-padded to `_PADDED_HEAD_DIM`.
+    """A single-head VAE attention block's forward with the head zero-padded to `_PADDED_HEAD_DIM`.
 
     Zero dimensions add nothing to a dot product and come out as zeros, so the result is the
     same to the bit. The scale stays the unpadded head's.
@@ -113,18 +112,16 @@ def _padded_head_forward(block, x):
     return x.permute(0, 2, 1, 3, 4) + identity
 
 
-def pad_attention_heads(model: torch.nn.Module) -> int:
+def pad_attention_heads(model: torch.nn.Module, block_types: Tuple[type, ...]) -> int:
     """Zero-pad the `_SLOW_HEAD_DIM`-wide attention heads of `model` (`_padded_head_forward`).
 
-    Returns the number of attention blocks changed.
+    `block_types` are the VAE's attention block classes: one head of `dim` channels computed by
+    `norm`, `to_qkv` and `proj` over [batch, channels, frames, height, width], as in diffusers'
+    Qwen-Image VAE. Returns the number of attention blocks changed.
     """
-    try:
-        from diffusers.models.autoencoders.autoencoder_kl_qwenimage import QwenImageAttentionBlock
-    except ImportError:
-        return 0
     padded = 0
     for module in model.modules():
-        if type(module) is not QwenImageAttentionBlock or "forward" in vars(module):
+        if type(module) not in block_types or "forward" in vars(module):
             continue
         if module.dim != _SLOW_HEAD_DIM:
             continue
@@ -172,32 +169,45 @@ class VAEManager:
                 self._install_vae_tiled_decode(vae)
             self._install_vae_decode_guard(vae, applied_shape)
 
-    def fold_single_frame_convs(self, vaes) -> None:
+    def fold_single_frame_convs(self, vaes, conv_types: Tuple[type, ...]) -> None:
         """Run the decoders' causal 3D convolutions as 2D ones on single frames (`fold_single_frame_causal_convs`).
 
         For a runner whose VAE only sees single frames. The encoder keeps its 3D convolutions:
         an edited image follows the last bits of its input latents through every step, and
-        encoding is a small part of such a call. Not under ``--use_parallel_vae``, whose
-        adapters replace the convolutions with their own.
+        encoding is a small part of such a call. Not where the parallel VAE owns the decoder
+        (`_decodes_with_its_own_layers`).
         """
-        if self.config.use_parallel_vae:
-            return
         for vae in vaes:
-            folded = fold_single_frame_causal_convs(vae.decoder)
+            if not self._decodes_with_its_own_layers(vae):
+                continue
+            folded = fold_single_frame_causal_convs(vae.decoder, conv_types)
             if folded:
                 log(f"{type(vae).__name__}: {folded} causal 3D decoder convolutions run as 2D on single frames.")
 
-    def pad_attention_heads(self, vaes) -> None:
+    def pad_attention_heads(self, vaes, block_types: Tuple[type, ...]) -> None:
         """Zero-pad the VAEs' attention heads where that is the faster kernel (`pad_attention_heads`).
 
-        Not under ``--use_parallel_vae``, whose adapters own the blocks.
+        Not where the parallel VAE owns the decoder (`_decodes_with_its_own_layers`).
         """
-        if self.config.use_parallel_vae or device_arch().split(":")[0] not in _ARCHS_PADDING_ATTENTION_HEADS:
+        if device_arch().split(":")[0] not in _ARCHS_PADDING_ATTENTION_HEADS:
             return
         for vae in vaes:
-            padded = pad_attention_heads(vae)
+            if not self._decodes_with_its_own_layers(vae):
+                continue
+            padded = pad_attention_heads(vae, block_types)
             if padded:
                 log(f"{type(vae).__name__}: {padded} attention heads zero-padded to {_PADDED_HEAD_DIM} dimensions.")
+
+    def _decodes_with_its_own_layers(self, vae) -> bool:
+        """Return whether `vae` decodes through its own decoder layers.
+
+        It does on one rank, and under ``--use_parallel_vae`` where each rank decodes whole
+        tiles. Where the parallel VAE shards rows instead, it owns the decoder: its adapter
+        runs the layers itself, with its own convolutions.
+        """
+        if not self.config.use_parallel_vae:
+            return True
+        return self._tiles(vae) and vae_tiling.supports_tile_parallel(vae)
 
     def prepare_run(self, vaes, input_args) -> None:
         """Apply shape-dependent VAE options for the current invocation."""

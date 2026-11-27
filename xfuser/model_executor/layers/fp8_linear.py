@@ -6,7 +6,7 @@ from typing import Optional
 
 try:
     import aiter
-except ImportError:
+except Exception:  # noqa: BLE001 - without a visible GPU, aiter raises RuntimeError on import
     pass  # Error raised in base_model.py if fp8 enabled without AITER.
 
 
@@ -24,7 +24,7 @@ try:
     )
 
     _HAS_PRESHUFFLE = True
-except ImportError:
+except Exception:  # noqa: BLE001 - without a visible GPU, aiter raises RuntimeError on import
     _HAS_PRESHUFFLE = False  # older AITER without preshuffle blockscale GEMM
 
 _FP8_BLOCK = 128

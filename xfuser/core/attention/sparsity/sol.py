@@ -35,7 +35,9 @@ def _probe_aiter():
 
     Bound once at import so no import runs inside a traced graph. native_fp8_format is held as a
     function because it queries the device, which import time is too early for.
+    When the aiter import fails, keeps the error in _AITER_IMPORT_ERROR for the unavailable report.
     """
+    global _AITER_IMPORT_ERROR
     try:
         from aiter.ops.mha_v4 import (
             AttentionFormat,
@@ -66,7 +68,8 @@ def _probe_aiter():
             quantize_v_mxfp6_fp6_p,
         )
         from aiter.ops.triton.attention.utils import sol_prepare
-    except ImportError:
+    except Exception as exc:  # noqa: BLE001 - without a visible GPU, aiter raises RuntimeError on import
+        _AITER_IMPORT_ERROR = exc
         return None
     try:
         from aiter.ops.mha_v4 import quantize_v_fp8
@@ -157,6 +160,13 @@ def _probe_second_order():
     )
 
 
+def _sol_attn_unavailable() -> SolAttnUnsupported:
+    """The error for a build without Sol-Attn, with the aiter import error when there is one."""
+    detail = f": {type(_AITER_IMPORT_ERROR).__name__}: {_AITER_IMPORT_ERROR}" if _AITER_IMPORT_ERROR is not None else ""
+    return SolAttnUnsupported(f"Sol-Attn requires aiter with mha_v4_sol and sol_prepare; please update AITER{detail}")
+
+
+_AITER_IMPORT_ERROR: Optional[Exception] = None
 _AITER = _probe_aiter()
 SOL_ATTN_AVAILABLE = _AITER is not None
 
@@ -326,7 +336,7 @@ def check_sol_attn_device(device=None):
     Checked once at backend setup, not per call; direct callers of sol_attn_bhsd check it themselves.
     """
     if not SOL_ATTN_AVAILABLE:
-        raise SolAttnUnsupported("Sol-Attn requires aiter with mha_v4_sol and sol_prepare; please update AITER")
+        raise _sol_attn_unavailable() from _AITER_IMPORT_ERROR
     if device is None:
         if not torch.cuda.is_available():
             raise SolAttnUnsupported("Sol-Attn is a GPU kernel and no CUDA device is available")
@@ -889,7 +899,7 @@ def sol_attn_bhsd(
     _jensen_only applies the capped term alone: a comparison for the tests, which no option reaches.
     """
     if _AITER is None:
-        raise SolAttnUnsupported("Sol-Attn requires aiter with mha_v4_sol and sol_prepare; please update AITER")
+        raise _sol_attn_unavailable() from _AITER_IMPORT_ERROR
     check_sol_attn_supported(query, key, value, is_causal, ring_world_size=ring_world_size)
     recipe = _resolve_recipe(recipe)
     block_tile = sol_attn_block_tile(recipe, block_tile)

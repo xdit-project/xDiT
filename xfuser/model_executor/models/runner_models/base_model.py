@@ -1572,6 +1572,7 @@ class xFuserModel(abc.ABC):
             wait=self.config.profile_wait,
             warmup=self.config.profile_warmup,
             active=self.config.profile_active,
+            repeat=1,
         )
         num_repetitions = self.config.profile_wait + self.config.profile_warmup + self.config.profile_active
         with_stack = self.config.profile_with_stack

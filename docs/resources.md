@@ -34,5 +34,6 @@ hardware, software, and workload.
 
 | Published | Article | Publisher | xDiT coverage |
 | --- | --- | --- | --- |
+| 2026-11-25 | [Introducing xDiT for ComfyUI](https://rocm.blogs.amd.com/artificial-intelligence/diffusion-xdit-comfyui/README.html) | ROCm Blogs | Shows container and existing-environment setup, preset-based generation workflows, and model monitoring and unloading in ComfyUI. |
 | 2026-11-02 | [How to Scale Diffusion Inference Across AMD RDNA 4 GPUs](https://rocm.blogs.amd.com/artificial-intelligence/diffusion-xdit-rdna4/README.html) | ROCm Blogs | Shows xDiT image and video generation across one, two, or four Radeon AI PRO R9700S GPUs. |
 | 2026-09-17 | [Technical Dive into AMD MLPerf Inference v6.1 Submission](https://rocm.blogs.amd.com/artificial-intelligence/mlperf-inf-v6.1/README.html) | ROCm Blogs | Describes xDiT optimizations for Wan2.2-T2V-A14B within AMD's MLPerf Inference v6.1 submission. |

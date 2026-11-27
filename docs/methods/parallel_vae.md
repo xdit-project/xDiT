@@ -51,7 +51,8 @@ especially for video VAEs with temporal state outside the spatial window.
 MiniMax-H3 uses native tile dispatch instead of DistVAE row adapters. LTX-2's
 diffusion decoder enables native tiling with parallel VAE. Some pipelines enable
 VAE tiling during loading. These pipelines use tiling without an explicit
-`--enable_tiling` flag.
+`--enable_tiling` flag. Qwen-Image-2.1's VAE has no row adapter: there
+`--use_parallel_vae` needs `--enable_tiling` and distributes whole tiles.
 
 ## Set an exact tile window
 

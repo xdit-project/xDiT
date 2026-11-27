@@ -307,6 +307,23 @@ def test_parallel_setup_adapts_runtime_group_for_distvae():
     ]
 
 
+def test_parallel_setup_asks_for_tiling_when_only_whole_tiles_can_be_distributed():
+    untiled = SimpleNamespace()
+    coordinator = SimpleNamespace(device_group=object(), rank_in_group=0, world_size=2, ranks=[0, 1])
+    runner = _runner(use_parallel_vae=True)
+
+    with (
+        mock.patch.object(vae_manager, "get_vae_parallel_group", return_value=coordinator),
+        mock.patch.object(vae_manager.vae_tiling, "supports_tile_parallel", return_value=True),
+        mock.patch.object(vae_manager.vae_parallel, "decoder_adapter_name", return_value=None),
+        mock.patch.object(vae_manager.vae_parallel, "parallelize_decoder") as parallelize_decoder,
+        pytest.raises(ValueError, match="whole tiles: add --enable_tiling"),
+    ):
+        runner._vae_manager.setup_parallel_vae([untiled])
+
+    parallelize_decoder.assert_not_called()
+
+
 def test_tile_overlap_is_applied_through_distvae():
     vae = SimpleNamespace()
     runner = _runner(

@@ -388,6 +388,29 @@ def group_for(process_group: dist.ProcessGroup) -> PeerGroup:
         return _groups[key]
 
 
+def close_all() -> None:
+    """Release every PeerGroup of this process; collective over the ranks of each group.
+
+    Call it before the process groups are destroyed. A PeerGroup keeps its process group, and
+    group_for() gives the cached PeerGroup for the same ranks, so a parallel state set up again
+    would get a PeerGroup on a destroyed group. The groups close in the order of their ranks, so
+    a rank in several groups closes them in the same order as its peers. After a flag wait gave
+    up, a peer can be stuck, and the barriers of a close would wait for it: the groups are then
+    dropped without releasing their buffers.
+    """
+    groups = [_groups[key] for key in sorted(_groups)]
+    _groups.clear()
+    _by_process_group.clear()
+    if not groups:
+        return
+    tag, call, missing = ctypes.c_int(), ctypes.c_int(), ctypes.c_uint64()
+    if load().sx_peek_error(ctypes.byref(tag), ctypes.byref(call), ctypes.byref(missing)):
+        logger.warning(f"SDMA flag waits gave up: dropping {len(groups)} peer group(s) without releasing them")
+        return
+    for g in groups:
+        g.close()
+
+
 def _timeout_message(count: int, tag: int, call: int, missing: int) -> str:
     words = [i for i in range(MAX_FLAGS_PER_WAIT) if missing >> i & 1]
     plans = {ranks: g.engine_plan() for ranks, g in _groups.items()}

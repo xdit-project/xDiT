@@ -263,6 +263,12 @@ def _state(process_group: dist.ProcessGroup) -> _State:
     return state
 
 
+def reset() -> None:
+    """Forget the open calls and the held outputs of every group, before the groups are destroyed."""
+    _states.clear()
+    _state_keys.clear()
+
+
 def _streams(device: torch.device, count: int) -> List[torch.cuda.Stream]:
     """`count` side streams on `device`, the first at high priority."""
     streams = _side_streams.setdefault(device, [])

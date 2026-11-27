@@ -173,6 +173,31 @@ def test_sdma_exchange_under_cfg_parallel(accelerator_ranks, world_size):
     accelerator_ranks(_exchange_worker, world_size=world_size, timeout=600, args=(2, False))
 
 
+def _reinit_worker(rank, world_size, init_method):
+    import torch.distributed as dist
+    from yunchang.globals import PROCESS_GROUP
+
+    from xfuser.core.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
+
+    small, large = EXCHANGES[0], EXCHANGES[-1]
+    # The same process sets up the same Ulysses group again, as a long-lived runner can. The
+    # second time, the large call grows the shared buffers, which is collective on the group.
+    for setup, cases in enumerate([[small], [small, large]]):
+        try:
+            _setup(rank, world_size, f"{init_method}-{setup}", world_size)
+            for index, case in enumerate(cases):
+                wrong = exchange_mismatches(PROCESS_GROUP.ULYSSES_PG, case, 10 * setup + index)
+                assert wrong == 0, f"setup {setup}, {case}: {wrong} wrong elements"
+            dist.barrier()
+        finally:
+            destroy_model_parallel()
+            destroy_distributed_environment()
+
+
+def test_sdma_exchange_after_the_parallel_state_is_set_up_again(accelerator_ranks):
+    accelerator_ranks(_reinit_worker, world_size=2, timeout=300)
+
+
 def test_packed_exchange_over_rccl(accelerator_ranks):
     accelerator_ranks(_exchange_worker, world_size=4, timeout=600, args=(1, True))
 

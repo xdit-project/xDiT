@@ -44,7 +44,8 @@ cache-dit = [
     "cache-dit>=1.5.0,<1.6.0",  # NOTE: cache-dit is required for --cache_method dbcache
 ]
 test = [
-    "pytest",
+    "pytest>=7.0",
+    "pytest-check",
     "pytest-timeout",
     "imageio",
     "imageio-ffmpeg",

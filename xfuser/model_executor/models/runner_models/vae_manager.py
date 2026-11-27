@@ -4,11 +4,13 @@ import functools
 from typing import List, Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 from distvae.vae import ParallelContext, VAERowSplitError, latent_rows, mark
 from distvae.vae import parallel as vae_parallel
 from distvae.vae import tile_parallel as vae_tile_parallel
 from distvae.vae import tiling as vae_tiling
 
+from xfuser.core.attention.requirements import device_arch
 from xfuser.core.distributed.parallel_state import (
     get_vae_parallel_group,
     get_vae_parallel_world_size,
@@ -45,6 +47,87 @@ def validate_vae_config(config, capabilities, settings) -> None:
     """Validate VAE-specific runner configuration without runner state."""
     _validate_vae_tile_pair(config, capabilities, settings, "size", 1, "positive")
     _validate_vae_tile_pair(config, capabilities, settings, "overlap", 0, "non-negative")
+
+
+def _single_frame_forward(conv, forward_3d, x, cache_x=None):
+    """A causal convolution's forward: one uncached frame as a 2D convolution, the rest as before."""
+    if cache_x is not None or x.shape[2] != 1:
+        return forward_3d(x, cache_x)
+    pad_w, _, pad_h, _, _, _ = conv._padding
+    frame = F.conv2d(
+        x[:, :, 0], conv.weight[:, :, -1], conv.bias, conv.stride[1:], (pad_h, pad_w), conv.dilation[1:], conv.groups
+    )
+    return frame.unsqueeze(2)
+
+
+def fold_single_frame_causal_convs(model: torch.nn.Module, conv_types: Tuple[type, ...]) -> int:
+    """Run `model`'s causal 3D convolutions as 2D convolutions where they see one uncached frame.
+
+    A causal convolution pads time in front only, with zeros when no frame is cached. On one
+    frame every temporal slice of its kernel but the last then multiplies zeros, so the 3D
+    convolution equals a 2D one with that last slice: a third of the arithmetic for a kernel
+    three frames deep, and no padded copy of the input. An image VAE built on a video VAE
+    decodes exactly one such frame. Several frames, or a cached one, keep the 3D path.
+
+    `conv_types` are the VAE's causal convolution classes: `nn.Conv3d` subclasses that pad by
+    `_padding` (`F.pad` order, all of time's in front) in a `forward(x, cache_x=None)`, as
+    diffusers' Qwen-Image VAE does. Returns the number of convolutions changed.
+    """
+    folded = 0
+    for module in model.modules():
+        if type(module) not in conv_types or "forward" in vars(module):
+            continue
+        # One output frame per input frame, from zero padding that precedes it.
+        if module.kernel_size[0] != module._padding[4] + 1 or module.stride[0] != 1 or module.dilation[0] != 1:
+            continue
+        if module.padding != (0, 0, 0) or module.padding_mode != "zeros":
+            continue
+        module.forward = functools.partial(_single_frame_forward, module, module.forward)
+        folded += 1
+    return folded
+
+
+# On these GPUs torch's attention kernel serves one head of 384 dimensions at a third of the
+# throughput it reaches at 512 (measured on MI350X and MI355X: 64 ms against 22 ms for the 65,536
+# tokens of a 2048x2048 image).
+_ARCHS_PADDING_ATTENTION_HEADS = ("gfx950",)
+_SLOW_HEAD_DIM = 384
+_PADDED_HEAD_DIM = 512
+
+
+def _padded_head_forward(block, x):
+    """A single-head VAE attention block's forward with the head zero-padded to `_PADDED_HEAD_DIM`.
+
+    Zero dimensions add nothing to a dot product and come out as zeros, so the result is the
+    same to the bit. The scale stays the unpadded head's.
+    """
+    identity = x
+    batch, channels, frames, height, width = x.shape
+    x = x.permute(0, 2, 1, 3, 4).reshape(batch * frames, channels, height, width)
+    qkv = block.to_qkv(block.norm(x)).reshape(batch * frames, 1, channels * 3, -1).permute(0, 1, 3, 2)
+    q, k, v = (F.pad(part, (0, _PADDED_HEAD_DIM - channels)) for part in qkv.chunk(3, dim=-1))
+    x = F.scaled_dot_product_attention(q, k, v, scale=channels**-0.5)[..., :channels]
+    x = x.squeeze(1).permute(0, 2, 1).reshape(batch * frames, channels, height, width)
+    x = block.proj(x).view(batch, frames, channels, height, width)
+    return x.permute(0, 2, 1, 3, 4) + identity
+
+
+def pad_attention_heads(model: torch.nn.Module, block_types: Tuple[type, ...]) -> int:
+    """Zero-pad the `_SLOW_HEAD_DIM`-wide attention heads of `model` (`_padded_head_forward`).
+
+    `block_types` are the VAE's attention block classes: one head of `dim` channels computed by
+    `norm`, `to_qkv` and `proj` over [batch, channels, frames, height, width], as in diffusers'
+    Qwen-Image VAE. Returns the number of attention blocks changed.
+    """
+    padded = 0
+    for module in model.modules():
+        if type(module) not in block_types or "forward" in vars(module):
+            continue
+        if module.dim != _SLOW_HEAD_DIM:
+            continue
+        module.forward = functools.partial(_padded_head_forward, module)
+        padded += 1
+    return padded
 
 
 class VAEManager:
@@ -85,6 +168,46 @@ class VAEManager:
                 self._check_tiles_against_parallel_vae(vae, native_shape)
                 self._install_vae_tiled_decode(vae)
             self._install_vae_decode_guard(vae, applied_shape)
+
+    def fold_single_frame_convs(self, vaes, conv_types: Tuple[type, ...]) -> None:
+        """Run the decoders' causal 3D convolutions as 2D ones on single frames (`fold_single_frame_causal_convs`).
+
+        For a runner whose VAE only sees single frames. The encoder keeps its 3D convolutions:
+        an edited image follows the last bits of its input latents through every step, and
+        encoding is a small part of such a call. Not where the parallel VAE owns the decoder
+        (`_decodes_with_its_own_layers`).
+        """
+        for vae in vaes:
+            if not self._decodes_with_its_own_layers(vae):
+                continue
+            folded = fold_single_frame_causal_convs(vae.decoder, conv_types)
+            if folded:
+                log(f"{type(vae).__name__}: {folded} causal 3D decoder convolutions run as 2D on single frames.")
+
+    def pad_attention_heads(self, vaes, block_types: Tuple[type, ...]) -> None:
+        """Zero-pad the VAEs' attention heads where that is the faster kernel (`pad_attention_heads`).
+
+        Not where the parallel VAE owns the decoder (`_decodes_with_its_own_layers`).
+        """
+        if device_arch().split(":")[0] not in _ARCHS_PADDING_ATTENTION_HEADS:
+            return
+        for vae in vaes:
+            if not self._decodes_with_its_own_layers(vae):
+                continue
+            padded = pad_attention_heads(vae, block_types)
+            if padded:
+                log(f"{type(vae).__name__}: {padded} attention heads zero-padded to {_PADDED_HEAD_DIM} dimensions.")
+
+    def _decodes_with_its_own_layers(self, vae) -> bool:
+        """Return whether `vae` decodes through its own decoder layers.
+
+        It does on one rank, and under ``--use_parallel_vae`` where each rank decodes whole
+        tiles. Where the parallel VAE shards rows instead, it owns the decoder: its adapter
+        runs the layers itself, with its own convolutions.
+        """
+        if not self.config.use_parallel_vae:
+            return True
+        return self._tiles(vae) and vae_tiling.supports_tile_parallel(vae)
 
     def prepare_run(self, vaes, input_args) -> None:
         """Apply shape-dependent VAE options for the current invocation."""

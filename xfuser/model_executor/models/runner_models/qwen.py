@@ -80,12 +80,15 @@ class _SingleFrameVAEMixin:
     """The VAE both Qwen-Image runners share: a video VAE that only ever sees one frame here.
 
     Its decoder's causal 3D convolutions then run as 2D ones (`fold_single_frame_causal_convs`):
-    decoding a 2048x2048 image on an MI350X goes from 265 ms to 163 ms, and what is left is
-    mostly the mid-block attention.
+    decoding a 2048x2048 image on an MI350X goes from 265 ms to 163 ms. Most of the rest is the
+    mid-block attention, one head of 384 dimensions, which is zero-padded to 512 where that is
+    the faster kernel (`pad_attention_heads`): 125 ms.
     """
 
     def _enable_options(self) -> None:
-        self._vae_manager.fold_single_frame_convs(self._decoding_vaes())
+        vaes = self._decoding_vaes()
+        self._vae_manager.fold_single_frame_convs(vaes)
+        self._vae_manager.pad_attention_heads(vaes)
         super()._enable_options()
 
 

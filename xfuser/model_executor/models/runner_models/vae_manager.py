@@ -10,6 +10,7 @@ from distvae.vae import parallel as vae_parallel
 from distvae.vae import tile_parallel as vae_tile_parallel
 from distvae.vae import tiling as vae_tiling
 
+from xfuser.core.attention.requirements import device_arch
 from xfuser.core.distributed.parallel_state import (
     get_vae_parallel_group,
     get_vae_parallel_world_size,
@@ -87,6 +88,51 @@ def fold_single_frame_causal_convs(model: torch.nn.Module) -> int:
     return folded
 
 
+# On these GPUs torch's attention kernel serves one head of 384 dimensions at a third of the
+# throughput it reaches at 512 (measured on MI350X and MI355X: 64 ms against 22 ms for the 65,536
+# tokens of a 2048x2048 image).
+_ARCHS_PADDING_ATTENTION_HEADS = ("gfx950",)
+_SLOW_HEAD_DIM = 384
+_PADDED_HEAD_DIM = 512
+
+
+def _padded_head_forward(block, x):
+    """`QwenImageAttentionBlock.forward` with its one attention head zero-padded to `_PADDED_HEAD_DIM`.
+
+    Zero dimensions add nothing to a dot product and come out as zeros, so the result is the
+    same to the bit. The scale stays the unpadded head's.
+    """
+    identity = x
+    batch, channels, frames, height, width = x.shape
+    x = x.permute(0, 2, 1, 3, 4).reshape(batch * frames, channels, height, width)
+    qkv = block.to_qkv(block.norm(x)).reshape(batch * frames, 1, channels * 3, -1).permute(0, 1, 3, 2)
+    q, k, v = (F.pad(part, (0, _PADDED_HEAD_DIM - channels)) for part in qkv.chunk(3, dim=-1))
+    x = F.scaled_dot_product_attention(q, k, v, scale=channels**-0.5)[..., :channels]
+    x = x.squeeze(1).permute(0, 2, 1).reshape(batch * frames, channels, height, width)
+    x = block.proj(x).view(batch, frames, channels, height, width)
+    return x.permute(0, 2, 1, 3, 4) + identity
+
+
+def pad_attention_heads(model: torch.nn.Module) -> int:
+    """Zero-pad the `_SLOW_HEAD_DIM`-wide attention heads of `model` (`_padded_head_forward`).
+
+    Returns the number of attention blocks changed.
+    """
+    try:
+        from diffusers.models.autoencoders.autoencoder_kl_qwenimage import QwenImageAttentionBlock
+    except ImportError:
+        return 0
+    padded = 0
+    for module in model.modules():
+        if type(module) is not QwenImageAttentionBlock or "forward" in vars(module):
+            continue
+        if module.dim != _SLOW_HEAD_DIM:
+            continue
+        module.forward = functools.partial(_padded_head_forward, module)
+        padded += 1
+    return padded
+
+
 class VAEManager:
     """Owns all VAE-specific policy used by runner-model lifecycles."""
 
@@ -140,6 +186,18 @@ class VAEManager:
             folded = fold_single_frame_causal_convs(vae.decoder)
             if folded:
                 log(f"{type(vae).__name__}: {folded} causal 3D decoder convolutions run as 2D on single frames.")
+
+    def pad_attention_heads(self, vaes) -> None:
+        """Zero-pad the VAEs' attention heads where that is the faster kernel (`pad_attention_heads`).
+
+        Not under ``--use_parallel_vae``, whose adapters own the blocks.
+        """
+        if self.config.use_parallel_vae or device_arch().split(":")[0] not in _ARCHS_PADDING_ATTENTION_HEADS:
+            return
+        for vae in vaes:
+            padded = pad_attention_heads(vae)
+            if padded:
+                log(f"{type(vae).__name__}: {padded} attention heads zero-padded to {_PADDED_HEAD_DIM} dimensions.")
 
     def prepare_run(self, vaes, input_args) -> None:
         """Apply shape-dependent VAE options for the current invocation."""

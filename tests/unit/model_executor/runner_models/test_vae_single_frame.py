@@ -12,7 +12,11 @@ from xfuser.model_executor.models.runner_models.qwen import (
     xFuserQwenImageEditModel,
     xFuserQwenImageModel,
 )
-from xfuser.model_executor.models.runner_models.vae_manager import VAEManager, fold_single_frame_causal_convs
+from xfuser.model_executor.models.runner_models.vae_manager import (
+    VAEManager,
+    fold_single_frame_causal_convs,
+    pad_attention_heads,
+)
 
 qwenimage_vae = pytest.importorskip("diffusers.models.autoencoders.autoencoder_kl_qwenimage")
 
@@ -106,7 +110,7 @@ def test_manager_folds_the_decoder_of_a_vae_it_decodes_on_one_rank(monkeypatch, 
 
 
 @pytest.mark.parametrize("runner", [xFuserQwenImageModel, xFuserQwenImageEditModel])
-def test_qwen_image_runners_fold_their_vae_with_the_other_options(runner):
+def test_qwen_image_runners_prepare_their_vae_with_the_other_options(runner):
     events = []
     model = object.__new__(runner)
     model.config = SimpleNamespace()
@@ -114,12 +118,58 @@ def test_qwen_image_runners_fold_their_vae_with_the_other_options(runner):
     model._enable_cpu_offload = lambda: None
     model._vae_manager = SimpleNamespace(
         fold_single_frame_convs=lambda vaes: events.append(("fold", vaes)),
+        pad_attention_heads=lambda vaes: events.append(("pad", vaes)),
         enable_options=lambda vaes: events.append(("options", vaes)),
     )
 
     model._enable_options()
 
-    assert events == [("fold", ["vae"]), ("options", ["vae"])]
+    assert events == [("fold", ["vae"]), ("pad", ["vae"]), ("options", ["vae"])]
+
+
+class AttentionBlocks(nn.Module):
+    def __init__(self):
+        super().__init__()
+        torch.manual_seed(0)
+        self.wide = qwenimage_vae.QwenImageAttentionBlock(384).double()
+        self.narrow = qwenimage_vae.QwenImageAttentionBlock(64).double()
+
+
+def test_a_padded_attention_head_attends_as_before():
+    blocks = AttentionBlocks()
+    reference = copy.deepcopy(blocks)
+    assert pad_attention_heads(blocks) == 1
+    assert pad_attention_heads(blocks) == 0
+    assert "forward" not in vars(blocks.narrow)
+
+    # Two frames: the block attends within each frame.
+    x = torch.randn(1, 384, 2, 5, 3, dtype=torch.float64)
+    with torch.no_grad():
+        padded, expected = blocks.wide(x), reference.wide(x)
+    assert padded.shape == expected.shape
+    torch.testing.assert_close(padded, expected, rtol=0, atol=1e-12)
+
+
+@pytest.mark.parametrize(
+    ("arch", "use_parallel_vae", "padded"),
+    [
+        ("gfx950:sramecc+:xnack-", False, 1),
+        # Measured on gfx950 only.
+        ("gfx942:sramecc+:xnack-", False, 0),
+        ("", False, 0),
+        # The parallel VAE's adapters own the blocks.
+        ("gfx950:sramecc+:xnack-", True, 0),
+    ],
+)
+def test_manager_pads_attention_heads_where_the_padded_kernel_is_faster(monkeypatch, arch, use_parallel_vae, padded):
+    monkeypatch.setattr(vae_manager, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(vae_manager, "device_arch", lambda: arch)
+    blocks = AttentionBlocks()
+    manager = VAEManager(
+        config=SimpleNamespace(use_parallel_vae=use_parallel_vae), capabilities=object(), settings=object()
+    )
+    manager.pad_attention_heads([blocks])
+    assert sum("forward" in vars(module) for module in blocks.modules()) == padded
 
 
 def test_qwen_image_21_keeps_its_2d_vae_as_it_is():

@@ -23,8 +23,26 @@ On ROCm, `--ulysses_a2a sdma` uses GPU copy engines for both Ulysses exchanges.
 It can overlap communication with attention and Q/K/V projections. Support was
 validated upstream on `gfx942` and `gfx950`; measure latency on your workload.
 
+SDMA pays where each rank's share of the sequence is large. With a small share, its
+cost per exchange outweighs the overlap, and every head group adds exchanges.
+FLUX.3-klein-base on eight MI355X (`gfx950`), CFG parallel with `--ulysses_degree 4`:
+
+| Size | Latency with `--ulysses_a2a sdma` |
+| --- | --- |
+| 1024x1024 | +34% (+7% with `--ulysses_sdma_head_groups 1`) |
+| 1536x1536 | -5% |
+| 2048x2048 | -10% |
+| 4096x4096 | -7% |
+
+The other models ran on the same machine with `--ulysses_degree 8` and no CFG parallel.
+MiniMax-H3 at 768x1344 was 7% faster. Z-Image at 1088x1920, FLUX.2-dev at 1024x1024, and
+Qwen-Image and Qwen-Image-Edit at 2048x2048 were 4% to 12% slower.
+On `gfx950` the FLUX.3-klein-base image is not bit-identical to the default
+all-to-all's (about 43 dB PSNR at 2048x2048) but repeats from run to run.
+
 ```bash
 xdit --model flux-3-image-klein-base --prompt "A lighthouse on a rocky coast" \
+    --height 2048 --width 2048 \
     --use_cfg_parallel --ulysses_degree 4 --attention_backend aiter_bf16 \
     --ulysses_a2a sdma --ulysses_sdma_overlap_qkv --use_torch_compile
 ```

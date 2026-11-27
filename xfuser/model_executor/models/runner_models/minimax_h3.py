@@ -983,7 +983,7 @@ class xFuserMiniMaxH3Model(MiniMaxH3TextEncoderMixin, xFuserModel):
         original_forward = transformer.forward
         compiled_forward = torch.compile(
             original_forward,
-            **usp_sdma.compile_kwargs(self._transformer_compile_mode(mode, use_hybrid)),
+            **usp_sdma.compile_kwargs(self._transformer_compile_mode(mode, use_hybrid), transformer),
             fullgraph=not use_hybrid,
         )
 

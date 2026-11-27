@@ -84,6 +84,8 @@ def _ulysses_worker(rank, world_size, init_method):
         distributed_init_method=init_method,
     )
     initialize_model_parallel(ulysses_degree=world_size, ring_degree=1)
+    # The worker can share its process with other tests, so restore the function in `finally`.
+    original_get_runtime_state = usp.get_runtime_state
     usp.get_runtime_state = lambda: SimpleNamespace(attention_backend=AttentionBackendType.SDPA)
     try:
         processors = [xfuser_qwenimage21.xFuserQwenImage21AttnProcessor]
@@ -121,6 +123,7 @@ def _ulysses_worker(rank, world_size, init_method):
                             ),
                         )
     finally:
+        usp.get_runtime_state = original_get_runtime_state
         destroy_model_parallel()
         destroy_distributed_environment()
 

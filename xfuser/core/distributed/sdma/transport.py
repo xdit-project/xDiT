@@ -203,6 +203,24 @@ def device_bytes(ptr: int, nbytes: int, device: torch.device) -> torch.Tensor:
     return torch.as_tensor(_CudaArray(ptr, nbytes), device=device)
 
 
+# sx_malloc rounds every allocation up to this size.
+_ALLOC_GRANULE = 2 << 20
+# Uncached allocations of released buffers, (pointer, bytes), for the next uncached buffer.
+# They are not freed: after about 130 cycles of freeing uncached memory that peers had mapped
+# and allocating it again, this rank no longer saw the peers' writes to a new allocation, so
+# flag waits gave up or ended before the data arrived.
+_spare_uncached: List[Tuple[int, int]] = []
+
+
+def _take_spare_uncached(nbytes: int) -> int:
+    """A spare uncached allocation of at least `nbytes`, or 0 if there is none."""
+    fits = [i for i, (_, size) in enumerate(_spare_uncached) if size >= nbytes]
+    if not fits:
+        return 0
+    best = min(fits, key=lambda i: _spare_uncached[i][1])
+    return _spare_uncached.pop(best)[0]
+
+
 class SharedBuffer:
     """Device memory of the same size on every rank of a group, mapped into every peer
     (interface.SymmetricBuffer).
@@ -219,9 +237,11 @@ class SharedBuffer:
         self.uncached = uncached
         # False once released: routes naming it are rebuilt.
         self.live = True
-        ptr = ctypes.c_uint64()
-        _check(lib.sx_malloc(nbytes, int(uncached), ctypes.byref(ptr)), f"sx_malloc({nbytes}, uncached={uncached})")
-        self.ptr = ptr.value
+        self.ptr = _take_spare_uncached(nbytes) if uncached else 0
+        if not self.ptr:
+            ptr = ctypes.c_uint64()
+            _check(lib.sx_malloc(nbytes, int(uncached), ctypes.byref(ptr)), f"sx_malloc({nbytes}, uncached={uncached})")
+            self.ptr = ptr.value
         _check(lib.sx_memset(self.ptr, 0, nbytes), "sx_memset")
         size = lib.sx_ipc_handle_size()
         handle = (ctypes.c_uint8 * size)()
@@ -249,8 +269,12 @@ class SharedBuffer:
 
     def free(self) -> None:
         """Free this rank's buffer; every peer must have unmapped it: a buffer freed while a peer
-        still maps it leaves later allocations that HIP cannot export."""
+        still maps it leaves later allocations that HIP cannot export. Uncached memory is kept
+        for a later uncached buffer (see _spare_uncached)."""
         self.local = None
+        if self.uncached:
+            _spare_uncached.append((self.ptr, -(-self.nbytes // _ALLOC_GRANULE) * _ALLOC_GRANULE))
+            return
         load().sx_free(self.ptr)
 
 
@@ -386,6 +410,29 @@ def group_for(process_group: dist.ProcessGroup) -> PeerGroup:
             _groups[key] = PeerGroup(process_group)
         _by_process_group[process_group] = _groups[key]
         return _groups[key]
+
+
+def close_all() -> None:
+    """Release every PeerGroup of this process; collective over the ranks of each group.
+
+    Call it before the process groups are destroyed. A PeerGroup keeps its process group, and
+    group_for() gives the cached PeerGroup for the same ranks, so a parallel state set up again
+    would get a PeerGroup on a destroyed group. The groups close in the order of their ranks, so
+    a rank in several groups closes them in the same order as its peers. After a flag wait gave
+    up, a peer can be stuck, and the barriers of a close would wait for it: the groups are then
+    dropped without releasing their buffers.
+    """
+    groups = [_groups[key] for key in sorted(_groups)]
+    _groups.clear()
+    _by_process_group.clear()
+    if not groups:
+        return
+    tag, call, missing = ctypes.c_int(), ctypes.c_int(), ctypes.c_uint64()
+    if load().sx_peek_error(ctypes.byref(tag), ctypes.byref(call), ctypes.byref(missing)):
+        logger.warning(f"SDMA flag waits gave up: dropping {len(groups)} peer group(s) without releasing them")
+        return
+    for g in groups:
+        g.close()
 
 
 def _timeout_message(count: int, tag: int, call: int, missing: int) -> str:

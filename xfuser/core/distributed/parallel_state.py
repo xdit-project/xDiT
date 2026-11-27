@@ -3,6 +3,7 @@
 # https://github.com/vllm-project/vllm/blob/main/vllm/distributed/parallel_state.py
 # Copyright 2023 The vLLM team.
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
+import sys
 from typing import List, Optional
 
 import torch
@@ -574,6 +575,8 @@ def initialize_model_parallel(
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
+    _release_sdma()
+
     global _MODEL_REPLICA
     if _MODEL_REPLICA:
         _MODEL_REPLICA.destroy()
@@ -613,6 +616,20 @@ def destroy_model_parallel():
     if _VAE:
         _VAE.destroy()
     _VAE = None
+
+
+def _release_sdma():
+    """Release the SDMA peer groups while their process groups still work.
+
+    Collective: every rank of a group calls destroy_model_parallel. Nothing is
+    imported when no SDMA call ran in this process.
+    """
+    ulysses = sys.modules.get("xfuser.core.distributed.sdma.ulysses")
+    if ulysses is not None:
+        ulysses.reset()
+    transport = sys.modules.get("xfuser.core.distributed.sdma.transport")
+    if transport is not None:
+        transport.close_all()
 
 
 def destroy_distributed_environment():
